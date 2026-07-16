@@ -20,7 +20,6 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { get } from 'node:https';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -75,35 +74,29 @@ function relToRoot(absPath) {
   return path.relative(ROOT, absPath).split(path.sep).join('/');
 }
 
-function fetchBuffer(url, redirectsLeft = MAX_REDIRECTS) {
-  return new Promise((resolve, reject) => {
-    const req = get(url, { headers: { 'user-agent': USER_AGENT, accept: '*/*' } }, (res) => {
-      const status = res.statusCode ?? 0;
-      const location = res.headers.location;
-      if (status >= 300 && status < 400 && location) {
-        res.resume();
-        if (redirectsLeft <= 0) {
-          reject(new Error(`too many redirects fetching ${url}`));
-          return;
-        }
-        const next = new URL(location, url).href;
-        log(`  redirect -> ${next}`);
-        resolve(fetchBuffer(next, redirectsLeft - 1));
-        return;
-      }
-      if (status !== 200) {
-        res.resume();
-        reject(new Error(`HTTP ${status} fetching ${url}`));
-        return;
-      }
-      const chunks = [];
-      res.on('data', (c) => chunks.push(c));
-      res.on('end', () => resolve(Buffer.concat(chunks)));
-      res.on('error', reject);
-    });
-    req.on('error', reject);
-    req.setTimeout(TIMEOUT_MS, () => req.destroy(new Error(`timeout fetching ${url}`)));
-  });
+// curl instead of node:https - it honors HTTPS_PROXY/CA-bundle env vars
+// (required behind the dev sandbox's egress proxy) and is present on ubuntu
+// runners. -L follows the ambientCG/PolyHaven redirect chains (cap MAX_REDIRECTS).
+function fetchBuffer(url) {
+  try {
+    return Promise.resolve(
+      execFileSync(
+        'curl',
+        [
+          '-fsSL',
+          '--max-redirs', String(MAX_REDIRECTS),
+          '--retry', '3',
+          '--retry-delay', '2',
+          '--max-time', String(Math.floor(TIMEOUT_MS / 1000)),
+          '-A', USER_AGENT,
+          url,
+        ],
+        { maxBuffer: 512 * 1024 * 1024 },
+      ),
+    );
+  } catch (err) {
+    return Promise.reject(new Error(`curl failed fetching ${url}: ${err.message ?? err}`));
+  }
 }
 
 function assertZipMagic(buf, url) {
