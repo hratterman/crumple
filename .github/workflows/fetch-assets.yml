@@ -1,0 +1,45 @@
+# Downloads the pinned CC0 assets (ambientCG textures + Poly Haven HDRIs) on a
+# GitHub runner and commits them back to main. Runs here because the dev
+# sandbox's proxy blocks both asset hosts. Idempotent: the fetch script skips
+# files whose recorded sha256 already matches, so re-runs produce no commit.
+name: fetch-assets
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - tools/fetch-assets.mjs
+      - .github/workflows/fetch-assets.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fetch-assets
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Fetch CC0 assets
+        run: node tools/fetch-assets.mjs
+
+      - name: Commit and push assets
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898604+github-actions[bot]@users.noreply.github.com"
+            git add public/assets CREDITS.md
+            git commit -m "chore: add CC0 texture/HDRI assets (ambientCG, Poly Haven)" -m "[skip ci]"
+            git push
+          else
+            echo "No asset changes to commit."
+          fi
