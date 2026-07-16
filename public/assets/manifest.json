@@ -1,0 +1,159 @@
+{
+  "generated": "2026-07-16T17:18:04.480Z",
+  "files": [
+    {
+      "path": "public/assets/hdri/kiara_1_dawn_2k.hdr",
+      "sha256": "7261c613b35a9b760ed5c7846ec8182532b90d89f6a8385c42bb743883159a66",
+      "bytes": 6149550,
+      "source": "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/kiara_1_dawn_2k.hdr",
+      "license": "CC0-1.0"
+    },
+    {
+      "path": "public/assets/hdri/venice_sunset_2k.hdr",
+      "sha256": "cbfac020ee17ab36016ccc7fbe9020b828587b9864af6ecda0a93089914889a6",
+      "bytes": 5723224,
+      "source": "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/venice_sunset_2k.hdr",
+      "license": "CC0-1.0"
+    },
+    {
+      "path": "public/assets/textures/asphalt/ao.jpg",
+      "sha256": "01d257497bc5ae57b7aefaa6fc4ecc0c346387326931884ac61654cf7fb9aaa4",
+      "bytes": 2959227,
+      "source": "https://ambientcg.com/get?file=Asphalt025C_2K-JPG.zip",
+      "license": "CC0-1.0"
+    },
+    {
+      "path": "public/assets/textures/asphalt/color.jpg",
+      "sha256": "b8954ee2ca152fdd7983be5ed145017260ea36ac8ef75425cdcbd8ffac3ca00c",
+      "bytes": 4321032,
+      "source": "https://ambientcg.com/get?file=Asphalt025C_2K-JPG.zip",
+      "license": "CC0-1.0"
+    },
+    {
+      "path": "public/assets/textures/asphalt/normal.jpg",
+      "sha256": "20104b6950f9a616459cda0a92902b28a4ed3d43dff957b30448810261ba32a2",
+      "bytes": 9202291,
+      "source": "https://ambientcg.com/get?file=Asphalt025C_2K-JPG.zip",
+      "license": "CC0-1.0"
+    },
+    {
+      "path": "public/assets/textures/asphalt/rough.jpg",
+      "sha256": "94fa2e3df6d4851b4fc004ddad6a27b34c17d16bbb08ad3a435543caab2d3b5b",
+      "bytes": 2511938,
+      "source": "https://ambientcg.com/get?file=Asphalt025C_2K-JPG.zip",
+      "license": "CC0-1.0"
+    },
+    {
+      "path": "public/assets/textures/dirt/ao.jpg",
+      "sha256": "f8529644aff137ccc4566b7304b3e55b97bc4a8a1ada3aa92d4f5f42dac6e687",
+      "bytes": 2102448,
+      "source": "https://ambientcg.com/get?file=Ground037_2K-JPG.zip",
+      "license": "CC0-1.0"
+    },
+    {
+      "path": "public/assets/textures/dirt/color.jpg",
+      "sha256": "86af35a54593548543a291a54bddfd3568fd90268f8f65d0f8e743b37d714782",
+      "bytes": 8674228,
+      "source": "https://ambientcg.com/get?file=Ground037_2K-JPG.zip",
+      "license": "CC0-1.0"
+    },
+    {
+      "path": "public/assets/textures/dirt/normal.jpg",
+      "sha256": "99743f03f5f818d4a0ee3dca289d5c6f125b1e05f1e624a541455e2f7fb29eec",
+      "bytes": 10341826,
+      "source": "https://ambientcg.com/get?file=Ground037_2K-JPG.zip",
+      "license": "CC0-1.0"
+    },
+    {
+      "path": "public/assets/textures/dirt/rough.jpg",
+      "sha256": "5484c117706e5937afa103c82795cbacb6c3b76d1a056b47942ca91d00efbbb9",
+      "bytes": 3058522,
+      "source": "https://ambientcg.com/get?file=Ground037_2K-JPG.zip",
+      "license": "CC0-1.0"
+    },
+    {
+      "path": "public/assets/textures/grass/ao.jpg",
+      "sha256": "0f9180993db4c7b9479ad2a4b65763d90e8668fb7e800baff68cac1883a9dff5",
+      "bytes": 3659925,
+      "source": "https://ambientcg.com/get?file=Grass004_2K-JPG.zip",
+      "license": "CC0-1.0"
+    },
+    {
+      "path": "public/assets/textures/grass/color.jpg",
+      "sha256": "735b141c8f1972e70a45879424f1238fea9f887324173097785f4ac36e67e9a3",
+      "bytes": 7644307,
+      "source": "https://ambientcg.com/get?file=Grass004_2K-JPG.zip",
+      "license": "CC0-1.0"
+    },
+    {
+      "path": "public/assets/textures/grass/normal.jpg",
+      "sha256": "15ccad231764049d6581a52076d02bb6b627df77895cb0508e4017d8a4877fef",
+      "bytes": 10015079,
+      "source": "https://ambientcg.com/get?file=Grass004_2K-JPG.zip",
+      "license": "CC0-1.0"
+    },
+    {
+      "path": "public/assets/textures/grass/rough.jpg",
+      "sha256": "c449fdf1e779eb7be5a19c1d58ee28cc155ed0523a141b151f3cbc843c4ae2e3",
+      "bytes": 3413801,
+      "source": "https://ambientcg.com/get?file=Grass004_2K-JPG.zip",
+      "license": "CC0-1.0"
+    },
+    {
+      "path": "public/assets/textures/gravel/ao.jpg",
+      "sha256": "536599cce4836af49ef8e25f85f0ab93cdf675e8e224af33219643715356e918",
+      "bytes": 3110305,
+      "source": "https://ambientcg.com/get?file=Gravel023_2K-JPG.zip",
+      "license": "CC0-1.0"
+    },
+    {
+      "path": "public/assets/textures/gravel/color.jpg",
+      "sha256": "76569030a07606b43d65e32f77c478d85d4fa52d9eea3f7d5b0df6b757f28546",
+      "bytes": 4284822,
+      "source": "https://ambientcg.com/get?file=Gravel023_2K-JPG.zip",
+      "license": "CC0-1.0"
+    },
+    {
+      "path": "public/assets/textures/gravel/normal.jpg",
+      "sha256": "5e16db4953a642dc0a5229db44db933f04e16da288306adc8af7b2ff8b8cac1d",
+      "bytes": 9206492,
+      "source": "https://ambientcg.com/get?file=Gravel023_2K-JPG.zip",
+      "license": "CC0-1.0"
+    },
+    {
+      "path": "public/assets/textures/gravel/rough.jpg",
+      "sha256": "a08dfc8ca5fb9e13591133aab03067cebeed8dbab13621f5ac56d1c546fafbf6",
+      "bytes": 1854529,
+      "source": "https://ambientcg.com/get?file=Gravel023_2K-JPG.zip",
+      "license": "CC0-1.0"
+    },
+    {
+      "path": "public/assets/textures/rock/ao.jpg",
+      "sha256": "bd1684542c52610bce29f2df8a6e9e64f11c052c808f3eccd9086b5bbdd252eb",
+      "bytes": 2093010,
+      "source": "https://ambientcg.com/get?file=Rock035_2K-JPG.zip",
+      "license": "CC0-1.0"
+    },
+    {
+      "path": "public/assets/textures/rock/color.jpg",
+      "sha256": "a37852d15dca9a5fe16f2b86b82ed400ea048fa42ff774192a6567013075c889",
+      "bytes": 5601503,
+      "source": "https://ambientcg.com/get?file=Rock035_2K-JPG.zip",
+      "license": "CC0-1.0"
+    },
+    {
+      "path": "public/assets/textures/rock/normal.jpg",
+      "sha256": "2c8b62a4dd0b7306c93519b72846ee92a9a3820dc348c2732ae521658e720c3c",
+      "bytes": 10194915,
+      "source": "https://ambientcg.com/get?file=Rock035_2K-JPG.zip",
+      "license": "CC0-1.0"
+    },
+    {
+      "path": "public/assets/textures/rock/rough.jpg",
+      "sha256": "fcb394a485e707bcfd823beb2f3a82e5998e76e51d9c729f49c4c741982133db",
+      "bytes": 2520984,
+      "source": "https://ambientcg.com/get?file=Rock035_2K-JPG.zip",
+      "license": "CC0-1.0"
+    }
+  ]
+}
