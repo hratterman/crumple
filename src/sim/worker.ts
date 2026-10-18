@@ -1,0 +1,294 @@
+/**
+ * Sim worker entry: message handling, real-time pacing and snapshot output.
+ *
+ * Pacing: each wake adds real elapsed time × timeScale to an accumulator and
+ * runs whole SIM_DT steps, at most MAX_STEPS_PER_WAKE; any further backlog is
+ * DROPPED (counted in droppedSteps) so a stall never causes a spiral of
+ * death. Snapshots land on fixed ticks (every SIM_HZ/snapshotHz ticks); when
+ * one wake crosses several snapshot ticks only the last is written. Commands
+ * are applied as they arrive, which is always between steps.
+ */
+import { BufferPool, SnapshotWriter } from '../protocol/codec';
+import { computeSnapshotLayout } from '../protocol/layout';
+import {
+  DEFAULT_CAPACITY,
+  DEFAULT_SNAPSHOT_HZ,
+  type MainToWorker,
+  type MainToWorkerType,
+  type WorkerToMain,
+} from '../protocol/messages';
+import { SIM_DT, SIM_HZ, SimCommandError, SimEngine } from './engine';
+
+export const MAX_STEPS_PER_WAKE = 200;
+
+export type PostFn = (msg: WorkerToMain, transfer?: Transferable[]) => void;
+
+export interface HostScheduler {
+  /** Milliseconds, monotonic. */
+  now(): number;
+  /** Run `fn` soon; `immediate` = backlog pending (no timer clamp wanted). */
+  schedule(fn: () => void, immediate: boolean): void;
+}
+
+function defaultScheduler(): HostScheduler {
+  const perf = globalThis.performance;
+  const now = perf ? () => perf.now() : () => Date.now();
+  let channel: MessageChannel | null = null;
+  let pending: (() => void) | null = null;
+  if (typeof MessageChannel !== 'undefined') {
+    channel = new MessageChannel();
+    channel.port1.onmessage = () => {
+      const fn = pending;
+      pending = null;
+      fn?.();
+    };
+  }
+  return {
+    now,
+    schedule(fn, immediate) {
+      if (immediate && channel) {
+        pending = fn;
+        channel.port2.postMessage(0);
+      } else {
+        setTimeout(fn, 0);
+      }
+    },
+  };
+}
+
+function errMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+/** Worker logic, independent of the global scope (testable in node). */
+export class WorkerHost {
+  engine: SimEngine | null = null;
+  pool: BufferPool | null = null;
+  writer: SnapshotWriter | null = null;
+  timeScale = 1;
+  snapshotHz = DEFAULT_SNAPSHOT_HZ;
+  /** Steps dropped by the per-wake cap (real time the sim did not simulate). */
+  droppedSteps = 0;
+  snapshotsSent = 0;
+  dead = false;
+
+  private acc = 0;
+  private lastWall = 0;
+  private scheduled = false;
+  private nextSnapIndex = 1;
+  private nextSnapTick = 0;
+  private dirty = false;
+  private readonly scheduler: HostScheduler;
+
+  constructor(
+    private readonly post: PostFn,
+    scheduler?: HostScheduler,
+  ) {
+    this.scheduler = scheduler ?? defaultScheduler();
+  }
+
+  handle(msg: MainToWorker): void {
+    if (this.dead) return;
+    const type = (msg as { type?: unknown } | null)?.type as MainToWorkerType;
+    try {
+      switch (msg.type) {
+        case 'init':
+          this.init(msg);
+          return;
+        case 'setBubble':
+        case 'keyframeRequest':
+        case 'replaySeek':
+          this.post({ type: 'unimplemented', command: msg.type });
+          return;
+        case 'returnBuffer':
+          if (!this.pool) throw new SimCommandError('returnBuffer before init');
+          this.pool.release(msg.buffer);
+          return;
+        case 'timescale': {
+          const v = msg.value;
+          if (typeof v !== 'number' || Number.isNaN(v)) throw new SimCommandError('timescale must be a number');
+          this.timeScale = v <= 0 ? 0 : v < 0.05 ? 0.05 : v > 1 ? 1 : v;
+          return;
+        }
+        default:
+          break;
+      }
+      const engine = this.engine;
+      if (!engine) throw new SimCommandError('not initialized');
+      switch (msg.type) {
+        case 'ground':
+          if (msg.mode === 'plane') {
+            engine.setGroundPlane(msg.y, msg.materialId);
+            this.dirty = true;
+          } else {
+            this.post({ type: 'unimplemented', command: 'ground' });
+          }
+          return;
+        case 'spawn':
+          engine.spawn(msg.objectId, msg.rig, msg.transform);
+          this.dirty = true;
+          return;
+        case 'despawn':
+          engine.despawn(msg.objectId);
+          this.dirty = true;
+          return;
+        case 'reset':
+          engine.reset(msg.objectId, msg.transform);
+          this.dirty = true;
+          return;
+        case 'input':
+          engine.setInput(msg.objectId, msg.actions);
+          return;
+        default:
+          throw new SimCommandError(`unknown command ${String(type)}`);
+      }
+    } catch (e) {
+      const objectId =
+        e instanceof SimCommandError && e.objectId !== undefined
+          ? e.objectId
+          : typeof (msg as { objectId?: unknown }).objectId === 'number'
+            ? (msg as { objectId: number }).objectId
+            : undefined;
+      const reply: WorkerToMain = { type: 'error', command: type, message: errMessage(e) };
+      if (objectId !== undefined) reply.objectId = objectId;
+      this.post(reply);
+    }
+  }
+
+  private init(msg: Extract<MainToWorker, { type: 'init' }>): void {
+    const capacity = msg.capacity ?? DEFAULT_CAPACITY;
+    const hz = msg.snapshotHz === undefined ? DEFAULT_SNAPSHOT_HZ : msg.snapshotHz;
+    if (typeof hz !== 'number' || !(hz > 0) || hz > SIM_HZ) {
+      throw new SimCommandError(`snapshotHz must be in (0, ${SIM_HZ}]`);
+    }
+    const engine = new SimEngine({
+      gravity: msg.gravity,
+      debugStrains: !!msg.debugStrains,
+      capacity,
+      seed: msg.seed,
+    });
+    const layout = computeSnapshotLayout(
+      capacity.maxObjects,
+      capacity.nodeCapacity,
+      capacity.beamCapacity,
+      engine.debugStrains,
+    );
+    this.engine = engine;
+    this.pool = new BufferPool(layout.totalBytes);
+    this.writer = new SnapshotWriter(layout);
+    this.snapshotHz = hz;
+    this.acc = 0;
+    this.droppedSteps = 0;
+    this.snapshotsSent = 0;
+    this.nextSnapIndex = 1;
+    this.nextSnapTick = this.snapTickFor(1);
+    this.dirty = true;
+    this.lastWall = this.scheduler.now();
+    this.post({ type: 'ready' });
+    this.requestWake(false);
+  }
+
+  private snapTickFor(index: number): number {
+    return Math.ceil((index * SIM_HZ) / this.snapshotHz);
+  }
+
+  private requestWake(immediate: boolean): void {
+    if (this.scheduled || this.dead) return;
+    this.scheduled = true;
+    this.scheduler.schedule(this.wake, immediate);
+  }
+
+  /** One pacing iteration (public for tests). */
+  readonly wake = (): void => {
+    this.scheduled = false;
+    const engine = this.engine;
+    if (this.dead || !engine) return;
+    let backlog = false;
+    try {
+      const now = this.scheduler.now();
+      let elapsed = (now - this.lastWall) / 1000;
+      this.lastWall = now;
+      if (!(elapsed > 0)) elapsed = 0;
+      this.acc += elapsed * this.timeScale;
+      let steps = Math.floor(this.acc / SIM_DT);
+      this.acc -= steps * SIM_DT;
+      if (steps > MAX_STEPS_PER_WAKE) {
+        this.droppedSteps += steps - MAX_STEPS_PER_WAKE;
+        steps = MAX_STEPS_PER_WAKE;
+        backlog = true;
+      }
+      this.runSteps(steps);
+    } catch (e) {
+      this.fail(e);
+      return;
+    }
+    this.requestWake(backlog);
+  };
+
+  /** Steps `steps` ticks, writing the last snapshot tick crossed (if any). */
+  runSteps(steps: number): void {
+    const engine = this.engine;
+    if (!engine) return;
+    for (let i = 0; i < steps; i++) {
+      engine.step();
+      if (engine.tick >= this.nextSnapTick) {
+        while (this.nextSnapTick <= engine.tick) this.nextSnapTick = this.snapTickFor(++this.nextSnapIndex);
+        const remaining = steps - 1 - i;
+        if (engine.tick + remaining < this.nextSnapTick) this.sendSnapshot();
+      }
+    }
+    if (steps === 0 && this.dirty) this.sendSnapshot();
+  }
+
+  private sendSnapshot(): void {
+    const engine = this.engine;
+    const pool = this.pool;
+    const writer = this.writer;
+    if (!engine || !pool || !writer) return;
+    const buffer = pool.acquire();
+    if (buffer === null) return; // skipped; pending events carry over
+    writer.attach(buffer);
+    engine.writeSnapshot(writer, this.timeScale);
+    this.dirty = false;
+    this.snapshotsSent++;
+    this.post({ type: 'snapshot', buffer }, [buffer]);
+  }
+
+  fail(e: unknown): void {
+    if (this.dead) return;
+    this.dead = true;
+    const msg: WorkerToMain = { type: 'fatal', message: errMessage(e) };
+    if (e instanceof Error && e.stack) msg.stack = e.stack;
+    this.post(msg);
+  }
+}
+
+// ------------------------------------------------------------ global install
+interface WorkerScopeLike {
+  postMessage(msg: unknown, transfer?: Transferable[]): void;
+  addEventListener(type: string, fn: (ev: unknown) => void): void;
+}
+
+function isWorkerScope(): boolean {
+  const g = globalThis as { WorkerGlobalScope?: abstract new () => unknown };
+  return typeof g.WorkerGlobalScope === 'function' && globalThis instanceof g.WorkerGlobalScope;
+}
+
+if (isWorkerScope()) {
+  const scope = globalThis as unknown as WorkerScopeLike;
+  const host = new WorkerHost((msg, transfer) => scope.postMessage(msg, transfer ?? []));
+  scope.addEventListener('message', (ev) => {
+    try {
+      host.handle((ev as MessageEvent<MainToWorker>).data);
+    } catch (e) {
+      host.fail(e);
+    }
+  });
+  scope.addEventListener('error', (ev) => {
+    const e = ev as ErrorEvent;
+    host.fail(e.error ?? new Error(e.message));
+  });
+  scope.addEventListener('unhandledrejection', (ev) => {
+    host.fail((ev as PromiseRejectionEvent).reason);
+  });
+}

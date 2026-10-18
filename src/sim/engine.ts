@@ -1,0 +1,356 @@
+/**
+ * Sim engine: owns the arena, objects, ground, pending events and the fixed
+ * step. Worker-only. Commands (spawn/despawn/reset/input/ground) must be
+ * called between steps; step() itself is allocation-free.
+ */
+import type { Vec3 } from '../core/math';
+import { createRng, type Rng } from '../core/rng';
+import type { SnapshotWriter } from '../protocol/codec';
+import {
+  BEAM_BREAK_CAPACITY,
+  EventKind,
+  IMPACT_CAPACITY,
+  SKID_CAPACITY,
+} from '../protocol/events';
+import {
+  ACTION_NAMES,
+  ACTION_RANGES,
+  Action,
+  DEFAULT_CAPACITY,
+  type ActionState,
+  type SnapshotCapacity,
+  type Transform,
+} from '../protocol/messages';
+import { applyBeamForces } from './beams';
+import { applyGroundContacts, PlaneSampler, resetGroundContactState } from './collision/ground';
+import { DEFAULT_MATERIALS } from './collision/materials';
+import { integrateNodes } from './integrator';
+import { compileRig } from './rig/builder';
+import type { CompiledRig, RigDef } from './rig/types';
+import { SimArena } from './state';
+import type { EventSink, HeightSampler, MaterialTable, SimObject, SimState } from './types';
+
+/** Fixed physics step, s. */
+export const SIM_DT = 1 / 2000;
+export const SIM_HZ = 2000;
+
+export interface EngineConfig {
+  gravity: Vec3;
+  debugStrains: boolean;
+  capacity?: SnapshotCapacity;
+  seed?: number;
+}
+
+const IMPACT_FIELDS = 9;
+const BREAK_FIELDS = 5;
+const SKID_FIELDS = 7;
+
+/**
+ * Buffers events between WRITTEN snapshots (discovery order, preallocated at
+ * protocol capacity). Events beyond capacity are dropped and counted; the
+ * counts are added to the next written snapshot's overflow fields.
+ */
+export class PendingEvents implements EventSink {
+  readonly impacts = new Float64Array(IMPACT_CAPACITY * IMPACT_FIELDS);
+  readonly breaks = new Float64Array(BEAM_BREAK_CAPACITY * BREAK_FIELDS);
+  readonly skids = new Float64Array(SKID_CAPACITY * SKID_FIELDS);
+  impactCount = 0;
+  breakCount = 0;
+  skidCount = 0;
+  impactOverflow = 0;
+  breakOverflow = 0;
+  skidOverflow = 0;
+
+  constructor(private readonly arena: SimArena) {}
+
+  impact(
+    objectId: number,
+    materialId: number,
+    px: number,
+    py: number,
+    pz: number,
+    nx: number,
+    ny: number,
+    nz: number,
+    impulse: number,
+  ): void {
+    if (this.impactCount >= IMPACT_CAPACITY) {
+      this.impactOverflow++;
+      return;
+    }
+    const a = this.impacts;
+    const w = this.impactCount * IMPACT_FIELDS;
+    a[w] = objectId;
+    a[w + 1] = materialId;
+    a[w + 2] = px;
+    a[w + 3] = py;
+    a[w + 4] = pz;
+    a[w + 5] = nx;
+    a[w + 6] = ny;
+    a[w + 7] = nz;
+    a[w + 8] = impulse;
+    this.impactCount++;
+  }
+
+  beamBreak(beamIndex: number, px: number, py: number, pz: number): void {
+    if (this.breakCount >= BEAM_BREAK_CAPACITY) {
+      this.breakOverflow++;
+      return;
+    }
+    const oi = this.arena.ownerOfBeam(beamIndex);
+    if (oi < 0) return; // unreachable: every arena beam belongs to an object
+    const obj = this.arena.objects[oi]!;
+    const a = this.breaks;
+    const w = this.breakCount * BREAK_FIELDS;
+    a[w] = obj.objectId;
+    a[w + 1] = beamIndex - obj.beamStart;
+    a[w + 2] = px;
+    a[w + 3] = py;
+    a[w + 4] = pz;
+    this.breakCount++;
+  }
+
+  skid(
+    objectId: number,
+    materialId: number,
+    px: number,
+    py: number,
+    pz: number,
+    slip: number,
+    load: number,
+  ): void {
+    if (this.skidCount >= SKID_CAPACITY) {
+      this.skidOverflow++;
+      return;
+    }
+    const a = this.skids;
+    const w = this.skidCount * SKID_FIELDS;
+    a[w] = objectId;
+    a[w + 1] = materialId;
+    a[w + 2] = px;
+    a[w + 3] = py;
+    a[w + 4] = pz;
+    a[w + 5] = slip;
+    a[w + 6] = load;
+    this.skidCount++;
+  }
+
+  /** Copies everything pending into `writer` (after begin) and clears. */
+  flushTo(writer: SnapshotWriter): void {
+    const im = this.impacts;
+    for (let i = 0; i < this.impactCount; i++) {
+      const w = i * IMPACT_FIELDS;
+      writer.pushImpact(im[w]!, im[w + 1]!, im[w + 2]!, im[w + 3]!, im[w + 4]!, im[w + 5]!, im[w + 6]!, im[w + 7]!, im[w + 8]!);
+    }
+    const br = this.breaks;
+    for (let i = 0; i < this.breakCount; i++) {
+      const w = i * BREAK_FIELDS;
+      writer.pushBeamBreak(br[w]!, br[w + 1]!, br[w + 2]!, br[w + 3]!, br[w + 4]!);
+    }
+    const sk = this.skids;
+    for (let i = 0; i < this.skidCount; i++) {
+      const w = i * SKID_FIELDS;
+      writer.pushSkid(sk[w]!, sk[w + 1]!, sk[w + 2]!, sk[w + 3]!, sk[w + 4]!, sk[w + 5]!, sk[w + 6]!);
+    }
+    if (this.impactOverflow > 0) writer.addOverflow(EventKind.impact, this.impactOverflow);
+    if (this.breakOverflow > 0) writer.addOverflow(EventKind.beamBreak, this.breakOverflow);
+    if (this.skidOverflow > 0) writer.addOverflow(EventKind.skid, this.skidOverflow);
+    this.clear();
+  }
+
+  clear(): void {
+    this.impactCount = 0;
+    this.breakCount = 0;
+    this.skidCount = 0;
+    this.impactOverflow = 0;
+    this.breakOverflow = 0;
+    this.skidOverflow = 0;
+  }
+}
+
+/** Command rejected (unknown object, capacity, invalid input). The sim stays consistent. */
+export class SimCommandError extends Error {
+  constructor(
+    message: string,
+    readonly objectId?: number,
+  ) {
+    super(message);
+    this.name = 'SimCommandError';
+  }
+}
+
+export class SimEngine {
+  readonly arena: SimArena;
+  readonly state: SimState;
+  readonly capacity: SnapshotCapacity;
+  readonly debugStrains: boolean;
+  readonly events: PendingEvents;
+  readonly rng: Rng;
+  gravityX: number;
+  gravityY: number;
+  gravityZ: number;
+  sampler: HeightSampler | null = null;
+  materials: MaterialTable = DEFAULT_MATERIALS;
+  /** Fixed steps taken since init. */
+  tick = 0;
+  /** Compiled rig per objectId (needed for reset/repair). */
+  private readonly rigs = new Map<number, CompiledRig>();
+
+  constructor(config: EngineConfig) {
+    const cap = config.capacity ?? DEFAULT_CAPACITY;
+    for (const v of [cap.maxObjects, cap.nodeCapacity, cap.beamCapacity]) {
+      if (!Number.isInteger(v) || v < 0) throw new RangeError('capacity values must be non-negative integers');
+    }
+    const g = config.gravity;
+    if (!g || g.length !== 3 || !g.every(Number.isFinite)) throw new TypeError('gravity must be 3 finite numbers');
+    this.capacity = { ...cap };
+    this.debugStrains = !!config.debugStrains;
+    this.arena = new SimArena(cap.nodeCapacity, cap.beamCapacity, cap.maxObjects);
+    this.state = this.arena.state;
+    this.events = new PendingEvents(this.arena);
+    this.gravityX = g[0];
+    this.gravityY = g[1];
+    this.gravityZ = g[2];
+    this.rng = createRng(config.seed ?? 0);
+  }
+
+  get objects(): readonly SimObject[] {
+    return this.arena.objects;
+  }
+
+  get simTime(): number {
+    return this.tick * SIM_DT;
+  }
+
+  setGroundPlane(y: number, materialId: number): void {
+    if (!Number.isFinite(y)) throw new SimCommandError('ground y must be finite');
+    if (!Number.isInteger(materialId) || materialId < 0 || materialId >= this.materials.friction.length) {
+      throw new SimCommandError(`invalid materialId ${materialId}`);
+    }
+    this.sampler = new PlaneSampler(y, materialId);
+  }
+
+  clearGround(): void {
+    this.sampler = null;
+  }
+
+  spawn(objectId: number, def: RigDef, transform: Transform): SimObject {
+    let rig: CompiledRig;
+    try {
+      rig = compileRig(def);
+    } catch (e) {
+      throw new SimCommandError(`invalid rig: ${e instanceof Error ? e.message : String(e)}`, objectId);
+    }
+    return this.spawnCompiled(objectId, rig, transform);
+  }
+
+  spawnCompiled(objectId: number, rig: CompiledRig, transform: Transform): SimObject {
+    let obj: SimObject;
+    try {
+      obj = this.arena.insert(objectId, rig, transform);
+    } catch (e) {
+      throw new SimCommandError(e instanceof Error ? e.message : String(e), objectId);
+    }
+    this.rigs.set(objectId, rig);
+    // Ranges from here on shifted; per-node contact bookkeeping restarts.
+    resetGroundContactState(this.state, obj.nodeStart, this.state.nodeCount - obj.nodeStart);
+    return obj;
+  }
+
+  despawn(objectId: number): void {
+    const obj = this.arena.get(objectId);
+    if (!obj) throw new SimCommandError(`unknown objectId ${objectId}`, objectId);
+    const start = obj.nodeStart;
+    const n = obj.nodeCount;
+    this.arena.remove(objectId);
+    this.rigs.delete(objectId);
+    resetGroundContactState(this.state, start, this.state.nodeCount + n - start);
+  }
+
+  reset(objectId: number, transform: Transform): void {
+    const rig = this.rigs.get(objectId);
+    if (!rig) throw new SimCommandError(`unknown objectId ${objectId}`, objectId);
+    let obj: SimObject;
+    try {
+      obj = this.arena.reset(objectId, rig, transform);
+    } catch (e) {
+      throw new SimCommandError(e instanceof Error ? e.message : String(e), objectId);
+    }
+    resetGroundContactState(this.state, obj.nodeStart, obj.nodeCount);
+  }
+
+  /** Merges named actions (clamped to ACTION_RANGES; gearSelect rounded). */
+  setInput(objectId: number, actions: Partial<ActionState>): void {
+    const obj = this.arena.get(objectId);
+    if (!obj) throw new SimCommandError(`unknown objectId ${objectId}`, objectId);
+    if (!actions || typeof actions !== 'object') throw new SimCommandError('actions must be an object', objectId);
+    for (let i = 0; i < ACTION_NAMES.length; i++) {
+      const v = actions[ACTION_NAMES[i]!];
+      if (v === undefined) continue;
+      if (typeof v !== 'number' || !Number.isFinite(v)) {
+        throw new SimCommandError(`action ${ACTION_NAMES[i]} must be a finite number`, objectId);
+      }
+    }
+    for (let i = 0; i < ACTION_NAMES.length; i++) {
+      const v = actions[ACTION_NAMES[i]!];
+      if (v !== undefined) this.setAction(obj, i, v);
+    }
+  }
+
+  /** Sets one action by index (clamped). */
+  setAction(obj: SimObject, index: number, value: number): void {
+    const r = ACTION_RANGES[index];
+    if (!r) throw new SimCommandError(`invalid action index ${index}`, obj.objectId);
+    let v = index === Action.gearSelect ? Math.round(value) : value;
+    if (v < r[0]) v = r[0];
+    if (v > r[1]) v = r[1];
+    obj.actions[index] = v;
+  }
+
+  /** One fixed step (SIM_DT): per object ascending → hydro drive, beams, ground, integrate. */
+  step(): void {
+    const s = this.state;
+    const objs = this.arena.objects;
+    const sampler = this.sampler;
+    const sink = this.events;
+    const dbg = this.debugStrains;
+    const gx = this.gravityX;
+    const gy = this.gravityY;
+    const gz = this.gravityZ;
+    const restLen = s.restLen;
+    for (let o = 0; o < objs.length; o++) {
+      const obj = objs[o]!;
+      const hb = obj.hydroBeams;
+      if (hb.length > 0) {
+        const steer = obj.actions[Action.steer]!;
+        const base = obj.hydroBase;
+        const travel = obj.hydroTravel;
+        for (let h = 0; h < hb.length; h++) restLen[hb[h]!] = base[h]! * (1 + travel[h]! * steer);
+      }
+      applyBeamForces(s, obj.beamStart, obj.beamCount, sink, dbg);
+      if (sampler !== null) {
+        applyGroundContacts(s, obj.nodeStart, obj.nodeCount, sampler, this.materials, SIM_DT, obj.objectId, sink);
+      }
+      integrateNodes(s, obj.nodeStart, obj.nodeCount, SIM_DT, gx, gy, gz);
+    }
+    this.tick++;
+  }
+
+  /**
+   * Fills an attached writer: header, objects (ascending id; telemetry zeros
+   * in P1), nodes f64→f32, strains (debugStrains), then all pending events,
+   * which are cleared. Only call for snapshots that will actually be sent.
+   */
+  writeSnapshot(writer: SnapshotWriter, timeScale = 1): void {
+    const s = this.state;
+    const objs = this.arena.objects;
+    writer.begin(this.tick, this.simTime, timeScale);
+    for (let o = 0; o < objs.length; o++) {
+      const obj = objs[o]!;
+      const i = writer.addObject(obj.objectId, obj.flags, obj.nodeCount, obj.beamCount);
+      writer.writeNodesSoA(i, s.posX, s.posY, s.posZ, obj.nodeStart);
+      writer.writeStrains(i, s.strainOut, obj.beamStart);
+    }
+    this.events.flushTo(writer);
+  }
+}
