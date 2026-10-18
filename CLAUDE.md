@@ -2,6 +2,8 @@
 
 BeamNG-style soft-body driving sandbox for the browser: node-and-beam physics in a worker, three.js rendering on main. Bespoke engine — no physics/game/UI frameworks.
 
+**Read `docs/PLAN.md` first.** It is the master plan: design, phase map, status, and the standing rule to commit and push after every work unit. `docs/CONTRACTS.md` lists the frozen seams.
+
 Commands: `npm run dev` | `build` (tsc + vite build) | `typecheck` | `test` (vitest) | `e2e` (playwright) | `bench` (node tools/bench-beams.mjs).
 
 ## Architecture map
