@@ -25,8 +25,9 @@ The dev container can be reclaimed at any time, and uncommitted work dies with i
 | Phase | State |
 |---|---|
 | P0 Foundation | ✅ done: scaffold, CI, Pages, fetch-assets, bench (31.6 M beam-updates/s/core; f64 faster than f32 on V8), `src/core` (102 tests), real CC0 assets |
-| P1 Sim core + protocol | ⏳ rebuilding (first attempt lost uncommitted) |
-| P2–P9 | not started |
+| P1 Sim core + protocol | ✅ done: frozen protocol, beam kernel (plasticity/breaking), ground contact, rig compiler, worker at real-time 2 kHz, soft-cube wireframe demo (172 tests) |
+| P2 Drivable wireframe car | ⏳ in progress |
+| P3–P9 | not started |
 
 ## Pinned stack
 
