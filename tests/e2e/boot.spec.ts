@@ -1,13 +1,16 @@
 import { expect, test } from '@playwright/test';
 
 interface CrumpleGlobal {
+  /** Sim tick of the latest snapshot (dt = 1/2000 s). */
   tick: number;
   build: string;
+  nodes: number;
+  snapshotHz: number;
 }
 
 // In CI the renderer string is SwiftShader (software rasterizer) — never
 // assert on GPU vendor/renderer, only on capabilities and behavior.
-test('boot: canvas attaches, WebGL2 works, render loop ticks, zero errors', async ({ page }) => {
+test('boot: canvas attaches, WebGL2 works, sim ticks, zero errors', async ({ page }) => {
   const pageErrors: string[] = [];
   const consoleErrors: string[] = [];
   page.on('pageerror', (err) => {
@@ -32,8 +35,7 @@ test('boot: canvas attaches, WebGL2 works, render loop ticks, zero errors', asyn
   });
   expect(webgl2Backed).toBe(true);
 
-  // Wait for the app global and the first rendered frame before sampling —
-  // SwiftShader's first frame (shader compile) can take a while.
+  // Wait for the app global and the first sim snapshot before sampling.
   await page.waitForFunction(() => {
     const g = (window as unknown as { __crumple?: { tick: number } }).__crumple;
     return !!g && g.tick > 0;
@@ -48,7 +50,13 @@ test('boot: canvas attaches, WebGL2 works, render loop ticks, zero errors', asyn
   );
 
   expect(tickBefore).toBeGreaterThan(0);
-  expect(tickAfter - tickBefore).toBeGreaterThanOrEqual(10);
+  // 2000 ticks/s at timescale 1; allow a slow headless worker.
+  expect(tickAfter - tickBefore).toBeGreaterThanOrEqual(500);
+
+  const nodes = await page.evaluate(
+    () => (window as unknown as { __crumple: CrumpleGlobal }).__crumple.nodes,
+  );
+  expect(nodes).toBeGreaterThan(0);
 
   expect(pageErrors).toEqual([]);
   expect(consoleErrors).toEqual([]);
