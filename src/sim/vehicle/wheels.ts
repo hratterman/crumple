@@ -1,0 +1,507 @@
+/**
+ * Wheel runtime kernels (worker-only): ω estimate + per-wheel bookkeeping,
+ * the torque law and the parking clamp. Contracts in ./types.ts
+ * (EstimateWheelOmega, ApplyWheelTorques, ApplyParkingClamp).
+ *
+ * HOT PATH: only + - * / sqrt, no allocation, fixed iteration order (ring
+ * nodes ascending, wheels in declaration order).
+ *
+ * GROUND: the frozen kernel signatures carry no HeightSampler, so the
+ * engine registers the active ground with setWheelGround() at init and on
+ * every `ground` command (null = no ground: no load/contact, no clamp).
+ */
+import { Action } from '../../protocol/messages';
+import { groundNormalForce, tanhR } from '../collision/ground';
+import { DEFAULT_MATERIALS } from '../collision/materials';
+import type { HeightSampler, MaterialTable, SimState } from '../types';
+import {
+  BRAKE_OMEGA_EPS,
+  PARK_GAIN,
+  PARK_SPEED,
+  type ApplyParkingClamp,
+  type ApplyWheelTorques,
+  type EstimateWheelOmega,
+  type VehicleRuntime,
+  type WheelRuntime,
+} from './types';
+
+let groundSampler: HeightSampler | null = null;
+let groundMaterials: MaterialTable = DEFAULT_MATERIALS;
+/** Step for groundNormalForce's stiffness clamp in estimateWheelOmega (its frozen signature has no dt). */
+let groundDt = 1 / 2000;
+
+/**
+ * Registers the ground the wheel kernels query. Call at init and on every
+ * `ground` command (null clears it). `dt` = the fixed sim step.
+ */
+export function setWheelGround(
+  sampler: HeightSampler | null,
+  materials: MaterialTable = DEFAULT_MATERIALS,
+  dt = 1 / 2000,
+): void {
+  groundSampler = sampler;
+  groundMaterials = materials;
+  groundDt = dt;
+}
+
+/** Slip ratio denominator floor, m/s (see WheelRuntime.slipRatio). */
+const SLIP_RATIO_MIN_SPEED = 0.5;
+/** Pedal threshold that arms the parking clamp. */
+const PARK_PEDAL = 0.1;
+const SLIP_REG_INV = 1 / 0.3;
+/**
+ * WHY the clamp has two anchors on top of the contract's viscous term
+ * (cart rigs in wheels.test.ts, 10 % grade, full brake: no clamp creeps
+ * 0.31 m per 2 s, the viscous term alone ~0.15 m, both anchors 0.2 mm):
+ *
+ * 1. Sliding. The ground kernel caps friction at KT_FRACTION·m/dt·|v_t| per
+ *    node and PARK_GAIN adds 0.25·m/dt, so a static tangential force F on a
+ *    node of mass m needs a steady slip F·dt/(0.75·m) (~0.2 m/s for a
+ *    0.67 kg tyre node carrying 200 N). Each in-contact node of a clamped
+ *    wheel therefore also gets a tangential spring k = PARK_ANCHOR_K·m/dt²
+ *    toward the point where it touched down, inside the same
+ *    μN(1 − tanhR(|v_t|/0.3)) cap (ground friction + clamp ≤ μN). Past the
+ *    cap the anchor is dragged along (sliding, no stored wind-up). ω·dt of
+ *    that spring alone = sqrt(0.05) ≈ 0.22, inside the contact headroom of
+ *    ground.ts.
+ * 2. Rolling. A rolling wheel's contact nodes do not slide, so no contact
+ *    force can stop it; only the brake can, and the contract's brake ramp
+ *    (−T·ω/1 rad/s below 1 rad/s) is viscous: a 10 % grade rolls a sedan at
+ *    ~2 cm/s. Clamped wheels get a brake-pad stiction spring on the wheel
+ *    angle accumulated since engagement, τ = −PARK_HOLD_K·(I/dt²)·θ, with
+ *    service + hold torque capped at the wheel's available brake torque
+ *    (θ is re-based at the cap: slips, no wind-up). ω·dt on the bare wheel
+ *    inertia = sqrt(0.02) ≈ 0.14 (on the ground the car's mass adds inertia).
+ * Both are capped forces/torques, never position constraints.
+ */
+const PARK_ANCHOR_K = 0.05;
+const PARK_HOLD_K = 0.02;
+/** Squared anchor distance (m²) treated as stale (re-armed in place), 5 cm. */
+const PARK_ANCHOR_STALE2 = 0.05 * 0.05;
+
+
+// ---- module scratch (reused; nothing is allocated per call)
+const nrm = new Float64Array(3);
+/** Axle frame of the last axleFrame() call: centre xyz, unit spin axis s xyz. */
+const frame = new Float64Array(6);
+
+/** Per-wheel parking state, allocated once per WheelRuntime on first clamp use (never per tick). */
+interface ParkState {
+  /** Contact anchor xyz per tyre ring node. */
+  anchor: Float64Array;
+  armed: Uint8Array;
+  /** Wheel angle since the hold engaged, rad. */
+  theta: number;
+  holding: boolean;
+}
+const parkStates = new WeakMap<WheelRuntime, ParkState>();
+
+function parkStateFor(w: WheelRuntime): ParkState {
+  let p = parkStates.get(w);
+  if (p === undefined) {
+    p = { anchor: new Float64Array(w.ringCount * 3), armed: new Uint8Array(w.ringCount), theta: 0, holding: false };
+    parkStates.set(w, p);
+  }
+  return p;
+}
+
+function release(w: WheelRuntime): void {
+  const p = parkStates.get(w);
+  if (p !== undefined && p.holding) {
+    p.armed.fill(0);
+    p.theta = 0;
+    p.holding = false;
+  }
+}
+
+/** Writes hub midpoint + unit spin axis s = spinSign·normalize(hubO − hubI) into `frame`. False if degenerate. */
+function axleFrame(state: SimState, w: WheelRuntime): boolean {
+  const { posX, posY, posZ } = state;
+  const hi = w.hubI;
+  const ho = w.hubO;
+  const sx = posX[ho]! - posX[hi]!;
+  const sy = posY[ho]! - posY[hi]!;
+  const sz = posZ[ho]! - posZ[hi]!;
+  const l = Math.sqrt(sx * sx + sy * sy + sz * sz);
+  if (!(l > 1e-9)) return false;
+  const k = w.wheel.spinSign / l;
+  frame[0] = (posX[hi]! + posX[ho]!) * 0.5;
+  frame[1] = (posY[hi]! + posY[ho]!) * 0.5;
+  frame[2] = (posZ[hi]! + posZ[ho]!) * 0.5;
+  frame[3] = sx * k;
+  frame[4] = sy * k;
+  frame[5] = sz * k;
+  return true;
+}
+
+/**
+ * Torque τ about s (+ = forward): τ/(N·r)·t̂_i on the N tyre ring nodes,
+ * t̂_i = s × ρ̂_i, and −ΣF/2 on each hub, so the net force is exactly zero.
+ */
+function applyAxleTorque(state: SimState, w: WheelRuntime, tau: number): void {
+  if (tau === 0 || !axleFrame(state, w)) return;
+  const { posX, posY, posZ, frcX, frcY, frcZ } = state;
+  const cx = frame[0]!;
+  const cy = frame[1]!;
+  const cz = frame[2]!;
+  const sx = frame[3]!;
+  const sy = frame[4]!;
+  const sz = frame[5]!;
+  const n = w.ringCount;
+  const coef = tau / (n * w.wheel.tireRingRadius);
+  let sumX = 0;
+  let sumY = 0;
+  let sumZ = 0;
+  const t0 = w.tireStart;
+  const t1 = t0 + n;
+  for (let i = t0; i < t1; i++) {
+    const rx = posX[i]! - cx;
+    const ry = posY[i]! - cy;
+    const rz = posZ[i]! - cz;
+    const ax = rx * sx + ry * sy + rz * sz;
+    const px = rx - ax * sx;
+    const py = ry - ax * sy;
+    const pz = rz - ax * sz;
+    const pl = Math.sqrt(px * px + py * py + pz * pz);
+    if (!(pl > 1e-9)) continue;
+    const g = coef / pl;
+    const fx = g * (sy * pz - sz * py);
+    const fy = g * (sz * px - sx * pz);
+    const fz = g * (sx * py - sy * px);
+    frcX[i] = frcX[i]! + fx;
+    frcY[i] = frcY[i]! + fy;
+    frcZ[i] = frcZ[i]! + fz;
+    sumX += fx;
+    sumY += fy;
+    sumZ += fz;
+  }
+  const hx = -0.5 * sumX;
+  const hy = -0.5 * sumY;
+  const hz = -0.5 * sumZ;
+  const hi = w.hubI;
+  const ho = w.hubO;
+  frcX[hi] = frcX[hi]! + hx;
+  frcY[hi] = frcY[hi]! + hy;
+  frcZ[hi] = frcZ[hi]! + hz;
+  frcX[ho] = frcX[ho]! + hx;
+  frcY[ho] = frcY[ho]! + hy;
+  frcZ[ho] = frcZ[ho]! + hz;
+}
+
+/**
+ * ω about s, plus bookkeeping: detached (sticky), load, contact, slipSpeed,
+ * slipRatio.
+ *
+ * ω is the INERTIA-WEIGHTED mean over the rim AND tyre rings,
+ * Σ m_i (v_i − v_c)·(s × ρ_i) / Σ m_i |ρ_i|² = L_axle / I_axle (the frozen
+ * doc's per-node mean over the rim only, with masses as weights and the tyre
+ * ring included). WHY: torques act on the tyre ring; a rim-only estimate is
+ * non-collocated, and the brake ramp's ~T/(1 rad/s) gain fed by it pumped
+ * the ~50 Hz rim–tyre torsional mode unstable at full brake (cart test).
+ * L/I is blind to that internal mode (it conserves L), so brake, clutch and
+ * diff feedback only ever see rigid wheel rotation.
+ *
+ * Load/contact/slip use groundNormalForce on the tyre nodes (this tick's
+ * contact force; zero without a registered ground).
+ */
+export const estimateWheelOmega: EstimateWheelOmega = (state, w) => {
+  if (!axleFrame(state, w)) {
+    w.omega = 0;
+    return;
+  }
+  const { posX, posY, posZ, velX, velY, velZ, invMass } = state;
+  const cx = frame[0]!;
+  const cy = frame[1]!;
+  const cz = frame[2]!;
+  const sx = frame[3]!;
+  const sy = frame[4]!;
+  const sz = frame[5]!;
+  const hi = w.hubI;
+  const ho = w.hubO;
+  const vcx = (velX[hi]! + velX[ho]!) * 0.5;
+  const vcy = (velY[hi]! + velY[ho]!) * 0.5;
+  const vcz = (velZ[hi]! + velZ[ho]!) * 0.5;
+
+  // ---- ω (rim and tyre rings are contiguous: rimStart .. rimStart + 2·ringCount)
+  const n = w.ringCount;
+  let lSum = 0;
+  let iSum = 0;
+  const r0 = w.rimStart;
+  const r1 = r0 + 2 * n;
+  for (let i = r0; i < r1; i++) {
+    const im = invMass[i]!;
+    if (im === 0) continue;
+    const rx = posX[i]! - cx;
+    const ry = posY[i]! - cy;
+    const rz = posZ[i]! - cz;
+    const ax = rx * sx + ry * sy + rz * sz;
+    const px = rx - ax * sx;
+    const py = ry - ax * sy;
+    const pz = rz - ax * sz;
+    const tx = sy * pz - sz * py;
+    const ty = sz * px - sx * pz;
+    const tz = sx * py - sy * px;
+    const m = 1 / im;
+    lSum += m * ((velX[i]! - vcx) * tx + (velY[i]! - vcy) * ty + (velZ[i]! - vcz) * tz);
+    iSum += m * (px * px + py * py + pz * pz);
+  }
+  const omega = iSum > 0 ? lSum / iSum : 0;
+  w.omega = omega;
+
+  // ---- detached: every hub link broken (sticky until reset)
+  if (w.detached === 0) {
+    const links = w.hubLinkBeams;
+    const nl = links.length;
+    if (nl > 0) {
+      let broken = 0;
+      for (let j = 0; j < nl; j++) if (state.active[links[j]!] === 0) broken++;
+      if (broken === nl) w.detached = 1;
+    }
+  }
+
+  // ---- ground load / contact / slip
+  const sampler = groundSampler;
+  let load = 0;
+  let slipSum = 0;
+  let contacts = 0;
+  let gnx = 0;
+  let gny = 0;
+  let gnz = 0;
+  if (sampler !== null) {
+    const t0 = w.tireStart;
+    const t1 = t0 + n;
+    for (let i = t0; i < t1; i++) {
+      const fn = groundNormalForce(state, i, sampler, groundDt, nrm);
+      if (!(fn > 0)) continue;
+      const nx = nrm[0]!;
+      const ny = nrm[1]!;
+      const nz = nrm[2]!;
+      const vx = velX[i]!;
+      const vy = velY[i]!;
+      const vz = velZ[i]!;
+      const vn = vx * nx + vy * ny + vz * nz;
+      const tx = vx - vn * nx;
+      const ty = vy - vn * ny;
+      const tz = vz - vn * nz;
+      slipSum += Math.sqrt(tx * tx + ty * ty + tz * tz);
+      load += fn;
+      gnx += fn * nx;
+      gny += fn * ny;
+      gnz += fn * nz;
+      contacts++;
+    }
+  }
+  w.load = load;
+  w.contact = contacts > 0 ? 1 : 0;
+  w.slipSpeed = contacts > 0 ? slipSum / contacts : 0;
+
+  // forward = s × n (n: load-weighted contact normal, +Y when airborne).
+  if (contacts > 0) {
+    const gl = Math.sqrt(gnx * gnx + gny * gny + gnz * gnz);
+    gnx /= gl;
+    gny /= gl;
+    gnz /= gl;
+  } else {
+    gnx = 0;
+    gny = 1;
+    gnz = 0;
+  }
+  let fx = sy * gnz - sz * gny;
+  let fy = sz * gnx - sx * gnz;
+  let fz = sx * gny - sy * gnx;
+  const fl = Math.sqrt(fx * fx + fy * fy + fz * fz);
+  let vFwd = 0;
+  if (fl > 1e-9) {
+    fx /= fl;
+    fy /= fl;
+    fz /= fl;
+    vFwd = vcx * fx + vcy * fy + vcz * fz;
+  }
+  const den = vFwd < 0 ? -vFwd : vFwd;
+  w.slipRatio = (omega * w.wheel.radius - vFwd) / (den > SLIP_RATIO_MIN_SPEED ? den : SLIP_RATIO_MIN_SPEED);
+};
+
+/**
+ * TORQUE LAW: τ = drive (0 when detached) + brake ramped as
+ * −brakeTorque·clamp(ω/BRAKE_OMEGA_EPS, −1, 1), applied by applyAxleTorque.
+ */
+export const applyWheelTorques: ApplyWheelTorques = (state, w, driveTorque, brakeTorque) => {
+  const drive = w.detached !== 0 ? 0 : driveTorque;
+  let ramp = w.omega / BRAKE_OMEGA_EPS;
+  if (ramp > 1) ramp = 1;
+  else if (ramp < -1) ramp = -1;
+  const brake = brakeTorque > 0 ? -brakeTorque * ramp : 0;
+  w.driveTorque = drive;
+  w.brakeTorque = brake;
+  applyAxleTorque(state, w, drive + brake);
+};
+
+/**
+ * PARKING CLAMP. Engaged below PARK_SPEED (horizontal speed of the object's
+ * mass-weighted mean velocity) on wheels whose brake is held: braked wheels with brake ≥ 0.1,
+ * handbrake wheels with handbrake ≥ 0.1. Per engaged wheel:
+ *  - brake hold (see the WHY above PARK_ANCHOR_K), capped at the wheel's
+ *    available brake torque max(brakeTorque·brake, handbrakeTorque·handbrake);
+ *  - per in-contact tyre node: the contract's PARK_GAIN·m/dt·|v_t| viscous
+ *    term plus the contact anchor spring, together capped at
+ *    μN·(1 − tanhR(|v_t|/0.3)) (N from groundNormalForce, μ = node × material).
+ * Run after applyWheelTorques (it reads w.omega and w.brakeTorque).
+ */
+export const applyParkingClamp: ApplyParkingClamp = (state, vehicle, actions, dt) => {
+  const wheels = vehicle.wheels;
+  const nw = wheels.length;
+  const brake = actions[Action.brake]!;
+  const hand = actions[Action.handbrake]!;
+  const brakeOn = brake >= PARK_PEDAL;
+  const handOn = hand >= PARK_PEDAL;
+  if ((!brakeOn && !handOn) || !(comSpeed(state, vehicle) < PARK_SPEED)) {
+    for (let k = 0; k < nw; k++) release(wheels[k]!);
+    return;
+  }
+  const sampler = groundSampler;
+  const { posX, posY, posZ, velX, velY, velZ, frcX, frcY, frcZ, invMass, friction } = state;
+  const matFriction = groundMaterials.friction;
+  const invDt = 1 / dt;
+  const viscGain = PARK_GAIN * invDt;
+  const anchorGain = PARK_ANCHOR_K * invDt * invDt;
+  for (let k = 0; k < nw; k++) {
+    const w = wheels[k]!;
+    const cw = w.wheel;
+    const service = cw.braked && brakeOn ? cw.brakeTorque * brake : 0;
+    const parking = cw.handbrake && handOn ? cw.handbrakeTorque * hand : 0;
+    const brakeMax = service > parking ? service : parking;
+    if (!(brakeMax > 0)) {
+      release(w);
+      continue;
+    }
+    const ps = parkStateFor(w);
+    ps.holding = true;
+
+    // ---- brake hold on the wheel angle
+    ps.theta += w.omega * dt;
+    let inertia = 0;
+    const r0 = w.rimStart;
+    const r1 = r0 + 2 * w.ringCount;
+    const rimR = cw.rimRadius;
+    const tireR = cw.tireRingRadius;
+    const rimR2 = rimR * rimR;
+    const tireR2 = tireR * tireR;
+    for (let i = r0; i < r1; i++) {
+      const im = invMass[i]!;
+      if (im !== 0) inertia += (i < w.tireStart ? rimR2 : tireR2) / im;
+    }
+    const kHold = PARK_HOLD_K * inertia * invDt * invDt;
+    const prior = w.brakeTorque;
+    let total = prior - kHold * ps.theta;
+    if (total > brakeMax || total < -brakeMax) {
+      total = total > 0 ? brakeMax : -brakeMax;
+      ps.theta = (prior - total) / kHold;
+    }
+    const hold = total - prior;
+    w.brakeTorque = total;
+    applyAxleTorque(state, w, hold);
+
+    // ---- contact nodes: viscous + anchor, capped at μN(1 − tanhR(|v_t|/0.3))
+    if (sampler === null) continue;
+    const anchor = ps.anchor;
+    const armed = ps.armed;
+    const n = w.ringCount;
+    for (let j = 0; j < n; j++) {
+      const i = w.tireStart + j;
+      const fn = groundNormalForce(state, i, sampler, dt, nrm);
+      if (!(fn > 0)) {
+        armed[j] = 0;
+        continue;
+      }
+      const nx = nrm[0]!;
+      const ny = nrm[1]!;
+      const nz = nrm[2]!;
+      const px = posX[i]!;
+      const py = posY[i]!;
+      const pz = posZ[i]!;
+      const j3 = 3 * j;
+      if (armed[j] !== 0) {
+        // Teleport (reset/recover) while parked: never yank toward a stale anchor.
+        const ex = px - anchor[j3]!;
+        const ey = py - anchor[j3 + 1]!;
+        const ez = pz - anchor[j3 + 2]!;
+        if (ex * ex + ey * ey + ez * ez > PARK_ANCHOR_STALE2) armed[j] = 0;
+      }
+      if (armed[j] === 0) {
+        anchor[j3] = px;
+        anchor[j3 + 1] = py;
+        anchor[j3 + 2] = pz;
+        armed[j] = 1;
+      }
+      const m = 1 / invMass[i]!;
+      const vx = velX[i]!;
+      const vy = velY[i]!;
+      const vz = velZ[i]!;
+      const vn = vx * nx + vy * ny + vz * nz;
+      const tx = vx - vn * nx;
+      const ty = vy - vn * ny;
+      const tz = vz - vn * nz;
+      const vt = Math.sqrt(tx * tx + ty * ty + tz * tz);
+      const dx = px - anchor[j3]!;
+      const dy = py - anchor[j3 + 1]!;
+      const dz = pz - anchor[j3 + 2]!;
+      const dn = dx * nx + dy * ny + dz * nz;
+      const ox = dx - dn * nx;
+      const oy = dy - dn * ny;
+      const oz = dz - dn * nz;
+      const ka = anchorGain * m;
+      const cv = viscGain * m;
+      let fx = -ka * ox - cv * tx;
+      let fy = -ka * oy - cv * ty;
+      let fz = -ka * oz - cv * tz;
+      const f2 = fx * fx + fy * fy + fz * fz;
+      if (!(f2 > 0)) continue;
+      const mu = friction[i]! * matFriction[sampler.materialAt(px, pz)]!;
+      const cap = mu * fn * (1 - tanhR(vt * SLIP_REG_INV));
+      const f = Math.sqrt(f2);
+      if (f > cap) {
+        const sc = cap / f;
+        fx *= sc;
+        fy *= sc;
+        fz *= sc;
+        // Drag the anchor so the spring alone sits at the cap (no wind-up).
+        const ol = Math.sqrt(ox * ox + oy * oy + oz * oz);
+        const maxOff = cap / ka;
+        if (ol > maxOff) {
+          const pull = (ol - maxOff) / ol;
+          anchor[j3] = anchor[j3]! + ox * pull;
+          anchor[j3 + 1] = anchor[j3 + 1]! + oy * pull;
+          anchor[j3 + 2] = anchor[j3 + 2]! + oz * pull;
+        }
+      }
+      frcX[i] = frcX[i]! + fx;
+      frcY[i] = frcY[i]! + fy;
+      frcZ[i] = frcZ[i]! + fz;
+    }
+  }
+};
+
+/**
+ * Horizontal speed of the object's mass-weighted mean velocity, m/s. The
+ * vertical component is left out on purpose: body/tyre bounce reaches
+ * ~0.3 m/s on a parked car and would otherwise release the clamp (and
+ * re-base its anchors) every bounce cycle.
+ */
+function comSpeed(state: SimState, vehicle: VehicleRuntime): number {
+  const { velX, velZ, invMass } = state;
+  const start = vehicle.nodeStart;
+  const end = start + vehicle.vehicle.rig.nodeCount;
+  let m = 0;
+  let px = 0;
+  let pz = 0;
+  for (let i = start; i < end; i++) {
+    const im = invMass[i]!;
+    if (im === 0) continue;
+    const mi = 1 / im;
+    m += mi;
+    px += mi * velX[i]!;
+    pz += mi * velZ[i]!;
+  }
+  if (!(m > 0)) return 0;
+  return Math.sqrt(px * px + pz * pz) / m;
+}

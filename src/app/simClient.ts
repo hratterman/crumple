@@ -30,8 +30,11 @@ import {
 } from '../protocol/messages';
 import { NODE_STRIDE } from '../protocol/layout';
 import { SnapshotReader } from '../protocol/codec';
+import { readVehicleTelemetry, type VehicleTelemetryFrame } from '../protocol/telemetry';
 import { compileRig } from '../sim/rig/builder';
 import type { RigDef } from '../sim/rig/types';
+import { buildVehicleRig } from '../sim/vehicle/builder';
+import type { TransmissionMode, VehicleDef } from '../sim/vehicle/types';
 
 export interface SimClientOptions {
   seed: number;
@@ -51,6 +54,15 @@ export interface ObjectRange {
   nodeOffset: number;
   nodeCount: number;
   beamOffset: number;
+  beamCount: number;
+}
+
+/** Main-side static facts about a spawned vehicle (object-local indices, canonical merged order). */
+export interface VehicleInfo {
+  /** Object-local node indices [origin, front, top] of VehicleDef.frame. */
+  frameNodes: Int32Array;
+  bodyNodeCount: number;
+  nodeCount: number;
   beamCount: number;
 }
 
@@ -110,6 +122,7 @@ export class SimClient {
 
   /** objectId → interleaved [a0, b0, a1, b1, …] object-local node indices. */
   private readonly pairs = new Map<number, Uint32Array>();
+  private readonly vehicles = new Map<number, VehicleInfo>();
 
   private readonly impacts = new EventQueue(createImpactEvent);
   private readonly breaks = new EventQueue(createBeamBreakEvent);
@@ -178,19 +191,56 @@ export class SimClient {
       console.warn(`[sim] spawn ${objectId}: rig '${rig.name}' rejected on main:`, err);
       return false;
     }
-    const n = compiled.beamCount;
-    const p = new Uint32Array(n * 2);
-    for (let i = 0; i < n; i++) {
-      p[2 * i] = compiled.beamA[i]!;
-      p[2 * i + 1] = compiled.beamB[i]!;
-    }
-    this.pairs.set(objectId, p);
+    this.pairs.set(objectId, beamPairsOf(compiled.beamCount, compiled.beamA, compiled.beamB));
+    this.vehicles.delete(objectId);
     this.post({ type: 'spawn', objectId, rig, transform: cloneTransform(transform) });
     return true;
   }
 
+  /**
+   * Spawns a vehicle. Main builds the merged rig (pure buildVehicleRig, same
+   * canonical order the worker compiles; MINIMASS never changes topology) to
+   * keep beam pairs and frame-node indices. Returns false if the def is invalid.
+   */
+  spawnVehicle(objectId: number, vehicle: VehicleDef, transform: Transform, transmission?: TransmissionMode): boolean {
+    let rig: RigDef;
+    let compiled;
+    try {
+      rig = buildVehicleRig(vehicle);
+      compiled = compileRig(rig);
+    } catch (err) {
+      console.warn(`[sim] spawnVehicle ${objectId}: '${vehicle.name}' rejected on main:`, err);
+      return false;
+    }
+    const nodeIndex = (id: string): number => rig.nodes.findIndex((n) => n.id === id);
+    const f = vehicle.frame;
+    this.pairs.set(objectId, beamPairsOf(compiled.beamCount, compiled.beamA, compiled.beamB));
+    this.vehicles.set(objectId, {
+      frameNodes: Int32Array.of(nodeIndex(f.origin), nodeIndex(f.front), nodeIndex(f.top)),
+      bodyNodeCount: vehicle.body.nodes.length,
+      nodeCount: rig.nodes.length,
+      beamCount: compiled.beamCount,
+    });
+    const msg: MainToWorker = { type: 'spawnVehicle', objectId, vehicle, transform: cloneTransform(transform) };
+    if (transmission) msg.transmission = transmission;
+    this.post(msg);
+    return true;
+  }
+
+  setTransmission(objectId: number, mode: TransmissionMode): void {
+    this.post({ type: 'setTransmission', objectId, mode });
+  }
+
+  /** Rigidly re-places the current (deformed) vehicle upright; damage is kept (see RecoverMsg). */
+  recover(objectId: number, pos?: Vec3): void {
+    const msg: MainToWorker = { type: 'recover', objectId };
+    if (pos) msg.pos = [pos[0], pos[1], pos[2]];
+    this.post(msg);
+  }
+
   despawn(objectId: number): void {
     this.pairs.delete(objectId);
+    this.vehicles.delete(objectId);
     this.post({ type: 'despawn', objectId });
   }
 
@@ -296,6 +346,31 @@ export class SimClient {
   /** Static beam endpoints (object-local node indices, interleaved a,b), or null if not spawned here. */
   beamPairs(objectId: number): Uint32Array | null {
     return this.pairs.get(objectId) ?? null;
+  }
+
+  /** Static vehicle facts for an object spawned via spawnVehicle, else null. */
+  vehicleInfo(objectId: number): VehicleInfo | null {
+    return this.vehicles.get(objectId) ?? null;
+  }
+
+  /**
+   * Latest telemetry block (TELEMETRY_SLOTS f32, slot names in
+   * protocol/telemetry.ts) for `objectId`, or null when absent. Valid until
+   * the next snapshot is processed.
+   */
+  telemetry(objectId: number): Float32Array | null {
+    const cur = this.cur;
+    if (!cur) return null;
+    const i = cur.findObject(objectId);
+    return i < 0 ? null : cur.objectTelemetry(i);
+  }
+
+  /** Decodes the latest telemetry of `objectId` into `out`; false (out untouched) when absent. */
+  readTelemetry(objectId: number, out: VehicleTelemetryFrame): boolean {
+    const t = this.telemetry(objectId);
+    if (!t) return false;
+    readVehicleTelemetry(t, out);
+    return true;
   }
 
   /** Latest strains for `objectId` (object-local beam order), or null (absent / no debugStrains). */
@@ -438,6 +513,15 @@ export class SimClient {
       this.rangeCount = n;
     }
   }
+}
+
+function beamPairsOf(n: number, a: ArrayLike<number>, b: ArrayLike<number>): Uint32Array {
+  const p = new Uint32Array(n * 2);
+  for (let i = 0; i < n; i++) {
+    p[2 * i] = a[i]!;
+    p[2 * i + 1] = b[i]!;
+  }
+  return p;
 }
 
 function cloneTransform(t: Transform): Transform {

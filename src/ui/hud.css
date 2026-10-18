@@ -1,0 +1,238 @@
+.hud {
+  --hud-fg: #f2f4f7;
+  --hud-dim: rgba(242, 244, 247, 0.55);
+  --hud-faint: rgba(242, 244, 247, 0.18);
+  --hud-panel: rgba(12, 14, 18, 0.62);
+  --hud-accent: #ff9a3c;
+  --hud-red: #ff4141;
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  user-select: none;
+  color: var(--hud-fg);
+  font: 500 13px/1.2 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+
+/* ---------------------------------------------------------- badges */
+.hud-badges {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.hud-badge {
+  padding: 4px 9px;
+  border-radius: 4px;
+  background: var(--hud-panel);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  color: var(--hud-dim);
+}
+.hud-badge--alert {
+  color: #111;
+  background: var(--hud-accent);
+  text-shadow: none;
+}
+
+/* ---------------------------------------------------------- cluster */
+.hud-cluster {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  display: grid;
+  grid-template-columns: auto auto;
+  grid-template-rows: auto auto;
+  gap: 4px 10px;
+  align-items: end;
+}
+.hud-gauge {
+  position: relative;
+  width: 172px;
+  height: 172px;
+}
+.hud-dial {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.hud-dial-face {
+  fill: var(--hud-panel);
+  stroke: rgba(255, 255, 255, 0.08);
+  stroke-width: 1;
+}
+.hud-dial-track,
+.hud-dial-fill {
+  fill: none;
+  stroke-width: 5;
+  stroke-linecap: round;
+}
+.hud-dial-track {
+  stroke: var(--hud-faint);
+}
+.hud-dial-fill {
+  stroke: var(--hud-accent);
+  transition: stroke 120ms linear;
+}
+.hud-dial-redline {
+  fill: none;
+  stroke: var(--hud-red);
+  stroke-width: 4;
+  opacity: 0.85;
+}
+.hud-dial--redline .hud-dial-fill {
+  stroke: var(--hud-red);
+}
+.hud-dial-ticks line {
+  stroke: var(--hud-dim);
+  stroke-linecap: round;
+}
+.hud-dial-ticks line.major {
+  stroke: var(--hud-fg);
+  stroke-width: 1.6;
+}
+.hud-dial-ticks line.minor {
+  stroke-width: 1;
+}
+.hud-dial-label {
+  fill: var(--hud-dim);
+  font-size: 10px;
+  font-weight: 600;
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+.hud-dial-needle line {
+  stroke: var(--hud-fg);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+.hud-dial-needle circle {
+  fill: var(--hud-fg);
+}
+
+.hud-gauge-center {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 96px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.hud-speed,
+.hud-gear {
+  font-size: 34px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+.hud-gear {
+  color: var(--hud-accent);
+}
+.hud-gear-mode {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--hud-dim);
+}
+.hud-unit {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--hud-dim);
+}
+
+/* ---------------------------------------------------------- damage */
+.hud-damage {
+  grid-column: 1 / span 2;
+  display: grid;
+  grid-template-columns: auto 1fr 3.5em;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  border-radius: 6px;
+  background: var(--hud-panel);
+}
+.hud-damage-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--hud-dim);
+}
+.hud-damage-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--hud-faint);
+  overflow: hidden;
+}
+.hud-damage-fill {
+  height: 100%;
+  background: var(--hud-accent);
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 200ms ease-out;
+}
+.hud-damage-fill--high {
+  background: var(--hud-red);
+}
+.hud-damage-value {
+  text-align: right;
+  font-weight: 650;
+}
+
+/* ---------------------------------------------------------- hint */
+.hud-hint {
+  position: absolute;
+  left: 16px;
+  bottom: 16px;
+  max-width: min(420px, calc(100vw - 32px));
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--hud-panel);
+  color: var(--hud-dim);
+  font-size: 12px;
+  opacity: 1;
+  transition: opacity 1.2s ease;
+}
+.hud-hint--hidden {
+  opacity: 0;
+}
+.hud-hint span {
+  white-space: nowrap;
+}
+.hud-hint kbd {
+  display: inline-block;
+  min-width: 1.4em;
+  margin-right: 5px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--hud-fg);
+  font: 600 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-align: center;
+}
+
+@media (max-width: 640px) {
+  .hud-gauge {
+    width: 132px;
+    height: 132px;
+  }
+  .hud-gauge-center {
+    top: 72px;
+  }
+  .hud-speed,
+  .hud-gear {
+    font-size: 26px;
+  }
+  .hud-hint {
+    bottom: auto;
+    top: 48px;
+  }
+}

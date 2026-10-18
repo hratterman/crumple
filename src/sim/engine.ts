@@ -12,6 +12,7 @@ import {
   IMPACT_CAPACITY,
   SKID_CAPACITY,
 } from '../protocol/events';
+import { TELEMETRY_SLOTS } from '../protocol/layout';
 import {
   ACTION_NAMES,
   ACTION_RANGES,
@@ -29,6 +30,17 @@ import { compileRig } from './rig/builder';
 import type { CompiledRig, RigDef } from './rig/types';
 import { SimArena } from './state';
 import type { EventSink, HeightSampler, MaterialTable, SimObject, SimState } from './types';
+import { compileVehicle } from './vehicle/builder';
+import {
+  createVehicleRuntime,
+  rebaseVehicle,
+  recoverVehicle,
+  resetVehicleRuntime,
+  vehiclePreStep,
+  writeVehicleTelemetry,
+} from './vehicle/runtime';
+import type { CompiledVehicle, TransmissionMode, VehicleDef, VehicleRuntime } from './vehicle/types';
+import { setWheelGround } from './vehicle/wheels';
 
 /** Fixed physics step, s. */
 export const SIM_DT = 1 / 2000;
@@ -195,6 +207,10 @@ export class SimEngine {
   tick = 0;
   /** Compiled rig per objectId (needed for reset/repair). */
   private readonly rigs = new Map<number, CompiledRig>();
+  /** Vehicle runtime per objectId. */
+  private readonly vehicles = new Map<number, VehicleRuntime>();
+  /** Parallel to arena.objects: the object's vehicle runtime or null (hot-loop lookup). */
+  private vehicleSlots: (VehicleRuntime | null)[] = [];
 
   constructor(config: EngineConfig) {
     const cap = config.capacity ?? DEFAULT_CAPACITY;
@@ -254,7 +270,78 @@ export class SimEngine {
     this.rigs.set(objectId, rig);
     // Ranges from here on shifted; per-node contact bookkeeping restarts.
     resetGroundContactState(this.state, obj.nodeStart, this.state.nodeCount - obj.nodeStart);
+    this.syncVehicles();
     return obj;
+  }
+
+  /**
+   * Spawns a vehicle: compileVehicle (pure; main compiles the same def to
+   * map snapshot nodes) → arena insert → vehicle runtime. `transmission`
+   * overrides the def's initial mode.
+   */
+  spawnVehicle(objectId: number, def: VehicleDef, transform: Transform, transmission?: TransmissionMode): SimObject {
+    let compiled: CompiledVehicle;
+    try {
+      compiled = compileVehicle(def);
+    } catch (e) {
+      throw new SimCommandError(`invalid vehicle: ${e instanceof Error ? e.message : String(e)}`, objectId);
+    }
+    return this.spawnCompiledVehicle(objectId, compiled, transform, transmission);
+  }
+
+  spawnCompiledVehicle(
+    objectId: number,
+    compiled: CompiledVehicle,
+    transform: Transform,
+    transmission?: TransmissionMode,
+  ): SimObject {
+    if (transmission !== undefined && transmission !== 'auto' && transmission !== 'manual') {
+      throw new SimCommandError(`invalid transmission ${String(transmission)}`, objectId);
+    }
+    const obj = this.spawnCompiled(objectId, compiled.rig, transform);
+    const rt = createVehicleRuntime(objectId, compiled, obj.nodeStart, obj.beamStart, transmission);
+    this.vehicles.set(objectId, rt);
+    this.syncVehicles();
+    return obj;
+  }
+
+  /** The vehicle runtime of objectId, if it is a vehicle. */
+  getVehicle(objectId: number): VehicleRuntime | undefined {
+    return this.vehicles.get(objectId);
+  }
+
+  setTransmission(objectId: number, mode: TransmissionMode): void {
+    const v = this.vehicles.get(objectId);
+    if (!v) throw new SimCommandError(`objectId ${objectId} is not a vehicle`, objectId);
+    if (mode !== 'auto' && mode !== 'manual') throw new SimCommandError(`invalid transmission ${String(mode)}`, objectId);
+    v.drivetrain.transmission = mode;
+  }
+
+  /** Upright the vehicle in place (damage and drivetrain kept); see recoverVehicle. */
+  recover(objectId: number, pos?: Vec3): void {
+    const v = this.vehicles.get(objectId);
+    const obj = this.arena.get(objectId);
+    if (!v || !obj) throw new SimCommandError(`objectId ${objectId} is not a vehicle`, objectId);
+    if (pos !== undefined && (!Array.isArray(pos) || pos.length !== 3 || !pos.every(Number.isFinite))) {
+      throw new SimCommandError('recover pos must be 3 finite numbers', objectId);
+    }
+    recoverVehicle(this.state, v, this.sampler, pos);
+    resetGroundContactState(this.state, obj.nodeStart, obj.nodeCount);
+  }
+
+  /** Rebuilds the per-object vehicle slots and rebases every vehicle onto its current arena range. */
+  private syncVehicles(): void {
+    const objs = this.arena.objects;
+    const slots: (VehicleRuntime | null)[] = new Array(objs.length);
+    for (let o = 0; o < objs.length; o++) {
+      const obj = objs[o]!;
+      const v = this.vehicles.get(obj.objectId) ?? null;
+      if (v !== null && (v.nodeStart !== obj.nodeStart || v.beamStart !== obj.beamStart)) {
+        rebaseVehicle(v, obj.nodeStart, obj.beamStart);
+      }
+      slots[o] = v;
+    }
+    this.vehicleSlots = slots;
   }
 
   despawn(objectId: number): void {
@@ -264,7 +351,9 @@ export class SimEngine {
     const n = obj.nodeCount;
     this.arena.remove(objectId);
     this.rigs.delete(objectId);
+    this.vehicles.delete(objectId);
     resetGroundContactState(this.state, start, this.state.nodeCount + n - start);
+    this.syncVehicles();
   }
 
   reset(objectId: number, transform: Transform): void {
@@ -277,6 +366,8 @@ export class SimEngine {
       throw new SimCommandError(e instanceof Error ? e.message : String(e), objectId);
     }
     resetGroundContactState(this.state, obj.nodeStart, obj.nodeCount);
+    const v = this.vehicles.get(objectId);
+    if (v) resetVehicleRuntime(v);
   }
 
   /** Merges named actions (clamped to ACTION_RANGES; gearSelect rounded). */
@@ -307,7 +398,10 @@ export class SimEngine {
     obj.actions[index] = v;
   }
 
-  /** One fixed step (SIM_DT): per object ascending → hydro drive, beams, ground, integrate. */
+  /**
+   * One fixed step (SIM_DT): per object ascending → [vehicle pre-step] →
+   * hydro drive → beams → ground → integrate.
+   */
   step(): void {
     const s = this.state;
     const objs = this.arena.objects;
@@ -318,8 +412,14 @@ export class SimEngine {
     const gy = this.gravityY;
     const gz = this.gravityZ;
     const restLen = s.restLen;
+    const vslots = this.vehicleSlots;
+    // The wheel kernels' ground is module state: point it at THIS engine's
+    // ground every step (several engines may coexist, e.g. in tests).
+    if (this.vehicles.size > 0) setWheelGround(sampler, this.materials, SIM_DT);
     for (let o = 0; o < objs.length; o++) {
       const obj = objs[o]!;
+      const veh = vslots[o];
+      if (veh) vehiclePreStep(s, veh, obj.actions, SIM_DT);
       const hb = obj.hydroBeams;
       if (hb.length > 0) {
         const steer = obj.actions[Action.steer]!;
@@ -337,9 +437,10 @@ export class SimEngine {
   }
 
   /**
-   * Fills an attached writer: header, objects (ascending id; telemetry zeros
-   * in P1), nodes f64→f32, strains (debugStrains), then all pending events,
-   * which are cleared. Only call for snapshots that will actually be sent.
+   * Fills an attached writer: header, objects (ascending id; vehicle
+   * telemetry, zeros for plain rigs), nodes f64→f32, strains (debugStrains),
+   * then all pending events, which are cleared. Only call for snapshots that
+   * will actually be sent.
    */
   writeSnapshot(writer: SnapshotWriter, timeScale = 1): void {
     const s = this.state;
@@ -350,6 +451,11 @@ export class SimEngine {
       const i = writer.addObject(obj.objectId, obj.flags, obj.nodeCount, obj.beamCount);
       writer.writeNodesSoA(i, s.posX, s.posY, s.posZ, obj.nodeStart);
       writer.writeStrains(i, s.strainOut, obj.beamStart);
+      const veh = this.vehicleSlots[o];
+      if (veh) {
+        const t = writeVehicleTelemetry(s, veh);
+        for (let k = 0; k < TELEMETRY_SLOTS; k++) writer.setTelemetry(i, k, t[k]!);
+      }
     }
     this.events.flushTo(writer);
   }
