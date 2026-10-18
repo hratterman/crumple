@@ -12,6 +12,7 @@
  */
 import type { Quat, Vec3 } from '../core/math';
 import type { RigDef } from '../sim/rig/types';
+import type { TransmissionMode, VehicleDef } from '../sim/vehicle/types';
 
 // ============================================================ MaterialId
 /**
@@ -175,6 +176,45 @@ export interface ReturnBufferMsg {
   buffer: ArrayBuffer;
 }
 
+// ---------------------------------------------------------------- vehicles (P2, additive)
+/**
+ * Spawn a vehicle: the worker runs compileVehicle(vehicle) (body + generated
+ * wheels in canonical order, MINIMASS) and inserts the merged rig exactly
+ * like `spawn`, plus a vehicle runtime (drivetrain, wheels, telemetry).
+ * Snapshot node/beam ranges follow the merged canonical order, so main
+ * compiles the same def (compileVehicle is pure) to map nodes. Invalid defs
+ * get `error`. `transmission` overrides drivetrain.transmission.
+ */
+export interface SpawnVehicleMsg {
+  type: 'spawnVehicle';
+  objectId: number;
+  vehicle: VehicleDef;
+  transform: Transform;
+  transmission?: TransmissionMode;
+}
+/**
+ * Switch a vehicle between automatic and manual shifting. gearSelect
+ * semantics: auto: −1 R, 0 N, ≥ 1 Drive (worker picks 1..n); manual: the
+ * exact gear (clamped to the vehicle's gear count).
+ */
+export interface SetTransmissionMsg {
+  type: 'setTransmission';
+  objectId: number;
+  mode: TransmissionMode;
+}
+/**
+ * Recover (R): rigidly re-place the CURRENT (deformed) node set upright —
+ * vehicle frame up → world +Y, heading kept — with its frame origin at
+ * `pos` (default: current origin + 0.5 m up, ground-clearance adjusted),
+ * zero velocities, drivetrain state kept. Damage is NOT repaired (that is
+ * `reset`).
+ */
+export interface RecoverMsg {
+  type: 'recover';
+  objectId: number;
+  pos?: Vec3;
+}
+
 /** RESERVED (P6): awake bubble around the player. Worker may answer `unimplemented`. */
 export interface SetBubbleMsg {
   type: 'setBubble';
@@ -201,6 +241,9 @@ export type MainToWorker =
   | ResetMsg
   | TimescaleMsg
   | ReturnBufferMsg
+  | SpawnVehicleMsg
+  | SetTransmissionMsg
+  | RecoverMsg
   | SetBubbleMsg
   | KeyframeRequestMsg
   | ReplaySeekMsg;

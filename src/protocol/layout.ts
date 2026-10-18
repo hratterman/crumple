@@ -114,9 +114,10 @@ export const OBJ_RECORD_BYTES = OBJ_RECORD_WORDS * 4; // 160
 export const OBJECT_FLAG_SLEEPING = 1 << 0;
 
 /**
- * Telemetry slot indices (f32, relative to OBJ_TELEMETRY). RESERVED: all
- * zeros in P1; vehicles fill them from P2 (VehicleDef freeze may assign the
- * spare slots 26..31, never renumber these).
+ * Telemetry slot indices (f32, relative to OBJ_TELEMETRY). All zeros in P1;
+ * vehicles fill them from P2. Slots 26..31 are assigned in telemetry.ts
+ * (`VehicleTelemetry`, the full P2 table and exact semantics); never
+ * renumber these.
  */
 export const Telemetry = {
   speed: 0, // m/s, signed along vehicle forward
@@ -127,7 +128,7 @@ export const Telemetry = {
   steer: 5, // applied -1..1
   clutch: 6, // applied 0..1
   handbrake: 7, // applied 0..1
-  wheelSlipFL: 8, // m/s
+  wheelSlipFL: 8, // m/s, mean tangential ground velocity of in-contact tyre nodes
   wheelSlipFR: 9,
   wheelSlipRL: 10,
   wheelSlipRR: 11,
@@ -142,10 +143,11 @@ export const Telemetry = {
   velY: 20,
   velZ: 21,
   engineTorque: 22, // N·m
-  damage: 23, // accumulated plastic work, J
-  airborne: 24, // 1 when no wheel touches ground
+  damage: 23, // 0..1 fraction of beams broken or plastically deformed (P2; was 'plastic work J' placeholder)
+  airborne: 24, // 1 when no attached wheel touches ground
   wheelsDetached: 25, // bitmask FL=1 FR=2 RL=4 RR=8, as f32
 } as const;
+/** First slot beyond the P1 names; 26..31 are assigned by telemetry.ts (no spares remain after P2). */
 export const TELEMETRY_FIRST_SPARE = 26;
 
 // ============================================================ nodes / strains
