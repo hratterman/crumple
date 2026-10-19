@@ -349,8 +349,15 @@ export const WATER_PHYSICS = {
   linearDrag: 0.8,
   dragCoeff: 1.0,
   nodeLength: 0.3,
-  /** Effective density of vehicles (cabin air): a sedan floats low for a moment, then the drag stops it. */
-  vehicleDensity: 900,
+  /**
+   * Effective density of a DRY vehicle (≈ 1450 kg around ≈ 3 m³ of cabin
+   * and body air): it floats with the roof out, then floods — the sim
+   * scales its BODY nodes' buoyancy down as the cabin fills
+   * (src/sim/collision/water.ts VEHICLE FLOODING) and it sinks within ~20 s.
+   * U1 amendment: was 900 (the sedan never floated: it plunged under on
+   * entry and flooded straight away).
+   */
+  vehicleDensity: 500,
 } as const;
 
 // ============================================================ vegetation (P5)

@@ -289,8 +289,11 @@ describe('WorkerHost groundHeightfield', () => {
     };
     return { deps, calls };
   }
-  /** DEFAULT_LAYOUT under another id, without props (the stub terrain is tiny; P5 props are tested below). */
-  const layout = (id: string): WorldLayout => ({ ...DEFAULT_LAYOUT, id, props: [] });
+  /**
+   * DEFAULT_LAYOUT under another id, without props (the stub terrain is tiny; P5 props are tested
+   * in props/) and without the lake (the stub terrain lies below the water level: all water).
+   */
+  const layout = (id: string): WorldLayout => ({ ...DEFAULT_LAYOUT, id, props: [], zones: DEFAULT_LAYOUT.zones.filter((z) => z.kind !== 'lake') });
 
   it('installs the regenerated terrain and answers terrainReady (matched / unchecked / mismatch + error)', () => {
     const { deps, calls } = stubDeps();

@@ -31,10 +31,11 @@ import {
 import { applyBeamForces } from './beams';
 import { applyColliderContacts, compileColliders, resetColliderContactState } from './collision/colliders';
 import { OBJ_REBUILD_TICKS, OBJ_REBUILD_TICKS_SLOW, OBJ_SLOW_SPEED, ObjectContacts } from './collision/objects';
+import { applyWater, boxNearWater, VEHICLE_FLOOD_LOSS, VEHICLE_FLOOD_TIME_S } from './collision/water';
 import { applyGroundContacts, PlaneSampler, resetGroundContactState } from './collision/ground';
 import type { ColliderWorld } from './collision/types';
 import { resolveColliders } from '../world/colliders';
-import type { ColliderDef, ResolvedCollider, WaterBody } from '../world/types';
+import { WATER_PHYSICS, type ColliderDef, type ResolvedCollider, type WaterBody } from '../world/types';
 import { DEFAULT_MATERIALS } from './collision/materials';
 import { integrateNodes } from './integrator';
 import { compileRig } from './rig/builder';
@@ -217,6 +218,8 @@ export class SimEngine {
   gravityX: number;
   gravityY: number;
   gravityZ: number;
+  /** |gravity| (water buoyancy). */
+  gravityMag: number;
   sampler: HeightSampler | null = null;
   /** The installed heightfield (setGroundTerrain), null for plane / no ground. */
   terrain: TerrainData | null = null;
@@ -246,6 +249,10 @@ export class SimEngine {
   private rebuildInterval = OBJ_REBUILD_TICKS;
   /** Set by commands that move nodes or change sleep states: rebuild before the next step. */
   private contactsDirty = true;
+  /** Vehicle flood level 0..1 per objectId (water; reset by reset/recover). */
+  private readonly floods = new Map<number, { level: number }>();
+  /** Parallel to arena.objects: the vehicle's flood state or null. */
+  private floodSlots: ({ level: number } | null)[] = [];
   /** Prop runtime per objectId (layout + dynamic props). */
   private readonly props = new Map<number, PropRuntime>();
   /** Parallel to arena.objects: the object's prop runtime or null. */
@@ -267,6 +274,7 @@ export class SimEngine {
     this.gravityX = g[0];
     this.gravityY = g[1];
     this.gravityZ = g[2];
+    this.gravityMag = Math.sqrt(g[0] * g[0] + g[1] * g[1] + g[2] * g[2]);
     this.rng = createRng(config.seed ?? 0);
   }
 
@@ -448,6 +456,8 @@ export class SimEngine {
     recoverVehicle(this.state, v, this.sampler, pos);
     resetGroundContactState(this.state, obj.nodeStart, obj.nodeCount);
     resetColliderContactState(this.state, obj.nodeStart, obj.nodeCount);
+    const fl = this.floods.get(objectId);
+    if (fl) fl.level = 0; // recovered onto land: the cabin drains
     this.contactsDirty = true;
   }
 
@@ -456,6 +466,7 @@ export class SimEngine {
     const objs = this.arena.objects;
     const slots: (VehicleRuntime | null)[] = new Array(objs.length);
     const pslots: (PropRuntime | null)[] = new Array(objs.length);
+    const fslots: ({ level: number } | null)[] = new Array(objs.length);
     for (let o = 0; o < objs.length; o++) {
       const obj = objs[o]!;
       const v = this.vehicles.get(obj.objectId) ?? null;
@@ -464,12 +475,24 @@ export class SimEngine {
       }
       slots[o] = v;
       pslots[o] = this.props.get(obj.objectId) ?? null;
+      let fl: { level: number } | null = null;
+      if (v) {
+        fl = this.floods.get(obj.objectId) ?? { level: 0 };
+        this.floods.set(obj.objectId, fl);
+      }
+      fslots[o] = fl;
     }
     this.vehicleSlots = slots;
     this.propSlots = pslots;
+    this.floodSlots = fslots;
   }
 
   // ------------------------------------------------------------------ props (P5)
+  /** Vehicle flood level 0..1 (water), or undefined for a non-vehicle. */
+  floodLevel(objectId: number): number | undefined {
+    return this.floods.get(objectId)?.level;
+  }
+
   /** The prop runtime of objectId, if it is a prop. */
   getProp(objectId: number): PropRuntime | undefined {
     return this.props.get(objectId);
@@ -650,6 +673,7 @@ export class SimEngine {
     this.rigs.delete(objectId);
     this.vehicles.delete(objectId);
     this.props.delete(objectId);
+    this.floods.delete(objectId);
     this.repairEpochs.delete(objectId);
     resetGroundContactState(this.state, start, this.state.nodeCount + n - start);
     resetColliderContactState(this.state, start, this.state.nodeCount + n - start);
@@ -672,6 +696,8 @@ export class SimEngine {
     this.repairEpochs.set(objectId, ((this.repairEpochs.get(objectId) ?? 0) + 1) >>> 0);
     const v = this.vehicles.get(objectId);
     if (v) resetVehicleRuntime(v);
+    const fl = this.floods.get(objectId);
+    if (fl) fl.level = 0;
     this.contactsDirty = true;
   }
 
@@ -746,10 +772,33 @@ export class SimEngine {
     }
     // Phase 2: node-vs-node contacts over the cached pair list (canonical order).
     if (this.contacts.pairCount > 0) this.contacts.apply(s, SIM_DT, sink);
-    // Phase 3, per awake object ascending: ground → static colliders → integrate.
+    // Phase 3, per awake object ascending: water → ground → static colliders → integrate.
+    const water = this.water;
+    const c = this.contacts;
+    const g = this.gravityMag;
     for (let o = 0; o < objs.length; o++) {
       const obj = objs[o]!;
       if ((obj.flags & SIM_OBJECT_FLAG_SLEEPING) !== 0) continue;
+      if (water.length > 0) {
+        // Early-out on the broadphase box (≤ 16 ticks old, padded by the motion since).
+        const b = 6 * o;
+        const pad = c.oVmax[o]! * OBJ_REBUILD_TICKS_SLOW * SIM_DT + 0.5;
+        if (boxNearWater(water, c.oBox[b]!, c.oBox[b + 1]!, c.oBox[b + 2]!, c.oBox[b + 3]!, c.oBox[b + 5]!, pad)) {
+          const veh = vslots[o];
+          const prop = pslots[o];
+          const fl = this.floodSlots[o];
+          if (veh && fl) {
+            const bodyN = veh.vehicle.bodyNodeCount;
+            const sum = applyWater(s, obj.nodeStart, obj.nodeCount, water, WATER_PHYSICS.vehicleDensity, g, SIM_DT, obj.nodeStart + bodyN, 1 - VEHICLE_FLOOD_LOSS * fl.level);
+            if (sum > 0 && fl.level < 1) {
+              const lv = fl.level + (SIM_DT * sum) / (bodyN * VEHICLE_FLOOD_TIME_S);
+              fl.level = lv > 1 ? 1 : lv;
+            }
+          } else {
+            applyWater(s, obj.nodeStart, obj.nodeCount, water, prop ? prop.def.density : WATER_PHYSICS.vehicleDensity, g, SIM_DT, obj.nodeStart, 1);
+          }
+        }
+      }
       if (sampler !== null) {
         applyGroundContacts(s, obj.nodeStart, obj.nodeCount, sampler, this.materials, SIM_DT, obj.objectId, sink, gx, gy, gz);
       }

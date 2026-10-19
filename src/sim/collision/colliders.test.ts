@@ -232,7 +232,7 @@ describe('engine + worker integration', () => {
     });
     host.handle({ type: 'init', seed: 1, gravity: [0, -9.81, 0], snapshotHz: 120, debugStrains: false, capacity: { maxObjects: 4, nodeCapacity: 1024, beamCapacity: 4096 } });
     // Without props: the layout's P5 props would not fit this capacity (tested in props/props.test.ts).
-    host.handle({ type: 'groundHeightfield', layout: { ...DEFAULT_LAYOUT, props: [] }, terrainHash: 0 });
+    host.handle({ type: 'groundHeightfield', layout: { ...DEFAULT_LAYOUT, props: [], zones: DEFAULT_LAYOUT.zones.filter((z) => z.kind !== 'lake') }, terrainHash: 0 });
     const eng = host.engine!;
     expect(eng.colliderWorld!.colliders.ids).toEqual(DEFAULT_LAYOUT.colliders.map((c) => c.id));
     // Wall rests on the terrain (height 1 everywhere in the stub): centre y = 1 + 1.

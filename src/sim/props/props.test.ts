@@ -61,6 +61,8 @@ function host() {
 const LAYOUT: WorldLayout = {
   ...DEFAULT_LAYOUT,
   id: 'props-test',
+  // No lake: the stub terrain (height 1) lies below the layout's water level and would all be water.
+  zones: DEFAULT_LAYOUT.zones.filter((z) => z.kind !== 'lake'),
   props: [
     { id: 'cones', prop: 'cone', pos: [0, null, 0], row: { count: 3, step: [1, 0] } },
     { id: 'boxes', prop: 'boxCardboard', pos: [0, null, 5], stack: 2 },
