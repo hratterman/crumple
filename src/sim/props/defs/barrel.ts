@@ -3,14 +3,17 @@
  * Thin shell that DENTS: low yield strain on the shell, high break strain
  * (a steel drum crumples long before it tears).
  *
- * Nodes (r = 0.04, inset from the nominal surface):
- *   rim{ring}_{k}  rings 0..2 bottom → top, 12 around (k = 0 faces −Z, then clockwise seen from above: +X at k = 3)
+ * Nodes (inset by r from the nominal surface):
+ *   rim{ring}_{k}  rings 0..2 bottom → top, 8 around (k = 0 faces −Z, then clockwise seen from above: +X at k = 2)
  *   lidB_c, lidT_c  bottom / top lid centres
+ * Node r = 0.06 (P5 integration; was 12 around at r = 0.04): a third fewer
+ * nodes / beams for the 2 kHz awake budget, and the 0.19 m ring pitch minus
+ * two 0.06 m radii still leaves no gap a 0.04 m prop node slips through.
  */
 import { buildPropRig, ringPoint, type PropBeamSpec, type PropNodeSpec } from './build';
 
-const R = 0.04;
-const N = 12;
+const R = 0.06;
+const N = 8;
 const RAD = 0.2925 - R;
 const HEIGHT = 0.88;
 const RING_Y = [R, HEIGHT / 2, HEIGHT - R];
@@ -19,7 +22,7 @@ function build() {
   const nodes: PropNodeSpec[] = [];
   const beams: PropBeamSpec[] = [];
   // Mass: chime rings + lids 13.2 kg, middle wall ring 4.8 kg = 18 kg.
-  const ringMass = [0.5, 0.4, 0.5];
+  const ringMass = [0.75, 0.6, 0.75];
   RING_Y.forEach((y, ring) => {
     for (let k = 0; k < N; k++) nodes.push({ id: `rim${ring}_${k}`, pos: ringPoint(RAD, y, k, N), mass: ringMass[ring]! });
   });

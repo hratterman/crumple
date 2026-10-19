@@ -43,8 +43,8 @@ import type { CompiledRig, RigDef } from './rig/types';
 import { SimArena } from './state';
 import { NODE_FLAG_OBJ_CONTACT, SIM_OBJECT_FLAG_SLEEPING, type EventSink, type HeightSampler, type MaterialTable, type SimObject, type SimState } from './types';
 import { compilePropRig, getPropDef, isPropKey } from './props/catalog';
-import { applyPropDamping, PROP_INTERNAL_DAMPING, PROP_WAKE_SPEED, propAnchored, type PropRuntime } from './props/runtime';
-import type { PropInstance, PropKey } from './props/types';
+import { applyPropDamping, PROP_BUDGET_SLEEP_SPEED, PROP_INTERNAL_DAMPING, PROP_UNMOVED_HOLD_FRACTION, PROP_WAKE_SPEED, propAnchored, type PropRuntime } from './props/runtime';
+import { PROP_AWAKE_BEAM_BUDGET, type PropInstance, type PropKey } from './props/types';
 import { compileVehicle } from './vehicle/builder';
 import { createTerrainSampler, type HeightfieldSampler } from '../world/sampler';
 import type { TerrainData } from '../world/types';
@@ -241,6 +241,8 @@ export class SimEngine {
   private readonly vehicles = new Map<number, VehicleRuntime>();
   /** Parallel to arena.objects: the object's vehicle runtime or null (hot-loop lookup). */
   private vehicleSlots: (VehicleRuntime | null)[] = [];
+  /** Scratch for enforceAwakeBudget (arena slots; reused, no per-rebuild allocation after warm-up). */
+  private readonly budgetOrder: number[] = [];
   /** Node-vs-node contact (P5): broadphase + pair list + kernel. */
   readonly contacts: ObjectContacts;
   /** Tick of the last / next broadphase rebuild and its interval. */
@@ -526,6 +528,7 @@ export class SimEngine {
       spawn: { pos: [transform.pos[0], transform.pos[1], transform.pos[2]], quat: [transform.quat[0], transform.quat[1], transform.quat[2], transform.quat[3]] },
       anchorBeams: Int32Array.from(anchor),
       stillS: 0,
+      moved: false,
       sleepBox: new Float64Array(6),
       sleepRmax: 0,
     });
@@ -540,7 +543,10 @@ export class SimEngine {
    */
   setAsleep(obj: SimObject, asleep: boolean): void {
     const rt = this.props.get(obj.objectId);
-    if (rt) rt.stillS = 0;
+    if (rt) {
+      rt.stillS = 0;
+      rt.moved = false;
+    }
     this.contactsDirty = true;
     if (!asleep) {
       obj.flags &= ~SIM_OBJECT_FLAG_SLEEPING;
@@ -851,12 +857,13 @@ export class SimEngine {
       if (rt && !this.contactsDirty) {
         if (v < rt.def.sleep.linearSpeed) {
           rt.stillS += elapsed;
-          if (rt.stillS >= rt.def.sleep.holdS) {
+          if (rt.stillS >= (rt.moved ? rt.def.sleep.holdS : PROP_UNMOVED_HOLD_FRACTION * rt.def.sleep.holdS)) {
             this.setAsleep(obj, true);
             c.setStaticBox(o, obj.nodeStart, obj.nodeCount, obj.objectId, mat, rt.sleepBox, 0, rt.sleepRmax);
           }
         } else {
           rt.stillS = 0;
+          rt.moved = true;
         }
       }
     }
@@ -874,18 +881,31 @@ export class SimEngine {
       }
     }
     if (woke) {
-      // Propagate once: sleeping objects touching a just-woken one wake too.
-      for (let p = 0; p < n; p++) {
-        if (c.oStatic[p] !== 2) continue;
-        for (let q = 0; q < n; q++) {
-          if (c.oStatic[q] !== 1 || c.oValid[q] === 0) continue;
-          if (!c.boxesNear(p, q, c.oRmax[p]! + c.oRmax[q]! + c.margin(p, q, interval, SIM_DT))) continue;
-          this.wakeSlot(q);
-          c.oStatic[q] = 3;
+      // Propagate UP through stacks: a sleeping object resting on a just-woken one (its box bottom
+      // above the woken box's mid-height, boxes touching) wakes too, transitively, so a stack never
+      // hovers over a moved base. Side neighbours are left to the mover rule above (a pushed prop wakes
+      // the next one a rebuild later): waking the whole barrel wall cost 2 kHz stepping of drums
+      // nothing touched.
+      let grew = true;
+      while (grew) {
+        grew = false;
+        for (let p = 0; p < n; p++) {
+          if (c.oStatic[p] !== 2) continue;
+          c.oStatic[p] = 4; // propagated from
+          const midY = 0.5 * (c.oBox[6 * p + 1]! + c.oBox[6 * p + 4]!);
+          for (let q = 0; q < n; q++) {
+            if (c.oStatic[q] !== 1 || c.oValid[q] === 0) continue;
+            if (c.oBox[6 * q + 1]! < midY) continue;
+            if (!c.boxesNear(p, q, c.oRmax[p]! + c.oRmax[q]! + c.margin(p, q, interval, SIM_DT))) continue;
+            this.wakeSlot(q);
+            c.oStatic[q] = 2;
+            grew = true;
+          }
         }
       }
       for (let o = 0; o < n; o++) if (c.oStatic[o]! >= 2) c.oStatic[o] = 0;
     }
+    if (this.props.size > 0) this.enforceAwakeBudget(interval);
     c.rebuild(s, interval, SIM_DT, s.friction);
     this.rebuildInterval = interval;
     this.lastRebuild = this.tick;
@@ -893,12 +913,62 @@ export class SimEngine {
     this.contactsDirty = false;
   }
 
+  /**
+   * Awake budget (PROP_AWAKE_BEAM_BUDGET, soft): over it, awake props slower
+   * than PROP_BUDGET_SLEEP_SPEED that no moving object can reach within the
+   * rebuild interval sleep now, slowest first (ties: slot order).
+   */
+  private enforceAwakeBudget(interval: number): void {
+    const objs = this.arena.objects;
+    const c = this.contacts;
+    const pslots = this.propSlots;
+    const n = objs.length;
+    const cand = this.budgetOrder;
+    cand.length = 0;
+    let beams = 0;
+    for (let o = 0; o < n; o++) {
+      const obj = objs[o]!;
+      if (!pslots[o] || (obj.flags & SIM_OBJECT_FLAG_SLEEPING) !== 0) continue;
+      beams += obj.beamCount;
+      if (c.oVmax[o]! < PROP_BUDGET_SLEEP_SPEED) cand.push(o);
+    }
+    if (beams <= PROP_AWAKE_BEAM_BUDGET || cand.length === 0) return;
+    // Insertion sort by speed (stable, allocation-free; a handful of candidates).
+    for (let i = 1; i < cand.length; i++) {
+      const o = cand[i]!;
+      const v = c.oVmax[o]!;
+      let j = i - 1;
+      while (j >= 0 && c.oVmax[cand[j]!]! > v) {
+        cand[j + 1] = cand[j]!;
+        j--;
+      }
+      cand[j + 1] = o;
+    }
+    for (let i = 0; i < cand.length && beams > PROP_AWAKE_BEAM_BUDGET; i++) {
+      const o = cand[i]!;
+      let reachable = false;
+      for (let p = 0; p < n && !reachable; p++) {
+        if (p === o || c.oStatic[p] !== 0 || c.oValid[p] === 0 || c.oVmax[p]! < PROP_WAKE_SPEED) continue;
+        reachable = c.boxesNear(p, o, c.oRmax[p]! + c.oRmax[o]! + c.margin(p, o, interval, SIM_DT));
+      }
+      if (reachable) continue; // it would wake again at the next rebuild (ping-pong)
+      const obj = objs[o]!;
+      const rt = pslots[o]!;
+      this.setAsleep(obj, true);
+      c.setStaticBox(o, obj.nodeStart, obj.nodeCount, obj.objectId, rt.def.material, rt.sleepBox, 0, rt.sleepRmax);
+      beams -= obj.beamCount;
+    }
+  }
+
   /** Wakes the object in arena slot `o` (broadphase). */
   private wakeSlot(o: number): void {
     const obj = this.arena.objects[o]!;
     obj.flags &= ~SIM_OBJECT_FLAG_SLEEPING;
     const rt = this.propSlots[o];
-    if (rt) rt.stillS = 0;
+    if (rt) {
+      rt.stillS = 0;
+      rt.moved = false;
+    }
   }
 
   /**

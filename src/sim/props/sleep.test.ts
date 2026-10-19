@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { MaterialId, PROP_DYNAMIC_ID_BASE } from '../../protocol/messages';
 import { SimEngine } from '../engine';
 import { SIM_OBJECT_FLAG_SLEEPING } from '../types';
+import { PROP_AWAKE_BEAM_BUDGET } from './types';
 import { SEDAN } from '../vehicle/defs/sedan';
 import { setMotion } from '../vehicle/handling';
 
@@ -101,4 +102,29 @@ describe('prop sleep / wake', () => {
     expect(usPerTick).toBeLessThan(25);
     for (let i = 0; i < 200; i++) expect(asleep(eng, PID + i)).toBe(true);
   }, 120_000);
+
+  it('awake budget: over PROP_AWAKE_BEAM_BUDGET, slow unreachable props sleep at once (slowest first); fast ones never', () => {
+    const eng = engine();
+    const n = 30;
+    for (let i = 0; i < n; i++) eng.spawnProp(PID + i, 'barrel', at((i % 6) * 2, 0, Math.floor(i / 6) * 2), false);
+    const beamsOf = (id: number): number => eng.arena.get(id)!.beamCount;
+    const awakeBeams = (): number => {
+      let b = 0;
+      for (let i = 0; i < n; i++) if (!asleep(eng, PID + i)) b += beamsOf(PID + i);
+      return b;
+    };
+    expect(n * beamsOf(PID)).toBeGreaterThan(PROP_AWAKE_BEAM_BUDGET);
+    // Fast props are never put to sleep by the budget.
+    const s = eng.state;
+    for (let i = 0; i < s.nodeCount; i++) s.velX[i] = 2;
+    eng.step();
+    expect(awakeBeams()).toBe(n * beamsOf(PID));
+    // At rest (still props, nothing moving nearby): trimmed to the budget at the next rebuild.
+    for (let i = 0; i < s.nodeCount; i++) s.velX[i] = 0;
+    for (let i = 0; i < n; i++) eng.setAsleep(eng.arena.get(PID + i)!, false);
+    eng.step();
+    expect(awakeBeams()).toBeLessThanOrEqual(PROP_AWAKE_BEAM_BUDGET);
+    expect(awakeBeams()).toBeGreaterThan(PROP_AWAKE_BEAM_BUDGET - beamsOf(PID));
+  });
 });
+

@@ -38,10 +38,27 @@ export interface PropRuntime {
   anchorBeams: Int32Array;
   /** Seconds of continuous stillness (sleep bookkeeping). */
   stillS: number;
+  /** Moved (max node speed ≥ sleep.linearSpeed at a rebuild) since it last woke; unmoved props re-sleep after PROP_UNMOVED_HOLD_FRACTION · holdS. */
+  moved: boolean;
   /** While asleep: node-centre box of the contact nodes (min xyz, max xyz) and max contact radius. */
   sleepBox: Float64Array;
   sleepRmax: number;
 }
+
+/**
+ * Awake budget (P5 integration): a prop woken by a passing mover that never
+ * actually moved goes back to sleep after this fraction of its holdS (the
+ * barrel wall's untouched drums cost a full 0.75 s of 2 kHz stepping each).
+ */
+export const PROP_UNMOVED_HOLD_FRACTION = 0.3;
+/**
+ * Awake budget (P5 integration): while the awake props carry more than
+ * PROP_AWAKE_BEAM_BUDGET beams, props slower than this (max node speed, m/s)
+ * that no moving object could reach before the next rebuild go to sleep at
+ * once, slowest first (a soft cap: woken props are never refused, and fast
+ * ones always stay awake).
+ */
+export const PROP_BUDGET_SLEEP_SPEED = 0.3;
 
 /** Waking speed: only an awake object whose max node speed exceeds this wakes sleeping neighbours (still neighbours would ping-pong). */
 export const PROP_WAKE_SPEED = 0.1;
