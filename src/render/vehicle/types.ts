@@ -263,10 +263,11 @@ export interface PanelDef<S extends string = MaterialSlot> {
   /** Default true (glass: false — transmission glass casting full shadows reads as dark panes). */
   castShadow?: boolean;
   /**
-   * P6 additive (F4 implements in materials.ts / flexskin.ts; ignored until
-   * then): per-panel finish of a 'paint' panel — a panel's own colour (the
-   * box truck's white box under any cab palette, the beater's mismatched
-   * doors) and weathering. Absent = the vehicle paint, pristine.
+   * P6 additive (F4: weathering.ts, wired in materials.ts): per-panel finish
+   * — a panel's own colour (the box truck's white box under any cab
+   * palette, the beater's mismatched doors) and weathering. Absent = the
+   * vehicle paint, pristine. Only defs with a finished panel compile the
+   * weathering hook (other vehicles' programs are unchanged).
    */
   finish?: PanelFinish;
 }
@@ -286,6 +287,12 @@ export interface PanelDef<S extends string = MaterialSlot> {
  *   rust    coverage of rust (orange-brown, rough, bumpy) growing from the
  *           panel's lower edge and wheel-arch lips (rest-space y + noise).
  *   dirt    road grime toward the bottom (darken + roughen).
+ * F4 additions (weathering.ts implements; any slot, not only paint):
+ *   peel    coverage of clear-coat peel (chalky matte patches, lifted rims).
+ *   holes   share of the rust eaten through (dark voids, crusty rims), 0..1.
+ *   crack   cracked lens / pane (radial + ring cracks about the panel centre;
+ *           ≥ 0.6 also chips the core out).
+ *   number  a hand-painted race number (7-segment digits).
  */
 export interface PanelFinish {
   color?: number;
@@ -294,6 +301,28 @@ export interface PanelFinish {
   primer?: number;
   rust?: number;
   dirt?: number;
+  peel?: number;
+  holes?: number;
+  crack?: number;
+  number?: PanelNumber;
+}
+
+/**
+ * Painted number (F4, PanelFinish.number). Up to 3 digits, projected in
+ * REST space along `axis`: 'x' = side panels (reads left → right from
+ * whichever side the fragment is on), 'y' = roof / hood (top up = forward).
+ */
+export interface PanelNumber {
+  text: string;
+  /** Rest-space centre of the digits (x ignored for axis 'x'). */
+  center: Vec3T;
+  /** Digit height, m. */
+  height: number;
+  /** sRGB hex. */
+  color: number;
+  axis: 'x' | 'y';
+  /** sRGB hex of a painted roundel behind the digits (absent = none). */
+  background?: number;
 }
 
 /** Car paint (A3 materials: MeshPhysicalMaterial clearcoat + procedural flake). */

@@ -30,6 +30,12 @@
  * Every hook reads only its own varyings (vCrUv = uv, vCrRest = position =
  * REST rig-local for flexbody panels), so it never depends on the order
  * of later patches.
+ *
+ * Panel finish (P6, weathering.ts): when the def has panels with a
+ * `PanelDef.finish`, the slots carrying them get the weathering hook after
+ * their own (cache key + '|wx1'), reading a per-panel finish texture by
+ * the flexskin panel index. Defs without a finish compile exactly as
+ * before.
  */
 import {
   Color,
@@ -49,6 +55,15 @@ import {
 import type { VehicleTelemetryFrame } from '../../protocol/telemetry';
 import type { RenderContext } from '../types';
 import { setVehicleTextureAnisotropy, vehicleTextures } from './textures';
+import {
+  applyWeatherGlsl,
+  buildFinishData,
+  createFinishTexture,
+  createWeatherUniforms,
+  finishExtras,
+  WEATHER_KEY,
+  type FinishData,
+} from './weathering';
 import type {
   CreateVehicleMaterials,
   LightState,
@@ -933,6 +948,25 @@ export const createVehicleMaterials: CreateVehicleMaterials = (ctx: RenderContex
     caliper,
   };
 
+  // ---------------- panel finish (weathering): only the slots that carry a finished panel
+  const finish = buildFinishData(def);
+  const finishTex = finish.finished > 0 ? createFinishTexture(finish) : null;
+  if (finishTex) {
+    const wu = createWeatherUniforms(finishTex, finishExtras(def).arches ?? []);
+    for (const slot of finish.slots) {
+      const m = bases[slot];
+      if (!m) continue;
+      const prev = m.onBeforeCompile;
+      const key = m.customProgramCacheKey();
+      m.onBeforeCompile = ((shader: WebGLProgramParametersWithUniforms, renderer: unknown) => {
+        (prev as (s: WebGLProgramParametersWithUniforms, r: unknown) => void).call(m, shader, renderer);
+        applyWeatherGlsl(shader, wu);
+      }) as AnyMat['onBeforeCompile'];
+      const k = `${key}|${WEATHER_KEY}`;
+      m.customProgramCacheKey = () => k;
+    }
+  }
+
   const lights = createLightState();
   lights.head = false;
   function writeLights(s: LightState): void {
@@ -958,7 +992,8 @@ export const createVehicleMaterials: CreateVehicleMaterials = (ctx: RenderContex
   }
   writeLights(lights);
 
-  return {
+  const set: VehicleMaterialSet & { readonly finish: FinishInfo | null } = {
+    finish: finishTex ? { data: finish, texture: finishTex } : null,
     base(slot: MaterialSlot): AnyMat {
       const m = bases[slot];
       if (!m) throw new Error(`createVehicleMaterials: unknown slot "${slot}"`);
@@ -981,13 +1016,26 @@ export const createVehicleMaterials: CreateVehicleMaterials = (ctx: RenderContex
       writeLights(s);
     },
     dispose(): void {
-      for (const set of registries.values()) {
-        for (const m of [...set]) m.dispose();
-        set.clear();
+      for (const reg of registries.values()) {
+        for (const m of [...reg]) m.dispose();
+        reg.clear();
       }
+      finishTex?.dispose();
     },
   };
+  return set;
 };
+
+/** Panel-finish data of a material set (weathering.ts), null when the def has no finished panel. */
+export interface FinishInfo {
+  data: FinishData;
+  texture: Texture;
+}
+
+/** The finish of a set made by createVehicleMaterials (null for other sets / no finish). */
+export function materialFinish(set: VehicleMaterialSet): FinishInfo | null {
+  return (set as { finish?: FinishInfo | null }).finish ?? null;
+}
 
 /** Test/debug: the shared uniform objects behind a material set's hooks (null if absent). */
 export function debugLampLevels(set: VehicleMaterialSet, slot: 'lightHead' | 'lightTail' | 'lightReverse' | 'lightIndicator'): Vector4Like | null {
