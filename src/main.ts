@@ -21,6 +21,7 @@ import { MeshPhysicalMaterial, NoToneMapping, PerspectiveCamera, Scene, SRGBColo
 import { FrameProfiler, gpuSyncFn, PassCounter, perfGpuSync, perfRequested } from './app/perf';
 import { anisotropyFor, createQualityControllerWith, isQualityLevel, isSoftwareRenderer, loadQualityLevel, SOFTWARE_GL_PIXEL_RATIO } from './app/quality';
 import { SimClient, type ObjectRange } from './app/simClient';
+import { createTrafficController, type TrafficController } from './app/traffic';
 import { placeOnGround, repairSpot, yawOf, type Aabb } from './app/spawn';
 import { loadTerrain } from './app/world';
 import { loadAllTerrainSets } from './assets/loader';
@@ -80,6 +81,8 @@ const CUBE_ID = 2;
 /** Beam/node colour gain under the HDR post pipeline (see BeamView). */
 const WIREFRAME_GAIN = 0.26;
 const SLOW_MO_SCALE = 0.25;
+/** P6: traffic rng seed (fixed: same traffic every boot; replays record it with the setTraffic command). */
+const TRAFFIC_SEED = 0x7a11c;
 
 const params = new URLSearchParams(location.search);
 const loading = new LoadingScreen();
@@ -299,6 +302,8 @@ function updateNearCasters(lighting: Parameters<typeof setNearCasters>[0]): void
 // ------------------------------------------------------------ P5 world layer (props, FX; set by boot())
 let fx: FxSystem | null = null;
 let props: PropRenderer | null = null;
+/** P6 AI traffic (app/traffic.ts, T2); null until boot builds it. */
+let traffic: TrafficController | null = null;
 let layoutPropCount = 0;
 /** Spawn-pose AABBs of the layout props (F re-places them; see repairVehicle). */
 let propBoxes: readonly Aabb[] = [];
@@ -308,15 +313,18 @@ const eventSink = {
   impact(e: Readonly<ImpactEvent>): void {
     if (e.objectId === VEHICLE_ID) sedanVisual?.onImpact(e);
     else if (isPropObjectId(e.objectId)) props?.onImpact(e);
+    else if (traffic?.owns(e.objectId)) traffic.onImpact(e);
     fx?.onImpact(e);
   },
   beamBreak(e: Readonly<BeamBreakEvent>): void {
     if (e.objectId === VEHICLE_ID) sedanVisual?.onBeamBreak(e);
     else if (isPropObjectId(e.objectId)) props?.onBeamBreak(e);
+    else if (traffic?.owns(e.objectId)) traffic.onBeamBreak(e);
     fx?.onBeamBreak(e);
   },
   skid(e: Readonly<SkidEvent>): void {
     if (e.objectId === VEHICLE_ID) sedanVisual?.onSkid(e);
+    else if (traffic?.owns(e.objectId)) traffic.onSkid(e);
     fx?.onSkid(e);
   },
 };
@@ -828,14 +836,17 @@ async function boot(): Promise<void> {
   scene.add(fxR.object);
   fxR.addVehicle(VEHICLE_ID, sedanCompiled);
   fxR.addProps(propInstances);
+  const trafficC = createTrafficController(ctx, { client, lighting, patchMaterial, fx: fxR, sampler: smp, focusObjectId: VEHICLE_ID });
+  traffic = trafficC;
+  scene.add(trafficC.object);
   stats.stages.vegetationMs = Math.round(loaded.vegetationMs);
   const qc = createQualityControllerWith(
     ctx,
-    { lighting, post: postStack, others: [terrainR, roadsR, collidersR, propsR, vegetationR, waterR, fxR] },
+    { lighting, post: postStack, others: [terrainR, roadsR, collidersR, propsR, vegetationR, waterR, fxR, trafficC] },
     forcedLevel ? { initial: forcedLevel, storage: null, maxPixelRatio } : { maxPixelRatio },
   );
   quality = qc;
-  Object.assign(crumple.debug, { terrain: terrainR, roads: roadsR, post: postStack, director, props: propsR, vegetation: vegetationR, water: waterR, fx: fxR, waterBodies, propInstances });
+  Object.assign(crumple.debug, { terrain: terrainR, roads: roadsR, post: postStack, director, props: propsR, vegetation: vegetationR, water: waterR, fx: fxR, traffic: trafficC, waterBodies, propInstances });
   mark('renderers');
   await nextFrame();
 
@@ -857,8 +868,12 @@ async function boot(): Promise<void> {
   const wanted = params.get('spawn') ?? DEFAULT_SPAWN;
   spawnIndex = Math.max(0, world.spawns.findIndex((s) => s.id === wanted));
   lastSpawn = spawnTransformAt(spawnIndex);
-  client.spawnVehicle(VEHICLE_ID, SEDAN, lastSpawn, transmission);
+  client.spawnVehicle(VEHICLE_ID, SEDAN, lastSpawn, transmission, 'sedan');
   spawnCube();
+  // P6 traffic: ?traffic=0 disables it (perf comparisons); the stub resolves false until T2 lands.
+  if (params.get('traffic') !== '0') {
+    void trafficC.start(TRAFFIC_SEED).then((on) => console.info(`[traffic] ${on ? 'running' : 'off'}`));
+  }
 
   // Camera at the spawn, the first view's LODs built and its programs compiled behind the overlay.
   const startPose = { position: new Vector3(), forward: new Vector3(), up: new Vector3(), velocity: new Vector3() } satisfies ChaseTarget;
@@ -973,6 +988,8 @@ async function boot(): Promise<void> {
     worldFrame.interpolated = interpolated;
     worldFrame.objects = client.objectRanges();
     worldFrame.tick = client.latestTick;
+    trafficC.update(worldFrame);
+    prof.lap('traffic');
     propsR.update(worldFrame);
     prof.lap('props');
     vegetationR.update(worldFrame);

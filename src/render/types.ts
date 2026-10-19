@@ -25,6 +25,7 @@ import type {
   WebGLProgramParametersWithUniforms,
   WebGLRenderer,
 } from 'three';
+import type { TrafficDensity } from '../protocol/traffic';
 import type { CSM } from 'three/examples/jsm/csm/CSM.js';
 import type { EffectComposer } from 'postprocessing';
 
@@ -82,6 +83,12 @@ export interface QualityPreset {
   waterReflection: 'env' | 'planar';
   /** P5 water: planar reflection target size as a fraction of the drawing buffer (ignored for 'env'). */
   waterReflectionScale: number;
+  /**
+   * P6 AI traffic density + awake budget (sent in `setTraffic` /
+   * `setTrafficDensity`; a quality change retunes it without a restart).
+   * Physics cost, not GPU: see the CONTRACTS P6 awake-budget table.
+   */
+  traffic: TrafficDensity;
   adaptiveResolution: AdaptiveResolution;
 }
 
@@ -108,6 +115,7 @@ export const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualityPreset>> = {
     vegetationShadowCascades: 0,
     waterReflection: 'env',
     waterReflectionScale: 0,
+    traffic: { agents: 8, maxAwake: 1, awakePoolBeams: 2500 },
     adaptiveResolution: { enabled: true, targetFps: 50, minScale: 0.6 },
   },
   medium: {
@@ -132,6 +140,7 @@ export const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualityPreset>> = {
     vegetationShadowCascades: 1,
     waterReflection: 'env',
     waterReflectionScale: 0,
+    traffic: { agents: 14, maxAwake: 2, awakePoolBeams: 4000 },
     adaptiveResolution: { enabled: true, targetFps: 60, minScale: 0.7 },
   },
   high: {
@@ -156,6 +165,7 @@ export const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualityPreset>> = {
     vegetationShadowCascades: 2,
     waterReflection: 'planar',
     waterReflectionScale: 0.5,
+    traffic: { agents: 20, maxAwake: 3, awakePoolBeams: 5000 },
     adaptiveResolution: { enabled: true, targetFps: 60, minScale: 0.75 },
   },
   ultra: {
@@ -180,6 +190,7 @@ export const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualityPreset>> = {
     vegetationShadowCascades: 3,
     waterReflection: 'planar',
     waterReflectionScale: 0.75,
+    traffic: { agents: 28, maxAwake: 4, awakePoolBeams: 6500 },
     adaptiveResolution: { enabled: false, targetFps: 60, minScale: 1 },
   },
 };

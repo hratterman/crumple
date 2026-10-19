@@ -262,6 +262,38 @@ export interface PanelDef<S extends string = MaterialSlot> {
   damageWeight?: number;
   /** Default true (glass: false — transmission glass casting full shadows reads as dark panes). */
   castShadow?: boolean;
+  /**
+   * P6 additive (F4 implements in materials.ts / flexskin.ts; ignored until
+   * then): per-panel finish of a 'paint' panel — a panel's own colour (the
+   * box truck's white box under any cab palette, the beater's mismatched
+   * doors) and weathering. Absent = the vehicle paint, pristine.
+   */
+  finish?: PanelFinish;
+}
+
+/**
+ * Per-panel paint finish (P6). All weathering amounts 0..1, applied in REST
+ * space (vFlexRest) with procedural masks so they ride with the panel and
+ * stay put when it deforms; independent of (and under) the damage patch's
+ * scuffs, which keep working on top.
+ *   color   sRGB hex replacing PaintDef.color on this panel (palette swaps
+ *           leave it alone); metallic/flake of the vehicle paint are kept
+ *           unless `solid`.
+ *   solid   true = no flake, no metallic (single-stage enamel / gelcoat).
+ *   fade    UV-faded paint: desaturate + lighten the base colour, raise
+ *           roughness, clearcoat → 0 at 1.
+ *   primer  coverage of matte grey primer patches (blotchy noise mask).
+ *   rust    coverage of rust (orange-brown, rough, bumpy) growing from the
+ *           panel's lower edge and wheel-arch lips (rest-space y + noise).
+ *   dirt    road grime toward the bottom (darken + roughen).
+ */
+export interface PanelFinish {
+  color?: number;
+  solid?: boolean;
+  fade?: number;
+  primer?: number;
+  rust?: number;
+  dirt?: number;
 }
 
 /** Car paint (A3 materials: MeshPhysicalMaterial clearcoat + procedural flake). */
@@ -305,6 +337,13 @@ export interface WheelVisualDef {
   brake: { discRadius: number; caliperColor: number };
   /** Optional rear override of rim/tire fields. */
   rear?: Partial<Pick<WheelVisualDef, 'rim' | 'tire'>>;
+  /**
+   * P6 additive (F3 implements in wheels.ts; ignored until then): WheelDef
+   * ids whose rim is built mirrored — face and dish toward the vehicle
+   * centre, as on the INNER wheel of a dual-rear pair — and that get no
+   * brake disc/caliper of their own (the outer dual's hub carries it).
+   */
+  mirrored?: readonly string[];
 }
 
 /** Everything that makes a vehicle visible. Pure data (A1 authors the sedan's: src/render/vehicle/defs/sedan.ts). */
@@ -632,7 +671,18 @@ export interface VehicleFrameInput {
    * main updates vehicles before the camera). Absent = LOD0 always.
    */
   camera?: Camera;
+  /**
+   * P6 additive: lamp overrides merged OVER the telemetry-derived state
+   * (traffic AI intent: indicators, hazards, brake lamps of a ghost →
+   * awake hand-over). Values are the lamp state THIS frame: the caller does
+   * the blinking (TRAFFIC_BLINK_ON_S / _OFF_S). Absent = telemetry only.
+   */
+  lights?: Partial<LightState>;
 }
+
+/** Indicator blink timing for AI/hazard lamps (render side), s. */
+export const TRAFFIC_BLINK_ON_S = 0.4;
+export const TRAFFIC_BLINK_OFF_S = 0.35;
 
 export interface FlexSkin {
   /** Root at the anchor; children = one Mesh per BindingPanel (same order). */

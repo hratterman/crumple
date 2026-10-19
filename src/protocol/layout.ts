@@ -6,12 +6,17 @@
  * (no DataView anywhere). Byte order is the platform's (little-endian on all
  * supported targets); worker and main always share it.
  *
- *   [header][objects][impacts][beamBreaks][skids][nodes][strains?][broken]
+ *   [header][objects][impacts][beamBreaks][skids][nodes][strains?][broken][traffic]
  *
  * P4 additive: the `broken` bitset section (always present, header flag
  * SNAPSHOT_FLAG_BROKEN_BEAMS, offset at HDR_BROKEN_OFFSET_BYTE) and the
  * per-object repair epoch in the former OBJ_RESERVED0 word. Readers that
  * predate them ignore both; SNAPSHOT_VERSION is unchanged.
+ *
+ * P6 additive: the `traffic` section (always present, header flag
+ * SNAPSHOT_FLAG_TRAFFIC, offset/count at HDR_TRAFFIC_*; records in
+ * traffic.ts) and the worker load word HDR_WORKER_LOAD_BYTE. Same rule:
+ * older readers ignore them, SNAPSHOT_VERSION stays 1.
  *
  * Fixed-size sections (header, objects, events) come first; their byte
  * offsets depend only on maxObjects. The header ALSO stores every section
@@ -22,6 +27,7 @@
  * Float32Array / Float64Array views over the WHOLE buffer (byteOffset 0).
  * Section offsets are in bytes; divide by 4 for u32/f32 word indices.
  */
+import { TRAFFIC_MAX_AGENTS, TRAFFIC_RECORD_BYTES } from './traffic';
 import {
   BEAM_BREAK_BYTES,
   BEAM_BREAK_CAPACITY,
@@ -66,7 +72,19 @@ export const HDR_BEAM_CAPACITY_BYTE = 96; // u32 capacity
 export const HDR_TOTAL_BYTES_BYTE = 100; // u32, layout size (buffer may be larger)
 /** P4 additive: u32 byte offset of the broken-beam bitset section (0 = absent: pre-P4 writer). */
 export const HDR_BROKEN_OFFSET_BYTE = 104;
-// bytes 108..127 reserved (zero)
+/** P6 additive: u32 byte offset of the traffic section (0 = absent: pre-P6 writer). */
+export const HDR_TRAFFIC_OFFSET_BYTE = 108;
+/** P6 additive: u32 traffic records written this snapshot (≤ TRAFFIC_MAX_AGENTS). */
+export const HDR_TRAFFIC_COUNT_BYTE = 112;
+/**
+ * P6 additive: f32 WORKER LOAD = worker CPU ms spent stepping / simulated
+ * ms, rolling over the last ~1 s of wall time (1 = the real-time limit;
+ * 0 = not measured). Informational only (wall-clock, NOT deterministic):
+ * the main-side traffic governor reads it and answers with
+ * `setTrafficDensity`, which is a logged command — the sim never reads it.
+ */
+export const HDR_WORKER_LOAD_BYTE = 116;
+// bytes 120..127 reserved (zero)
 
 export const HDR_U32_MAGIC = HDR_MAGIC_BYTE >> 2;
 export const HDR_U32_VERSION = HDR_VERSION_BYTE >> 2;
@@ -94,11 +112,16 @@ export const HDR_U32_NODE_CAPACITY = HDR_NODE_CAPACITY_BYTE >> 2;
 export const HDR_U32_BEAM_CAPACITY = HDR_BEAM_CAPACITY_BYTE >> 2;
 export const HDR_U32_TOTAL_BYTES = HDR_TOTAL_BYTES_BYTE >> 2;
 export const HDR_U32_BROKEN_OFFSET = HDR_BROKEN_OFFSET_BYTE >> 2;
+export const HDR_U32_TRAFFIC_OFFSET = HDR_TRAFFIC_OFFSET_BYTE >> 2;
+export const HDR_U32_TRAFFIC_COUNT = HDR_TRAFFIC_COUNT_BYTE >> 2;
+export const HDR_F32_WORKER_LOAD = HDR_WORKER_LOAD_BYTE >> 2;
 
 /** Header flag bits. */
 export const SNAPSHOT_FLAG_DEBUG_STRAINS = 1 << 0;
 /** P4 additive: the broken-beam bitset section is present (always set by P4 writers). */
 export const SNAPSHOT_FLAG_BROKEN_BEAMS = 1 << 1;
+/** P6 additive: the traffic section is present (always set by P6 writers; count may be 0). */
+export const SNAPSHOT_FLAG_TRAFFIC = 1 << 2;
 
 // ============================================================ objects
 /**
@@ -193,6 +216,8 @@ export const BROKEN_WORD_BITS = 32;
 export function brokenSectionBytes(beamCapacity: number): number {
   return Math.ceil(beamCapacity / BROKEN_WORD_BITS) * 4;
 }
+/** P6: traffic section size (fixed: TRAFFIC_MAX_AGENTS records of traffic.ts TRAFFIC_RECORD_BYTES). */
+export const TRAFFIC_SECTION_BYTES = TRAFFIC_MAX_AGENTS * TRAFFIC_RECORD_BYTES;
 
 // ============================================================ layout calc
 export interface SnapshotLayout {
@@ -209,6 +234,8 @@ export interface SnapshotLayout {
   strainsOffset: number;
   /** P4 additive: broken-beam bitset (always present). */
   brokenOffset: number;
+  /** P6 additive: traffic records (always present). */
+  trafficOffset: number;
   totalBytes: number;
 }
 
@@ -231,7 +258,8 @@ export function computeSnapshotLayout(
   const strainsOffset = debugStrains ? nodesEnd : 0;
   const strainsEnd = debugStrains ? alignUp(nodesEnd + beamCapacity * STRAIN_BYTES) : nodesEnd;
   const brokenOffset = strainsEnd;
-  const totalBytes = alignUp(brokenOffset + brokenSectionBytes(beamCapacity));
+  const trafficOffset = alignUp(brokenOffset + brokenSectionBytes(beamCapacity));
+  const totalBytes = alignUp(trafficOffset + TRAFFIC_SECTION_BYTES);
   return {
     maxObjects,
     nodeCapacity,
@@ -244,6 +272,7 @@ export function computeSnapshotLayout(
     nodesOffset,
     strainsOffset,
     brokenOffset,
+    trafficOffset,
     totalBytes,
   };
 }

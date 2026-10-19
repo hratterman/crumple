@@ -806,3 +806,163 @@ export class WorldLayoutError extends Error {
     this.name = 'WorldLayoutError';
   }
 }
+
+// ============================================================ P6 route network (AI traffic)
+/**
+ * ROUTE NETWORK (P6; T1 implements `buildRouteNetwork` in
+ * src/world/routes.ts; docs/CONTRACTS.md "P6 contracts"). PURE and
+ * deterministic: a function of (layout, terrain) only, generator numerics
+ * (only + − × ÷ sqrt floor abs min max; fixed iteration order: roads in
+ * layout order, directions +1 then −1, lanes inner → outer, junctions in
+ * layout order). The worker builds it on `setTraffic`; main may build the
+ * same one (minimap, debug) and compare `hash`.
+ *
+ * TRAFFIC DRIVES ON THE RIGHT. A road with `lanes` = n per direction has
+ * 2n lanes of width laneW = width / (2n); lane k (0 = next to the centre
+ * line, n−1 = kerb side) of direction dir sits at road-frame lateral
+ * offset d = dir · (k + 0.5) · laneW (d + = right of increasing s; the
+ * right of travel for dir +1, the left for dir −1).
+ *
+ * ROUTED KINDS: TRAFFIC_ROAD_KINDS (highway, country, mountain, street).
+ * dirt trails and the arena runway carry no traffic: a junction leg onto
+ * an unrouted road gets no connector.
+ *
+ * PATHS. Everything an agent follows is a RoutePath with its own station
+ * polyline (ROUTE_STATION_SPACING, lane offset and bank already applied,
+ * y = carved surface + 0 at the lane centre), so ghosts and the driver
+ * model never touch RoadProfiles at runtime:
+ *  - LANE: one direction-lane of one road between two junction boxes (or a
+ *    road end). Each road is cut at every junction it crosses: the lane
+ *    stops JUNCTION_BOX_M before the junction centre and resumes the same
+ *    distance after it (closed roads wrap; a road with no junction is one
+ *    looping lane per direction-lane).
+ *  - CONNECTOR: the drivable curve across a junction box from the end of
+ *    an incoming lane to the start of an outgoing lane (a cubic Hermite
+ *    between the two lane ends, tangent length 0.5·chord), sampled at the
+ *    same spacing. Connectors exist for straight-on (same road, same lane
+ *    index), right and left turns onto every other routed leg (kerb lane ↔
+ *    kerb lane for right turns, inner ↔ inner for left), and a U-turn at
+ *    a DEAD END (an open road end not at a junction: the connector joins
+ *    the end of each lane to the start of the opposite direction's kerb
+ *    lane on a radius max(width/2 + shoulder, 6 m) semicircle; T1 may
+ *    trim it onto the adjacent pad).
+ *  - RIGHT-OF-WAY: connectors along the junction's THROUGH road (the
+ *    highest-priority road, ROAD_KIND_DEFAULTS.priority; ties layout
+ *    order) never yield, except left turns, which yield to the opposing
+ *    straight connector. Every connector starting on a branch yields to
+ *    every through connector it conflicts with. Two connectors CONFLICT
+ *    when their polylines come within 2.5 m of each other anywhere other
+ *    than a shared start lane, or end in the same lane (merge).
+ *
+ * POSE. `routePose(path, s, out)` (T1, routes.ts) gives the vehicle-frame
+ * placement of a car whose rig-local ground plane y = 0 stands on the lane
+ * at arc s: position = station point (lerp), forward = unit 3D tangent
+ * (grade included), r = horizontal right (−tz, 0, tx) raised by the
+ * station bank (r + bank·Y, normalized), up = r × forward, then
+ * Gram-Schmidt (forward kept exact, right = forward × up); quat from that
+ * basis (Shepperd, sqrt only). Rig forward is −Z, so the quat
+ * maps local −Z → forward, +Y → up. Ghost poses and promotions use it, so
+ * a promoted car spawns where its ghost was drawn.
+ */
+/** Road kinds that carry AI traffic (dirt / arena: none). */
+export const TRAFFIC_ROAD_KINDS: readonly RoadKind[] = ['highway', 'country', 'mountain', 'street'];
+/** Speed limit per road kind, m/s (0 = not routed): highway 110, country 80, mountain 60, street 50 km/h. */
+export const ROUTE_SPEED_LIMITS: Readonly<Record<RoadKind, number>> = {
+  highway: 110 / 3.6,
+  country: 80 / 3.6,
+  mountain: 60 / 3.6,
+  street: 50 / 3.6,
+  dirt: 0,
+  arena: 0,
+};
+/** Station spacing along every RoutePath, m (the last station sits at `length`). */
+export const ROUTE_STATION_SPACING = 2;
+/**
+ * f64 per route station: [x, y, z, tx, ty, tz, bank, curvature]
+ *   x, y, z     lane-centre point on the carved surface (world m)
+ *   tx, ty, tz  unit 3D tangent in the direction of travel
+ *   bank        cross-slope m/m in the PATH frame (+ = right of travel higher)
+ *   curvature   signed plan curvature of the lane line, 1/m (+ = turning right)
+ */
+export const ROUTE_STATION_STRIDE = 8;
+export const RouteStation = { x: 0, y: 1, z: 2, tx: 3, ty: 4, tz: 5, bank: 6, curvature: 7 } as const;
+/** Lanes stop / resume this far from a junction centre, m (the connector spans the box). */
+export const JUNCTION_BOX_M = 12;
+
+export type RouteTurn = 'straight' | 'left' | 'right' | 'uturn';
+
+export interface RoutePath {
+  /** Index in RouteNetwork.paths (lanes first in build order, then connectors). */
+  index: number;
+  kind: 'lane' | 'connector';
+  /** Lane: RoadProfile id. Connector: null. */
+  road: string | null;
+  /** Lane: +1 travels toward increasing road s, −1 toward decreasing. Connector: 0. */
+  dir: 1 | -1 | 0;
+  /** Lane: 0 = inner (centre line) … lanes−1 = kerb. Connector: −1. */
+  lane: number;
+  /** Lane: road-frame lateral offset of the lane centre, m (see the module doc). Connector: 0. */
+  offset: number;
+  /** Lane: road arc range covered, travel order (sFrom > sTo for dir −1; a closed road may wrap). Connector: 0, length. */
+  sFrom: number;
+  sTo: number;
+  /** Arc length along the path polyline, m. */
+  length: number;
+  /** m/s: lane = ROUTE_SPEED_LIMITS[kind]; connector = min of its two lanes' limits, ≤ 40 km/h for turns, ≤ 15 km/h for U-turns. */
+  speedLimit: number;
+  stationCount: number;
+  /** stationCount × ROUTE_STATION_STRIDE. */
+  stations: Float64Array;
+  /** Successor / predecessor path indices (ascending). A lane's successors are connectors (or the next lane of a closed road with no junction); a connector's single successor is a lane. */
+  next: readonly number[];
+  prev: readonly number[];
+  /** Lane: the junction id at its END (null = dead end / loop). Connector: the junction it crosses (null for a dead-end U-turn). */
+  junction: string | null;
+  /** Connector turn type; lanes null. */
+  turn: RouteTurn | null;
+  /** Connector must give way (see RIGHT-OF-WAY). Lanes false. */
+  yield: boolean;
+  /** Connector: indices of conflicting connectors (ascending). Lanes: []. */
+  conflicts: readonly number[];
+  /** Lane: the same-direction neighbour lanes (lane change), −1 = none. Connector: −1, −1. */
+  left: number;
+  right: number;
+}
+
+export interface RouteJunction {
+  id: string;
+  pos: Vec2;
+  /** Highest-priority routed road through the junction. */
+  through: string;
+  /** Connector path indices crossing it (ascending). */
+  connectors: readonly number[];
+}
+
+export interface RouteNetwork {
+  layoutId: string;
+  layoutVersion: number;
+  paths: readonly RoutePath[];
+  junctions: readonly RouteJunction[];
+  /** Number of lane paths (paths[0, laneCount) are lanes). */
+  laneCount: number;
+  /** Σ lane lengths, m (density bookkeeping). */
+  laneLength: number;
+  /** FNV-1a 32 over path count, then per path kind/dir/lane/next and the stations as raw u32 words (hashTerrain's word rule). */
+  hash: number;
+}
+
+/** Vehicle-frame placement on a path (routePose output). */
+export interface RoutePose {
+  pos: [number, number, number];
+  quat: [number, number, number, number];
+  /** Unit forward / up in world space (convenience for the driver model). */
+  forward: [number, number, number];
+  up: [number, number, number];
+  curvature: number;
+  speedLimit: number;
+}
+
+/** T1: src/world/routes.ts. Throws WorldLayoutError on a layout it cannot route (should not happen for validated layouts). */
+export type BuildRouteNetwork = (layout: WorldLayout, terrain: TerrainData) => RouteNetwork;
+/** T1: allocation-free; s clamped to [0, path.length]. */
+export type RoutePoseFn = (path: RoutePath, s: number, out: RoutePose) => RoutePose;

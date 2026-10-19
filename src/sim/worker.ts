@@ -118,6 +118,9 @@ export class WorkerHost {
         case 'setBubble':
         case 'keyframeRequest':
         case 'replaySeek':
+        // P6 contracts landed; T1 implements traffic (docs/CONTRACTS.md "P6 contracts").
+        case 'setTraffic':
+        case 'setTrafficDensity':
           this.post({ type: 'unimplemented', command: msg.type });
           return;
         case 'returnBuffer':

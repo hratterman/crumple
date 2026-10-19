@@ -7,7 +7,8 @@
  * Set-up: plane ground y = 0 (concrete), the vehicle settled 0.5 s at rest,
  * then every node given the test velocity (wheel rings pre-spun to rolling
  * for frontal tests), no throttle/brake, neutral; 2.0 s simulated after the
- * first contact. Measures use node ids (the vehicle frame):
+ * first contact. Measures use node ids (the vehicle frame; P6: per-vehicle
+ * sets in `CrashSpec.probes`, the sedan's ids below are SEDAN_CRASH_PROBES):
  *   crush       rest − final distance between the crash-can tips (mean of
  *               s1_rl_*, s1_rh_*) and the B-pillar floor (s7_fl_*, s7_sl_*),
  *               along the safety cell's long axis (s9 ring → s5 ring).
@@ -27,12 +28,63 @@ import type { CompiledVehicle, VehicleDef, VehicleRuntime } from './types';
 
 export type CrashKind = 'frontal' | 'offset' | 'pole';
 
+/**
+ * P6: the node-id sets a vehicle is measured by (one per VehicleDef; the
+ * sedan's are SEDAN_CRASH_PROBES). Patterns as in `nodesMatching` (exact
+ * id, or a prefix ending in `*`); beam pairs match either orientation.
+ * Every fleet def exports its own probes next to its VehicleDef.
+ */
+export interface CrashProbes {
+  /** Front crush reference (crash-can tips / the frame horns). */
+  front: readonly string[];
+  /** Cabin reference the crush and intrusion are measured to (B-pillar floor). */
+  cabin: readonly string[];
+  /** Firewall ring (frontal intrusion). */
+  firewall: readonly string[];
+  /** Safety-cell long axis: rear ring → front ring (crush is measured along it). */
+  cellRear: readonly string[];
+  cellFront: readonly string[];
+  /** Side pole: the struck door's mid nodes (pole z = their mean) and the door / sill width pairs (single ids). */
+  doorMid: readonly string[];
+  doorR: string;
+  doorL: string;
+  sillR: string;
+  sillL: string;
+  /** Body-node id prefixes of detachable sub-rigs, exempt from the "no node far from its neighbours" span check. */
+  exemptPrefixes: readonly string[];
+  /** Hood latch beams (a, b) — `latchBroken` = any broken. Empty = no hood (reported false). */
+  latch: readonly (readonly [string, string])[];
+  /** Front bumper: beams from a node with this prefix to a node without it. */
+  bumperPrefix: string;
+  /** Windscreen glass beams: from a node with prefix [0] to one with prefix [1]. Empty = none. */
+  windscreen: readonly [string, string] | null;
+}
+
+export const SEDAN_CRASH_PROBES: CrashProbes = {
+  front: ['s1_rl_*', 's1_rh_*'],
+  cabin: ['s7_fl_*', 's7_sl_*'],
+  firewall: ['s5_fl_*', 's5_sl_*', 's5_hp_*', 's5_cw_*'],
+  cellRear: ['s9_*'],
+  cellFront: ['s5_*'],
+  doorMid: ['s6_dm_*'],
+  doorR: 's6_dm_R',
+  doorL: 's6_dm_L',
+  sillR: 's6_sl_R',
+  sillL: 's6_sl_L',
+  exemptPrefixes: ['s0_', 's13_', 'hood_'],
+  latch: [['hood_0C', 's2_rt']],
+  bumperPrefix: 's0_',
+  windscreen: ['s5_cw', 's6_rf'],
+};
+
 export interface CrashSpec {
   kind: CrashKind;
   speedKmh: number;
   /** Offset frontal: overlap fraction of the body width (struck side = vehicle left). Default 0.4. */
   overlap?: number;
   def?: VehicleDef;
+  /** Node sets to measure `def` by (P6). Default SEDAN_CRASH_PROBES. */
+  probes?: CrashProbes;
   /** Seconds simulated after first contact. Default 2.0. */
   afterContactS?: number;
 }
@@ -139,13 +191,14 @@ export function runCrash(spec: CrashSpec): CrashResult {
   };
   const dist = (a: number[], b: number[]): number => Math.hypot(a[0]! - b[0]!, a[1]! - b[1]!, a[2]! - b[2]!);
 
-  const tips = nodesMatching(cv, ['s1_rl_*', 's1_rh_*']);
-  const bpillar = nodesMatching(cv, ['s7_fl_*', 's7_sl_*']);
-  const firewall = nodesMatching(cv, ['s5_fl_*', 's5_sl_*', 's5_hp_*', 's5_cw_*']);
-  const [dmR] = nodesMatching(cv, ['s6_dm_R']);
-  const [dmL] = nodesMatching(cv, ['s6_dm_L']);
-  const [slR] = nodesMatching(cv, ['s6_sl_R']);
-  const [slL] = nodesMatching(cv, ['s6_sl_L']);
+  const pr = spec.probes ?? SEDAN_CRASH_PROBES;
+  const tips = nodesMatching(cv, pr.front);
+  const bpillar = nodesMatching(cv, pr.cabin);
+  const firewall = nodesMatching(cv, pr.firewall);
+  const [dmR] = nodesMatching(cv, [pr.doorR]);
+  const [dmL] = nodesMatching(cv, [pr.doorL]);
+  const [slR] = nodesMatching(cv, [pr.sillR]);
+  const [slL] = nodesMatching(cv, [pr.sillL]);
 
   // Rest references come from the undeformed rig (before settling).
   const restP = (i: number): number[] => [cv.rig.nodePos[3 * i]!, cv.rig.nodePos[3 * i + 1]!, cv.rig.nodePos[3 * i + 2]!];
@@ -167,8 +220,8 @@ export function runCrash(spec: CrashSpec): CrashResult {
     const l = Math.hypot(ux, uy, uz);
     return ((a[0]! - b[0]!) * ux + (a[1]! - b[1]!) * uy + (a[2]! - b[2]!) * uz) / l;
   };
-  const cellRear = nodesMatching(cv, ['s9_*']);
-  const cellFront = nodesMatching(cv, ['s5_*']);
+  const cellRear = nodesMatching(cv, pr.cellRear);
+  const cellFront = nodesMatching(cv, pr.cellFront);
   const axisNow = (): number[] => {
     const f = mean(cellFront);
     const r = mean(cellRear);
@@ -213,7 +266,7 @@ export function runCrash(spec: CrashSpec): CrashResult {
   let poleX = 0;
   let faceZ = 0;
   if (spec.kind === 'pole') {
-    const zPole = mean(nodesMatching(cv, ['s6_dm_*']))[2];
+    const zPole = mean(nodesMatching(cv, pr.doorMid))[2];
     poleX = maxX + GAP + POLE_RADIUS;
     barrier = { id: 'crashPole', kind: 'cylinder', pos: [poleX, 3, zPole], quat: [0, 0, 0, 1], size: [POLE_RADIUS, 3, 0], material: MaterialId.metal };
     dir = [1, 0, 0];
@@ -339,7 +392,7 @@ export function runCrash(spec: CrashSpec): CrashResult {
     ke += 0.5 * m * (s.velX[i]! ** 2 + s.velY[i]! ** 2 + s.velZ[i]! ** 2);
   }
   const ids = cv.rig.nodeIds;
-  const exempt = (i: number): boolean => i >= cv.bodyNodeCount || /^(s0_|s13_|hood_)/.test(ids[i]!);
+  const exempt = (i: number): boolean => i >= cv.bodyNodeCount || pr.exemptPrefixes.some((p) => ids[i]!.startsWith(p));
   const b0 = obj.beamStart;
   let maxSpan = 0;
   let broken = 0;
@@ -369,9 +422,10 @@ export function runCrash(spec: CrashSpec): CrashResult {
     return out;
   };
   const brokenFraction = (list: number[]): number => (list.length === 0 ? 0 : list.filter((b) => s.active[b0 + b] === 0).length / list.length);
-  const latch = beamsWhere((a, c) => a === 'hood_0C' && c === 's2_rt');
-  const bumper = beamsWhere((a, c) => a.startsWith('s0_') && !c.startsWith('s0_'));
-  const windscreen = beamsWhere((a, c) => a.startsWith('s5_cw') && c.startsWith('s6_rf'));
+  const latch = beamsWhere((a, c) => pr.latch.some(([la, lb]) => a === la && c === lb));
+  const bumper = beamsWhere((a, c) => a.startsWith(pr.bumperPrefix) && !c.startsWith(pr.bumperPrefix));
+  const ws = pr.windscreen;
+  const windscreen = ws ? beamsWhere((a, c) => a.startsWith(ws[0]) && c.startsWith(ws[1])) : [];
 
   return {
     spec,

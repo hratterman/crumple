@@ -15,6 +15,7 @@ import type { PropKey } from '../sim/props/types';
 import type { RigDef } from '../sim/rig/types';
 import type { TransmissionMode, VehicleDef } from '../sim/vehicle/types';
 import type { ColliderDef, WorldLayout } from '../world/types';
+import type { TrafficBubble, TrafficDensity, TrafficVariantSpec } from './traffic';
 
 // ============================================================ MaterialId
 /**
@@ -236,6 +237,13 @@ export interface SpawnVehicleMsg {
   vehicle: VehicleDef;
   transform: Transform;
   transmission?: TransmissionMode;
+  /**
+   * P6 additive: VehicleCatalog id of `vehicle` (src/game/catalog.ts), e.g.
+   * 'coupe'. Informational for the worker (kept per object for the P7
+   * replay header and logs); `vehicle` stays authoritative — the worker
+   * never looks a def up by id. Omitted = unknown / ad-hoc def.
+   */
+  catalogId?: string;
 }
 /**
  * Switch a vehicle between automatic and manual shifting. gearSelect
@@ -342,7 +350,50 @@ export interface ResetPropsMsg {
   objectIds?: number[];
 }
 
-/** RESERVED (P6): awake bubble around the player. Worker may answer `unimplemented`. */
+// ---------------------------------------------------------------- traffic (P6, additive; protocol/traffic.ts)
+/**
+ * Configure (or restart) AI traffic. FULL REPLACE: every existing agent and
+ * awake traffic object is removed at the step boundary, then the worker
+ * builds the RouteNetwork from its installed layout + terrain
+ * (buildRouteNetwork, src/world/routes.ts; requires `groundHeightfield`
+ * first, else `error`), compiles each variant once (validateVehicle at
+ * TRAFFIC_BEAM_BUDGET; failure → `error`, traffic stays off), settles each
+ * variant's rest pose on a private plane (the SETTLED TEMPLATE), places
+ * `density.agents` ghosts with its seeded rng (never inside the bubble or
+ * the focus's forward cone) and answers `trafficReady`. `enabled: false`
+ * (or agents 0) = traffic off, answered with trafficReady{agentCount: 0}.
+ * Deterministic: same (layout, seed, variants, density, focus) and command
+ * tick ⇒ same agents, poses and decisions.
+ */
+export interface SetTrafficMsg {
+  type: 'setTraffic';
+  enabled: boolean;
+  /** Seed of the traffic rng stream (independent of InitMsg.seed). */
+  seed: number;
+  /** ≥ 1 when enabled; agent variant index = index into this array. */
+  variants: TrafficVariantSpec[];
+  density: TrafficDensity;
+  /** The vehicle the awake bubble follows (the player, objectId 1). Missing object = no promotions (all ghosts). */
+  focusObjectId: number;
+  /** Default TRAFFIC_BUBBLE_DEFAULTS. */
+  bubble?: TrafficBubble;
+}
+/**
+ * Retune density without a restart (quality change, the main-side
+ * governor). Fewer agents: the highest-index agents retire (awake ones
+ * despawn only once out of sight, ghosts at once); more agents: new ones
+ * spawn by the respawn rule. Lower maxAwake: the farthest undamaged awake
+ * cars demote at the next scheduler tick. No traffic configured → `error`.
+ */
+export interface SetTrafficDensityMsg {
+  type: 'setTrafficDensity';
+  density: TrafficDensity;
+}
+/**
+ * SUPERSEDED (P6) by setTraffic.focusObjectId + bubble (the bubble follows a
+ * sim object, so it is deterministic without main sending positions). The
+ * worker keeps answering `unimplemented`.
+ */
 export interface SetBubbleMsg {
   type: 'setBubble';
   center: Vec3;
@@ -376,6 +427,8 @@ export type MainToWorker =
   | SetCollidersMsg
   | SpawnPropsMsg
   | ResetPropsMsg
+  | SetTrafficMsg
+  | SetTrafficDensityMsg
   | SetBubbleMsg
   | KeyframeRequestMsg
   | ReplaySeekMsg;
@@ -433,5 +486,34 @@ export interface TerrainReadyMsg {
   waterBodies?: number;
 }
 
-export type WorkerToMain = ReadyMsg | SnapshotMsg | FatalMsg | UnimplementedMsg | ErrorMsg | TerrainReadyMsg;
+/** One traffic variant's settled template (TrafficReadyMsg.variants, same order as SetTrafficMsg.variants). */
+export interface TrafficTemplate {
+  catalogId: string;
+  /** CompiledVehicle node count (merged canonical order). */
+  nodeCount: number;
+  /**
+   * RIG-LOCAL node positions (xyz × nodeCount) of the variant at rest after
+   * TRAFFIC settling (1.5 s on a plane, neutral, brakes on), rigidly
+   * re-aligned so its frame (VehicleDef.frame origin/front/top basis)
+   * coincides with the rest frame. Ghost pose p_world = quat · p + pos;
+   * promotion spawns exactly these nodes under the agent's pose (+ rigid
+   * velocity, wheels pre-spun), so the rigid ghost instance and the
+   * soft-body car agree at the hand-over.
+   */
+  settled: Float32Array;
+}
+/** Answer to `setTraffic` (P6) once the agents exist. */
+export interface TrafficReadyMsg {
+  type: 'trafficReady';
+  /** hashRouteNetwork() of the worker's network (main may compare with its own build). */
+  routeHash: number;
+  /** RoutePath count of the network (0 when traffic is off). */
+  pathCount: number;
+  agentCount: number;
+  variants: TrafficTemplate[];
+  /** Worker time spent building the network + compiling + settling, ms. */
+  setupMs: number;
+}
+
+export type WorkerToMain = ReadyMsg | SnapshotMsg | FatalMsg | UnimplementedMsg | ErrorMsg | TerrainReadyMsg | TrafficReadyMsg;
 export type WorkerToMainType = WorkerToMain['type'];

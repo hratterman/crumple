@@ -179,7 +179,10 @@ export function createVehicleVisual(
       damage.update(frame, skin);
       skin.update(frame);
       wheels.update(skin, frame.dtS);
-      materials.setLights(lightStateFromTelemetry(frame.telemetry, lights, game));
+      const ls = lightStateFromTelemetry(frame.telemetry, lights, game);
+      // P6: AI intent (traffic indicators / hazards / forced brake lamps) overrides the telemetry-derived state.
+      if (frame.lights) Object.assign(ls, frame.lights);
+      materials.setLights(ls);
       fx?.update(frame.dtS);
     },
     onImpact: (e) => damage.onImpact(e),

@@ -406,10 +406,11 @@ export interface LaunchResult {
   samples: HandlingSample[];
 }
 
-export function runLaunch(def: VehicleDef = SEDAN): LaunchResult {
+/** P6: `durationS` (default 12) — heavy vehicles need longer to reach 100 km/h. */
+export function runLaunch(def: VehicleDef = SEDAN, opts: { durationS?: number } = {}): LaunchResult {
   const { samples } = runScenario({
     def,
-    durationS: 12,
+    durationS: opts.durationS ?? 12,
     sampleHz: 50,
     control: () => ({ gearSelect: 1, throttle: 1, steer: 0 }),
     stop: (s) => s.speed > 100 / 3.6 && s.dist > 100,
@@ -719,10 +720,22 @@ function fullThrottleAccel(def: VehicleDef, kmh: number): number {
  * stiffened (sedan.ts REAR_LINK_FACTOR) and at 205 km/h before the rigid
  * subframe (sedan.ts K_SUBFRAME).
  */
-export function runTopSpeed(def: VehicleDef = SEDAN): TopSpeedResult {
-  const accel200 = fullThrottleAccel(def, 200);
-  const accel210 = fullThrottleAccel(def, 210);
-  const samples = fullThrottleRun(def, 195, 10);
+/**
+ * P6: the probe speeds are parameters (defaults = the sedan's 200 / 210 /
+ * 195 km/h); the result fields keep their names (`accel200` = the lower
+ * probe, `accel210` the upper, `gear200` / `gear210` likewise).
+ */
+export interface TopSpeedOptions {
+  lowKmh?: number;
+  highKmh?: number;
+  straightFromKmh?: number;
+}
+export function runTopSpeed(def: VehicleDef = SEDAN, opts: TopSpeedOptions = {}): TopSpeedResult {
+  const lo = opts.lowKmh ?? 200;
+  const hi = opts.highKmh ?? 210;
+  const accel200 = fullThrottleAccel(def, lo);
+  const accel210 = fullThrottleAccel(def, hi);
+  const samples = fullThrottleRun(def, opts.straightFromKmh ?? 195, 10);
   let maxYawRate = 0;
   let drift = 0;
   const h0 = samples[0]!.heading;
@@ -734,8 +747,8 @@ export function runTopSpeed(def: VehicleDef = SEDAN): TopSpeedResult {
   return {
     accel200,
     accel210,
-    gear200: bestGear(def, 200),
-    gear210: bestGear(def, 210),
+    gear200: bestGear(def, lo),
+    gear210: bestGear(def, hi),
     maxYawRate,
     headingDrift: (drift * 180) / Math.PI,
     endKmh: samples[samples.length - 1]!.speed * 3.6,

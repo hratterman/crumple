@@ -57,6 +57,10 @@ import {
 } from './events';
 import {
   HDR_F32_TIMESCALE,
+  HDR_F32_WORKER_LOAD,
+  HDR_U32_TRAFFIC_COUNT,
+  HDR_U32_TRAFFIC_OFFSET,
+  SNAPSHOT_FLAG_TRAFFIC,
   HDR_F64_SIMTIME,
   HDR_U32_BEAM_BREAK_COUNT,
   HDR_U32_BEAM_BREAK_OVERFLOW,
@@ -101,6 +105,23 @@ import {
   TELEMETRY_SLOTS,
   type SnapshotLayout,
 } from './layout';
+import {
+  TR_AGENT,
+  TR_BRAKE,
+  TR_FLAGS,
+  TR_LOOK,
+  TR_OBJECT_ID,
+  TR_PATH,
+  TR_POS,
+  TR_QUAT,
+  TR_SPEED,
+  TR_STATE,
+  TR_STEER,
+  TRAFFIC_MAX_AGENTS,
+  TRAFFIC_RECORD_WORDS,
+  packTrafficLook,
+  type TrafficAgentFrame,
+} from './traffic';
 
 export const SNAPSHOT_POOL_SIZE = 3;
 
@@ -149,7 +170,9 @@ export class SnapshotWriter {
   private readonly nodeW: number;
   private readonly strainW: number;
   private readonly brokenW: number;
+  private readonly trafficW: number;
   private lastObjectId = -1;
+  private lastAgent = -1;
 
   constructor(layout: SnapshotLayout) {
     this.layout = layout;
@@ -160,6 +183,7 @@ export class SnapshotWriter {
     this.nodeW = layout.nodesOffset >> 2;
     this.strainW = layout.strainsOffset >> 2;
     this.brokenW = layout.brokenOffset >> 2;
+    this.trafficW = layout.trafficOffset >> 2;
   }
 
   /** Binds the writer to `buffer` (creates views) and writes the static header. */
@@ -175,7 +199,7 @@ export class SnapshotWriter {
     for (let i = 0; i < HEADER_BYTES >> 2; i++) u[i] = 0;
     u[HDR_U32_MAGIC] = SNAPSHOT_MAGIC;
     u[HDR_U32_VERSION] = SNAPSHOT_VERSION;
-    u[HDR_U32_FLAGS] = (L.debugStrains ? SNAPSHOT_FLAG_DEBUG_STRAINS : 0) | SNAPSHOT_FLAG_BROKEN_BEAMS;
+    u[HDR_U32_FLAGS] = (L.debugStrains ? SNAPSHOT_FLAG_DEBUG_STRAINS : 0) | SNAPSHOT_FLAG_BROKEN_BEAMS | SNAPSHOT_FLAG_TRAFFIC;
     u[HDR_U32_OBJECTS_OFFSET] = L.objectsOffset;
     u[HDR_U32_IMPACTS_OFFSET] = L.impactsOffset;
     u[HDR_U32_BEAM_BREAKS_OFFSET] = L.beamBreaksOffset;
@@ -187,7 +211,9 @@ export class SnapshotWriter {
     u[HDR_U32_BEAM_CAPACITY] = L.beamCapacity;
     u[HDR_U32_TOTAL_BYTES] = L.totalBytes;
     u[HDR_U32_BROKEN_OFFSET] = L.brokenOffset;
+    u[HDR_U32_TRAFFIC_OFFSET] = L.trafficOffset;
     this.lastObjectId = -1;
+    this.lastAgent = -1;
     return this;
   }
 
@@ -206,7 +232,49 @@ export class SnapshotWriter {
     u[HDR_U32_BEAM_BREAK_OVERFLOW] = 0;
     u[HDR_U32_SKID_COUNT] = 0;
     u[HDR_U32_SKID_OVERFLOW] = 0;
+    u[HDR_U32_TRAFFIC_COUNT] = 0;
+    this.f32[HDR_F32_WORKER_LOAD] = 0;
     this.lastObjectId = -1;
+    this.lastAgent = -1;
+  }
+
+  /** P6: worker CPU ms per simulated ms over the last ~1 s (informational; layout.ts HDR_WORKER_LOAD_BYTE). */
+  setWorkerLoad(load: number): void {
+    this.f32[HDR_F32_WORKER_LOAD] = load;
+  }
+
+  /**
+   * P6: appends one traffic record (traffic.ts layout). Agents must be
+   * strictly ascending; the section holds TRAFFIC_MAX_AGENTS. Reads every
+   * field of `rec` except `nodesReady` (main-side). Allocation-free.
+   * Throws on order / capacity violations (programming errors).
+   */
+  pushTrafficAgent(rec: Readonly<TrafficAgentFrame>): number {
+    const u = this.u32;
+    const f = this.f32;
+    const i = u[HDR_U32_TRAFFIC_COUNT]!;
+    if (i >= TRAFFIC_MAX_AGENTS) throw new RangeError(`traffic section full (${TRAFFIC_MAX_AGENTS})`);
+    if (rec.agent <= this.lastAgent) throw new RangeError(`traffic agents must be ascending (${rec.agent} after ${this.lastAgent})`);
+    this.lastAgent = rec.agent;
+    const w = this.trafficW + i * TRAFFIC_RECORD_WORDS;
+    u[w + TR_AGENT] = rec.agent;
+    u[w + TR_OBJECT_ID] = rec.objectId;
+    u[w + TR_FLAGS] = rec.flags;
+    u[w + TR_LOOK] = packTrafficLook(rec.variant, rec.paint);
+    u[w + TR_STATE] = rec.state;
+    f[w + TR_POS] = rec.pos[0];
+    f[w + TR_POS + 1] = rec.pos[1];
+    f[w + TR_POS + 2] = rec.pos[2];
+    f[w + TR_QUAT] = rec.quat[0];
+    f[w + TR_QUAT + 1] = rec.quat[1];
+    f[w + TR_QUAT + 2] = rec.quat[2];
+    f[w + TR_QUAT + 3] = rec.quat[3];
+    f[w + TR_SPEED] = rec.speed;
+    f[w + TR_STEER] = rec.steer;
+    f[w + TR_BRAKE] = rec.brake;
+    u[w + TR_PATH] = rec.path;
+    u[HDR_U32_TRAFFIC_COUNT] = i + 1;
+    return i;
   }
 
   setTick(tick: number): void {
@@ -469,6 +537,8 @@ export class SnapshotReader {
   private nodeW = 0;
   private strainW = 0;
   private brokenW = 0;
+  private trafficW = 0;
+  private _trafficCount = 0;
   private _hasBroken = false;
   private _objectCount = 0;
   private _nodeTotal = 0;
@@ -502,6 +572,8 @@ export class SnapshotReader {
       (u[HDR_U32_FLAGS]! & SNAPSHOT_FLAG_DEBUG_STRAINS) !== 0 && u[HDR_U32_STRAINS_OFFSET]! !== 0;
     this.brokenW = u[HDR_U32_BROKEN_OFFSET]! >> 2;
     this._hasBroken = (u[HDR_U32_FLAGS]! & SNAPSHOT_FLAG_BROKEN_BEAMS) !== 0 && this.brokenW !== 0;
+    this.trafficW = u[HDR_U32_TRAFFIC_OFFSET]! >> 2;
+    this._trafficCount = (u[HDR_U32_FLAGS]! & SNAPSHOT_FLAG_TRAFFIC) !== 0 && this.trafficW !== 0 ? u[HDR_U32_TRAFFIC_COUNT]! : 0;
     this.nodesView = null;
     this.strainsView = null;
     const n = this._objectCount;
@@ -770,6 +842,63 @@ export class SnapshotReader {
     out.pz = f[w + SKID_PZ]!;
     out.slip = f[w + SKID_SLIP]!;
     out.load = f[w + SKID_LOAD]!;
+    return out;
+  }
+
+  // ---------------- traffic (P6)
+  /** Traffic records in this snapshot (0 when absent or traffic is off). */
+  get trafficCount(): number {
+    return this._trafficCount;
+  }
+  /** Worker CPU ms per simulated ms (0 = not measured). Informational, not deterministic. */
+  get workerLoad(): number {
+    return this.f32[HDR_F32_WORKER_LOAD]!;
+  }
+  trafficAgent(i: number): number {
+    return this.u32[this.trafficW + i * TRAFFIC_RECORD_WORDS + TR_AGENT]!;
+  }
+  trafficFlags(i: number): number {
+    return this.u32[this.trafficW + i * TRAFFIC_RECORD_WORDS + TR_FLAGS]!;
+  }
+  trafficObjectId(i: number): number {
+    return this.u32[this.trafficW + i * TRAFFIC_RECORD_WORDS + TR_OBJECT_ID]!;
+  }
+  /** Record index of `agent` (binary search; agents are ascending), or -1. */
+  findTrafficAgent(agent: number): number {
+    let lo = 0;
+    let hi = this._trafficCount - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const a = this.trafficAgent(mid);
+      if (a === agent) return mid;
+      if (a < agent) lo = mid + 1;
+      else hi = mid - 1;
+    }
+    return -1;
+  }
+  /** Decodes record i into `out` (allocation-free; `nodesReady` is left unchanged). */
+  readTrafficAgent(i: number, out: TrafficAgentFrame): TrafficAgentFrame {
+    const u = this.u32;
+    const f = this.f32;
+    const w = this.trafficW + i * TRAFFIC_RECORD_WORDS;
+    out.agent = u[w + TR_AGENT]!;
+    out.objectId = u[w + TR_OBJECT_ID]!;
+    out.flags = u[w + TR_FLAGS]!;
+    const look = u[w + TR_LOOK]!;
+    out.variant = look & 0xffff;
+    out.paint = look >>> 16;
+    out.state = u[w + TR_STATE]!;
+    out.pos[0] = f[w + TR_POS]!;
+    out.pos[1] = f[w + TR_POS + 1]!;
+    out.pos[2] = f[w + TR_POS + 2]!;
+    out.quat[0] = f[w + TR_QUAT]!;
+    out.quat[1] = f[w + TR_QUAT + 1]!;
+    out.quat[2] = f[w + TR_QUAT + 2]!;
+    out.quat[3] = f[w + TR_QUAT + 3]!;
+    out.speed = f[w + TR_SPEED]!;
+    out.steer = f[w + TR_STEER]!;
+    out.brake = f[w + TR_BRAKE]!;
+    out.path = u[w + TR_PATH]!;
     return out;
   }
 }

@@ -26,10 +26,13 @@ import {
   type MaterialId,
   type PropSpawn,
   type SnapshotCapacity,
+  type SetTrafficMsg,
   type TerrainReadyMsg,
+  type TrafficReadyMsg,
   type Transform,
   type WorkerToMain,
 } from '../protocol/messages';
+import { createTrafficAgentFrame, TRAFFIC_FLAG_AWAKE, TRAFFIC_FLAG_TELEPORTED, type TrafficAgentFrame, type TrafficDensity } from '../protocol/traffic';
 import { NODE_STRIDE } from '../protocol/layout';
 import { SnapshotReader } from '../protocol/codec';
 import { readVehicleTelemetry, type VehicleTelemetryFrame } from '../protocol/telemetry';
@@ -87,6 +90,10 @@ export interface SimClientStats {
 
 /** The worker's answer to `groundHeightfield` (TerrainReadyMsg without `type`). */
 export type TerrainReadyInfo = Omit<TerrainReadyMsg, 'type'>;
+/** The worker's answer to `setTraffic` (P6; TrafficReadyMsg without `type`). */
+export type TrafficReadyInfo = Omit<TrafficReadyMsg, 'type'>;
+/** `setTraffic` fields (P6). */
+export type TrafficConfig = Omit<SetTrafficMsg, 'type'>;
 
 interface PendingTerrain {
   hash: number;
@@ -149,6 +156,9 @@ export class SimClient {
   /** `error` replies still due for terrainReady{matched:false} already resolved (hash mismatch). */
   private mismatchErrorsDue = 0;
   private _terrain: TerrainReadyInfo | null = null;
+  private readonly pendingTraffic: { resolve(info: TrafficReadyInfo): void; reject(err: Error): void }[] = [];
+  private _traffic: TrafficReadyInfo | null = null;
+  private readonly trafficPrev = createTrafficAgentFrame();
 
   private _ready = false;
   private _fatal: string | null = null;
@@ -247,7 +257,7 @@ export class SimClient {
    * canonical order the worker compiles; MINIMASS never changes topology) to
    * keep beam pairs and frame-node indices. Returns false if the def is invalid.
    */
-  spawnVehicle(objectId: number, vehicle: VehicleDef, transform: Transform, transmission?: TransmissionMode): boolean {
+  spawnVehicle(objectId: number, vehicle: VehicleDef, transform: Transform, transmission?: TransmissionMode, catalogId?: string): boolean {
     let rig: RigDef;
     let compiled;
     try {
@@ -268,8 +278,100 @@ export class SimClient {
     });
     const msg: MainToWorker = { type: 'spawnVehicle', objectId, vehicle, transform: cloneTransform(transform) };
     if (transmission) msg.transmission = transmission;
+    if (catalogId !== undefined) msg.catalogId = catalogId;
     this.post(msg);
     return true;
+  }
+
+  // ------------------------------------------------------------ traffic (P6)
+  /**
+   * Configures (full restart) AI traffic; resolves with the worker's
+   * `trafficReady` (also kept in `trafficInfo`). Rejects when the worker
+   * rejects the config (`error`), does not implement traffic yet
+   * (`unimplemented`) or dies. Send after `groundHeightfield` and after the
+   * focus vehicle's spawn.
+   */
+  setTraffic(config: TrafficConfig): Promise<TrafficReadyInfo> {
+    if (this.disposed || this._fatal) {
+      return Promise.reject(new Error(`[sim] setTraffic: worker ${this.disposed ? 'disposed' : 'dead'}`));
+    }
+    return new Promise<TrafficReadyInfo>((resolve, reject) => {
+      this.pendingTraffic.push({ resolve, reject });
+      this.post({ type: 'setTraffic', ...config, variants: config.variants.slice() });
+    });
+  }
+
+  /** Retunes density without a restart (quality change, governor). */
+  setTrafficDensity(density: TrafficDensity): void {
+    this.post({ type: 'setTrafficDensity', density: { ...density } });
+  }
+
+  /** The latest `trafficReady` (null before traffic is configured). */
+  get trafficInfo(): TrafficReadyInfo | null {
+    return this._traffic;
+  }
+
+  /** Worker CPU ms per simulated ms of the latest snapshot (0 = not measured). Informational. */
+  get workerLoad(): number {
+    return this.cur ? this.cur.workerLoad : 0;
+  }
+
+  /** Traffic records in the latest snapshot. */
+  get trafficCount(): number {
+    return this.cur ? this.cur.trafficCount : 0;
+  }
+
+  /**
+   * Decodes every traffic record of the latest snapshot into `out` (grown
+   * with new frames when shorter; reuse the array: steady state allocates
+   * nothing) and returns the count. Ghost poses, speed, steer and brake are
+   * interpolated to `renderSimTime` between the previous and the latest
+   * snapshot when the agent is in both, in the same mode (ghost/awake) and
+   * not TELEPORTED; otherwise the latest values are used as-is. Sets
+   * `nodesReady` (awake object present in both snapshots with the same node
+   * count: its interpolated nodes are valid — the hand-over rule).
+   */
+  readTrafficAgents(renderSimTime: number, out: TrafficAgentFrame[]): number {
+    const cur = this.cur;
+    if (!cur) return 0;
+    const n = cur.trafficCount;
+    while (out.length < n) out.push(createTrafficAgentFrame());
+    const prev = this.prev;
+    const span = prev ? cur.simTime - prev.simTime : 0;
+    let t = span > 0 && prev ? (renderSimTime - prev.simTime) / span : 1;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const p = this.trafficPrev;
+    for (let i = 0; i < n; i++) {
+      const o = cur.readTrafficAgent(i, out[i]!);
+      const awake = (o.flags & TRAFFIC_FLAG_AWAKE) !== 0;
+      o.nodesReady = false;
+      if (awake && prev) {
+        const ci = cur.findObject(o.objectId);
+        const pi = prev.findObject(o.objectId);
+        o.nodesReady = ci >= 0 && pi >= 0 && prev.objectNodeCount(pi) === cur.objectNodeCount(ci);
+      }
+      if (!prev || t >= 1 || (o.flags & TRAFFIC_FLAG_TELEPORTED) !== 0) continue;
+      const j = prev.findTrafficAgent(o.agent);
+      if (j < 0) continue;
+      prev.readTrafficAgent(j, p);
+      if (((p.flags & TRAFFIC_FLAG_AWAKE) !== 0) !== awake) continue;
+      for (let k = 0; k < 3; k++) o.pos[k] = p.pos[k]! + (o.pos[k]! - p.pos[k]!) * t;
+      // nlerp along the shorter arc.
+      const dot = p.quat[0] * o.quat[0] + p.quat[1] * o.quat[1] + p.quat[2] * o.quat[2] + p.quat[3] * o.quat[3];
+      const sg = dot < 0 ? -1 : 1;
+      let len = 0;
+      for (let k = 0; k < 4; k++) {
+        const q = p.quat[k]! + (sg * o.quat[k]! - p.quat[k]!) * t;
+        o.quat[k] = q;
+        len += q * q;
+      }
+      len = len > 0 ? 1 / Math.sqrt(len) : 1;
+      for (let k = 0; k < 4; k++) o.quat[k] = o.quat[k]! * len;
+      o.speed = p.speed + (o.speed - p.speed) * t;
+      o.steer = p.steer + (o.steer - p.steer) * t;
+      o.brake = p.brake + (o.brake - p.brake) * t;
+    }
+    return n;
   }
 
   setTransmission(objectId: number, mode: TransmissionMode): void {
@@ -504,6 +606,7 @@ export class SimClient {
     if (this._fatal) return;
     this._fatal = message;
     this.rejectTerrain(`[sim] worker fatal: ${message}`);
+    for (const p of this.pendingTraffic.splice(0)) p.reject(new Error(`[sim] worker fatal: ${message}`));
     console.error(`[sim] fatal: ${message}${stack ? `\n${stack}` : ''}`);
     this.onFatal?.(message);
   }
@@ -526,7 +629,14 @@ export class SimClient {
           if (this.mismatchErrorsDue > 0) this.mismatchErrorsDue--;
           else this.pendingTerrain.shift()?.reject(new Error(msg.message));
         }
+        if (msg.command === 'setTraffic') this.pendingTraffic.shift()?.reject(new Error(msg.message));
         break;
+      case 'trafficReady': {
+        const { type: _type, ...info } = msg;
+        this._traffic = info;
+        this.pendingTraffic.shift()?.resolve(info);
+        break;
+      }
       case 'terrainReady': {
         const info: TerrainReadyInfo = {
           layoutId: msg.layoutId,
@@ -542,6 +652,7 @@ export class SimClient {
       }
       case 'unimplemented':
         console.warn(`[sim] worker: '${msg.command}' not implemented yet`);
+        if (msg.command === 'setTraffic') this.pendingTraffic.shift()?.reject(new Error('setTraffic not implemented by the worker'));
         break;
       case 'fatal':
         this.fail(msg.message, msg.stack);
