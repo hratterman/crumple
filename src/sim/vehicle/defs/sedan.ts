@@ -60,6 +60,19 @@ const Y_W = WHEEL_RADIUS; // wheel centre height at rest (tyres touch y = 0)
 /** ω·dt the auto-stiffness allocation solves for (structure limit 0.35, margin). */
 const OMEGA_DT_TARGET = 0.33;
 const BUDGET_PER_KG = (OMEGA_DT_TARGET / DT) ** 2; // Σk/m allowed, (N/m)/kg
+/**
+ * ω·dt target of the body SHELL nodes (stations s0…s13), above the 0.33 of
+ * everything else, still under the 0.5 hard limit.
+ * WHY: crash response is stiffness-limited. The ~590 kg shell must carry a
+ * ~250–400 kN crush force; at 0.33 its section stiffnesses were ~3 MN/m,
+ * so a section reached its yield force only after ~10 cm of ELASTIC
+ * closure per section: a 30 km/h frontal compressed the nose ~90 cm and
+ * gave most of it back (spring-back, rebound). (0.46/0.33)² ≈ 1.94× the
+ * stiffness. With ground/collider contact (≤ sqrt(0.2) in quadrature) a
+ * shell node stays ≤ 0.65, far inside the explicit-Euler bound of 2.
+ */
+const SHELL_OMEGA_DT_TARGET = 0.46;
+const SHELL_BUDGET_PER_KG = (SHELL_OMEGA_DT_TARGET / DT) ** 2;
 
 // ====================================================================== beam classes
 /**
@@ -76,15 +89,22 @@ const BUDGET_PER_KG = (OMEGA_DT_TARGET / DT) ** 2; // Σk/m allowed, (N/m)/kg
  * locked-wheel braking, full-lock cornering, 0.5 m drop: ≤ 3 kN in body
  * beams, ≤ 4.7 kN in mounts/subframe), so normal driving stays elastic;
  * the cage floor is ~4× the crumple zones', so crashes fold the ends first.
+ * P4 crash tuning (crash.ts harness): low yield strains in the crumple
+ * zones (a member that distorts yields, so crush is permanent instead of
+ * springing back), ζ 0.4 there (crush energy also goes into damping),
+ * cage links force-based (CRASH SECTIONS) so the cell never yields in a
+ * frontal; subframe anchors and suspension arms yield at modest loads
+ * (ARM_SCALE) so the front wheel is pushed back instead of acting as a
+ * rigid block that springs the nose back out.
  */
 const CLASSES = {
-  bumper: { w: 1.0, zeta: 0.25, yieldStrain: 0.03, minDeform: 1.5e3, breakRatio: 5 },
-  crash: { w: 1.0, zeta: 0.25, yieldStrain: 0.04, minDeform: 4e3, breakRatio: 6 },
-  bay: { w: 1.0, zeta: 0.25, yieldStrain: 0.05, minDeform: 6e3, breakRatio: 6 },
-  cage: { w: 1.3, zeta: 0.25, yieldStrain: 0.1, minDeform: 1.6e4, breakRatio: 5 },
-  /** Brittle: yields at 6 % strain, shatters at ~10 %. */
+  bumper: { w: 1.0, zeta: 0.4, yieldStrain: 0.03, minDeform: 1.5e3, breakRatio: 5 },
+  crash: { w: 1.0, zeta: 0.4, yieldStrain: 0.052, minDeform: 4e3, breakRatio: 6 },
+  bay: { w: 1.0, zeta: 0.4, yieldStrain: 0.05, minDeform: 6e3, breakRatio: 6 },
+  cage: { w: 1.3, zeta: 0.3, yieldStrain: 0.1, minDeform: 1.6e4, breakRatio: 5 },
+  /** Brittle: elastic, shatters at GLASS_BREAK_STRAIN (yieldStrain/breakRatio unused). */
   glass: { w: 0.4, zeta: 0.25, yieldStrain: 0.06, minDeform: 0, breakRatio: 1.7 },
-  subframe: { w: 1.5, zeta: 0.25, yieldStrain: 0.25, minDeform: 1.5e4, breakRatio: 5 },
+  subframe: { w: 1.5, zeta: 0.25, yieldStrain: 0.04, minDeform: 8e3, breakRatio: 5 },
   mount: { w: 1.0, zeta: 0.3, yieldStrain: 0.2, minDeform: 1.2e4, breakRatio: 5 },
   /** Engine block: never yields or breaks. */
   engine: { w: 2.0, zeta: 0.2, yieldStrain: 0, minDeform: 0, breakRatio: 0 },
@@ -110,12 +130,16 @@ interface Station {
 }
 
 const BULKHEAD_REACH = 1.0;
+/** Per-node (Σd/m)·dt target of the generator (validator limit 1). */
+const DAMP_BUDGET = 0.95;
+/** Open (bay) sections: cross-car braces between the two sides up to this length, m. */
+const BAY_CROSS_REACH = 1.2;
 /**
  * Longitudinal members (rails, sills, roof rails, tunnel) take this many
  * times a diagonal's share of each node's budget: bending stiffness lives in
  * them, shear only needs the diagonals.
  */
-const LONGITUDINAL_W = 2.5;
+const LONGITUDINAL_W = 4;
 const LINKS_PER_NODE = 3;
 
 /*
@@ -128,19 +152,19 @@ const LINKS_PER_NODE = 3;
  */
 const STATIONS: readonly Station[] = [
   // 0 front bumper face
-  { z: -2.3, closed: true, bulkhead: true, cls: 'bumper', mass: { bl: 3, bo: 3, bu: 3 },
+  { z: -2.3, closed: true, bulkhead: true, cls: 'bumper', mass: { bl: 10, bo: 6, bu: 10 },
     ring: [['bl', 0, 0.3], ['bl', 0.4, 0.3], ['bo', 0.74, 0.42], ['bu', 0.4, 0.5], ['bu', 0, 0.5]] },
   // 1 crash-can tips
-  { z: -2.04, closed: false, bulkhead: false, cls: 'crash', mass: { rl: 4, rh: 4, fd: 3 },
+  { z: -2.04, closed: false, bulkhead: false, cls: 'crash', mass: { rl: 20, rh: 20, fd: 6 },
     ring: [['rl', 0.42, 0.28], ['rh', 0.42, 0.5], ['fd', 0.74, 0.64]] },
   // 2 radiator support (bulkhead)
-  { z: -1.72, closed: true, bulkhead: true, cls: 'crash', mass: { rs: 5, rl: 6, rh: 6, fd: 4, rt: 5 },
+  { z: -1.72, closed: true, bulkhead: true, cls: 'crash', mass: { rs: 8, rl: 20, rh: 20, fd: 6, rt: 8 },
     ring: [['rs', 0, 0.26], ['rl', 0.42, 0.28], ['rh', 0.42, 0.52], ['fd', 0.79, 0.74], ['rt', 0, 0.76]] },
   // 3 front axle: shock towers
-  { z: Z_F, closed: false, bulkhead: false, cls: 'bay', mass: { rl: 7, rh: 7, tw: 8, fd: 5 },
+  { z: Z_F, closed: false, bulkhead: false, cls: 'bay', mass: { rl: 14, rh: 14, tw: 8, fd: 5 },
     ring: [['rl', 0.42, 0.28], ['rh', 0.42, 0.54], ['tw', 0.56, 0.88], ['fd', 0.82, 0.82]] },
   // 4 engine bay rear
-  { z: -1.06, closed: false, bulkhead: false, cls: 'bay', mass: { rl: 7, rh: 7, fd: 5 },
+  { z: -1.06, closed: false, bulkhead: false, cls: 'bay', mass: { rl: 14, rh: 14, fd: 5 },
     ring: [['rl', 0.43, 0.26], ['rh', 0.44, 0.54], ['fd', 0.84, 0.88]] },
   // 5 firewall / cowl / A-pillar base (bulkhead)
   { z: -0.8, closed: true, bulkhead: true, cls: 'cage', mass: { tn: 8, fl: 9, sl: 9, hp: 7, cw: 7, fw: 6 },
@@ -165,11 +189,58 @@ const STATIONS: readonly Station[] = [
   { z: 1.8, closed: true, bulkhead: false, cls: 'crash', mass: { tf: 7, rl: 5, rh: 5, qt: 4, ld: 3 },
     ring: [['tf', 0, 0.36], ['rl', 0.48, 0.34], ['rh', 0.48, 0.54], ['qt', 0.84, 0.92], ['ld', 0.6, 0.99], ['ld', 0, 1.0]] },
   // 12 rear panel / crash cans (bulkhead)
-  { z: 2.12, closed: true, bulkhead: true, cls: 'crash', mass: { tf: 4, rl: 4, rh: 4, qt: 3, ld: 3 },
+  { z: 2.12, closed: true, bulkhead: true, cls: 'crash', mass: { tf: 10, rl: 12, rh: 12, qt: 5, ld: 4 },
     ring: [['tf', 0, 0.38], ['rl', 0.48, 0.36], ['rh', 0.48, 0.56], ['qt', 0.8, 0.86], ['ld', 0.58, 0.96], ['ld', 0, 0.97]] },
   // 13 rear bumper face
-  { z: 2.4, closed: true, bulkhead: true, cls: 'bumper', mass: { bl: 3, bo: 3, bu: 3 },
+  { z: 2.4, closed: true, bulkhead: true, cls: 'bumper', mass: { bl: 10, bo: 6, bu: 10 },
     ring: [['bl', 0, 0.34], ['bl', 0.44, 0.34], ['bo', 0.76, 0.46], ['bu', 0.42, 0.54], ['bu', 0, 0.54]] },
+];
+/**
+ * Axial yield force of each SAFETY-CELL station gap g (station g → g+1,
+ * cage-class links), N; see CRASH SECTIONS in the generator. Set far above
+ * any frontal's section force (~250–400 kN), so the cell stays elastic
+ * while the crumple zones (strain-yield classes, 0 here) fold.
+ */
+const GAP_YIELD: readonly number[] = [0, 0, 0, 0, 0, 1.2e6, 1.2e6, 1.2e6, 1.2e6, 400e3, 0, 0, 0];
+/**
+ * Load-path members that change tag across a gap ([gap, front tag, rear
+ * tag], same side) get the longitudinal stiffness share like same-tag
+ * rails: bumper beam → crash cans, bay rails → floor rails / firewall, the
+ * fender (apron) rail → A-pillar, rear floor → rear rails.
+ */
+/**
+ * A gap's shear diagonals yield at no less than this fraction of the axial
+ * members' yield travel (deform = k·δ_g·max(cz, floor)): with pure cz
+ * scaling the near-transverse diagonals yielded first and the bay crushed
+ * by SHEARING sideways (stations sliding past each other) at a fraction of
+ * its axial capacity.
+ */
+const SHEAR_YIELD_FLOOR = 0.8;
+/** …and at no less than this fraction of a longitudinal member's yield force. */
+const SHEAR_FORCE_SHARE = 0.6;
+/** In-station members yield at this multiple of the adjacent gaps' yield travel. */
+const IN_STATION_YIELD_FACTOR = 3;
+/** Window glass breaks (shatters) at this strain; elastic below. */
+const GLASS_BREAK_STRAIN = 0.03;
+/** Door skins/frames (nodes s6/s8 dm, bt): yield strain, so a side impact dents them plastically. */
+const DOOR_YIELD_STRAIN = 0.05;
+const DOOR_MIN_DEFORM = 4e3;
+const DOOR_NODES = /^s[68]_(dm|bt|sl|fl)_/;
+const isDoor = (a: string, b: string): boolean => DOOR_NODES.test(a) || DOOR_NODES.test(b);
+/**
+ * Bumper beam ↔ crash-can links (the boundary of the s0 / s13 bulkheads):
+ * brittle relative to their yield, so a hard hit tears the bumper off.
+ */
+const BUMPER_MOUNT_BREAK_RATIO = 3;
+const isBumperMount = (a: string, b: string): boolean => /^s(0|13)_/.test(a) !== /^s(0|13)_/.test(b);
+const LOAD_PATH_CONTINUATIONS: readonly (readonly [number, string, string])[] = [
+  [0, 'bl', 'rl'],
+  [0, 'bu', 'rh'],
+  [4, 'rl', 'fl'],
+  [4, 'rh', 'fw'],
+  [4, 'fd', 'hp'],
+  [4, 'fd', 'cw'],
+  [9, 'fl', 'rl'],
 ];
 /** Stations whose links to the next station are window glass between these tags. */
 const GLASS_TAGS: readonly (readonly [string, string])[] = [
@@ -177,6 +248,43 @@ const GLASS_TAGS: readonly (readonly [string, string])[] = [
   ['cw', 'rf'],
   ['rf', 'dk'],
 ];
+/**
+ * Safety-cell members spanning two stations ([station, tag, station, tag],
+ * both sides; centre nodes once): sills, floor rails, tunnel and roof rails
+ * from bulkhead to bulkhead, plus X diagonals across each door frame.
+ * WHY: the per-node ω·dt budget keeps each cabin segment soft (sill ≈ 4e5
+ * N/m per 0.48 m), and a chain of soft segments folded: a 50 km/h frontal
+ * V-folded the floor at the front doors and tented the roof (the front's
+ * ~250 kN crush force acts below the cabin's centre of mass). A member
+ * spanning the door opening costs its end nodes the same budget as one
+ * segment but is not in series with the mid-door nodes, so the cell keeps
+ * its length and shape while the ends crush.
+ */
+const CABIN_SPANS: readonly (readonly [number, string, number, string])[] = [
+  [5, 'sl', 7, 'sl'],
+  [7, 'sl', 9, 'sl'],
+  [5, 'fl', 7, 'fl'],
+  [7, 'fl', 9, 'fl'],
+  [5, 'tn', 7, 'tn'],
+  [7, 'tn', 9, 'tn'],
+  [6, 'rf', 8, 'rf'],
+  [5, 'cw', 7, 'rf'],
+  [7, 'rf', 9, 'dk'],
+  [5, 'sl', 7, 'bt'],
+  [5, 'hp', 7, 'sl'],
+  [7, 'sl', 9, 'dk'],
+  [7, 'bt', 9, 'sl'],
+];
+/** Cabin spans yield only at this strain (they carry the frontal crush force past the doors elastically). */
+const CABIN_SPAN_YIELD_STRAIN = 0.25;
+const SPAN_KEYS = new Set(
+  CABIN_SPANS.flatMap(([i, ta, j, tb]) => [`s${i}_${ta}|s${j}_${tb}`]),
+);
+/** Both endpoints match a CABIN_SPANS entry (side suffix ignored). */
+const isCabinSpan = (a: string, b: string): boolean => {
+  const base = (id: string): string => id.replace(/_[LR]$/, '');
+  return SPAN_KEYS.has(`${base(a)}|${base(b)}`) || SPAN_KEYS.has(`${base(b)}|${base(a)}`);
+};
 /** B-pillar hoop / rear bulkhead: cross-cabin cage diagonals (tag a on one side → tag b on the other). */
 const CROSS_CABIN: readonly (readonly [number, string, string])[] = [
   [5, 'cw', 'sl'],
@@ -279,8 +387,15 @@ const KNUCKLE_NODE_MASS = 7.5;
  */
 const K_SUBFRAME = 1e6;
 const SUBFRAME_BUDGET_SHARE = 0.7;
-const SUBFRAME_DEFORM = 9e4;
-const SUBFRAME_BREAK = 1.8e5;
+/**
+ * Yield/break scale of the subframe and suspension arms (P4 crash tuning):
+ * 0.3 × the P2 values (deform 2.7e4 / 2.1e4 N, ≥ 4× the measured driving
+ * loads), so a frontal pushes the wheel back instead of loading the shell
+ * through a rigid wheel/subframe block.
+ */
+const ARM_SCALE = 0.3;
+const SUBFRAME_DEFORM = 9e4 * ARM_SCALE;
+const SUBFRAME_BREAK = 1.8e5 * ARM_SCALE;
 const subframePivotMass = (fixedK: number): number => round(fixedK / (BUDGET_PER_KG * SUBFRAME_BUDGET_SHARE), 2);
 /** Base mass of the upper-arm pivot nodes, kg (before the mass solve). */
 const PIVOT_NODE_MASS = 7;
@@ -473,6 +588,9 @@ export interface SedanDesign {
   hydroTravel: { L: number; R: number };
   bodyNodeCount: number;
   bodyBeamCount: number;
+  /** Per station gap: axial stiffness K_g (N/m) and the gap closure at section yield δ_g = F_g/K_g (m). */
+  gapAxialK: number[];
+  gapYieldTravel: number[];
 }
 
 function buildSedan(): { def: VehicleDef; design: SedanDesign } {
@@ -726,7 +844,13 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
   const isLongitudinal = (a: string, b: string): boolean => {
     const pa = pos.get(a)!;
     const pb = pos.get(b)!;
-    return tagOf.get(a) === tagOf.get(b) && Math.sign(pa[0]) === Math.sign(pb[0]);
+    if (Math.sign(pa[0]) !== Math.sign(pb[0])) return false;
+    const ta = tagOf.get(a)!;
+    const tb = tagOf.get(b)!;
+    if (ta === tb) return true;
+    const [lo, hi] = stationOf.get(a)! < stationOf.get(b)! ? [ta, tb] : [tb, ta];
+    const g = Math.min(stationOf.get(a)!, stationOf.get(b)!);
+    return LOAD_PATH_CONTINUATIONS.some(([gap, x, y]) => gap === g && x === lo && y === hi);
   };
   /** Pillars (cowl→roof rail, roof rail→deck) are structure, not glass: same side and outboard. */
   const sameColumn = (a: string, b: string): boolean => {
@@ -748,11 +872,28 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
         for (let q = p + 1; q < ids.length; q++) if (dist(ids[p]!, ids[q]!) <= BULKHEAD_REACH) link(ids[p]!, ids[q]!, st.cls);
     } else {
       for (const e of ids) if (!ring.includes(e)) for (const n of nearest(e, ids, 3)) link(e, n, st.cls);
+      if (!st.closed) {
+        // Open (engine-bay) sections: triangulate each side in-plane (an
+        // untriangulated polyline section distorts freely: the bay rails
+        // buckled inward elastically in a frontal and sprang back) and tie
+        // the lower rails across under the engine (subframe crossmember).
+        for (let p = 0; p < ids.length; p++)
+          for (let q = p + 1; q < ids.length; q++) {
+            const pa = pos.get(ids[p]!)!;
+            const pb = pos.get(ids[q]!)!;
+            const same = Math.sign(pa[0]) === Math.sign(pb[0]);
+            const cross = !same && dist(ids[p]!, ids[q]!) <= BAY_CROSS_REACH;
+            if ((same && dist(ids[p]!, ids[q]!) <= BULKHEAD_REACH) || cross) link(ids[p]!, ids[q]!, st.cls);
+          }
+      }
     }
     // Links to the next station: nearest LINKS_PER_NODE both ways.
     const next = stationIds[i + 1];
     if (next === undefined) return;
-    const cls: BeamClass = STATIONS[i + 1]!.cls === 'cage' || st.cls === 'cage' ? 'cage' : st.cls;
+    // The firewall gap (bay → cage) belongs to the crumple zone: its rails
+    // fold onto the firewall instead of loading the cell.
+    const fw = st.cls !== 'cage' && STATIONS[i + 1]!.cls === 'cage';
+    const cls: BeamClass = !fw && (STATIONS[i + 1]!.cls === 'cage' || st.cls === 'cage') ? 'cage' : st.cls;
     const pairs: [string, string][] = [];
     for (const a of ids) for (const b of nearest(a, next, LINKS_PER_NODE)) pairs.push([a, b]);
     for (const b of next) for (const a of nearest(b, ids, LINKS_PER_NODE)) pairs.push([a, b]);
@@ -761,6 +902,14 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
       else link(a, b, cls, isLongitudinal(a, b) ? LONGITUDINAL_W : 1);
     }
   });
+  // Safety-cell chords spanning two stations (see CABIN_SPANS).
+  for (const [i, ta, j, tb] of CABIN_SPANS) {
+    for (const sd of ['R', 'L'] as const) {
+      const a = pos.has(sid(i, ta, sd)) ? sid(i, ta, sd) : sid(i, ta);
+      const b = pos.has(sid(j, tb, sd)) ? sid(j, tb, sd) : sid(j, tb);
+      link(a, b, 'cage', ta === tb ? LONGITUDINAL_W : 1);
+    }
+  }
   for (const [i, ta, tb] of CROSS_CABIN) {
     link(sid(i, ta, 'R'), sid(i, tb, 'L'), 'cage');
     link(sid(i, ta, 'L'), sid(i, tb, 'R'), 'cage');
@@ -899,8 +1048,8 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
       // Axle stub: the generated hubI–hubO beam has the (soft) rim rate; this one makes the upright triangle rigid.
       const lf = linkFactor(front);
       fix({ a: ids.hubI, b: ids.hubO, type: 'normal', k: K_AXLE_STUB * lf, d: D_ARM, deform: 0, breakF: 0 });
-      for (const p of ids.lower) fix({ a: ids.hubI, b: p, type: 'normal', k: K_LOWER_ARM * lf, d: D_ARM, deform: 9e4, breakF: 1.8e5 });
-      for (const p of ids.upper) fix({ a: ids.kU, b: p, type: 'normal', k: K_UPPER_ARM, d: D_ARM, deform: 7e4, breakF: 1.4e5 });
+      for (const p of ids.lower) fix({ a: ids.hubI, b: p, type: 'normal', k: K_LOWER_ARM * lf, d: D_ARM, deform: 9e4 * ARM_SCALE, breakF: 1.8e5 * ARM_SCALE });
+      for (const p of ids.upper) fix({ a: ids.kU, b: p, type: 'normal', k: K_UPPER_ARM, d: D_ARM, deform: 7e4 * ARM_SCALE, breakF: 1.4e5 * ARM_SCALE });
       fix({
         a: ids.hubI,
         b: ids.tower,
@@ -980,6 +1129,11 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
     }
     hb.push({ a: H(0, 1), b: sid(2, 'rt'), w: 1, kind: 'latch' });
     hb.push({ a: H(1, 1), b: sid(2, 'rt'), w: 0.5, kind: 'rest' });
+    // Front edge: the latch links are near-horizontal, so the front corners
+    // and centre also rest on the crash-can tops / bumper beam (support).
+    hb.push({ a: H(0, 0), b: sid(1, 'rh', 'L'), w: 0.5, kind: 'rest' });
+    hb.push({ a: H(0, 2), b: sid(1, 'rh', 'R'), w: 0.5, kind: 'rest' });
+    hb.push({ a: H(0, 1), b: sid(0, 'bu'), w: 0.5, kind: 'rest' });
     hb.push({ a: H(3, 1), b: sid(5, 'fw', 'L'), w: 0.5, kind: 'rest' });
     hb.push({ a: H(3, 1), b: sid(5, 'fw', 'R'), w: 0.5, kind: 'rest' });
     const hoodW = new Map<string, number>();
@@ -1027,21 +1181,111 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
     W.set(b.b, (W.get(b.b) ?? 0) + w);
   }
   const share = (id: string): number => {
-    const budget = BUDGET_PER_KG * massOf.get(id)! - (fixedK.get(id) ?? 0);
+    const perKg = stationOf.has(id) ? SHELL_BUDGET_PER_KG : BUDGET_PER_KG;
+    const budget = perKg * massOf.get(id)! - (fixedK.get(id) ?? 0);
     if (!(budget > 0)) throw new Error(`sedan: node ${id} has no stiffness budget left`);
     return budget / W.get(id)!;
   };
-  const autoBeams: RigBeamDef[] = auto.map(({ a, b, cls, w }) => {
+  const kOf = auto.map(({ a, b, w }) => sig3(0.995 * w * Math.min(share(a), share(b))));
+  /*
+   * CRASH SECTIONS: body beams spanning consecutive stations g → g+1 (glass
+   * excepted) yield together when the gap closes by δ_g = F_g / K_g, where
+   * F_g = GAP_YIELD[g] (the section's axial yield force) and
+   * K_g = Σ k·cz² its axial stiffness (cz = |cos| of the beam to the car's
+   * long axis): deform = k·δ_g·cz (floored by the class minDeform).
+   * Uniform section yield = the gap crushes as one fold instead of one
+   * member at a time.
+   */
+  const gapOf = (a: string, b: string): number => {
+    const sa = stationOf.get(a);
+    const sb = stationOf.get(b);
+    if (sa === undefined || sb === undefined || Math.abs(sa - sb) !== 1) return -1;
+    return Math.min(sa, sb);
+  };
+  const czOf = (a: string, b: string): number => Math.abs(pos.get(a)![2] - pos.get(b)![2]) / dist(a, b);
+  const gapK = new Float64Array(STATIONS.length);
+  const isLong = (i: number): boolean => auto[i]!.w > CLASSES[auto[i]!.cls].w;
+  // Longitudinal members (rails, sills, …) carry the section yield force
+  // F_g in equal shares; the rest of the gap yields at the rails' travel.
+  const gapLongCz = new Float64Array(STATIONS.length);
+  auto.forEach(({ a, b, cls }, i) => {
+    const g = gapOf(a, b);
+    if (g < 0 || cls === 'glass') return;
+    gapK[g]! += kOf[i]! * czOf(a, b) ** 2;
+    if (isLong(i)) gapLongCz[g]! += czOf(a, b);
+  });
+  const longDeform = Array.from(gapLongCz, (c, g) => (g < GAP_YIELD.length && c > 0 ? GAP_YIELD[g]! / c : 0));
+  const travelSum = new Float64Array(STATIONS.length);
+  const travelN = new Float64Array(STATIONS.length);
+  auto.forEach(({ a, b, cls }, i) => {
+    const g = gapOf(a, b);
+    if (g < 0 || cls === 'glass' || !isLong(i)) return;
+    travelSum[g]! += longDeform[g]! / (kOf[i]! * czOf(a, b));
+    travelN[g]!++;
+  });
+  const gapYieldTravel = Array.from(travelSum, (t, g) => (travelN[g]! > 0 ? t / travelN[g]! : 0));
+  const autoBeams: RigBeamDef[] = auto.map(({ a, b, cls }, i) => {
     const spec = CLASSES[cls];
-    const k = sig3(0.995 * w * Math.min(share(a), share(b)));
+    const k = kOf[i]!;
     const ma = massOf.get(a)!;
     const mb = massOf.get(b)!;
     const d = sig3(2 * spec.zeta * Math.sqrt((k * ma * mb) / (ma + mb)));
     if (spec.yieldStrain === 0) return { a, b, type: 'normal', k, d, deform: 0, breakF: 0 };
-    const deform = sig3(Math.max(spec.yieldStrain * k * dist(a, b), spec.minDeform));
-    return { a, b, type: 'normal', k, d, deform, breakF: sig3(spec.breakRatio * deform) };
+    const g = gapOf(a, b);
+    let section = 0;
+    if (cls === 'glass') {
+      // Brittle: elastic up to its break strain, then shatters (never yields).
+      return { a, b, type: 'normal', k, d, deform: 0, breakF: sig3(GLASS_BREAK_STRAIN * k * dist(a, b)) };
+    }
+    if (isDoor(a, b)) {
+      const deform = sig3(Math.max(DOOR_YIELD_STRAIN * k * dist(a, b), DOOR_MIN_DEFORM));
+      return { a, b, type: 'normal', k, d, deform, breakF: sig3(spec.breakRatio * deform) };
+    }
+    if (cls === 'cage') {
+      if (g >= 0) {
+        section = isLong(i)
+          ? longDeform[g]!
+          : Math.max(k * gapYieldTravel[g]! * Math.max(czOf(a, b), SHEAR_YIELD_FLOOR), SHEAR_FORCE_SHARE * longDeform[g]!);
+      }
+      else {
+        // In-station (ring / bulkhead / bay brace) members keep the section's
+        // shape: they yield only at the adjacent gaps' yield travel.
+        const st = stationOf.get(a);
+        if (st !== undefined && st === stationOf.get(b)) {
+          const near = Math.max(gapYieldTravel[st - 1] ?? 0, gapYieldTravel[st] ?? 0);
+          section = k * near * IN_STATION_YIELD_FACTOR;
+        }
+      }
+    }
+    if (section === 0 && isCabinSpan(a, b)) section = CABIN_SPAN_YIELD_STRAIN * k * dist(a, b);
+    const deform = sig3(Math.max(section > 0 ? section : spec.yieldStrain * k * dist(a, b), spec.minDeform));
+    const mount = isBumperMount(a, b);
+    return { a, b, type: 'normal', k, d, deform, breakF: sig3((mount ? BUMPER_MOUNT_BREAK_RATIO : spec.breakRatio) * deform) };
   });
 
+  /*
+   * Damping budget: (Σd/m)·dt ≤ DAMP_BUDGET per node (the validator's limit
+   * is 1). Light nodes with many auto beams (radiator support, firewall
+   * tunnel) exceeded it at the crash-zone damping ratios; their auto beams'
+   * d (and the hood's) is scaled down uniformly (never the fixed beams).
+   */
+  {
+    const sumD = new Map<string, number>();
+    for (const b of [...autoBeams, ...fixed, ...hoodBeams]) {
+      for (const id of [b.a, b.b]) sumD.set(id, (sumD.get(id) ?? 0) + (b.d ?? 0));
+    }
+    for (const w of wheels) for (const id of w.attach) sumD.set(id, (sumD.get(id) ?? 0) + 2 * (w.attachDamp ?? 0));
+    const scale = (id: string): number => {
+      const m = massOf.get(id);
+      if (m === undefined) return 1;
+      const z = (sumD.get(id)! * DT) / m;
+      return z > DAMP_BUDGET ? DAMP_BUDGET / z : 1;
+    };
+    for (const b of [...autoBeams, ...hoodBeams]) {
+      const f = Math.min(scale(b.a), scale(b.b));
+      if (f < 1) b.d = sig3(b.d! * f);
+    }
+  }
   const beams = [...autoBeams, ...fixed, ...hoodBeams];
   const def: VehicleDef = {
     name: 'sedan',
@@ -1081,6 +1325,8 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
     hydroTravel,
     bodyNodeCount: nodes.length,
     bodyBeamCount: beams.length,
+    gapAxialK: Array.from(gapK.slice(0, STATIONS.length - 1)),
+    gapYieldTravel: gapYieldTravel.slice(0, STATIONS.length - 1),
   };
   return { def, design };
 }

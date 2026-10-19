@@ -1,0 +1,405 @@
+/**
+ * Headless crash harness (worker-side, test/tool use only; docs/CONTRACTS.md
+ * "Crash tuning targets"). Drives a VehicleDef into a rigid static collider
+ * in a real SimEngine and measures crush, cabin intrusion, rebound, damage
+ * and stability.
+ *
+ * Set-up: plane ground y = 0 (concrete), the vehicle settled 0.5 s at rest,
+ * then every node given the test velocity (wheel rings pre-spun to rolling
+ * for frontal tests), no throttle/brake, neutral; 2.0 s simulated after the
+ * first contact. Measures use node ids (the vehicle frame):
+ *   crush       rest − final distance between the crash-can tips (mean of
+ *               s1_rl_*, s1_rh_*) and the B-pillar floor (s7_fl_*, s7_sl_*),
+ *               along the car's long axis (B-pillar refs → firewall ring).
+ *   intrusion   same for the firewall ring (s5_fl_*, s5_sl_*, s5_hp_*, s5_cw_*).
+ *   doorIntrusion (side pole) rest − final width s6_dm_R ↔ s6_dm_L.
+ *   rebound     peak COM speed away from the barrier after contact ends.
+ *
+ * Not a hot path (allocates); never imported by the engine.
+ */
+import { MaterialId } from '../../protocol/messages';
+import type { ColliderDef } from '../../world/types';
+import { SimEngine, SIM_HZ } from '../engine';
+import type { SimObject } from '../types';
+import { SEDAN } from './defs/sedan';
+import { setMotion, type HandlingSim } from './handling';
+import type { CompiledVehicle, VehicleDef, VehicleRuntime } from './types';
+
+export type CrashKind = 'frontal' | 'offset' | 'pole';
+
+export interface CrashSpec {
+  kind: CrashKind;
+  speedKmh: number;
+  /** Offset frontal: overlap fraction of the body width (struck side = vehicle left). Default 0.4. */
+  overlap?: number;
+  def?: VehicleDef;
+  /** Seconds simulated after first contact. Default 2.0. */
+  afterContactS?: number;
+}
+
+export interface CrashResult {
+  spec: CrashSpec;
+  /** Permanent (final) and max dynamic crush, m. */
+  crush: number;
+  crushMax: number;
+  intrusion: number;
+  intrusionMax: number;
+  /** Side pole: final / max door intrusion, m; also the sill width change. */
+  doorIntrusion: number;
+  doorIntrusionMax: number;
+  sillIntrusion: number;
+  /** Peak COM speed away from the barrier, m/s. */
+  rebound: number;
+  /** Max penetration of any node into the barrier, m. */
+  maxPenetration: number;
+  finite: boolean;
+  /** Max node speed after 1 s, m/s (must stay ≤ the initial speed). */
+  maxSpeedLate: number;
+  initialSpeed: number;
+  /** KE at the end / initial KE. */
+  keRatio: number;
+  /** Longest beam (both ends non-exempt) at the end, m. */
+  maxSpan: number;
+  brokenBeams: number;
+  /** Body beams plastically deformed (|L0 − L0_orig| > 0.1 %) / body beams (hydros excluded). */
+  plasticFraction: number;
+  /** Bitmask FL 1, FR 2, RL 4, RR 8. */
+  wheelsDetached: number;
+  /** Hood centre latch hood_0C–s2_rt broken / any latch broken. */
+  latchBroken: boolean;
+  /** Fraction of the front bumper's boundary beams (s0_* ↔ rest) broken. */
+  bumperBrokenFraction: number;
+  /** Fraction of windscreen glass beams (s5_cw* ↔ s6_rf*) broken. */
+  windscreenBrokenFraction: number;
+  /** Pole: every node stayed on the impact side of the pole axis (else the first offender). */
+  poleSideKept: boolean;
+  poleViolator: string;
+  /** Node id of maxSpeedLate. */
+  fastestLateNode: string;
+  /** Crush (m) sampled every 5 ms after contact (diagnostics). */
+  crushTrace: number[];
+}
+
+const G = 9.81;
+const SETTLE_S = 0.5;
+/** Gap between the vehicle and the barrier at release, m. */
+const GAP = 0.03;
+const POLE_RADIUS = 0.15;
+/** Pole pull-through check: nodes within this distance (along the car) of the pole axis, i.e. inside its footprint (r 0.15 + node radius); nodes farther away may wrap past the axis plane. */
+const POLE_NEAR = 0.2;
+
+interface Sim extends HandlingSim {
+  eng: SimEngine;
+  obj: SimObject;
+  veh: VehicleRuntime;
+  cv: CompiledVehicle;
+}
+
+function createSim(def: VehicleDef): Sim {
+  const eng = new SimEngine({
+    gravity: [0, -G, 0],
+    debugStrains: false,
+    capacity: { maxObjects: 2, nodeCapacity: 2048, beamCapacity: 8192 },
+  });
+  eng.setGroundPlane(0, MaterialId.concrete);
+  const objectId = 1;
+  const obj = eng.spawnVehicle(objectId, def, { pos: [0, 0, 0], quat: [0, 0, 0, 1] }, 'auto');
+  const veh = eng.getVehicle(objectId)!;
+  return { eng, obj, veh, cv: veh.vehicle, objectId };
+}
+
+/** Node indices (rig-local) matching any of the patterns (`*` = any suffix). */
+export function nodesMatching(cv: CompiledVehicle, patterns: readonly string[]): number[] {
+  const out: number[] = [];
+  const ids = cv.rig.nodeIds;
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i]!;
+    if (patterns.some((p) => (p.endsWith('*') ? id.startsWith(p.slice(0, -1)) : id === p))) out.push(i);
+  }
+  if (out.length === 0) throw new Error(`crash: no nodes match ${patterns.join(', ')}`);
+  return out;
+}
+
+export function runCrash(spec: CrashSpec): CrashResult {
+  const sim = createSim(spec.def ?? SEDAN);
+  const { eng, obj, cv, veh } = sim;
+  const s = eng.state;
+  const n0 = obj.nodeStart;
+  const nN = obj.nodeCount;
+  const P = (i: number): [number, number, number] => [s.posX[n0 + i]!, s.posY[n0 + i]!, s.posZ[n0 + i]!];
+  const mean = (ids: number[]): [number, number, number] => {
+    const m: [number, number, number] = [0, 0, 0];
+    for (const i of ids) {
+      const p = P(i);
+      for (let k = 0; k < 3; k++) m[k] = m[k]! + p[k]! / ids.length;
+    }
+    return m;
+  };
+  const dist = (a: number[], b: number[]): number => Math.hypot(a[0]! - b[0]!, a[1]! - b[1]!, a[2]! - b[2]!);
+
+  const tips = nodesMatching(cv, ['s1_rl_*', 's1_rh_*']);
+  const bpillar = nodesMatching(cv, ['s7_fl_*', 's7_sl_*']);
+  const firewall = nodesMatching(cv, ['s5_fl_*', 's5_sl_*', 's5_hp_*', 's5_cw_*']);
+  const [dmR] = nodesMatching(cv, ['s6_dm_R']);
+  const [dmL] = nodesMatching(cv, ['s6_dm_L']);
+  const [slR] = nodesMatching(cv, ['s6_sl_R']);
+  const [slL] = nodesMatching(cv, ['s6_sl_L']);
+
+  // Rest references come from the undeformed rig (before settling).
+  const restP = (i: number): number[] => [cv.rig.nodePos[3 * i]!, cv.rig.nodePos[3 * i + 1]!, cv.rig.nodePos[3 * i + 2]!];
+  const restMean = (ids: number[]): number[] => {
+    const m = [0, 0, 0];
+    for (const i of ids) for (let k = 0; k < 3; k++) m[k]! += restP(i)[k]! / ids.length;
+    return m;
+  };
+  /**
+   * Crush is measured ALONG the vehicle's long axis, taken from the safety
+   * cell (B-pillar refs → firewall ring, which stays rigid): crash-can tips
+   * splayed sideways or folded down do not count as length kept.
+   */
+  const axial = (a: number[], b: number[], fw: number[]): number => {
+    const ux = fw[0]! - b[0]!;
+    const uy = fw[1]! - b[1]!;
+    const uz = fw[2]! - b[2]!;
+    const l = Math.hypot(ux, uy, uz);
+    return ((a[0]! - b[0]!) * ux + (a[1]! - b[1]!) * uy + (a[2]! - b[2]!) * uz) / l;
+  };
+  const crushNow = (): number => crushRest - axial(mean(tips), mean(bpillar), mean(firewall));
+  const crushRest = axial(restMean(tips), restMean(bpillar), restMean(firewall));
+  const intrRest = dist(restMean(firewall), restMean(bpillar));
+  const doorRest = dist(restP(dmR!), restP(dmL!));
+  const sillRest = dist(restP(slR!), restP(slL!));
+
+  eng.setInput(1, { gearSelect: 0, throttle: 0, brake: 0, handbrake: 0 });
+  for (let t = 0; t < SETTLE_S * SIM_HZ; t++) eng.step();
+
+  // Body extent after settling (vehicle frame = world here: identity spawn).
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let minX = Infinity;
+  for (let i = 0; i < cv.bodyNodeCount; i++) {
+    const p = P(i);
+    const r = s.radius[n0 + i]!;
+    minZ = Math.min(minZ, p[2] - r);
+    maxX = Math.max(maxX, p[0] + r);
+    minX = Math.min(minX, p[0] - r);
+  }
+  for (let i = cv.bodyNodeCount; i < nN; i++) {
+    maxX = Math.max(maxX, P(i)[0] + s.radius[n0 + i]!);
+    minX = Math.min(minX, P(i)[0] - s.radius[n0 + i]!);
+  }
+
+  const v = spec.speedKmh / 3.6;
+  // Barrier + impact direction d (unit, the direction the car travels).
+  let barrier: ColliderDef;
+  let dir: [number, number, number];
+  let poleX = 0;
+  let faceZ = 0;
+  if (spec.kind === 'pole') {
+    const zPole = mean(nodesMatching(cv, ['s6_dm_*']))[2];
+    poleX = maxX + GAP + POLE_RADIUS;
+    barrier = { id: 'crashPole', kind: 'cylinder', pos: [poleX, 3, zPole], quat: [0, 0, 0, 1], size: [POLE_RADIUS, 3, 0], material: MaterialId.metal };
+    dir = [1, 0, 0];
+  } else {
+    faceZ = minZ - GAP;
+    const hz = 0.6;
+    if (spec.kind === 'frontal') {
+      barrier = { id: 'crashWall', kind: 'box', pos: [0, 1.5, faceZ - hz], quat: [0, 0, 0, 1], size: [6, 1.5, hz], material: MaterialId.concrete };
+    } else {
+      // Struck side = vehicle left (−X): the barrier covers overlap × body width from the left edge.
+      const width = maxX - minX;
+      const edge = minX + (spec.overlap ?? 0.4) * width;
+      const hx = 4;
+      barrier = { id: 'crashWall', kind: 'box', pos: [edge - hx, 1.5, faceZ - hz], quat: [0, 0, 0, 1], size: [hx, 1.5, hz], material: MaterialId.concrete };
+    }
+    dir = [0, 0, -1];
+  }
+  eng.setExtraColliders([barrier]);
+
+  // Release: rigid velocity along dir; frontal tests roll the wheels.
+  if (spec.kind === 'pole') {
+    for (let i = n0; i < n0 + nN; i++) {
+      s.velX[i] = v;
+      s.velY[i] = 0;
+      s.velZ[i] = 0;
+    }
+  } else {
+    setMotion(sim, v, 0);
+  }
+
+  let ke0 = 0;
+  for (let i = n0; i < n0 + nN; i++) {
+    const m = 1 / s.invMass[i]!;
+    ke0 += 0.5 * m * (s.velX[i]! ** 2 + s.velY[i]! ** 2 + s.velZ[i]! ** 2);
+  }
+
+  /** Penetration of node i into the barrier (> 0 = inside the contact shell). */
+  const penetration = (i: number): number => {
+    const p = P(i);
+    const r = s.radius[n0 + i]!;
+    if (spec.kind === 'pole') {
+      const dx = p[0] - poleX;
+      const dz = p[2] - barrier.pos[2];
+      return r + POLE_RADIUS - Math.hypot(dx, dz);
+    }
+    const inX = spec.kind === 'frontal' || p[0] <= barrier.pos[0] + barrier.size[0];
+    return inX && p[1] < 3 ? r - (p[2] - faceZ) : -Infinity;
+  };
+
+  const maxSteps = Math.round((spec.afterContactS ?? 2.0) * SIM_HZ);
+  let contactTick = -1;
+  let inContact = false;
+  let contactEnded = false;
+  let crushMax = 0;
+  let intrMax = 0;
+  let doorMax = 0;
+  let rebound = 0;
+  let maxPen = 0;
+  let maxSpeedLate = 0;
+  let poleSideKept = true;
+  let poleViolator = '';
+  let fastestLateNode = '';
+  const crushTrace: number[] = [];
+  const comVel = (): number => {
+    let m = 0;
+    let vd = 0;
+    for (let i = n0; i < n0 + nN; i++) {
+      const mi = 1 / s.invMass[i]!;
+      m += mi;
+      vd += mi * (s.velX[i]! * dir[0] + s.velY[i]! * dir[1] + s.velZ[i]! * dir[2]);
+    }
+    return vd / m;
+  };
+  const hardCap = maxSteps + SIM_HZ; // contact must start within 1 s
+  for (let t = 0; t < hardCap; t++) {
+    eng.step();
+    let touching = false;
+    for (let i = 0; i < nN; i++) {
+      const pen = penetration(i);
+      if (pen > 0) {
+        touching = true;
+        if (pen > maxPen) maxPen = pen;
+      }
+      if (spec.kind === 'pole' && P(i)[0] > poleX && Math.abs(P(i)[2] - barrier.pos[2]) < POLE_NEAR && poleSideKept) {
+        poleSideKept = false;
+        poleViolator = `${cv.rig.nodeIds[i]!}@${t - contactTick}`;
+      }
+    }
+    if (contactTick < 0 && touching) contactTick = t;
+    if (contactTick < 0) continue;
+    if (touching) inContact = true;
+    else if (inContact) contactEnded = true;
+    const since = t - contactTick;
+    const crush = crushNow();
+    const intr = intrRest - dist(mean(firewall), mean(bpillar));
+    const door = doorRest - dist(P(dmR!), P(dmL!));
+    if (crush > crushMax) crushMax = crush;
+    if (intr > intrMax) intrMax = intr;
+    if (door > doorMax) doorMax = door;
+    if (since % 10 === 0) crushTrace.push(crush);
+    if (contactEnded) rebound = Math.max(rebound, -comVel());
+    if (since >= SIM_HZ) {
+      // Body nodes and wheel hubs (a free-spinning wheel's rim/tyre nodes legitimately exceed the car's speed).
+      for (let i = n0; i < n0 + nN; i++) {
+        if (i - n0 >= cv.bodyNodeCount && !/\.hub[IO]$/.test(cv.rig.nodeIds[i - n0]!)) continue;
+        const sp = Math.hypot(s.velX[i]!, s.velY[i]!, s.velZ[i]!);
+        if (sp > maxSpeedLate) {
+          maxSpeedLate = sp;
+          fastestLateNode = cv.rig.nodeIds[i - n0]!;
+        }
+      }
+    }
+    if (since >= maxSteps) break;
+  }
+  if (contactTick < 0) throw new Error(`crash ${spec.kind}: no contact within 1 s`);
+
+  // ---- final state
+  let finite = true;
+  let ke = 0;
+  for (let i = n0; i < n0 + nN; i++) {
+    for (const a of [s.posX, s.posY, s.posZ, s.velX, s.velY, s.velZ]) if (!Number.isFinite(a[i]!)) finite = false;
+    const m = 1 / s.invMass[i]!;
+    ke += 0.5 * m * (s.velX[i]! ** 2 + s.velY[i]! ** 2 + s.velZ[i]! ** 2);
+  }
+  const ids = cv.rig.nodeIds;
+  const exempt = (i: number): boolean => i >= cv.bodyNodeCount || /^(s0_|s13_|hood_)/.test(ids[i]!);
+  const b0 = obj.beamStart;
+  let maxSpan = 0;
+  let broken = 0;
+  let plastic = 0;
+  let bodyBeams = 0;
+  for (let b = 0; b < cv.rig.beamCount; b++) {
+    const g = b0 + b;
+    const a = s.aIdx[g]! - n0;
+    const c = s.bIdx[g]! - n0;
+    if (s.active[g] === 0) broken++;
+    if (!exempt(a) && !exempt(c)) maxSpan = Math.max(maxSpan, dist(P(a), P(c)));
+    if (b < cv.bodyBeamCount && s.type[g] !== 3) {
+      bodyBeams++;
+      if (s.active[g] === 0 || Math.abs(s.restLen[g]! - s.restLen0[g]!) > 1e-3 * s.restLen0[g]!) plastic++;
+    }
+  }
+  let detached = 0;
+  for (const w of veh.wheels) if (w.detached !== 0) detached |= 1 << w.wheel.corner;
+
+  const beamsWhere = (pred: (a: string, b: string) => boolean): number[] => {
+    const out: number[] = [];
+    for (let b = 0; b < cv.bodyBeamCount; b++) {
+      const a = ids[cv.rig.beamA[b]!]!;
+      const c = ids[cv.rig.beamB[b]!]!;
+      if (pred(a, c) || pred(c, a)) out.push(b);
+    }
+    return out;
+  };
+  const brokenFraction = (list: number[]): number => (list.length === 0 ? 0 : list.filter((b) => s.active[b0 + b] === 0).length / list.length);
+  const latch = beamsWhere((a, c) => a === 'hood_0C' && c === 's2_rt');
+  const bumper = beamsWhere((a, c) => a.startsWith('s0_') && !c.startsWith('s0_'));
+  const windscreen = beamsWhere((a, c) => a.startsWith('s5_cw') && c.startsWith('s6_rf'));
+
+  return {
+    spec,
+    crush: crushNow(),
+    crushMax,
+    intrusion: intrRest - dist(mean(firewall), mean(bpillar)),
+    intrusionMax: intrMax,
+    doorIntrusion: doorRest - dist(P(dmR!), P(dmL!)),
+    doorIntrusionMax: doorMax,
+    sillIntrusion: sillRest - dist(P(slR!), P(slL!)),
+    rebound,
+    maxPenetration: maxPen,
+    finite,
+    maxSpeedLate,
+    initialSpeed: v,
+    keRatio: ke / ke0,
+    maxSpan,
+    brokenBeams: broken,
+    plasticFraction: plastic / bodyBeams,
+    wheelsDetached: detached,
+    latchBroken: brokenFraction(latch) > 0,
+    bumperBrokenFraction: brokenFraction(bumper),
+    windscreenBrokenFraction: brokenFraction(windscreen),
+    poleSideKept,
+    poleViolator,
+    fastestLateNode,
+    crushTrace,
+  };
+}
+
+/** One-line summary (reports). */
+export function formatCrash(r: CrashResult): string {
+  const f = (x: number, d = 1): string => (Number.isFinite(x) ? x.toFixed(d) : String(x));
+  const cm = (x: number): string => f(x * 100);
+  const head = `${r.spec.kind} ${r.spec.speedKmh} km/h`;
+  const main =
+    r.spec.kind === 'pole'
+      ? `door ${cm(r.doorIntrusion)} cm (max ${cm(r.doorIntrusionMax)}), sill ${cm(r.sillIntrusion)} cm, poleSide ${r.poleSideKept}`
+      : `crush ${cm(r.crush)} cm (max ${cm(r.crushMax)}), intrusion ${cm(r.intrusion)} cm (max ${cm(r.intrusionMax)})`;
+  return (
+    `${head}: ${main}, rebound ${f(r.rebound, 2)} m/s, pen ${cm(r.maxPenetration)} cm, ` +
+    `broken ${r.brokenBeams}, plastic ${f(r.plasticFraction * 100)} %, wheels ${r.wheelsDetached}, ` +
+    `latch ${r.latchBroken ? 'broken' : 'held'}, bumper ${f(r.bumperBrokenFraction * 100, 0)} %, ` +
+    `windscreen ${f(r.windscreenBrokenFraction * 100, 0)} %, KE ${f(r.keRatio * 100)} %, ` +
+    `vLate ${f(r.maxSpeedLate, 2)}/${f(r.initialSpeed, 2)} (${r.fastestLateNode})`+(r.poleViolator ? ` poleViolator ${r.poleViolator}` : '')+`, span ${f(r.maxSpan, 2)} m, finite ${r.finite}`
+  );
+}
+

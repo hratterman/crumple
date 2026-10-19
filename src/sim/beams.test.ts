@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   applyBeamForces,
   BOUND_STIFFNESS_RAMP,
+  PLASTIC_COMPRESS_FLOOR,
   PLASTIC_K_FLOOR,
   PLASTIC_RATCHET,
   PLASTIC_WEAKEN,
@@ -172,17 +173,18 @@ describe('applyBeamForces: elastic', () => {
 });
 
 describe('applyBeamForces: plasticity', () => {
-  it('ratchets restLen by 2% of the excess strain and weakens k by 1.5% per step, exactly', () => {
+  it('return-maps restLen by PLASTIC_RATCHET of the excess stretch and weakens k by 1.5% per plastic step, exactly', () => {
     const k0 = 1e5;
     const deform = 500;
-    for (const x of [1.02, 0.98]) {
-      const s = pair(x, 0, 0, { k: k0, deform }); // both pinned: fixed geometry
+    for (const dir of [1, -1]) {
+      const s = pair(1, 0, 0, { k: k0, deform }); // both pinned: geometry driven by the test
       const sink = recordingSink();
       let rest = 1;
       let k = k0;
       let steps = 0;
       for (let n = 0; n < 40; n++) {
-        const dist = x;
+        const dist = 1 + dir * 0.002 * (n + 1); // monotonic loading, 0.2 % per step
+        s.posX[1] = dist;
         const fs = k * (dist - rest);
         const fAbs = Math.abs(fs);
         const restBefore = rest;
@@ -201,24 +203,47 @@ describe('applyBeamForces: plasticity', () => {
         s.frcX[0] = 0;
         s.frcX[1] = 0;
       }
-      expect(steps).toBeGreaterThan(5);
-      // Rest length moved toward the current length.
-      if (x > 1) expect(s.restLen[0]).toBeGreaterThan(1);
-      else expect(s.restLen[0]).toBeLessThan(1);
+      expect(steps).toBeGreaterThan(20);
+      // Rest length followed the loading; the elastic force stays at the threshold.
+      if (dir > 0) expect(s.restLen[0]).toBeGreaterThan(1.05);
+      else expect(s.restLen[0]).toBeLessThan(0.95);
       expect(sink.breaks).toHaveLength(0);
       expect(s.restLen0[0]).toBe(1);
       expect(s.k0[0]).toBe(k0);
     }
   });
 
-  it('stiffness never drops below 0.25·k0', () => {
+  it('plastic weakening follows PLASTIC_WEAKEN per plastic step, floored at PLASTIC_K_FLOOR·k0', () => {
     const k0 = 1e6;
-    const s = pair(1.5, 0, 0, { k: k0, deform: 1e-9 });
+    const s = pair(1, 0, 0, { k: k0, deform: 1e-9 });
     const sink = recordingSink();
-    for (let n = 0; n < 300; n++) applyBeamForces(s, 0, 1, sink, false);
-    expect(s.k[0]).toBe(PLASTIC_K_FLOOR * k0);
-    expect(s.restLen[0]).toBeGreaterThan(1);
-    expect(s.restLen[0]).toBeLessThan(1.5);
+    let k = k0;
+    for (let n = 0; n < 300; n++) {
+      s.posX[1] = 1 + 0.001 * (n + 1);
+      applyBeamForces(s, 0, 1, sink, false);
+      k = Math.max(k * PLASTIC_WEAKEN, PLASTIC_K_FLOOR * k0);
+    }
+    expect(s.k[0]).toBe(k);
+    expect(s.k[0]).toBeGreaterThanOrEqual(PLASTIC_K_FLOOR * k0);
+    expect(s.restLen[0]).toBeGreaterThan(1.2);
+    expect(s.restLen[0]).toBeLessThan(1.3);
+  });
+
+  it('compression lockup: plastic shortening stops at PLASTIC_COMPRESS_FLOOR·L0 and a locked beam does not break in compression', () => {
+    const s = pair(1, 0, 0, { k: 1e5, deform: 100, breakF: 1e4 });
+    const sink = recordingSink();
+    for (let n = 0; n < 1000; n++) {
+      s.posX[1] = 1 - 0.001 * (n + 1); // to 0.0: far past the lockup
+      applyBeamForces(s, 0, 1, sink, false);
+    }
+    expect(s.restLen[0]).toBe(PLASTIC_COMPRESS_FLOOR);
+    expect(Math.abs(1e5 * (0 - PLASTIC_COMPRESS_FLOOR))).toBeGreaterThan(1e4);
+    expect(s.active[0]).toBe(1); // |f| ≫ breakF in compression, but locked
+    expect(sink.breaks).toHaveLength(0);
+    // Tension still breaks.
+    s.posX[1] = 2;
+    applyBeamForces(s, 0, 1, sink, false);
+    expect(s.active[0]).toBe(0);
   });
 
   it('does not yield at or below the deform threshold', () => {

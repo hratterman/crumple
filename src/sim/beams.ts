@@ -16,10 +16,35 @@ import { BeamType, type ApplyBeamForces } from './types';
 
 /** Extra stiffness (multiple of k) beyond bounded/shock bounds. Keeps ω·dt within the explicit-Euler envelope. */
 export const BOUND_STIFFNESS_RAMP = 4;
-/** Fraction of the excess plastic strain absorbed into restLen per step. */
-export const PLASTIC_RATCHET = 0.02;
-/** Stiffness multiplier per plastic step. */
-export const PLASTIC_WEAKEN = 0.985;
+/**
+ * Fraction of the excess (beyond-threshold) elastic stretch absorbed into
+ * restLen per step (time constant ≈ 1/RATCHET steps = 5 ms).
+ * WHY 0.1 (was 0.02): at crash rates a 0.3 m member strains ~1 %/step, and
+ * the 0.02 ratchet lagged ~25 ms, so members carried several × their
+ * yield force elastically and gave most of it back on unloading. Full
+ * return mapping (1) made yield rate-independent but then no ductile member
+ * could ever exceed `deform`, i.e. reach `breakF`; at 0.1 the force
+ * overshoots the threshold in proportion to the crush RATE, which is what
+ * lets a 100 km/h hit tear the bumper off while a 30 km/h one only bends
+ * it (crash.ts harness), and adds rate-dependent crush resistance.
+ */
+export const PLASTIC_RATCHET = 0.1;
+/**
+ * Compression lockup: plastic shortening stops at this fraction of the
+ * original rest length (a fully folded crash rail is a solid stack of
+ * metal). Past it the beam is elastic again about the floor length and
+ * cannot break in compression, so a crushed zone hardens and hands the
+ * load to the next zone back (progressive crush), and nodes never pass
+ * through each other along a crushed member.
+ */
+export const PLASTIC_COMPRESS_FLOOR = 0.3;
+/**
+ * Stiffness multiplier per plastic step (1 = no weakening).
+ * WHY 1 (was 0.985): weakened members store the same yield force at a
+ * larger elastic stretch, so a crushed nose sprang back further (50 km/h
+ * frontal: permanent crush 31 → 22 cm, rebound 3.6 → 4.4 m/s).
+ */
+export const PLASTIC_WEAKEN = 1;
 /** Plastic weakening never takes k below this fraction of k0. */
 export const PLASTIC_K_FLOOR = 0.25;
 /** Below this length a beam has no defined direction and exerts no force. */
@@ -45,6 +70,7 @@ export const applyBeamForces: ApplyBeamForces = (state, first, count, events, de
   const k0Arr = state.k0;
   const dArr = state.d;
   const restLen = state.restLen;
+  const restLen0 = state.restLen0;
   const deform = state.deform;
   const breakF = state.breakF;
   const boundsLow = state.boundsLow;
@@ -94,7 +120,7 @@ export const applyBeamForces: ApplyBeamForces = (state, first, count, events, de
 
     const fAbs = fs < 0 ? -fs : fs;
     const bf = breakF[b]!;
-    if (fAbs > bf) {
+    if (fAbs > bf && !(fs < 0 && rest <= PLASTIC_COMPRESS_FLOOR * restLen0[b]!)) {
       active[b] = 0;
       strainOut[b] = NaN;
       events.beamBreak(
@@ -111,7 +137,13 @@ export const applyBeamForces: ApplyBeamForces = (state, first, count, events, de
       // Ratchet rest length toward the current length by PLASTIC_RATCHET of
       // the excess (beyond-threshold) elastic stretch, then weaken k.
       const excess = (fAbs - df) / kb;
-      restLen[b] = fs > 0 ? rest + PLASTIC_RATCHET * excess : rest - PLASTIC_RATCHET * excess;
+      if (fs > 0) {
+        restLen[b] = rest + PLASTIC_RATCHET * excess;
+      } else {
+        const floor = PLASTIC_COMPRESS_FLOOR * restLen0[b]!;
+        const r = rest - PLASTIC_RATCHET * excess;
+        restLen[b] = r > floor ? r : floor < rest ? floor : rest;
+      }
       const kFloor = PLASTIC_K_FLOOR * k0Arr[b]!;
       const kNew = kb * PLASTIC_WEAKEN;
       kArr[b] = kNew > kFloor ? kNew : kFloor;

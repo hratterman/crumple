@@ -337,13 +337,33 @@ function compileMerged(name: string, merged: RigDef): CompiledRig {
  * limit; the soft-layer contact spring adds ≈ 0.2 in quadrature.
  */
 export const TREAD_OMEGA_DT_LIMIT = 0.49;
+/**
+ * Crash-shell nodes (group SHELL_GROUP) may run up to SHELL_OMEGA_DT_LIMIT
+ * (P4 crash amendment, docs/CONTRACTS.md). WHY: a crash is
+ * stiffness-limited. The shell must carry a 250–400 kN crush force, and
+ * at 0.35 its sections were so soft that a 30 km/h frontal compressed the
+ * nose elastically by ~60 cm and gave it back. (0.47/0.35)² = 1.8× the
+ * stiffness at the same mass. Ground / collider contact adds ≤ sqrt(0.2) in
+ * quadrature (≤ 0.66 per node), far inside the explicit-Euler bound of 2.
+ */
+export const SHELL_OMEGA_DT_LIMIT = 0.47;
+export const SHELL_GROUP = 'body';
+
+/** Per-node ω·dt limit of the vehicle MINIMASS / validation by node group. */
+export function vehicleOmegaDtLimit(group: string | undefined): number {
+  if (group === WHEEL_DEFAULTS.tireGroup) return TREAD_OMEGA_DT_LIMIT;
+  if (group === SHELL_GROUP) return SHELL_OMEGA_DT_LIMIT;
+  return STRUCTURE_OMEGA_DT_LIMIT;
+}
 
 export function minimumMasses(merged: RigDef): number[] {
   const structure = computeStabilityReport(merged, { limit: STRUCTURE_OMEGA_DT_LIMIT });
   const tread = computeStabilityReport(merged, { limit: TREAD_OMEGA_DT_LIMIT });
+  const shell = computeStabilityReport(merged, { limit: SHELL_OMEGA_DT_LIMIT });
   return merged.nodes.map((n, i) => {
     if (!(n.mass > 0)) return n.mass;
-    const rep = n.group === WHEEL_DEFAULTS.tireGroup ? tread : structure;
+    const lim = vehicleOmegaDtLimit(n.group);
+    const rep = lim === TREAD_OMEGA_DT_LIMIT ? tread : lim === SHELL_OMEGA_DT_LIMIT ? shell : structure;
     return Math.max(n.mass, rep.suggestedMinMass[i]!);
   });
 }
@@ -581,12 +601,12 @@ export function validateVehicle(
   }
   const driftPct = declaredFree > 0 ? ((raisedFree - declaredFree) / declaredFree) * 100 : 0;
   const raised = compileRig(withMasses(merged, masses));
-  const isTread = (i: number): boolean => merged.nodes[i]!.group === WHEEL_DEFAULTS.tireGroup;
-  // Post-MINIMASS report judged per node group (tread: TREAD_OMEGA_DT_LIMIT).
+  const limitOf = (i: number): number => vehicleOmegaDtLimit(merged.nodes[i]!.group);
+  // Post-MINIMASS report judged per node group (tread / shell / structure).
   const raisedReport = computeStabilityReport(raised, { limit: STRUCTURE_OMEGA_DT_LIMIT });
   let unstable = 0;
   for (let i = 0; i < raised.nodeCount; i++) {
-    const lim = isTread(i) ? TREAD_OMEGA_DT_LIMIT : STRUCTURE_OMEGA_DT_LIMIT;
+    const lim = limitOf(i);
     if (raisedReport.omegaDt[i]! > lim * (1 + 1e-9) || raisedReport.dampDt[i]! > DAMP_DT_LIMIT * (1 + 1e-9)) unstable++;
   }
   const stability: StabilityReport = { ...raisedReport, violations: unstable, ok: unstable === 0 };
@@ -609,13 +629,13 @@ export function validateVehicle(
       if (w > GENERAL_OMEGA_DT_LIMIT * (1 + 1e-9) || z > DAMP_DT_LIMIT * (1 + 1e-9)) {
         hardN++;
         if (hard.length < MAX_LISTED) hard.push(`${rig.nodeIds[i]} (ω·dt ${w.toFixed(3)}, Σd/m·dt ${z.toFixed(3)})`);
-      } else if (w > (isTread(i) ? TREAD_OMEGA_DT_LIMIT : STRUCTURE_OMEGA_DT_LIMIT) * (1 + 1e-9)) {
+      } else if (w > limitOf(i) * (1 + 1e-9)) {
         softN++;
         if (soft.length < MAX_LISTED) soft.push(`${rig.nodeIds[i]} (${w.toFixed(3)})`);
       }
     }
     if (hardN > 0) errors.push(`${hardN} node(s) exceed ω·dt ${GENERAL_OMEGA_DT_LIMIT} or (Σd/m)·dt ${DAMP_DT_LIMIT}: ${hard.join(', ')}`);
-    if (softN > 0) warnings.push(`${softN} node(s) exceed structure ω·dt ${STRUCTURE_OMEGA_DT_LIMIT} (tread ${TREAD_OMEGA_DT_LIMIT}; MINIMASS raises them): ${soft.join(', ')}`);
+    if (softN > 0) warnings.push(`${softN} node(s) exceed structure ω·dt ${STRUCTURE_OMEGA_DT_LIMIT} (tread ${TREAD_OMEGA_DT_LIMIT}, shell ${SHELL_OMEGA_DT_LIMIT}; MINIMASS raises them): ${soft.join(', ')}`);
     if (driftPct > MASS_DRIFT_WARN_PCT) warnings.push(`MINIMASS would raise node masses by ${driftPct.toFixed(2)} % > ${MASS_DRIFT_WARN_PCT} %`);
   }
 
