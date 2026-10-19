@@ -505,6 +505,9 @@ const HOOD = {
   restBreak: 1.5e4,
 } as const;
 
+/** Trunk-lid centre rest stiffness per rest, N/m (2 rests ≈ 13 % of s11_ld's ω·dt budget). */
+const TRUNK_REST_K = 1e5;
+
 // ====================================================================== drivetrain
 /**
  * 3.0 L I6: 350 N·m held from 3500 to 6500 rpm, ≈ 238 kW at 6500–6800 rpm
@@ -1126,6 +1129,22 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
     fix({ a: L.kU, b: Rc.hubI, type: 'normal', k: arbK[which] * arbF, d: dArb, deform: 0, breakF: 1e5 });
   }
 
+  // ---- P5 (U1): trunk-lid centre support rests. Station 11 is an open
+  // (non-bulkhead) ring, so the lid centre s11_ld hung on its lid neighbours
+  // and sagged 3.4 cm (the trunk floor centre sags with it, so a rest to the
+  // floor only got 2.4 cm). Two compression-only rests down to the upper
+  // rear rails s11_rh_L/R (45°: a stand-in for the lid's inner frame);
+  // elastic, snap at 15 kN like the hood rests. k is a small share of
+  // s11_ld's budget (fixed k: the auto beams there shrink to fit).
+  for (const side of ['L', 'R'] as const) {
+    const a = sid(11, 'ld');
+    const b = sid(11, 'rh', side);
+    const k = TRUNK_REST_K;
+    const ma = massOf.get(a)!;
+    const mb = massOf.get(b)!;
+    fix({ a, b, type: 'support', k, d: sig3(2 * HOOD.zeta * Math.sqrt((k * ma * mb) / (ma + mb))), deform: 0, breakF: HOOD.restBreak });
+  }
+
   // ---- hood beams (declared last; see HOOD). Stiffness: each hood node's
   // budget (0.33/dt)²·m split by weight over its hood beams (a structure
   // endpoint never limits it); the hood k then counts as fixed k at its
@@ -1166,6 +1185,12 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
     hb.push({ a: H(0, 1), b: sid(0, 'bu'), w: 0.5, kind: 'rest' });
     hb.push({ a: H(3, 1), b: sid(5, 'fw', 'L'), w: 0.5, kind: 'rest' });
     hb.push({ a: H(3, 1), b: sid(5, 'fw', 'R'), w: 0.5, kind: 'rest' });
+    // P5 (U1): hood_2C rests on the engine's top corners (the cam cover), 19 cm
+    // below: with only the skin under it the settled crown sagged 5.9 cm.
+    for (const s of ['L', 'R'] as const) {
+      hb.push({ a: H(2, 1), b: `eng_rhi_${s}`, w: 0.5, kind: 'rest' });
+      hb.push({ a: H(2, 1), b: `eng_fhi_${s}`, w: 0.5, kind: 'rest' });
+    }
     const hoodW = new Map<string, number>();
     for (const b of hb) for (const id of [b.a, b.b]) if (id.startsWith('hood_')) hoodW.set(id, (hoodW.get(id) ?? 0) + b.w);
     const hoodShare = (id: string): number => (id.startsWith('hood_') ? (BUDGET_PER_KG * massOf.get(id)!) / hoodW.get(id)! : Infinity);
