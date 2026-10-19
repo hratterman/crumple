@@ -939,6 +939,174 @@ function releasePads(owner: Uint8Array, absD: Float32Array, N: number): void {
   for (let i = 0; i < N; i++) if (owner[i] === OWNER_PAD && absD[i]! < PAD_RELEASE_M) owner[i] = OWNER_NONE;
 }
 
+/** Enclosed-ground grading: road stations farther than this from the verge (m) do not count. */
+const ENCLOSE_REACH_M = 34;
+/** Roads whose tightest radius is above this (m) cannot enclose ground (fast skip). */
+const ENCLOSE_MAX_RADIUS_M = 45;
+/**
+ * Enclosure (0..1) above which ground is graded: a lone road (straight, or
+ * the inside of an R ≥ 60 m curve) reads 0.1–0.2, the strip between
+ * switchback legs ≈ 0.6, a hairpin interior ≈ 0.8.
+ */
+const ENCLOSE_MIN = 0.42;
+/**
+ * Max weighted spread (m, standard deviation) of the surrounding road
+ * heights: a hairpin's legs read 2–5 m, stacked switchback legs 10–30 m
+ * apart in height (grading between them fights the legs' own banks and
+ * leaves single-sample spikes).
+ */
+const ENCLOSE_MAX_SPREAD_M = 6;
+/** The smoothing band (graded ground + its seams to the verges) starts this much below ENCLOSE_MIN. */
+const ENCLOSE_SMOOTH_MARGIN = 0.14;
+const ENCLOSE_SMOOTH_PASSES = 3;
+
+/**
+ * Grade the ground a road wraps around (hairpin interiors and the strip
+ * between switchback legs). The slope envelope alone clamps the natural
+ * terrain to max(T − g(d)) of the two legs: where a switchback is pinned
+ * above a falling slope that leaves a V-shaped pit between the legs, up to
+ * 3 m below the LOWER leg, walled by 2:1 banks.
+ *
+ * Per road (stations within ENCLOSE_REACH_M of the verge, weight
+ * w = 1/d² − 1/reach², continuous at the cutoff): target = Σw·y / Σw (for
+ * parallel legs the linear interpolation between them, in a hairpin the
+ * ring average) and enclosure E = 1 − |Σw·û| / Σw (û = unit direction to
+ * the station; → 1 when the road surrounds the sample). Free samples with
+ * E ≥ ENCLOSE_MIN and a height spread ≤ ENCLOSE_MAX_SPREAD_M become pad
+ * cores at the target, so the envelope builds
+ * proper embankments from them down to the natural slope on the open side
+ * and releasePads blends them into the verges. (Raising the natural field
+ * instead makes cliffs where the enclosure fades on a steep slope; `nat`
+ * stays natural so roundCreases' blurred carve delta stays smooth.)
+ */
+function gradeEnclosed(
+  owner: Uint8Array,
+  coreT: Float32Array,
+  smoothMask: Uint8Array,
+  g: FullGrid,
+  profiles: readonly RoadProfile[],
+): void {
+  const { cols, ox, oz, sp } = g;
+  const reach = ENCLOSE_REACH_M;
+  const iReach2 = 1 / (reach * reach);
+  for (const prof of profiles) {
+    const st = prof.stations;
+    const n = prof.stationCount;
+    let kMax = 0;
+    for (let k = 0; k < n; k++) {
+      const kv = Math.abs(st[k * ROAD_STATION_STRIDE + 6]!);
+      if (kv > kMax) kMax = kv;
+    }
+    if (kMax * ENCLOSE_MAX_RADIUS_M < 1) continue;
+    const verge = prof.width / 2 + prof.shoulder;
+    const R = reach + verge;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minZ = Infinity;
+    let maxZ = -Infinity;
+    for (let k = 0; k < n; k++) {
+      const x = st[k * ROAD_STATION_STRIDE]!;
+      const z = st[k * ROAD_STATION_STRIDE + 2]!;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (z < minZ) minZ = z;
+      if (z > maxZ) maxZ = z;
+    }
+    const [c0, c1, r0, r1] = boxOf(g, minX - R, maxX + R, minZ - R, maxZ + R);
+    const wc = c1 - c0 + 1;
+    const M = wc * (r1 - r0 + 1);
+    const sw = new Float64Array(M);
+    const swy = new Float64Array(M);
+    const swyy = new Float64Array(M);
+    const sux = new Float64Array(M);
+    const suz = new Float64Array(M);
+    for (let k = 0; k < n; k++) {
+      const o = k * ROAD_STATION_STRIDE;
+      const sx = st[o]!;
+      const sy = st[o + 1]!;
+      const sz = st[o + 2]!;
+      const [k0, k1, q0, q1] = boxOf(g, sx - R, sx + R, sz - R, sz + R);
+      for (let r = q0; r <= q1; r++) {
+        const dz = sz - (oz + r * sp);
+        const lo = (r - r0) * wc - c0;
+        for (let c = k0; c <= k1; c++) {
+          const dx = sx - (ox + c * sp);
+          const dist = Math.sqrt(dx * dx + dz * dz);
+          let d = dist - verge;
+          if (d >= reach) continue;
+          if (d < 0.5) d = 0.5;
+          const w = 1 / (d * d) - iReach2;
+          const j = lo + c;
+          sw[j]! += w;
+          swy[j]! += w * sy;
+          swyy[j]! += w * sy * sy;
+          if (dist > 1e-6) {
+            const u = w / dist;
+            sux[j]! += u * dx;
+            suz[j]! += u * dz;
+          }
+        }
+      }
+    }
+    const wr = r1 - r0 + 1;
+    const mask = new Uint8Array(M);
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
+        const j = (r - r0) * wc + (c - c0);
+        const W0 = sw[j]!;
+        if (!(W0 > 0)) continue;
+        if (owner[r * cols + c] !== OWNER_NONE) continue;
+        const ux = sux[j]!;
+        const uz = suz[j]!;
+        const e = 1 - Math.sqrt(ux * ux + uz * uz) / W0;
+        if (e < ENCLOSE_MIN - ENCLOSE_SMOOTH_MARGIN) continue;
+        const target = swy[j]! / W0;
+        const v = swyy[j]! / W0 - target * target;
+        if (v > ENCLOSE_MAX_SPREAD_M * ENCLOSE_MAX_SPREAD_M) continue;
+        smoothMask[r * cols + c] = 1;
+        if (e >= ENCLOSE_MIN) mask[j] = 1;
+      }
+    }
+    // Majority filter (≥ 5 of 8 neighbours): no isolated cores or one-sample fingers.
+    for (let lr = 1; lr < wr - 1; lr++) {
+      for (let lc = 1; lc < wc - 1; lc++) {
+        const j = lr * wc + lc;
+        if (mask[j] === 0) continue;
+        const nb =
+          mask[j - wc - 1]! + mask[j - wc]! + mask[j - wc + 1]! + mask[j - 1]! +
+          mask[j + 1]! + mask[j + wc - 1]! + mask[j + wc]! + mask[j + wc + 1]!;
+        if (nb < 5) continue;
+        const i = (r0 + lr) * cols + (c0 + lc);
+        owner[i] = OWNER_PAD;
+        coreT[i] = swy[j]! / sw[j]!;
+      }
+    }
+  }
+}
+
+/**
+ * Final smoothing of graded ground (gradeEnclosed's smoothMask, road cores
+ * excluded): a few 3×3 box passes round the seam between a graded core and
+ * the verge it was released from, and its rasterized outline.
+ */
+function smoothGraded(heights: Float32Array, owner: Uint8Array, mask: Uint8Array, g: FullGrid, tmp: Float32Array): void {
+  const { cols, rows } = g;
+  for (let pass = 0; pass < ENCLOSE_SMOOTH_PASSES; pass++) {
+    tmp.set(heights);
+    for (let r = 1; r < rows - 1; r++) {
+      for (let c = 1; c < cols - 1; c++) {
+        const i = r * cols + c;
+        if (mask[i] === 0 || owner[i]! < OWNER_PAD) continue;
+        const u = i - cols;
+        const d = i + cols;
+        heights[i] =
+          (tmp[u - 1]! + tmp[u]! + tmp[u + 1]! + tmp[i - 1]! + tmp[i]! + tmp[i + 1]! + tmp[d - 1]! + tmp[d]! + tmp[d + 1]!) /
+          9;
+      }
+    }
+  }
+}
+
 const BIG = 1e9;
 
 /** Embankment / cutting profile: g(d) = max_k(m_k·d − c_k) (1:2, then 1:1, then 2:1). */
@@ -962,11 +1130,20 @@ function envG(d: number): number {
  * close for the slopes (L > U) the bounds are blended by distance so the
  * surface still meets both cores without a step. Also writes the distance to
  * the nearest core into `dist` (crease ramp).
+ *
+ * Distances are measured to each source's CONTINUOUS edge: a road core
+ * sample in the verge band sits `slack` = verge half-width − |d| inside the
+ * true verge line (edgeSlack),
+ * and g is evaluated at max(0, |x − c| − slack). With raw sample distances
+ * the rasterized (staircase) verge made every cone apex jitter by up to a
+ * sample, which on 1:1 / 2:1 cut and fill faces read as stair-step bands
+ * running down the slope.
  */
 function slopeEnvelope(
   g: FullGrid,
   owner: Uint8Array,
   coreT: Float32Array,
+  slack: Float32Array,
   nat: Float32Array,
   heights: Float32Array,
   srcL: Int32Array,
@@ -996,8 +1173,8 @@ function slopeEnvelope(
         let bu = srcU[i]!;
         let vl = -BIG;
         let vu = BIG;
-        if (bl >= 0) vl = envValue(coreT, bl, cols, c, r, sp, -1);
-        if (bu >= 0) vu = envValue(coreT, bu, cols, c, r, sp, 1);
+        if (bl >= 0) vl = envValue(coreT, slack, bl, cols, c, r, sp, -1);
+        if (bu >= 0) vu = envValue(coreT, slack, bu, cols, c, r, sp, 1);
         // Scanned neighbours: previous in the row, and three in the previous row.
         for (let k = 0; k < 4; k++) {
           let n: number;
@@ -1012,7 +1189,7 @@ function slopeEnvelope(
           }
           const sl = srcL[n]!;
           if (sl >= 0 && sl !== bl) {
-            const v = envValue(coreT, sl, cols, c, r, sp, -1);
+            const v = envValue(coreT, slack, sl, cols, c, r, sp, -1);
             if (v > vl) {
               vl = v;
               bl = sl;
@@ -1020,7 +1197,7 @@ function slopeEnvelope(
           }
           const su = srcU[n]!;
           if (su >= 0 && su !== bu) {
-            const v = envValue(coreT, su, cols, c, r, sp, 1);
+            const v = envValue(coreT, slack, su, cols, c, r, sp, 1);
             if (v < vu) {
               vu = v;
               bu = su;
@@ -1046,8 +1223,8 @@ function slopeEnvelope(
         heights[i] = h;
         continue;
       }
-      const lo = envValue(coreT, sl, cols, c, r, sp, -1);
-      const hi = envValue(coreT, su, cols, c, r, sp, 1);
+      const lo = envValue(coreT, slack, sl, cols, c, r, sp, -1);
+      const hi = envValue(coreT, slack, su, cols, c, r, sp, 1);
       if (lo <= hi) {
         if (h < lo) h = lo;
         if (h > hi) h = hi;
@@ -1069,9 +1246,44 @@ function srcDist(src: number, cols: number, c: number, r: number, sp: number): n
   return Math.sqrt(dx * dx + dz * dz) * sp;
 }
 
-/** T_src ∓ g(distance to the sample): sign −1 → lower bound, +1 → upper bound. */
-function envValue(coreT: Float32Array, src: number, cols: number, c: number, r: number, sp: number, sign: number): number {
-  return coreT[src]! + sign * envG(srcDist(src, cols, c, r, sp));
+/** T_src ∓ g(distance to the source's edge): sign −1 → lower bound, +1 → upper bound. */
+function envValue(
+  coreT: Float32Array,
+  slack: Float32Array,
+  src: number,
+  cols: number,
+  c: number,
+  r: number,
+  sp: number,
+  sign: number,
+): number {
+  const d = srcDist(src, cols, c, r, sp) - slack[src]!;
+  return coreT[src]! + sign * envG(d > 0 ? d : 0);
+}
+
+/**
+ * Per road-core sample: distance from the sample to its road's verge line,
+ * capped at the shoulder width (the verge band is flat at verge level, so
+ * only there does the cone apex move without changing T; a carriageway
+ * sample credited more would lift the low side of a banked road). 0 for
+ * pads and free samples.
+ */
+function edgeSlack(owner: Uint8Array, absD: Float32Array, profiles: readonly RoadProfile[], N: number): Float32Array {
+  const b = new Float64Array(profiles.length);
+  const cap = new Float64Array(profiles.length);
+  for (let k = 0; k < profiles.length; k++) {
+    b[k] = profiles[k]!.width / 2 + profiles[k]!.shoulder;
+    cap[k] = profiles[k]!.shoulder;
+  }
+  const slack = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    const ow = owner[i]!;
+    if (ow >= OWNER_PAD) continue;
+    let v = b[ow]! - absD[i]!;
+    if (v > cap[ow]!) v = cap[ow]!;
+    slack[i] = v > 0 ? v : 0;
+  }
+  return slack;
 }
 
 /** Chamfer (1, √2) distance transform, in place: sources 0, others BIG. */
@@ -1541,6 +1753,8 @@ export function generateTerrain(layout: WorldLayout): TerrainData {
 
   // ---------------------------------------------------------- roads
   const profiles = resolveRoadProfiles(layout, (x, z) => bilinear(nat, cols, cols, ox, oz, sp, x, z));
+  const graded = new Uint8Array(N);
+  gradeEnclosed(owner, coreT, graded, g, profiles);
   mark('roadProfiles');
   const s1 = new Float32Array(N);
   const s2 = new Float32Array(N);
@@ -1556,9 +1770,11 @@ export function generateTerrain(layout: WorldLayout): TerrainData {
   releasePads(owner, absD, N);
   mark('roadRaster');
   const heights = new Float32Array(N);
-  slopeEnvelope(g, owner, coreT, nat, heights, new Int32Array(s1.buffer), new Int32Array(s2.buffer), s3);
+  const slack = edgeSlack(owner, absD, profiles, N);
+  slopeEnvelope(g, owner, coreT, slack, nat, heights, new Int32Array(s1.buffer), new Int32Array(s2.buffer), s3);
   mark('envelope');
   roundCreases(g, owner, nat, heights, s3, s1, s2, T.minHeight, T.maxHeight);
+  smoothGraded(heights, owner, graded, g, s1);
   mark('creases');
 
   // ---------------------------------------------------------- splat + material

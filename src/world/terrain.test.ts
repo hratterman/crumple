@@ -354,6 +354,43 @@ describe('generateTerrain (DEFAULT_LAYOUT)', () => {
     }
   });
 
+  it('grades hairpin interiors to the road (no pit below the legs)', () => {
+    // Every R < 17 m apex (the R16 hairpins) of the mountain road: the ground inside the turn
+    // (its curvature disc, clear of the verge) must not sink more than 1 m
+    // below the lowest road station around it.
+    const prof = t.roads.find((r) => r.kind === 'mountain')!;
+    const st = prof.stations;
+    const S = ROAD_STATION_STRIDE;
+    const verge = prof.width / 2 + prof.shoulder;
+    let apexes = 0;
+    for (let i = 2; i < prof.stationCount - 2; i++) {
+      const k = st[i * S + RoadStation.curvature]!;
+      const kPrev = Math.abs(st[(i - 1) * S + RoadStation.curvature]!);
+      const kNext = Math.abs(st[(i + 1) * S + RoadStation.curvature]!);
+      if (Math.abs(k) < 1 / 17 || Math.abs(k) < kPrev || Math.abs(k) <= kNext) continue;
+      apexes++;
+      const R = 1 / Math.abs(k);
+      const sg = Math.sign(k);
+      const cx = st[i * S]! - st[i * S + RoadStation.tz]! * sg * R;
+      const cz = st[i * S + 2]! + st[i * S + RoadStation.tx]! * sg * R;
+      let roadMin = Infinity;
+      for (let j = 0; j < prof.stationCount; j++) {
+        if (Math.hypot(st[j * S]! - cx, st[j * S + 2]! - cz) < R + verge) roadMin = Math.min(roadMin, st[j * S + 1]!);
+      }
+      const inner = R - verge - 1;
+      let lo = Infinity;
+      for (let a = 0; a < 32; a++) {
+        for (const f of [0, 0.4, 0.8, 1]) {
+          const x = cx + Math.cos((a / 32) * 2 * Math.PI) * inner * f;
+          const z = cz + Math.sin((a / 32) * 2 * Math.PI) * inner * f;
+          lo = Math.min(lo, at(t, x, z));
+        }
+      }
+      expect(lo, `hairpin at station ${i} (${cx.toFixed(0)}, ${cz.toFixed(0)})`).toBeGreaterThan(roadMin - 1);
+    }
+    expect(apexes).toBeGreaterThanOrEqual(3);
+  });
+
   it('resolves spawns onto the carved surface', () => {
     for (const [k, s] of t.spawns.entries()) {
       const def = DEFAULT_LAYOUT.spawnPoints[k]!;

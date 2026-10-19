@@ -53,7 +53,7 @@ import type { WorldLayout } from './types';
 export const DEFAULT_LAYOUT: WorldLayout = {
   id: 'crumple-valley',
   name: 'Crumple Valley',
-  version: 1,
+  version: 2,
   seed: 0x5eed_c0de,
   size: 1408,
   terrain: {

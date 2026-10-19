@@ -36,6 +36,8 @@ Commands: `npm run dev` | `build` (tsc + vite build) | `typecheck` | `test` (vit
 - Fixed iteration order everywhere (determinism).
 - Zero allocation in hot loops: SoA typed arrays, preallocated.
 
+- **Sampler inlining:** `src/world/sampler.ts` `normalAt` must stay under V8's 460-byte bytecode inlining limit (currently ~448 bytes). Over it, the 2 kHz contact pass stops inlining the call, boxes x/z as HeapNumbers and allocates on every query. Re-check the size after ANY edit: `node --print-bytecode --print-bytecode-filter=normalAt` (see the INLINING note in that file); the same applies to `heightAt` / `materialAt`.
+
 ## PHYSICS BUDGETS
 
 - Fixed dt = 1/2000 s.
