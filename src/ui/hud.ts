@@ -19,6 +19,8 @@ export interface HudStatus {
   camera: string;
   transmission: 'auto' | 'manual';
   beamView: boolean;
+  /** P4 debug view ('body' | 'body+beams' | 'beams' | 'nodes'); shown instead of BEAMS/NODES when set. */
+  view?: string;
 }
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -230,7 +232,7 @@ export class Hud {
     if (status.paused) parts.push('PAUSED');
     else if (status.slowMo) parts.push('SLOW-MO 0.25×');
     parts.push(`CAM ${status.camera.toUpperCase()}`);
-    parts.push(status.beamView ? 'BEAMS' : 'NODES');
+    parts.push(status.view ? status.view.toUpperCase() : status.beamView ? 'BEAMS' : 'NODES');
     const key = parts.join('|');
     if (key !== this.last.badges) {
       this.last.badges = key;

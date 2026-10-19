@@ -1,0 +1,4 @@
+{
+  "extends": "../tsconfig.json",
+  "include": ["damage.ts", "../src/vite-env.d.ts", "../src/render/n8ao.d.ts"]
+}

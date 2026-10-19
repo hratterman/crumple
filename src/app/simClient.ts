@@ -36,7 +36,7 @@ import { compileRig } from '../sim/rig/builder';
 import type { RigDef } from '../sim/rig/types';
 import { buildVehicleRig } from '../sim/vehicle/builder';
 import type { TransmissionMode, VehicleDef } from '../sim/vehicle/types';
-import type { WorldLayout } from '../world/types';
+import type { ColliderDef, WorldLayout } from '../world/types';
 
 export interface SimClientOptions {
   seed: number;
@@ -424,6 +424,42 @@ export class SimClient {
     if (!cur) return null;
     const i = cur.findObject(objectId);
     return i < 0 ? null : cur.objectStrains(i);
+  }
+
+  /**
+   * P4: object-local broken flags of `objectId` in the latest snapshot (the
+   * authoritative bitset section; 1 = broken, 0 = intact) written into
+   * out[0..beamCount). Returns the broken count, or -1 (out untouched) when
+   * the object is absent. All intact when the worker does not write the
+   * section. Allocation-free.
+   */
+  brokenBeams(objectId: number, out: Uint8Array): number {
+    const cur = this.cur;
+    if (!cur) return -1;
+    const i = cur.findObject(objectId);
+    return i < 0 ? -1 : cur.readObjectBroken(i, out);
+  }
+
+  /** P4: OBJ_REPAIR_EPOCH of `objectId` in the latest snapshot (0 when absent / pre-P4 worker). */
+  repairEpoch(objectId: number): number {
+    const cur = this.cur;
+    if (!cur) return 0;
+    const i = cur.findObject(objectId);
+    return i < 0 ? 0 : cur.objectRepairEpoch(i);
+  }
+
+  /** P4: the latest snapshot carries the broken-beam bitset section. */
+  get hasBrokenBeams(): boolean {
+    return this.cur ? this.cur.hasBrokenBeams : false;
+  }
+
+  /**
+   * P4: replaces the EXTRA static collider set (appended after the layout's
+   * own colliders; tests, set-ups, plane-ground demos). Invalid → worker
+   * `error`, set unchanged.
+   */
+  setColliders(colliders: ColliderDef[]): void {
+    this.post({ type: 'setColliders', colliders });
   }
 
   /** Delivers and clears every event received since the last drain, in arrival order per kind. */

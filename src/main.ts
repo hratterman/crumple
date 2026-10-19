@@ -16,7 +16,7 @@
  * roads → quality → post.
  */
 import './style.css';
-import { NoToneMapping, PerspectiveCamera, Scene, SRGBColorSpace, Vector3, WebGLRenderer } from 'three';
+import { MeshPhysicalMaterial, NoToneMapping, PerspectiveCamera, Scene, SRGBColorSpace, Vector3, WebGLRenderer } from 'three';
 
 import { createQualityControllerWith, isQualityLevel, loadQualityLevel } from './app/quality';
 import { SimClient, type ObjectRange } from './app/simClient';
@@ -26,8 +26,9 @@ import { loadAllTerrainSets } from './assets/loader';
 import { quatFromAxisAngle, quatRotateVec3, vec3Normalize, type Quat, type Vec3 } from './core/math';
 import { createInputMapper } from './input/actions';
 import { attachInputDevices } from './input/devices';
+import type { BeamBreakEvent, ImpactEvent, SkidEvent } from './protocol/events';
 import type { ActionState, Transform } from './protocol/messages';
-import { VehicleTelemetry } from './protocol/telemetry';
+import { createVehicleTelemetryFrame, VehicleTelemetry } from './protocol/telemetry';
 import { vehiclePoseFromNodes, type ChaseTarget } from './render/cameras/chase';
 import { CameraDirector } from './render/cameras/director';
 import { BeamView } from './render/debug/beamview';
@@ -37,6 +38,13 @@ import { createPostStack } from './render/post';
 import { createRoadRenderer } from './render/roads';
 import { createTerrainRenderer } from './render/terrain';
 import { createFarLand, FARLAND_OUTER_M } from './render/terrain/farland';
+import { createColliderRenderer } from './render/world/colliders';
+import { bindPanels } from './render/vehicle/binder';
+import { SEDAN_VISUAL } from './render/vehicle/defs/sedan';
+import { createFlexSkin } from './render/vehicle/flexskin';
+import { bodyVisibleIn, createVehicleVisual, VEHICLE_DEBUG_VIEWS, type VehicleDebugView, type VehicleVisualHandle } from './render/vehicle/index';
+import { syntheticCubeSubject } from './render/vehicle/synthetic';
+import type { FlexSkin, VehicleFrameInput, VehicleMaterialSet } from './render/vehicle/types';
 import {
   DEFAULT_QUALITY,
   QUALITY_LEVELS,
@@ -47,10 +55,11 @@ import {
 } from './render/types';
 import { compileRig } from './sim/rig/builder';
 import { softCube } from './sim/rig/testrigs';
-import { buildVehicleRig } from './sim/vehicle/builder';
+import { buildVehicleRig, compileVehicle } from './sim/vehicle/builder';
 import { SEDAN } from './sim/vehicle/defs/sedan';
 import { Hud } from './ui/hud';
 import { LoadingScreen } from './ui/loading';
+import { resolveColliders } from './world/colliders';
 import { DEFAULT_LAYOUT } from './world/layout';
 import { createTerrainSampler } from './world/sampler';
 import type { TerrainData, TerrainSampler } from './world/types';
@@ -118,6 +127,10 @@ const sedanDef = buildVehicleRig(SEDAN);
 const sedanRig = compileRig(sedanDef);
 const SEDAN_FRAME_ORIGIN = Math.max(0, sedanDef.nodes.findIndex((n) => n.id === SEDAN.frame.origin));
 const cubeRig = compileRig(softCube());
+/** The sedan as main renders it (same canonical order as the worker; triads index into it). */
+const sedanCompiled = compileVehicle(SEDAN);
+/** ?view=body|body+beams|beams|nodes picks the first debug view (B cycles them). */
+const initialView = ((v) => (VEHICLE_DEBUG_VIEWS as readonly string[]).includes(v ?? '') ? (v as VehicleDebugView) : 'body')(params.get('view'));
 const transmission = SEDAN.drivetrain.transmission ?? 'auto';
 
 // ------------------------------------------------------------ state filled in by boot()
@@ -134,6 +147,110 @@ let snapAfterTick = -1;
 const beamView = new BeamView({ gain: WIREFRAME_GAIN });
 beamView.visible = true;
 scene.add(beamView.group);
+
+// ------------------------------------------------------------ flexbody visuals (P4)
+/** The sedan's body (null until boot builds it, or when the visual failed: then the wireframe stays on). */
+let sedanVisual: VehicleVisualHandle | null = null;
+/** The arena soft cube skinned as a rounded red block (synthetic subject on the softCube rig). */
+let cubeSkin: FlexSkin | null = null;
+let debugView: VehicleDebugView = initialView;
+
+function applyDebugView(): void {
+  if (!sedanVisual) {
+    // No body mesh: never hide the car — the wireframe cycles beams ⇄ nodes.
+    beamView.visible = true;
+    if (debugView === 'nodes') beamView.mode = 'nodes';
+    else beamView.mode = 'beams';
+    return;
+  }
+  sedanVisual.setDebugView(debugView);
+  if (cubeSkin) cubeSkin.object.visible = bodyVisibleIn(debugView);
+  beamView.visible = debugView !== 'body';
+  beamView.mode = debugView === 'nodes' ? 'nodes' : 'beams';
+}
+
+function cycleDebugView(): void {
+  if (!sedanVisual) {
+    debugView = debugView === 'nodes' ? 'beams' : 'nodes';
+  } else {
+    debugView = VEHICLE_DEBUG_VIEWS[(VEHICLE_DEBUG_VIEWS.indexOf(debugView) + 1) % VEHICLE_DEBUG_VIEWS.length]!;
+  }
+  applyDebugView();
+}
+
+function cubeMaterials(): VehicleMaterialSet {
+  const paint = new MeshPhysicalMaterial({
+    name: 'cubePaint',
+    color: 0x8c0a12,
+    metalness: 0.55,
+    roughness: 0.34,
+    clearcoat: 1,
+    clearcoatRoughness: 0.05,
+  });
+  return { base: () => paint, setPaint() {}, setLights() {}, dispose: () => paint.dispose() };
+}
+
+const sedanBroken = new Uint8Array(sedanCompiled.rig.beamCount);
+const sedanTelemetry = createVehicleTelemetryFrame();
+let sedanBrokenTick = -1;
+const sedanFrame: VehicleFrameInput = {
+  nodes: new Float32Array(0),
+  nodeOffset: 0,
+  tick: 0,
+  broken: sedanBroken,
+  repairEpoch: 0,
+  telemetry: null,
+  dtS: 0,
+};
+const cubeFrame: VehicleFrameInput = { ...sedanFrame, broken: new Uint8Array(cubeRig.beamCount), telemetry: null };
+
+/** Feeds the interpolated nodes of this frame to the skinned bodies. */
+function updateVisuals(dt: number): void {
+  if (sedanVisual) {
+    const range = findRange(VEHICLE_ID);
+    const ok = !!range && range.nodeCount === sedanCompiled.rig.nodeCount;
+    sedanVisual.object.visible = ok;
+    if (ok) {
+      const tick = client.latestTick;
+      if (tick !== sedanBrokenTick) {
+        sedanBrokenTick = tick;
+        if (client.brokenBeams(VEHICLE_ID, sedanBroken) < 0) sedanBroken.fill(0);
+      }
+      sedanFrame.nodes = positions;
+      sedanFrame.nodeOffset = range.nodeOffset;
+      sedanFrame.tick = tick;
+      sedanFrame.repairEpoch = client.repairEpoch(VEHICLE_ID);
+      sedanFrame.telemetry = client.readTelemetry(VEHICLE_ID, sedanTelemetry) ? sedanTelemetry : null;
+      sedanFrame.dtS = dt;
+      sedanVisual.update(sedanFrame);
+    }
+  }
+  if (cubeSkin) {
+    const range = findRange(CUBE_ID);
+    const ok = !!range && range.nodeCount === cubeRig.nodeCount;
+    cubeSkin.object.visible = ok && bodyVisibleIn(debugView);
+    if (ok) {
+      cubeFrame.nodes = positions;
+      cubeFrame.nodeOffset = range.nodeOffset;
+      cubeFrame.tick = client.latestTick;
+      cubeFrame.dtS = dt;
+      cubeSkin.update(cubeFrame);
+    }
+  }
+}
+
+/** Sim events → the sedan's damage (allocation-free routing; FX consumers come in P5). */
+const eventSink = {
+  impact(e: Readonly<ImpactEvent>): void {
+    if (e.objectId === VEHICLE_ID) sedanVisual?.onImpact(e);
+  },
+  beamBreak(e: Readonly<BeamBreakEvent>): void {
+    if (e.objectId === VEHICLE_ID) sedanVisual?.onBeamBreak(e);
+  },
+  skid(e: Readonly<SkidEvent>): void {
+    if (e.objectId === VEHICLE_ID) sedanVisual?.onSkid(e);
+  },
+};
 
 const director = new CameraDirector(camera, renderer.domElement, {
   initial: 'chase',
@@ -261,8 +378,8 @@ function handleCommands(): void {
         director.cycle();
         break;
       case 'toggleBeamView':
-        // Cycles beams → nodes (no body mesh until P4: never hide the car).
-        beamView.cycle();
+        // body → body + beams → beams → nodes (beams ⇄ nodes when the body failed to build).
+        cycleDebugView();
         break;
       case 'pause':
         paused = !paused;
@@ -336,11 +453,29 @@ const crumple = {
   get beamView(): boolean {
     return beamView.visible && beamView.mode === 'beams';
   },
+  /** Debug view: 'body' | 'body+beams' | 'beams' | 'nodes'. */
   get viewMode(): string {
-    return beamView.mode;
+    return debugView;
   },
   get nodesVisible(): boolean {
     return beamView.nodesVisible;
+  },
+  /** True while the sedan's skinned body is drawn. */
+  get bodyVisible(): boolean {
+    return !!sedanVisual && sedanVisual.object.visible && bodyVisibleIn(debugView);
+  },
+  /** Flexbody bake facts for the sedan, or null when it has no body. */
+  get body(): { panels: number; vertices: number; triangles: number; repaired: number; tessellateMs: number; bindMs: number; totalMs: number } | null {
+    if (!sedanVisual) return null;
+    const s = sedanVisual.binding.stats;
+    return { panels: sedanVisual.binding.panels.length, vertices: s.vertices, triangles: s.triangles, repaired: s.repaired, ...sedanVisual.timings };
+  },
+  /** Set the debug view directly (screenshots / tests). */
+  setView(v: string): void {
+    if ((VEHICLE_DEBUG_VIEWS as readonly string[]).includes(v)) {
+      debugView = v as VehicleDebugView;
+      applyDebugView();
+    }
   },
   get timescale(): number {
     return paused ? 0 : slowMo ? SLOW_MO_SCALE : 1;
@@ -432,14 +567,60 @@ async function boot(): Promise<void> {
   const roadsR = createRoadRenderer(ctx, world, smp, materials, { lighting, patchMaterial });
   scene.add(roadsR.object);
   scene.add(createFarLand(world, { lighting, patchMaterial }).object);
+  // Static colliders (arena wall, poles, ramp, barriers): drawn exactly where the worker collides with them.
+  const collidersR = createColliderRenderer(ctx, resolveColliders(LAYOUT.colliders, (x, z) => smp.heightAt(x, z)), {
+    lighting,
+    patchMaterial,
+  });
+  scene.add(collidersR.object);
   const qc = createQualityControllerWith(
     ctx,
-    { lighting, post: postStack, others: [terrainR, roadsR] },
+    { lighting, post: postStack, others: [terrainR, roadsR, collidersR] },
     forcedLevel ? { initial: forcedLevel, storage: null } : {},
   );
   quality = qc;
   Object.assign(crumple.debug, { terrain: terrainR, roads: roadsR, post: postStack, director });
   mark('renderers');
+
+  // Flexbody bodies: built (tessellate + bind) before the shader compile below so their programs warm up too.
+  // ?body=0 skips them (wireframe only: perf comparisons, debugging the sim).
+  const withBody = params.get('body') !== '0';
+  try {
+    if (!withBody) throw new Error('disabled by ?body=0');
+    sedanVisual = createVehicleVisual(ctx, sedanCompiled, SEDAN_VISUAL, {
+      lighting,
+      patchMaterial,
+      groundAt: (x, z) => smp.heightAt(x, z),
+    });
+    sedanVisual.object.visible = false;
+    scene.add(sedanVisual.object);
+    const t = sedanVisual.timings;
+    console.info(
+      `[vehicle] sedan body: ${sedanVisual.binding.panels.length} panels, ${sedanVisual.binding.stats.vertices} verts, tessellate ${t.tessellateMs.toFixed(0)} ms, bind ${t.bindMs.toFixed(0)} ms, total ${t.totalMs.toFixed(0)} ms`,
+    );
+  } catch (e) {
+    if (withBody) console.error('[vehicle] sedan body failed; showing the beam wireframe', e);
+    sedanVisual = null;
+  }
+  try {
+    if (!withBody) throw new Error('disabled by ?body=0');
+    const cube = syntheticCubeSubject();
+    cubeSkin = createFlexSkin(bindPanels(cube.compiled, cube.def, cube.geoms), {
+      materials: cubeMaterials(),
+      damage: null,
+      lighting,
+      patchMaterial,
+      anchorNode: cube.compiled.frameNodes[0]!,
+    });
+    cubeSkin.object.visible = false;
+    scene.add(cubeSkin.object);
+  } catch (e) {
+    if (withBody) console.error('[vehicle] soft cube skin failed', e);
+    cubeSkin = null;
+  }
+  applyDebugView();
+  Object.assign(crumple.debug, { sedanVisual, cubeSkin });
+  mark('vehicleVisual');
   await nextFrame();
 
   // Physics: spawn only once the worker's heightfield is installed.
@@ -490,7 +671,7 @@ async function boot(): Promise<void> {
   });
   hud = hudView;
 
-  const hudStatus = { paused: false, slowMo: false, camera: 'chase', transmission, beamView: true };
+  const hudStatus = { paused: false, slowMo: false, camera: 'chase', transmission, beamView: true, view: debugView as string };
   const frame = (dt: number): void => {
     // Input → worker.
     devices.poll();
@@ -503,12 +684,13 @@ async function boot(): Promise<void> {
     const need = client.nodeTotal * 3;
     if (positions.length < need) positions = new Float32Array(need);
     if (client.interpolate(client.renderTime(), positions) > 0) {
-      beamView.update(client, positions);
+      if (beamView.visible) beamView.update(client, positions);
       poseValid = updateVehiclePose();
+      updateVisuals(dt);
     } else {
       poseValid = false;
     }
-    client.drainEvents({}); // no FX consumers yet; keep the queue from saturating
+    client.drainEvents(eventSink);
     // Commands apply at the next step boundary: two snapshots later the pose is the reset one.
     if (snapAfterTick >= 0 && poseValid && client.latestTick > snapAfterTick + 40) {
       snapAfterTick = -1;
@@ -531,6 +713,7 @@ async function boot(): Promise<void> {
     hudStatus.camera = director.mode;
     hudStatus.transmission = mapper.transmission;
     hudStatus.beamView = beamView.visible && beamView.mode === 'beams';
+    hudStatus.view = debugView;
     hudView.update(client.telemetry(VEHICLE_ID), hudStatus, dt);
   };
 

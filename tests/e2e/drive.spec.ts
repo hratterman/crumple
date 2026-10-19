@@ -16,6 +16,7 @@ interface CrumpleDriveGlobal {
   beamView: boolean;
   viewMode: string;
   nodesVisible: boolean;
+  bodyVisible: boolean;
   spawns: string[];
   spawnIndex: number;
 }
@@ -27,6 +28,8 @@ const g = (page: import('@playwright/test').Page) =>
   });
 
 test('drive: hold W on the spawn road accelerates the sedan; spawn keys teleport; zero errors', async ({ page }) => {
+  // P4: the skinned sedan adds ~a dozen programs; SwiftShader compiles them on the CPU.
+  test.setTimeout(180_000);
   const pageErrors: string[] = [];
   const consoleErrors: string[] = [];
   page.on('pageerror', (err) => pageErrors.push(err.stack ?? String(err)));
@@ -45,7 +48,7 @@ test('drive: hold W on the spawn road accelerates the sedan; spawn keys teleport
       return !!c && c.ready && c.vehicle !== null && c.position !== null;
     },
     null,
-    { timeout: 50_000 },
+    { timeout: 110_000 },
   );
   await page.waitForTimeout(1000);
 
@@ -68,20 +71,21 @@ test('drive: hold W on the spawn road accelerates the sedan; spawn keys teleport
   expect(during.vehicle!.speed).toBeGreaterThan(3);
   expect(during.vehicle!.rpm).toBeGreaterThan(during.idleRpm);
 
-  // B cycles the debug view beams → nodes: the wireframe goes, the car stays visible.
+  // B cycles the debug view body → body+beams → beams → nodes → body; the car is always visible.
+  const view = () =>
+    page.evaluate(() => {
+      const c = (window as unknown as { __crumple: CrumpleDriveGlobal }).__crumple;
+      return { mode: c.viewMode, beams: c.beamView, body: c.bodyVisible, nodes: c.nodesVisible };
+    });
+  expect(await view()).toEqual({ mode: 'body', beams: false, body: true, nodes: false });
   await page.keyboard.press('KeyB');
-  await expect
-    .poll(() => page.evaluate(() => (window as unknown as { __crumple: CrumpleDriveGlobal }).__crumple.beamView))
-    .toBe(false);
-  const view = await page.evaluate(() => {
-    const c = (window as unknown as { __crumple: CrumpleDriveGlobal }).__crumple;
-    return { mode: c.viewMode, nodes: c.nodesVisible };
-  });
-  expect(view).toEqual({ mode: 'nodes', nodes: true });
+  await expect.poll(view).toEqual({ mode: 'body+beams', beams: true, body: true, nodes: true });
   await page.keyboard.press('KeyB');
-  await expect
-    .poll(() => page.evaluate(() => (window as unknown as { __crumple: CrumpleDriveGlobal }).__crumple.beamView))
-    .toBe(true);
+  await expect.poll(view).toEqual({ mode: 'beams', beams: true, body: false, nodes: true });
+  await page.keyboard.press('KeyB');
+  await expect.poll(view).toEqual({ mode: 'nodes', beams: false, body: false, nodes: true });
+  await page.keyboard.press('KeyB');
+  await expect.poll(view).toEqual({ mode: 'body', beams: false, body: true, nodes: false });
 
   // 5 → the summit lookout spawn (150 m up the mountain).
   await page.keyboard.press('Digit5');

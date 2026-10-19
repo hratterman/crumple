@@ -15,6 +15,8 @@ interface CrumpleGlobal {
 // assert on GPU vendor/renderer, only on capabilities and behavior. Small
 // viewport + low preset keep the software-rendered island load well under a minute.
 test('boot: loading screen → island, sim ticks on the heightfield, zero errors', async ({ page }) => {
+  // P4: the skinned sedan adds ~a dozen programs; SwiftShader compiles them on the CPU.
+  test.setTimeout(180_000);
   const pageErrors: string[] = [];
   const consoleErrors: string[] = [];
   page.on('pageerror', (err) => {
@@ -42,7 +44,7 @@ test('boot: loading screen → island, sim ticks on the heightfield, zero errors
 
   // Island loaded: game loop running, render + physics terrain identical.
   await page.waitForFunction(() => (window as unknown as { __crumple?: CrumpleGlobal }).__crumple?.ready === true, null, {
-    timeout: 50_000,
+    timeout: 110_000,
   });
   const g = await page.evaluate(() => {
     const c = (window as unknown as { __crumple: CrumpleGlobal }).__crumple;
