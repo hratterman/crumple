@@ -405,7 +405,7 @@ function createMaterials(maxAniso: number): { mats: Mats; textures: Texture[] } 
     // Wall formwork panels 2.4 × 1.0 m.
     wall: concreteSet({ seed: 11, tone: 158, tint: [4, 2, -3], formwork: true, streaks: 0.22 }, 2.4, 1.0, 0.9),
     concrete: concreteSet({ seed: 23, tone: 150, tint: [3, 2, -2], streaks: 0.12 }, 2.0, 2.0, 0.92),
-    jersey: concreteSet({ seed: 37, tone: 176, tint: [3, 2, -1], streaks: 0.3 }, 1.5, 1.5, 0.88),
+    jersey: concreteSet({ seed: 37, tone: 184, tint: [3, 2, -1], streaks: 0.1 }, 1.5, 1.5, 0.88),
     deck: concreteSet({ seed: 41, tone: 140, tint: [2, 1, -2], grooves: 8 }, 1.2, 1.2, 0.95),
     steel: new MeshStandardMaterial({ name: 'collider-steel', color: 0xa9afb5, metalness: 0.85, roughness: 0.36 }),
     hazard: new MeshStandardMaterial({ name: 'collider-hazard', map: tex(stripes, 64, true, 1 / 0.5, 1 / 0.5), roughness: 0.55, metalness: 0 }),
