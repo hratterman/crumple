@@ -141,6 +141,7 @@ Measured by `src/sim/vehicle/handling.test.ts` (`node tools/handling-report.mjs`
 ## Terrain protocol — FROZEN (P3, additive to protocol)
 
 - Main→worker `groundHeightfield{layout: WorldLayout, terrainHash}`: the worker regenerates terrain itself (KB of JSON instead of 18 MB of arrays; collision == visual by construction), compares `hashTerrain` with `terrainHash` (0 = skip), installs its own terrain either way, and answers worker→main `terrainReady{layoutId, terrainHash, matched, generateMs}`; a mismatch also posts `error`. Send before spawning (spawns queued behind it apply after). The P1 `ground{mode:'plane'}` is unchanged; the reserved `ground{mode:'heightfield'}` variant stays `unimplemented` (superseded).
+- **Game boot (P3, `src/main.ts`):** `groundHeightfield` is the worker's FIRST ground command (never a plane first: switching ground types de-inlines the sampler). Main sends `terrainHash` 0 so the worker's generation overlaps main's (main's render copy is generated in a helper worker, `src/app/terrainWorker.ts`, arrays transferred), then compares `terrainReady.terrainHash` with its own hash and logs an error on mismatch. Vehicles spawn only after `terrainReady`.
 
 ## Render API — FROZEN (P3)
 

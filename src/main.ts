@@ -222,7 +222,7 @@ function repairVehicle(): void {
 function spawnCube(): void {
   const arena = terrain!.spawns.find((s) => s.id === 'arena');
   const x = arena ? arena.pos[0] : 360;
-  const z = arena ? arena.pos[2] - 45 : 355;
+  const z = arena ? arena.pos[2] - 26 : 374;
   let ground = -Infinity;
   for (let i = 0; i < cubeRig.nodeCount; i++) {
     ground = Math.max(ground, sampler!.heightAt(x + cubeRig.nodePos[3 * i]!, z + cubeRig.nodePos[3 * i + 2]!));
@@ -299,6 +299,8 @@ const stats = { loadMs: 0, terrainMs: 0, physicsMs: 0, fps: 0, terrainMatched: f
 /** Test/screenshot hook: while true the loop skips frames (the sim keeps running); renderOnce draws one. */
 let hold = false;
 let renderOnce: (() => void) | null = null;
+/** Seconds of camera motion to simulate (30 Hz) on the next frame, after the sim pose is read (screenshots). */
+let settleNext = 0;
 const crumple = {
   get tick(): number {
     return client.latestTick;
@@ -364,7 +366,8 @@ const crumple = {
   get hold(): boolean {
     return hold;
   },
-  renderOnce(): void {
+  renderOnce(settleSeconds = 0): void {
+    settleNext = settleSeconds;
     renderOnce?.();
   },
   /** Advance only the camera rig by `seconds` at 30 Hz (screenshots under software GL, where frames take seconds). */
@@ -372,7 +375,7 @@ const crumple = {
     for (let t = 0; t < seconds; t += 1 / 30) director.update(1 / 30, poseValid ? pose : null);
   },
   /** Dev handles for tuning from the console (not a contract). */
-  debug: { scene, camera, renderer, ctx } as Record<string, unknown>,
+  debug: { scene, camera, renderer, ctx, client } as Record<string, unknown>,
 };
 (window as unknown as { __crumple: typeof crumple }).__crumple = crumple;
 
@@ -512,6 +515,10 @@ async function boot(): Promise<void> {
       director.snap();
     }
 
+    if (settleNext > 0) {
+      for (let t = 0; t < settleNext; t += 1 / 30) director.update(1 / 30, poseValid ? pose : null);
+      settleNext = 0;
+    }
     director.update(dt, poseValid ? pose : null);
     lighting.update(camera);
     terrainR.update(camera);

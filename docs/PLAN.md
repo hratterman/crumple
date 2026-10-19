@@ -27,7 +27,8 @@ The dev container can be reclaimed at any time, and uncommitted work dies with i
 | P0 Foundation | ✅ done: scaffold, CI, Pages, fetch-assets, bench (31.6 M beam-updates/s/core; f64 faster than f32 on V8), `src/core` (102 tests), real CC0 assets |
 | P1 Sim core + protocol | ✅ done: frozen protocol, beam kernel (plasticity/breaking), ground contact, rig compiler, worker at real-time 2 kHz, soft-cube wireframe demo (172 tests) |
 | P2 Drivable wireframe car | ✅ done: sedan rig (soft-body wheels, tread brush, hoop tension, rigid subframes), drivetrain + TC, input, chase cam + HUD, beams/nodes view; headless handling harness all green (sag 5.9 cm, 0–100 6.8 s, 100–0 36 m, R40 1.0 g, v_max ≈ 210–218 km/h, no weave); 278 tests. Visually verified: straight 0–90 km/h launch, full-lock turn at 80 km/h without spin |
-| P3–P9 | not started |
+| P3 Terrain + graphics stack | ✅ done: the game runs on Crumple Valley. World layer (layout, deterministic generator with hairpin grading + continuous-edge slope envelope, roads, heightfield sampler + worker collision via `groundHeightfield`), golden-hour lighting (HDRI, CSM, gentle height fog) + post (N8AO, SMAA, bloom, ACES) + `patchMaterial`, chunked LOD terrain with triplanar splat, road ribbons with markings, far-land mountain ring, quality presets + adaptive resolution. `main.ts`: loading screen (terrain generated in a helper worker, no page freeze), sedan on the highway after `terrainReady`, soft cube in the arena, spawn menu 1–8, parked chase framing. Visually verified (loading, highway first frame + drive, summit, arena) |
+| P4–P9 | not started |
 
 ## Pinned stack
 
