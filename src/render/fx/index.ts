@@ -763,7 +763,7 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
           spawnSoft(
             K_SMOKE, t0 + (t1 - t0) * f, 6 + rng.float() * 5,
             0.35 + rng.float() * 0.25, (2.4 + rng.float() * 2.0) * big,
-            (0.18 + rng.float() * 0.13) * (0.45 + 0.55 * heat),
+            (0.21 + rng.float() * 0.15) * (0.45 + 0.55 * heat),
             grey * 0.97, grey * 0.985, grey * 1.02, groundY,
           );
         }

@@ -199,11 +199,18 @@ function applyColor(shader: WebGLProgramParametersWithUniforms, o: VegPatchOptio
     vec3 c = texture2D(map, p.zy).rgb * bw.x + texture2D(map, p.xz).rgb * bw.y + texture2D(map, p.xy).rgb * bw.z;
     float n = vegVnoise(vVegWorldP.xz * 0.9) * 0.6 + vegVnoise(vVegWorldP.xz * 3.1) * 0.4;
     float moss = smoothstep(0.45, 0.85, wn.y + 0.35 * (n - 0.5)) * smoothstep(0.3, 0.7, n + 0.15);
-    c = mix(c * vec3(1.02, 0.98, 0.92) * (0.85 + 0.3 * fract(vVeg.z * 13.7)), vec3(0.075, 0.09, 0.035), moss * 0.85);
+    c = mix(c * vec3(1.02, 0.98, 0.92) * (0.85 + 0.3 * fract(vVeg.z * 13.7)), vec3(0.1, 0.12, 0.045), moss * 0.8);
     diffuseColor.rgb *= c * mix(0.55, 1.0, vVeg.y);
   }`,
     );
     frag = frag.replace('#include <normal_fragment_maps>', '');
+    // Sky + ground bounce fill: the IBL alone left the sun-averted faces of boulders black against
+    // the (brighter, translucency-lit) grass and terrain around them.
+    frag = frag.replace(
+      '#include <emissivemap_fragment>',
+      `#include <emissivemap_fragment>
+  totalEmissiveRadiance += diffuseColor.rgb * uVegSunCol * (0.05 + 0.04 * max(vVegWorldN.y, 0.0));`,
+    );
   } else {
     frag = frag.replace(
       '#include <map_fragment>',

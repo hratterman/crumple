@@ -232,7 +232,7 @@ void main() {
     float lateral = length( toP - toF * ( along / lf ) );
     float before = 1.0 - smoothstep( lf - uFocus.w, lf + 0.5 * uFocus.w, along );
     float onRay = 1.0 - smoothstep( uFocus.w + 0.4 * size, uFocus.w + 1.2 * size, lateral );
-    vAlpha *= 1.0 - 0.6 * before * onRay;
+    vAlpha *= 1.0 - 0.5 * before * onRay;
   }
   gl_Position = projectionMatrix * mvPosition;
   #include <fog_vertex>

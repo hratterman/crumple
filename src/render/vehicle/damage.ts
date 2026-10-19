@@ -57,6 +57,15 @@ const BREAK_QUEUE = 1024;
 const EVENT_CONFIRM_SNAPSHOTS = 4;
 /** Skid/impact events closer than this to a wheel node are tyre contacts, not body scrapes. */
 const TYRE_EXCLUSION = 0.25;
+/**
+ * Events reach update() up to a snapshot interval + a frame + the
+ * interpolation delay away from the rendered pose; at drift speed a wheel
+ * moves metres in that time and its tyre skids landed behind it, were taken
+ * for body scrapes and snapped onto the rear bumper (silver "scuffed" rear
+ * after any drift). A wheel's exclusion zone is swept ±EVENT_LAG_S along the
+ * wheels' velocity.
+ */
+const EVENT_LAG_S = 0.15;
 /** Glass: an impact this far beyond the pane's current bounding sphere still counts. */
 const GLASS_IMPACT_MARGIN = 0.2;
 /** Second crack centre when a new hit lands this far (m, rest space) from the first. */
@@ -609,6 +618,13 @@ export function createVehicleDamage(
 
   let nodes: Float32Array = new Float32Array(0);
   let off = 0;
+  let wheelVx = 0;
+  let wheelVy = 0;
+  let wheelVz = 0;
+  let wheelPx = 0;
+  let wheelPy = 0;
+  let wheelPz = 0;
+  let wheelPrevOk = false;
 
   // Event helpers take (queue, record offset), never coordinates: doubles passed to a
   // non-inlined call are boxed as HeapNumbers (an allocation per event).
@@ -617,14 +633,51 @@ export function createVehicleDamage(
     const y = q[e + 1]!;
     const z = q[e + 2]!;
     const r2 = TYRE_EXCLUSION * TYRE_EXCLUSION;
+    const v2 = wheelVx * wheelVx + wheelVy * wheelVy + wheelVz * wheelVz;
+    const inv = v2 > 1e-6 ? 1 / v2 : 0;
     for (let k = 0; k < wheelNodes.length; k++) {
       const o = off + wheelNodes[k]! * 3;
-      const dx = nodes[o]! - x;
-      const dy = nodes[o + 1]! - y;
-      const dz = nodes[o + 2]! - z;
+      let dx = nodes[o]! - x;
+      let dy = nodes[o + 1]! - y;
+      let dz = nodes[o + 2]! - z;
+      // closest point on the node's path over ±EVENT_LAG_S
+      let t = -(dx * wheelVx + dy * wheelVy + dz * wheelVz) * inv;
+      t = t < -EVENT_LAG_S ? -EVENT_LAG_S : t > EVENT_LAG_S ? EVENT_LAG_S : t;
+      dx += wheelVx * t;
+      dy += wheelVy * t;
+      dz += wheelVz * t;
       if (dx * dx + dy * dy + dz * dz < r2) return true;
     }
     return false;
+  }
+
+  /** Mean wheel-node velocity (m per wall second) from successive frames (nearWheel's lag sweep). */
+  function trackWheels(dtS: number): void {
+    const n = wheelNodes.length;
+    if (n === 0) return;
+    let sx = 0;
+    let sy = 0;
+    let sz = 0;
+    for (let k = 0; k < n; k++) {
+      const o = off + wheelNodes[k]! * 3;
+      sx += nodes[o]!;
+      sy += nodes[o + 1]!;
+      sz += nodes[o + 2]!;
+    }
+    sx /= n;
+    sy /= n;
+    sz /= n;
+    if (dtS > 1e-4 && wheelPrevOk) {
+      wheelVx = (sx - wheelPx) / dtS;
+      wheelVy = (sy - wheelPy) / dtS;
+      wheelVz = (sz - wheelPz) / dtS;
+      const v2 = wheelVx * wheelVx + wheelVy * wheelVy + wheelVz * wheelVz;
+      if (!(v2 < 80 * 80)) wheelVx = wheelVy = wheelVz = 0; // teleport / NaN
+    }
+    wheelPx = sx;
+    wheelPy = sy;
+    wheelPz = sz;
+    wheelPrevOk = Number.isFinite(sx + sy + sz);
   }
 
   /**
@@ -1266,7 +1319,10 @@ export function createVehicleDamage(
       lastSkin = skin;
       nodes = frame.nodes;
       off = frame.nodeOffset * 3;
+      trackWheels(frame.dtS);
       if (frame.repairEpoch !== epoch) {
+        wheelPrevOk = false;
+        wheelVx = wheelVy = wheelVz = 0;
         if (epoch !== -1) clearAll();
         // events drained together with the repair snapshot may predate the repair
         impN = skidN = brkN = 0;

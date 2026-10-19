@@ -419,9 +419,11 @@ function rockSet(size: number): { albedo: Uint8Array; normal: Uint8Array } {
       h[y * size + x] = hh;
       const tone = 0.75 + 0.5 * (n4(u, v) - 0.5) + 0.25 * (n3(u, v) - 0.5);
       const i = (y * size + x) * 4;
-      albedo[i] = 106 * tone * (1 - 0.5 * crack);
-      albedo[i + 1] = 103 * tone * (1 - 0.5 * crack);
-      albedo[i + 2] = 98 * tone * (1 - 0.5 * crack);
+      // Weathered granite ≈ 0.2 linear albedo, like the terrain's rock set (at 106/103/98 the
+      // boulders read as black blobs against the sunlit ground).
+      albedo[i] = 144 * tone * (1 - 0.45 * crack);
+      albedo[i + 1] = 139 * tone * (1 - 0.45 * crack);
+      albedo[i + 2] = 130 * tone * (1 - 0.45 * crack);
       albedo[i + 3] = 255;
     }
   }
