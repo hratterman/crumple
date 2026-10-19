@@ -4,7 +4,7 @@ import { DEFAULT_LAYOUT } from './layout';
 import { syntheticTerrain } from './sampler.testkit';
 import type { WorldLayout } from './types';
 import { WATER_OPTICS_DEFAULTS } from './types';
-import { resolveWater, waterAt } from './water';
+import { resolveWater, waterAt, waterField } from './water';
 
 const lake = DEFAULT_LAYOUT.zones.find((z) => z.kind === 'lake')!;
 
@@ -45,5 +45,45 @@ describe('resolveWater', () => {
 
   it('skips a lake whose centre is dry', () => {
     expect(resolveWater(layoutWith(-10), terrain)).toHaveLength(0);
+  });
+});
+
+describe('waterField', () => {
+  const terrain = syntheticTerrain({
+    cols: 61,
+    rows: 61,
+    height: (x, z) => {
+      if ((x - 25) ** 2 + (z - 25) ** 2 < 4) return -3;
+      const r = Math.sqrt(x * x + z * z);
+      return r < 10 ? -6 * (1 - (r * r) / 100) : 2;
+    },
+  });
+  const [body] = resolveWater(layoutWith(0), terrain);
+  const f = waterField(terrain, body!);
+
+  it('covers the body rect on the terrain grid with level − height depths', () => {
+    expect(f.originX).toBeLessThanOrEqual(body!.minX);
+    expect(f.originX + (f.cols - 1) * f.spacing).toBeGreaterThanOrEqual(body!.maxX);
+    const c = Math.round((0 - f.originX) / f.spacing);
+    const r = Math.round((0 - f.originZ) / f.spacing);
+    expect(f.depth[r * f.cols + c]).toBeCloseTo(6, 3);
+  });
+
+  it('floods exactly the samples resolveWater counted, with a signed shore distance', () => {
+    let n = 0;
+    for (let k = 0; k < f.mask.length; k++) {
+      if (f.mask[k]) {
+        n++;
+        expect(f.depth[k]).toBeGreaterThan(0);
+        expect(f.shoreDist[k]).toBeGreaterThan(0);
+      } else {
+        expect(f.shoreDist[k]).toBeLessThan(0);
+      }
+    }
+    expect(n).toBe(body!.samples);
+    // the centre is ~10 m from the rim; the rim samples are ~0.5 m in
+    const centre = Math.round((0 - f.originZ) / f.spacing) * f.cols + Math.round((0 - f.originX) / f.spacing);
+    expect(f.shoreDist[centre]).toBeGreaterThan(8);
+    expect(f.shoreDist[centre]).toBeLessThan(11);
   });
 });

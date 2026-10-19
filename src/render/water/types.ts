@@ -29,9 +29,15 @@
  * the surface, render layer 0 only (no particles/grass/water) into a
  * HalfFloat target at waterReflectionScale × drawing buffer, shadow-map
  * auto-update off for the pass, ≤ WATER_REFLECTION_DRAW_BUDGET draws
- * (terrain at its current LOD, roads, colliders, props, vehicles, tree
- * impostors); skipped when no body is in the frustum or the camera is
- * farther than WATER_REFLECTION_MAX_DIST_M from the body rect.
+ * (colliders, props, vehicles, tree impostors; the terrain chunks and road
+ * ribbons are replaced for the pass by ONE coarse vertex-coloured terrain
+ * proxy on WATER_REFLECTION_LAYER 3, seen only by the reflection camera:
+ * the chunked terrain alone was ~300 draws looking across the lake);
+ * skipped when no body is in the frustum, the camera is farther than
+ * WATER_REFLECTION_MAX_DIST_M from the body rect, or the CSM shadow maps do
+ * not exist yet (the pass samples them without rendering them).
+ * REFRACTION: the water's onBeforeRender copies the bound colour buffer
+ * (copyFramebufferToTexture, once per render call) as the refracted bed.
  */
 import type { TerrainData, WaterBody } from '../../world/types';
 import type { LightingStack, PatchMaterial, RenderContext, WorldLayerRenderer } from '../types';
