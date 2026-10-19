@@ -17,14 +17,22 @@ import {
   Vector3,
   WebGLRenderer,
 } from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
-import { SimClient } from './app/simClient';
+import { SimClient, type ObjectRange } from './app/simClient';
 import { loadTerrainSet } from './assets/loader';
-import { quatFromAxisAngle, vec3Normalize, type Quat, type Vec3 } from './core/math';
-import { MaterialId, type Transform } from './protocol/messages';
+import { quatFromAxisAngle, quatRotateVec3, vec3Normalize, type Quat, type Vec3 } from './core/math';
+import { createInputMapper } from './input/actions';
+import { attachInputDevices } from './input/devices';
+import { MaterialId, type ActionState, type Transform } from './protocol/messages';
+import { VehicleTelemetry } from './protocol/telemetry';
+import { vehiclePoseFromNodes, type ChaseTarget } from './render/cameras/chase';
+import { CameraDirector } from './render/cameras/director';
 import { BeamView } from './render/debug/beamview';
+import { compileRig } from './sim/rig/builder';
 import { softCube } from './sim/rig/testrigs';
+import { buildVehicleRig } from './sim/vehicle/builder';
+import { SEDAN } from './sim/vehicle/defs/sedan';
+import { Hud } from './ui/hud';
 
 const canvas = document.getElementById('app') as HTMLCanvasElement;
 
@@ -37,9 +45,10 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 const scene = new Scene();
 
 const camera = new PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 2000);
-camera.position.set(4.5, 3.5, 6);
+camera.position.set(6, 3.5, 8);
+camera.lookAt(0, 0.5, 0);
 
-// Warm golden-hour gradient sky: large inverted dome, gradient by world-space height.
+// Warm golden-hour gradient sky: large inverted dome, gradient by view direction.
 const skyMaterial = new ShaderMaterial({
   side: BackSide,
   depthWrite: false,
@@ -48,29 +57,29 @@ const skyMaterial = new ShaderMaterial({
     horizonColor: { value: new Color(0xf2a65a) },
   },
   vertexShader: /* glsl */ `
-    varying vec3 vWorldPosition;
+    varying vec3 vDir;
     void main() {
-      vec4 worldPosition = modelMatrix * vec4(position, 1.0);
-      vWorldPosition = worldPosition.xyz;
+      vDir = position;
       gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
     }
   `,
   fragmentShader: /* glsl */ `
     uniform vec3 topColor;
     uniform vec3 horizonColor;
-    varying vec3 vWorldPosition;
+    varying vec3 vDir;
     void main() {
-      float h = normalize(vWorldPosition).y;
+      float h = normalize(vDir).y;
       float t = pow(clamp(h, 0.0, 1.0), 0.6);
       gl_FragColor = vec4(mix(horizonColor, topColor, t), 1.0);
     }
   `,
 });
 const sky = new Mesh(new SphereGeometry(900, 32, 16), skyMaterial);
+sky.frustumCulled = false;
 scene.add(sky);
 
-// Ground: 60 m asphalt pad at y = 0 (matches the sim's ground plane).
-const GROUND_SIZE = 60;
+// Ground: large asphalt plane at y = 0 (the sim's ground plane is infinite).
+const GROUND_SIZE = 600;
 const TEXTURE_TILE_M = 4;
 const groundMaterial = new MeshStandardMaterial({ color: 0x3a3c40, roughness: 0.95 });
 const ground = new Mesh(new PlaneGeometry(GROUND_SIZE, GROUND_SIZE), groundMaterial);
@@ -114,34 +123,159 @@ const client = new SimClient({
     fatalBox.hidden = false;
   },
 });
-client.ground(0, MaterialId.asphalt);
+const GROUND_Y = 0;
+client.ground(GROUND_Y, MaterialId.asphalt);
 
-const CUBE_ID = 1;
+const VEHICLE_ID = 1;
+const CUBE_ID = 2;
+
+// Rest-pose facts of the sedan (pure build; same canonical order the worker uses).
+const sedanRig = compileRig(buildVehicleRig(SEDAN));
+const SPAWN_DROP_M = 0.06;
+let restMinY = Infinity;
+for (let i = 0; i < sedanRig.nodeCount; i++) {
+  restMinY = Math.min(restMinY, sedanRig.nodePos[3 * i + 1]! - sedanRig.nodeRadius[i]!);
+}
+const spawnLift = GROUND_Y - restMinY + SPAWN_DROP_M;
+
+const vehicleSpawn: Transform = { pos: [0, spawnLift, 0], quat: [0, 0, 0, 1] };
+const transmission = SEDAN.drivetrain.transmission ?? 'auto';
+client.spawnVehicle(VEHICLE_ID, SEDAN, vehicleSpawn, transmission);
+
+// Soft cube target off to the side, ahead of the car (vehicle forward is −Z).
 const tumbleAxis = vec3Normalize([0, 0, 0] as Vec3, [1, 0.35, 0.6]);
-const spawnTransform: Transform = {
-  pos: [0, 6, 0],
+const cubeSpawn: Transform = {
+  pos: [6, 3, -18],
   quat: quatFromAxisAngle([0, 0, 0, 1] as Quat, tumbleAxis, 0.45),
 };
-client.spawn(CUBE_ID, softCube(), spawnTransform);
+client.spawn(CUBE_ID, softCube(), cubeSpawn);
 
 const beamView = new BeamView();
+beamView.visible = true;
 scene.add(beamView.group);
 
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-controls.dampingFactor = 0.08;
-controls.maxPolarAngle = Math.PI * 0.495;
-controls.minDistance = 2;
-controls.maxDistance = 80;
-controls.target.set(0, 3, 0);
-controls.update();
-
-window.addEventListener('keydown', (e) => {
-  if (e.code === 'KeyR' && !e.repeat && !e.ctrlKey && !e.metaKey) {
-    client.reset(CUBE_ID, spawnTransform);
-  }
+// ------------------------------------------------------------ cameras, input, HUD
+const director = new CameraDirector(camera, renderer.domElement, {
+  initial: 'chase',
+  chase: { groundHeight: () => GROUND_Y },
 });
 
+const mapper = createInputMapper({ transmission, gearCount: SEDAN.drivetrain.gearRatios.length });
+const devices = attachInputDevices(mapper);
+
+const hud = new Hud(document.body, {
+  idleRpm: SEDAN.drivetrain.idleRpm,
+  redlineRpm: SEDAN.drivetrain.redlineRpm,
+  revLimitRpm: SEDAN.drivetrain.revLimitRpm,
+});
+
+let paused = false;
+let slowMo = false;
+const SLOW_MO_SCALE = 0.25;
+function applyTimescale(): void {
+  client.setTimescale(paused ? 0 : slowMo ? SLOW_MO_SCALE : 1);
+}
+
+// ------------------------------------------------------------ vehicle pose
+let positions = new Float32Array(0);
+const pose = {
+  position: new Vector3(),
+  forward: new Vector3(0, 0, -1),
+  up: new Vector3(0, 1, 0),
+  velocity: new Vector3(),
+} satisfies ChaseTarget;
+let poseValid = false;
+
+function findRange(objectId: number): ObjectRange | null {
+  for (const r of client.objectRanges()) if (r.objectId === objectId) return r;
+  return null;
+}
+
+function updateVehiclePose(): boolean {
+  const info = client.vehicleInfo(VEHICLE_ID);
+  const range = findRange(VEHICLE_ID);
+  if (!info || !range || range.nodeCount !== info.nodeCount) return false;
+  if (!vehiclePoseFromNodes(positions, range.nodeOffset, range.nodeCount, info.frameNodes, pose.position, pose.forward, pose.up)) {
+    return false;
+  }
+  const t = client.telemetry(VEHICLE_ID);
+  if (t) pose.velocity.set(t[VehicleTelemetry.velX]!, t[VehicleTelemetry.velY]!, t[VehicleTelemetry.velZ]!);
+  else pose.velocity.set(0, 0, 0);
+  if (!Number.isFinite(pose.velocity.x + pose.velocity.y + pose.velocity.z)) pose.velocity.set(0, 0, 0);
+  return true;
+}
+
+/** Full repair: despawn + spawn a fresh sedan where the car is now, heading kept. */
+function repairVehicle(): void {
+  const t: Transform = { pos: vehicleSpawn.pos, quat: vehicleSpawn.quat };
+  const info = client.vehicleInfo(VEHICLE_ID);
+  if (poseValid && info) {
+    const f = pose.forward;
+    const h = Math.hypot(f.x, f.z);
+    // Rotation about +Y taking rig forward (−Z) to the current horizontal heading.
+    const yaw = h > 0.2 ? Math.atan2(-f.x, -f.z) : 0;
+    const q = quatFromAxisAngle([0, 0, 0, 1] as Quat, [0, 1, 0], yaw);
+    const o = info.frameNodes[0]!;
+    const rest: Vec3 = [sedanRig.nodePos[3 * o]!, sedanRig.nodePos[3 * o + 1]!, sedanRig.nodePos[3 * o + 2]!];
+    const r = quatRotateVec3([0, 0, 0] as Vec3, q, rest);
+    t.pos = [pose.position.x - r[0], spawnLift, pose.position.z - r[2]];
+    t.quat = q;
+  }
+  client.despawn(VEHICLE_ID);
+  client.spawnVehicle(VEHICLE_ID, SEDAN, t, mapper.transmission);
+  lastSent.gearSelect = NaN; // force a full input resend for the fresh object
+  director.snap();
+}
+
+// ------------------------------------------------------------ input plumbing
+const lastSent: ActionState = { throttle: NaN, brake: NaN, steer: NaN, handbrake: NaN, clutch: NaN, gearSelect: NaN };
+function sendInput(a: ActionState): void {
+  if (
+    a.throttle === lastSent.throttle &&
+    a.brake === lastSent.brake &&
+    a.steer === lastSent.steer &&
+    a.handbrake === lastSent.handbrake &&
+    a.clutch === lastSent.clutch &&
+    a.gearSelect === lastSent.gearSelect
+  ) {
+    return;
+  }
+  Object.assign(lastSent, a);
+  client.input(VEHICLE_ID, { ...a });
+}
+
+function handleCommands(): void {
+  for (const c of mapper.drainCommands()) {
+    switch (c) {
+      case 'recover':
+        client.recover(VEHICLE_ID);
+        break;
+      case 'repair':
+        repairVehicle();
+        break;
+      case 'cameraCycle':
+        director.cycle();
+        break;
+      case 'toggleBeamView':
+        beamView.visible = !beamView.visible;
+        break;
+      case 'pause':
+        paused = !paused;
+        applyTimescale();
+        break;
+      case 'slowMo':
+        slowMo = !slowMo;
+        applyTimescale();
+        break;
+      case 'shiftUp':
+      case 'shiftDown':
+        // Manual gear stepping lives in the mapper (gearSelect); nothing else to do.
+        break;
+    }
+  }
+}
+
+// ------------------------------------------------------------ debug/test global
 const crumple = {
   get tick(): number {
     return client.latestTick;
@@ -153,6 +287,23 @@ const crumple = {
   get snapshotHz(): number {
     return client.stats.snapshotHz;
   },
+  idleRpm: SEDAN.drivetrain.idleRpm,
+  /** Latest vehicle telemetry (subset), or null before the car appears. */
+  get vehicle(): { speed: number; rpm: number; gear: number; damage: number } | null {
+    const t = client.telemetry(VEHICLE_ID);
+    if (!t) return null;
+    const T = VehicleTelemetry;
+    return { speed: t[T.speed]!, rpm: t[T.engineRpm]!, gear: t[T.gear]!, damage: t[T.damage]! };
+  },
+  get camera(): string {
+    return director.mode;
+  },
+  get beamView(): boolean {
+    return beamView.visible;
+  },
+  get timescale(): number {
+    return paused ? 0 : slowMo ? SLOW_MO_SCALE : 1;
+  },
 };
 (window as unknown as { __crumple: typeof crumple }).__crumple = crumple;
 
@@ -162,49 +313,43 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-let positions = new Float32Array(0);
-const centroid = new Vector3();
-const follow = new Vector3();
+// ------------------------------------------------------------ frame loop
+const hudStatus = { paused: false, slowMo: false, camera: 'chase', transmission, beamView: true };
 let lastTime = performance.now();
-
-function cubeCentroid(out: Vector3): boolean {
-  for (const r of client.objectRanges()) {
-    if (r.objectId !== CUBE_ID || r.nodeCount === 0) continue;
-    let x = 0;
-    let y = 0;
-    let z = 0;
-    const end = (r.nodeOffset + r.nodeCount) * 3;
-    for (let i = r.nodeOffset * 3; i < end; i += 3) {
-      x += positions[i]!;
-      y += positions[i + 1]!;
-      z += positions[i + 2]!;
-    }
-    const inv = 1 / r.nodeCount;
-    out.set(x * inv, y * inv, z * inv);
-    return Number.isFinite(out.x + out.y + out.z);
-  }
-  return false;
-}
 
 function frame(now: number): void {
   const dt = Math.min((now - lastTime) / 1000, 0.1);
   lastTime = now;
 
+  // Input → worker.
+  devices.poll();
+  const tel = client.telemetry(VEHICLE_ID);
+  const speed = tel ? (tel[VehicleTelemetry.speed] ?? 0) : 0;
+  sendInput(mapper.update(dt, speed));
+  handleCommands();
+
+  // Interpolated nodes → beam view + camera subject.
   const need = client.nodeTotal * 3;
   if (positions.length < need) positions = new Float32Array(need);
   if (client.interpolate(client.renderTime(now), positions) > 0) {
     beamView.update(client, positions);
-    if (cubeCentroid(centroid)) {
-      // Follow the cube: translate camera and target together so orbiting is preserved.
-      follow.copy(centroid).sub(controls.target).multiplyScalar(1 - Math.exp(-4 * dt));
-      controls.target.add(follow);
-      camera.position.add(follow);
-    }
+    poseValid = updateVehiclePose();
+  } else {
+    poseValid = false;
   }
   // No FX consumers yet; drain so the queue never saturates.
   client.drainEvents({});
 
-  controls.update(dt);
+  director.update(dt, poseValid ? pose : null);
+  sky.position.copy(camera.position);
+
+  hudStatus.paused = paused;
+  hudStatus.slowMo = slowMo;
+  hudStatus.camera = director.mode;
+  hudStatus.transmission = mapper.transmission;
+  hudStatus.beamView = beamView.visible;
+  hud.update(client.telemetry(VEHICLE_ID), hudStatus, dt);
+
   renderer.render(scene, camera);
   requestAnimationFrame(frame);
 }

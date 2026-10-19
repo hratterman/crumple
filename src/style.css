@@ -23,4 +23,5 @@ canvas {
   background: rgba(150, 20, 20, 0.9);
   border-radius: 6px;
   white-space: pre-wrap;
+  z-index: 10;
 }
