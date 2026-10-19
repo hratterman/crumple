@@ -28,6 +28,7 @@ import { createRng } from '../core/rng';
 import { DEFAULT_EROSION, erodeHeightfield } from './erosion';
 import {
   createRoadSample,
+  detAtan2,
   headingToYaw,
   resolveRoadProfiles,
   sampleRoad,
@@ -85,6 +86,10 @@ const S_EROSION = 12;
 const S_CRAG = 13;
 const S_CRAG_PATCH = 14;
 const S_LAKE_WARP = 15;
+const S_LOW_ROLL = 16;
+const S_LOW_KNOLL = 17;
+const S_LOW_CREASE = 18;
+const S_LOW_OUTCROP = 19;
 const S_ZONE = 100; // + zone index (×2 for secondary)
 
 const WARP_AMP = 40;
@@ -93,6 +98,11 @@ const MTN_RIDGE_GAIN = 3.0;
 /** Extra domain-warp amplitude inside mountain zones, m. */
 const MTN_WARP_AMP = 45;
 const MTN_RIDGE_BIAS = 0.3;
+/** Lowland relief (m): swell amplitude, knoll height, drainage crease depth, outcrop height. */
+const LOW_ROLL_AMP = 6.5;
+const LOW_KNOLL_AMP = 5;
+const LOW_CREASE_DEPTH = 2.8;
+const LOW_OUTCROP_AMP = 5;
 /** Close-range crag relief on the mountains, m. */
 const CRAG_AMP = 2.4;
 const WARP_WAVELENGTH = 340;
@@ -360,6 +370,75 @@ interface CoarseFields {
   warpZC: Float32Array;
   eroC: Float32Array;
   mslopeC: Float32Array;
+  /** Lowland weight (0..1): open country outside mountains / hills / rim. */
+  lowC: Float32Array;
+  /** Moisture (0..1): lake surroundings and drainage creases. */
+  wetC: Float32Array;
+  /** Rocky outcrop weight (0..1). */
+  outC: Float32Array;
+  /** Drainage crease weight (0..1, 1 = crease bottom). */
+  creaseC: Float32Array;
+}
+
+/** Open-country relief: rolling swells, knolls, drainage creases toward the lake, rocky outcrops. */
+interface Lowland {
+  roll: Layer;
+  knoll: NoiseFunction2D;
+  crease: NoiseFunction2D;
+  outcrop: NoiseFunction2D;
+  /** Lake centre (creases run radially toward it), or null. */
+  lakeX: number;
+  lakeZ: number;
+  hasLake: boolean;
+}
+/** Scratch out-params of lowlandRelief: [wet, outcrop, crease]. */
+const LOW = new Float64Array(3);
+
+/**
+ * Lowland height delta at (x, z) (warped wx, wz) before weighting: ±5 m
+ * swells (λ 280 m), isolated knolls up to 7 m, a gentle rise away from the
+ * lake, shallow V creases that run radially toward the lake (noise in
+ * (angle, radius) coordinates: zero lines are nearly radial), and rare
+ * rocky outcrops. Writes moisture / outcrop weights into LOW.
+ */
+function lowlandRelief(lw: Lowland, x: number, z: number, wx: number, wz: number): number {
+  let h = LOW_ROLL_AMP * fbmRange(lw.roll, wx, wz, 0, lw.roll.octaves, 1, 1);
+  const kn = lw.knoll(wx / 150, wz / 150);
+  const k = smooth01((kn + 0.2) / 1.1);
+  h += LOW_KNOLL_AMP * k * k;
+  let wet = 0;
+  let crease = 0;
+  if (lw.hasLake) {
+    const dx = x - lw.lakeX;
+    const dz = z - lw.lakeZ;
+    const rho = Math.sqrt(dx * dx + dz * dz);
+    // Land rises gently away from the lake (drainage toward it).
+    h += 0.006 * (rho < 900 ? rho : 900);
+    const near = smooth01(1 - (rho - 180) / 260);
+    if (rho > 1) {
+      const th = detAtan2(dz, dx);
+      // Fade near the atan2 branch cut (west of the lake centre) and inside the lake.
+      const fade = smooth01((dx / rho + 0.7) / 0.3) * smooth01((rho - 200) / 120);
+      if (fade > 0) {
+        const c = lw.crease((th * 380) / 320 + 0.25 * kn, rho / 900);
+        const ac = c < 0 ? -c : c;
+        const v = smooth01(1 - ac / 0.42);
+        if (v > 0) {
+          h -= LOW_CREASE_DEPTH * v * fade;
+          wet = v * fade;
+          crease = wet;
+        }
+      }
+    }
+    if (near > wet) wet = near;
+  }
+  const on = lw.outcrop(wx / 160, wz / 160);
+  const o = smooth01((on - 0.86) / 0.08);
+  h += LOW_OUTCROP_AMP * o;
+  LOW[0] = wet;
+  LOW[1] = o;
+  LOW[2] = crease;
+  return h;
 }
 interface Flat {
   shape: CompiledShape;
@@ -379,7 +458,15 @@ function boxOf(g: FullGrid, minX: number, maxX: number, minZ: number, maxZ: numb
   ];
 }
 
+/**
+ * Smooth max with the blend width capped by both arguments, so smax(0, b) = b
+ * exactly: a fixed k added k/4 where a peak bump fades to 0 and left a 3.5 m
+ * step along every peak's ellipse.
+ */
 const smax = (a: number, b: number, k: number): number => {
+  if (a < k) k = a;
+  if (b < k) k = b;
+  if (k <= 0) return a > b ? a : b;
   const d = a > b ? a - b : b - a;
   const m = a > b ? a : b;
   if (d >= k) return m;
@@ -408,6 +495,7 @@ function coarseRelief(
   warpZ: Layer,
   rimL: Layer,
   rimRidge: Layer,
+  lw: Lowland,
 ): void {
   const T = layout.terrain;
   const half = layout.size / 2;
@@ -438,6 +526,8 @@ function coarseRelief(
       let spawn = 0;
       let mtnW = 0;
       let hillW = 0;
+      let mtnRelief = 0;
+      let rimM = 0;
       for (let k = 0; k < relief.length; k++) {
         const zr = relief[k]!;
         const L = zr.layer!;
@@ -482,6 +572,7 @@ function coarseRelief(
           const reliefW = rel * 3 > 1 ? 1 : rel * 3;
           mtnW += wgt;
           rough += 0.9 * reliefW;
+          if (reliefW > mtnRelief) mtnRelief = reliefW;
           spawn += reliefW;
         }
       }
@@ -498,9 +589,25 @@ function coarseRelief(
           const m = smooth01(1 - ed / (er.width * (0.6 + 0.4 * n01)));
           const ridge = ridgedRange(rimRidge, wx, wz, 0, rimRidge.octaves, 1, 1, 1);
           h += er.height * m * (0.72 + 0.56 * n01) + er.height * 0.35 * m * ridge;
+          rimM = m;
           rough += 0.7 * m;
           spawn += 0.9 * m;
         }
+      }
+      // Open country between the relief zones: rolling lowland.
+      const hw = hillW > 1 ? 1 : hillW;
+      const low = (1 - mtnRelief) * (1 - hw) * (1 - rimM);
+      F.lowC[i] = low;
+      F.wetC[i] = 0;
+      F.outC[i] = 0;
+      F.creaseC[i] = 0;
+      if (low > 1e-4) {
+        h += low * lowlandRelief(lw, x, z, wx, wz);
+        F.wetC[i] = low * LOW[0]!;
+        F.outC[i] = low * LOW[1]!;
+        F.creaseC[i] = low * LOW[2]!;
+        rough += 0.12 * low + 0.6 * low * LOW[1]!;
+        spawn += 0.12 * low;
       }
       F.hC[i] = h;
       F.roughC[i] = rough > 1 ? 1 : rough;
@@ -646,10 +753,12 @@ function fineDetail(
       const rough = cbl(F.roughC, nc, i00, fx, fz);
       if (rough > 1e-4) h += rough * (0.32 * microA(x * 0.11, z * 0.11) + 0.1 * microB(x * 0.29, z * 0.29));
       const mtn = cbl(F.mtnC, nc, i00, fx, fz);
-      if (mtn > 1e-3) {
-        // Crags: sharp ridged outcrops on steep, rocky mountain ground (patchy).
+      const out = cbl(F.outC, nc, i00, fx, fz);
+      if (mtn > 1e-3 || out > 1e-3) {
+        // Crags: sharp ridged outcrops on steep, rocky mountain ground (patchy) and lowland outcrops.
         const ms = cbl(F.mslopeC, nc, i00, fx, fz);
-        const w = mtn * smooth01((ms - 0.35) / 0.4 + 0.8 * cragP(x * 0.012, z * 0.012));
+        let w = mtn > 1e-3 ? mtn * smooth01((ms - 0.35) / 0.4 + 0.8 * cragP(x * 0.012, z * 0.012)) : 0;
+        w += 0.6 * out;
         if (w > 1e-3) {
           let n = cragA(x * 0.07, z * 0.07);
           n = 1 - (n < 0 ? -n : n);
@@ -1070,6 +1179,8 @@ function paintNatural(
       const fx = cFrac[c]!;
       const h = heights[i]!;
       const slope = slopeAt(heights, cols, rows, i, r, c, inv2);
+      // Aspect: terrain descending toward +Z faces south (sunny, drier).
+      const gzs = (heights[r < rows - 1 ? i + cols : i]! - heights[r > 0 ? i - cols : i]!) * inv2;
       const w00 = (1 - fx) * (1 - fz);
       const w10 = fx * (1 - fz);
       const w01 = (1 - fx) * fz;
@@ -1083,15 +1194,36 @@ function paintNatural(
       const hill = w00 * hillC[i00]! + w10 * hillC[i10]! + w01 * hillC[i01]! + w11 * hillC[i11]!;
       const nA = w00 * nAC[i00]! + w10 * nAC[i10]! + w01 * nAC[i01]! + w11 * nAC[i11]!;
       const nB = pB(x * 0.16, z * 0.16);
+      const lowE = w00 * F.lowC[i00]! + w10 * F.lowC[i10]! + w01 * F.lowC[i01]! + w11 * F.lowC[i11]!;
       W[0] = 0;
       W[1] = 0;
       W[2] = 0;
       W[3] = 0;
       // Worn earth on moderate slopes and in patches.
       over(1, smooth01((slope - 0.42) / 0.3 + 0.35 * nB) * 0.75);
-      over(1, smooth01((nA - 0.45) / 0.25 + 0.3 * nB) * (0.25 + 0.45 * hill + 0.4 * mtn) * 0.6);
+      const low = lowE;
+      const wet = w00 * F.wetC[i00]! + w10 * F.wetC[i10]! + w01 * F.wetC[i01]! + w11 * F.wetC[i11]!;
+      over(1, smooth01((nA - 0.45) / 0.25 + 0.3 * nB) * (0.25 + 0.45 * hill + 0.4 * mtn) * 0.6 * (1 - 0.8 * wet));
+      if (low > 1e-3) {
+        // Open country: dry grass / thin soil on sunny (south-facing) slopes and
+        // knoll tops, lush where it is wet (near the lake, in the drainage creases).
+        const south = smooth01((-gzs - 0.005) / 0.05);
+        const dry = (0.3 + 0.7 * south) * (1 - wet);
+        over(1, smooth01((dry - 0.5) / 0.35 + 0.6 * nA + 0.35 * nB) * 0.5 * low);
+        const cr = w00 * F.creaseC[i00]! + w10 * F.creaseC[i10]! + w01 * F.creaseC[i01]! + w11 * F.creaseC[i11]!;
+        if (cr > 0.5) {
+          // Crease bottoms: damp, darker earth showing through lush grass.
+          over(1, smooth01((cr - 0.75) / 0.2 + 0.6 * nB) * 0.3);
+        }
+        const out = w00 * F.outC[i00]! + w10 * F.outC[i10]! + w01 * F.outC[i01]! + w11 * F.outC[i11]!;
+        if (out > 0.05) {
+          // Rocky outcrops with a gravel apron.
+          over(3, smooth01((out - 0.1) / 0.25 + 0.6 * nB) * 0.45);
+          over(2, smooth01((out - 0.35) / 0.3 + 0.9 * nB + 0.4 * nA + (slope - 0.4)) * 0.85);
+        }
+      }
       // Erosion: gravel channel beds, earthy deposition fans.
-      if (ero < -0.1) over(3, smooth01((-ero - 1.0) / 2 + 0.35 * nB) * 0.6);
+      if (ero < -0.1) over(3, smooth01((-ero - 1.0) / 2 + 0.35 * nB) * 0.6 * (1 - 0.85 * lowE));
       else if (ero > 0.1) over(1, smooth01((ero - 0.4) / 1.2 + 0.3 * nB) * 0.3);
       if (mtn > 1e-3) {
         // Scree under steep mountain ground; macro rock faces (rockSlope); alpine heights.
@@ -1278,6 +1410,22 @@ export function generateTerrain(layout: WorldLayout): TerrainData {
     warpZC: new Float32Array(NC),
     eroC: new Float32Array(NC),
     mslopeC: new Float32Array(NC),
+    lowC: new Float32Array(NC),
+    wetC: new Float32Array(NC),
+    outC: new Float32Array(NC),
+    creaseC: new Float32Array(NC),
+  };
+  const lake = layout.zones.find((z) => z.kind === 'lake');
+  const lakeC: readonly [number, number] | null =
+    lake && (lake.shape.type === 'ellipse' || lake.shape.type === 'circle') ? lake.shape.center : null;
+  const lw: Lowland = {
+    roll: makeLayer(noiseFor(S_LOW_ROLL), { amplitude: 1, wavelength: 300, octaves: 4, gain: 0.45 }, cs),
+    knoll: noiseFor(S_LOW_KNOLL),
+    crease: noiseFor(S_LOW_CREASE),
+    outcrop: noiseFor(S_LOW_OUTCROP),
+    lakeX: lakeC ? lakeC[0] : 0,
+    lakeZ: lakeC ? lakeC[1] : 0,
+    hasLake: lakeC !== null,
   };
   const warpX = makeLayer(noiseFor(S_WARP_X), { amplitude: 1, wavelength: WARP_WAVELENGTH, octaves: 2 }, cs);
   const warpZ = makeLayer(noiseFor(S_WARP_Z), { amplitude: 1, wavelength: WARP_WAVELENGTH, octaves: 2 }, cs);
@@ -1337,7 +1485,7 @@ export function generateTerrain(layout: WorldLayout): TerrainData {
   const firstMtn = layout.zones.find((z) => z.kind === 'mountains');
   const rockSlope = firstMtn && firstMtn.kind === 'mountains' ? firstMtn.params.rockSlope : 0.65;
 
-  coarseRelief(layout, cg, F, relief, detail, detailFineW, warpX, warpZ, rimL, rimRidge);
+  coarseRelief(layout, cg, F, relief, detail, detailFineW, warpX, warpZ, rimL, rimRidge, lw);
   mark('coarse');
 
   // ---------------------------------------------------------- erosion

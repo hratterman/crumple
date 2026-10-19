@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // Top-down shaded-relief PNG of a world layout (hillshade × splat colours,
-// water, faint 10 m contours; roads show through their paved / dirt splat).
+// water, optional 10 m contours; roads show through their paved / dirt splat).
 // Node built-ins only: TypeScript is loaded through node's type stripping
 // with a resolve hook for the repo's extensionless imports.
 //
 //   node tools/terrain-preview.mjs <out.png> [--layout id] [--scale k]
 //        [--crop x0,z0,x1,z1]   (world metres; default the whole map)
+//        [--contours]           (faint 10 m contour lines)
 import { registerHooks } from 'node:module';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -72,6 +73,7 @@ for (const r of t.roads) {
 }
 
 // ---------------------------------------------------------------- render
+const contours = args.includes('--contours');
 const crop = opt('crop', null)?.split(',').map(Number);
 const scale = Number(opt('scale', crop ? 4 : 1));
 const x0 = crop ? crop[0] : originX;
@@ -143,7 +145,7 @@ for (let j = 0; j < H; j++) {
     let lit = 0.3 + 0.95 * shade;
     // Faint 10 m contours.
     const cf = h / 10 - Math.floor(h / 10);
-    if (cf < 0.04 * Math.max(1, Math.hypot(gx, gz) * 2) && h > waterLevel) lit *= 0.9;
+    if (contours && cf < 0.04 * Math.max(1, Math.hypot(gx, gz) * 2) && h > waterLevel) lit *= 0.9;
     col = col.map((v) => v * lit);
     if (h < waterLevel) {
       const d = Math.min(1, (waterLevel - h) / 6);
