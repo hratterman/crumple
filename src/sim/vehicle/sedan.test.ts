@@ -95,6 +95,39 @@ describe('SEDAN definition', () => {
     expect(body.beams.filter((b) => b.breakF !== undefined && b.breakF > 0 && b.breakF < 2e4).length).toBeGreaterThan(10);
   });
 
+  it('has the P4 hood sub-rig: 12 hood nodes after the structure, hinges, latch and rests (CONTRACTS)', () => {
+    const body = SEDAN.body;
+    const ids = body.nodes.map((n) => n.id);
+    const hood = ids.filter((id) => id.startsWith('hood_'));
+    const expected: string[] = [];
+    for (let r = 0; r < 4; r++) for (const s of ['L', 'C', 'R']) expected.push(`hood_${r}${s}`);
+    expect(hood).toEqual(expected);
+    // Appended after every other body node.
+    expect(ids.slice(ids.length - 12)).toEqual(expected);
+    const zr = [-2.0, -1.64, -1.28, -0.92];
+    const yr = [0.72, 0.84, 0.92, 0.96];
+    for (const n of body.nodes.filter((x) => x.group === 'hood')) {
+      const r = Number(n.id[5]);
+      const s = n.id[6];
+      expect(n.pos[0]).toBeCloseTo(s === 'L' ? -0.6 : s === 'R' ? 0.6 : 0, 9);
+      expect(n.pos[1]).toBeCloseTo(yr[r]! + (s === 'C' ? 0.02 : 0), 9);
+      expect(n.pos[2]).toBeCloseTo(zr[r]!, 9);
+      expect(n.mass).toBe(1);
+    }
+    const beam = (a: string, b: string) => body.beams.find((x) => (x.a === a && x.b === b) || (x.a === b && x.b === a));
+    for (const s of ['L', 'R']) {
+      for (const t of [`s5_cw_${s}`, `s4_fd_${s}`]) expect(beam(`hood_3${s}`, t)!.breakF).toBeGreaterThanOrEqual(2e4);
+      expect(beam(`hood_0${s}`, `s2_fd_${s}`)!.breakF).toBeLessThan(1e4);
+      for (const t of ['s2_fd', 's3_fd']) expect(beam(`hood_1${s}`, `${t}_${s}`)!.type).toBe('support');
+      for (const t of ['s3_fd', 's4_fd']) expect(beam(`hood_2${s}`, `${t}_${s}`)!.type).toBe('support');
+    }
+    expect(beam('hood_0C', 's2_rt')!.breakF).toBeLessThan(1e4);
+    expect(beam('hood_1C', 's2_rt')!.type).toBe('support');
+    // Hood beams are declared after every other body beam.
+    const firstHood = body.beams.findIndex((b) => b.a.startsWith('hood_') || b.b.startsWith('hood_'));
+    expect(body.beams.slice(firstHood).every((b) => b.a.startsWith('hood_') || b.b.startsWith('hood_'))).toBe(true);
+  });
+
   it('keeps canonical merged order (body, then FL FR RL RR as generated)', () => {
     const r = cv.rig;
     expect(r.nodeIds.slice(0, SEDAN.body.nodes.length)).toEqual(SEDAN.body.nodes.map((n) => n.id));

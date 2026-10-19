@@ -327,6 +327,39 @@ const DAMPER_CALIBRATION = 1.9;
 /** Wheel: 205/55R16-class tuning (wheelrig.ts) with a heavy hub carrier (upright + brakes): 15 kg per hub node. */
 const WHEEL_HUB_MASS = 30;
 
+// ====================================================================== hood
+/**
+ * HOOD sub-rig (docs/CONTRACTS.md P4 "Sedan rig additions"; A1/A2 bind the
+ * hood panel to these ids): 12 nodes hood_{r}{s}, r = 0..3 front → rear,
+ * s ∈ {L, C, R}, a 4 × 3 grid with X-braced quads. Physical, so it creases
+ * (skin beams yield like the bumper class), pops its latch in a hard
+ * frontal and can tear off at the hinges.
+ *   hinges  hood_3L–s5_cw_L, hood_3L–s4_fd_L (mirror R): high break.
+ *   latch   hood_0C–s2_rt, hood_0L/R–s2_fd_L/R: elastic, snaps at latchBreak.
+ *   rests   support (compression-only) beams from rows 1–2 L/R onto the
+ *           s2..s4 fender tops and hood_1C onto s2_rt: the hood lies on
+ *           the body without being glued to it. Plus hood_3C onto
+ *           s5_fw_L/R: a near-flat pin-jointed grid has no out-of-plane
+ *           stiffness, and the unsupported rear-centre node buzzed at
+ *           ~0.14 m/s on a parked car (light node, ~100 Hz).
+ * Skin damping ζ 0.5 (light 1 kg nodes; (Σd/m)·dt stays < 1).
+ */
+const HOOD_Z = [-2.0, -1.64, -1.28, -0.92] as const;
+const HOOD_Y = [0.72, 0.84, 0.92, 0.96] as const;
+const HOOD_HALF_X = 0.6;
+/** Centre-line crown, m. */
+const HOOD_CROWN = 0.02;
+const HOOD_NODE_MASS = 1;
+const HOOD = {
+  zeta: 0.5,
+  yieldStrain: 0.03,
+  minDeform: 1.5e3,
+  breakRatio: 8,
+  hingeDeform: 1.2e4,
+  hingeBreak: 3e4,
+  latchBreak: 4e3,
+} as const;
+
 // ====================================================================== drivetrain
 /**
  * 3.0 L I6: 350 N·m held from 3500 to 6500 rpm, ≈ 238 kW at 6500–6800 rpm
@@ -524,6 +557,20 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
       corners.set(c, ids);
     }
   }
+
+  // ---- hood sub-rig (P4, docs/CONTRACTS.md "Sedan rig additions"): appended
+  // after every structure node so structure indices are unchanged; fixed
+  // masses outside the structure solve (the solve keeps the car at 1450 kg).
+  const hoodIds: string[][] = [];
+  HOOD_Z.forEach((z, r) => {
+    const row: string[] = [];
+    for (const s of ['L', 'C', 'R'] as const) {
+      const x = s === 'C' ? 0 : s === 'R' ? HOOD_HALF_X : -HOOD_HALF_X;
+      const y = HOOD_Y[r]! + (s === 'C' ? HOOD_CROWN : 0);
+      row.push(addNode(`hood_${r}${s}`, [x, y, z], HOOD_NODE_MASS, 'hood', true, false));
+    }
+    hoodIds.push(row);
+  });
 
   // ---- wheels
   const unsprungWheelOf = (front: boolean): number => hubMass(front) + WHEEL_TUNING_205_55R16.rimMass + WHEEL_TUNING_205_55R16.tireMass;
@@ -900,6 +947,65 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
     fix({ a: L.kU, b: Rc.hubI, type: 'normal', k: arbK[which] * arbF, d: dArb, deform: 0, breakF: 1e5 });
   }
 
+  // ---- hood beams (declared last; see HOOD). Stiffness: each hood node's
+  // budget (0.33/dt)²·m split by weight over its hood beams (a structure
+  // endpoint never limits it); the hood k then counts as fixed k at its
+  // structure endpoints, so their auto beams shrink to fit.
+  const hoodBeams: RigBeamDef[] = [];
+  {
+    type HB = { a: string; b: string; w: number; kind: 'skin' | 'hinge' | 'latch' | 'rest' };
+    const hb: HB[] = [];
+    const H = (r: number, c: number): string => hoodIds[r]![c]!;
+    for (let r = 0; r < HOOD_Z.length; r++) {
+      for (let c = 0; c < 3; c++) {
+        if (c + 1 < 3) hb.push({ a: H(r, c), b: H(r, c + 1), w: 1, kind: 'skin' });
+        if (r + 1 < HOOD_Z.length) {
+          hb.push({ a: H(r, c), b: H(r + 1, c), w: 1, kind: 'skin' });
+          if (c + 1 < 3) {
+            hb.push({ a: H(r, c), b: H(r + 1, c + 1), w: 0.5, kind: 'skin' });
+            hb.push({ a: H(r, c + 1), b: H(r + 1, c), w: 0.5, kind: 'skin' });
+          }
+        }
+      }
+    }
+    for (const s of ['L', 'R'] as const) {
+      const c = s === 'L' ? 0 : 2;
+      hb.push({ a: H(3, c), b: sid(5, 'cw', s), w: 1.5, kind: 'hinge' });
+      hb.push({ a: H(3, c), b: sid(4, 'fd', s), w: 1.5, kind: 'hinge' });
+      hb.push({ a: H(0, c), b: sid(2, 'fd', s), w: 1, kind: 'latch' });
+      hb.push({ a: H(1, c), b: sid(2, 'fd', s), w: 0.5, kind: 'rest' });
+      hb.push({ a: H(1, c), b: sid(3, 'fd', s), w: 0.5, kind: 'rest' });
+      hb.push({ a: H(2, c), b: sid(3, 'fd', s), w: 0.5, kind: 'rest' });
+      hb.push({ a: H(2, c), b: sid(4, 'fd', s), w: 0.5, kind: 'rest' });
+    }
+    hb.push({ a: H(0, 1), b: sid(2, 'rt'), w: 1, kind: 'latch' });
+    hb.push({ a: H(1, 1), b: sid(2, 'rt'), w: 0.5, kind: 'rest' });
+    hb.push({ a: H(3, 1), b: sid(5, 'fw', 'L'), w: 0.5, kind: 'rest' });
+    hb.push({ a: H(3, 1), b: sid(5, 'fw', 'R'), w: 0.5, kind: 'rest' });
+    const hoodW = new Map<string, number>();
+    for (const b of hb) for (const id of [b.a, b.b]) if (id.startsWith('hood_')) hoodW.set(id, (hoodW.get(id) ?? 0) + b.w);
+    const hoodShare = (id: string): number => (id.startsWith('hood_') ? (BUDGET_PER_KG * massOf.get(id)!) / hoodW.get(id)! : Infinity);
+    for (const { a, b, w, kind } of hb) {
+      const k = sig3(0.995 * w * Math.min(hoodShare(a), hoodShare(b)));
+      const ma = massOf.get(a)!;
+      const mb = massOf.get(b)!;
+      const d = sig3(2 * HOOD.zeta * Math.sqrt((k * ma * mb) / (ma + mb)));
+      const L = dist(a, b);
+      if (seen.has(key(a, b))) throw new Error(`sedan: duplicate hood beam ${a}–${b}`);
+      seen.add(key(a, b));
+      if (kind === 'skin') {
+        const deform = sig3(Math.max(HOOD.yieldStrain * k * L, HOOD.minDeform));
+        hoodBeams.push({ a, b, type: 'normal', k, d, deform, breakF: sig3(HOOD.breakRatio * deform) });
+      } else if (kind === 'hinge') {
+        hoodBeams.push({ a, b, type: 'normal', k, d, deform: HOOD.hingeDeform, breakF: HOOD.hingeBreak });
+      } else if (kind === 'latch') {
+        hoodBeams.push({ a, b, type: 'normal', k, d, deform: 0, breakF: HOOD.latchBreak });
+      } else {
+        hoodBeams.push({ a, b, type: 'support', k, d, deform: HOOD.minDeform, breakF: 0 });
+      }
+    }
+  }
+
   // ---- auto stiffness: split each node's budget by class weight
   /*
    * Node budget B_i = (0.33/dt)²·m_i − Σ(fixed k at i, incl. generated wheel
@@ -909,7 +1015,7 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
    */
   const fixedK = new Map<string, number>();
   const addK = (id: string, k: number): void => void fixedK.set(id, (fixedK.get(id) ?? 0) + k);
-  for (const b of fixed) {
+  for (const b of [...fixed, ...hoodBeams]) {
     addK(b.a, b.k!);
     addK(b.b, b.k!);
   }
@@ -936,7 +1042,7 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
     return { a, b, type: 'normal', k, d, deform, breakF: sig3(spec.breakRatio * deform) };
   });
 
-  const beams = [...autoBeams, ...fixed];
+  const beams = [...autoBeams, ...fixed, ...hoodBeams];
   const def: VehicleDef = {
     name: 'sedan',
     body: {
@@ -948,6 +1054,7 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
         engine: { friction: 0.5, radius: 0.08 },
         subframe: { friction: 0.5, radius: 0.04 },
         knuckle: { friction: 0.5, radius: 0.03 },
+        hood: { friction: 0.5, radius: 0.03 },
       },
     },
     wheels,
