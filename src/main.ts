@@ -36,6 +36,7 @@ import { patchMaterial } from './render/material';
 import { createPostStack } from './render/post';
 import { createRoadRenderer } from './render/roads';
 import { createTerrainRenderer } from './render/terrain';
+import { createFarLand, FARLAND_OUTER_M } from './render/terrain/farland';
 import {
   DEFAULT_QUALITY,
   QUALITY_LEVELS,
@@ -60,7 +61,7 @@ const DEFAULT_SPAWN = 'highway';
 const VEHICLE_ID = 1;
 const CUBE_ID = 2;
 /** Beam/node colour gain under the HDR post pipeline (see BeamView). */
-const WIREFRAME_GAIN = 0.32;
+const WIREFRAME_GAIN = 0.26;
 const SLOW_MO_SCALE = 0.25;
 
 const params = new URLSearchParams(location.search);
@@ -79,7 +80,8 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, QUALITY_PRESETS[st
 renderer.setSize(window.innerWidth, window.innerHeight);
 
 const scene = new Scene();
-const camera = new PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 2600);
+// Far plane: the far-land ring's outer edge seen from the opposite map corner.
+const camera = new PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, Math.ceil(FARLAND_OUTER_M + 704 * Math.SQRT2 + 200));
 scene.add(camera);
 
 const ctx: RenderContext = {
@@ -365,6 +367,10 @@ const crumple = {
   renderOnce(): void {
     renderOnce?.();
   },
+  /** Advance only the camera rig by `seconds` at 30 Hz (screenshots under software GL, where frames take seconds). */
+  settleCamera(seconds: number): void {
+    for (let t = 0; t < seconds; t += 1 / 30) director.update(1 / 30, poseValid ? pose : null);
+  },
   /** Dev handles for tuning from the console (not a contract). */
   debug: { scene, camera, renderer, ctx } as Record<string, unknown>,
 };
@@ -422,6 +428,7 @@ async function boot(): Promise<void> {
   scene.add(terrainR.object);
   const roadsR = createRoadRenderer(ctx, world, smp, materials, { lighting, patchMaterial });
   scene.add(roadsR.object);
+  scene.add(createFarLand(world, { lighting, patchMaterial }).object);
   const qc = createQualityControllerWith(
     ctx,
     { lighting, post: postStack, others: [terrainR, roadsR] },

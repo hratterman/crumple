@@ -53,6 +53,19 @@ export interface ChaseOptions {
   groundClearance: number;
   /** Ground height under (x, z). */
   groundHeight: (x: number, z: number) => number;
+  /**
+   * Parked framing: after `idleDelayS` below `idleSpeed` the camera eases
+   * (rate idleInRate/s) up and back by these amounts and raises its look
+   * point, showing the world around a parked car (spawns, lookouts); it
+   * eases back at idleOutRate/s as soon as the car moves.
+   */
+  idleExtraHeight: number;
+  idleExtraDistance: number;
+  idleExtraLook: number;
+  idleSpeed: number;
+  idleDelayS: number;
+  idleInRate: number;
+  idleOutRate: number;
 }
 
 export const DEFAULT_CHASE_OPTIONS: Readonly<ChaseOptions> = {
@@ -72,6 +85,13 @@ export const DEFAULT_CHASE_OPTIONS: Readonly<ChaseOptions> = {
   velocityHeadingFullSpeed: 12,
   groundClearance: 0.3,
   groundHeight: () => 0,
+  idleExtraHeight: 2.6,
+  idleExtraDistance: 3.4,
+  idleExtraLook: 1.2,
+  idleSpeed: 0.6,
+  idleDelayS: 1.2,
+  idleInRate: 0.45,
+  idleOutRate: 2.5,
 };
 
 function smoothstep(e0: number, e1: number, x: number): number {
@@ -145,6 +165,9 @@ export class ChaseCamera {
   private readonly look = new Vector3();
   private readonly tmp = new Vector3();
   private fov: number;
+  /** Parked-framing blend 0..1 and time spent below idleSpeed. */
+  private idle = 0;
+  private idleTime = 0;
 
   constructor(
     readonly camera: PerspectiveCamera,
@@ -157,6 +180,11 @@ export class ChaseCamera {
   /** Next update snaps to the target instead of springing from the current pose. */
   reset(): void {
     this.initialized = false;
+  }
+
+  /** Parked-framing blend, 0 (driving) .. 1 (fully raised). */
+  get idleBlend(): number {
+    return this.idle;
   }
 
   /**
@@ -186,6 +214,16 @@ export class ChaseCamera {
     // Heading: forward blended toward the velocity direction with speed.
     const v = target.velocity;
     const speedH = Math.hypot(v.x, v.z);
+
+    // Parked framing (eases in after a delay, out quickly).
+    const speed3 = Math.hypot(v.x, v.y, v.z);
+    if (speed3 < o.idleSpeed) {
+      this.idleTime += step;
+      if (this.idleTime >= o.idleDelayS) this.idle = Math.min(1, this.idle + o.idleInRate * step);
+    } else {
+      this.idleTime = 0;
+      this.idle = Math.max(0, this.idle - o.idleOutRate * step);
+    }
     const desiredYaw = this.headingYaw(target, speedH);
     if (desiredYaw !== null) {
       const ky = 1 - Math.exp(-o.headingLambda * step);
@@ -206,9 +244,10 @@ export class ChaseCamera {
 
     // Look point leads along the heading with speed.
     const lead = o.lookAheadMax * Math.min(speedH / o.lookAheadFullSpeed, 1);
+    const ease = this.idleEase();
     this.look
       .copy(this.smoothTarget)
-      .add(this.tmp.set(Math.sin(this.yaw) * lead, o.lookHeight, Math.cos(this.yaw) * lead));
+      .add(this.tmp.set(Math.sin(this.yaw) * lead, o.lookHeight + o.idleExtraLook * ease, Math.cos(this.yaw) * lead));
     cam.lookAt(this.look);
 
     const fovGoal = o.baseFov + o.maxFovBoost * smoothstep(5, o.fovFullSpeed, speedH);
@@ -217,6 +256,11 @@ export class ChaseCamera {
       cam.fov = this.fov;
       cam.updateProjectionMatrix();
     }
+  }
+
+  private idleEase(): number {
+    const t = this.idle;
+    return t * t * (3 - 2 * t);
   }
 
   private initFrom(target: ChaseTarget): void {
@@ -261,7 +305,8 @@ export class ChaseCamera {
   /** Offset from the chassis point to the ideal camera position for the current yaw. */
   private desiredOffset(speedH: number, out: Vector3): Vector3 {
     const o = this.options;
-    const d = o.distance + o.distanceAtSpeed * Math.min(speedH / o.fovFullSpeed, 1);
-    return out.set(-Math.sin(this.yaw) * d, o.height, -Math.cos(this.yaw) * d);
+    const ease = this.idleEase();
+    const d = o.distance + o.distanceAtSpeed * Math.min(speedH / o.fovFullSpeed, 1) + o.idleExtraDistance * ease;
+    return out.set(-Math.sin(this.yaw) * d, o.height + o.idleExtraHeight * ease, -Math.cos(this.yaw) * d);
   }
 }

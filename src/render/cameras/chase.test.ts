@@ -58,4 +58,32 @@ describe('chase camera', () => {
     expect(drift.worstBehindDeg).toBeLessThan(35);
     expect(drift.worstNdc).toBeLessThan(0.8);
   });
+
+  it('rises for a parked car and settles back when it drives off', () => {
+    const camera = new PerspectiveCamera(60, 16 / 9, 0.1, 500);
+    const chase = new ChaseCamera(camera);
+    const target: ChaseTarget = {
+      position: new Vector3(0, 0.5, 0),
+      forward: new Vector3(0, 0, -1),
+      up: new Vector3(0, 1, 0),
+      velocity: new Vector3(),
+    };
+    const dt = 1 / 60;
+    chase.update(dt, target);
+    const h0 = camera.position.y;
+    for (let i = 0; i < 60 * 8; i++) chase.update(dt, target);
+    const o = chase.options;
+    expect(chase.idleBlend).toBe(1);
+    expect(camera.position.y - h0).toBeCloseTo(o.idleExtraHeight, 1);
+    const ndc = target.position.clone().project(camera);
+    expect(Math.abs(ndc.y)).toBeLessThan(0.6); // car still framed
+    // Drive off at 8 m/s: back to the normal chase height within ~1 s.
+    target.velocity.set(0, 0, -8);
+    for (let i = 0; i < 60 * 2; i++) {
+      target.position.z -= 8 * dt;
+      chase.update(dt, target);
+    }
+    expect(chase.idleBlend).toBe(0);
+    expect(camera.position.y - h0).toBeLessThan(0.3);
+  });
 });
