@@ -30,9 +30,11 @@ import type { BeamBreakEvent, ImpactEvent, SkidEvent } from '../../protocol/even
 import { RIG_BEAM_TYPE_ID, type CompiledRig } from '../../sim/rig/types';
 import type { CompiledVehicle } from '../../sim/vehicle/types';
 import type { PatchTarget, ShaderPatch } from '../types';
+import { FLEX_CRUMPLE_GLSL } from './flexskin';
 import { GLASS_CRACK_GLSL } from './shatter';
 import {
   DAMAGE_DEFAULTS,
+  FLEX_CRUMPLE_AMP,
   NODE_TEX_FLAG_BROKEN,
   NODE_TEX_FLAG_DETACHED,
   NODE_TEX_WIDTH,
@@ -251,19 +253,25 @@ const DMG_SURFACE = /* glsl */ `
   float dmgF1b = dmgR1b * dmgR1b * dmgR1b;
   float dmgF2 = dmgR2 * dmgR2;
   float dmgFold = max(dmgF1, 0.7 * dmgF1b) * dmgW1;
-  float dmgH = dmgStrain * (0.008 * dmgFold + 0.0025 * dmgF2 * dmgW2 + 0.001 * dmgN3 * dmgW3 + 0.005 * dmgDent);
+  // + the vertex stage's geometric crumple folds (flexskin FLEX_CRUMPLE_GLSL), so they shade.
+  float dmgH = dmgStrain * (0.008 * dmgFold + 0.0025 * dmgF2 * dmgW2 + 0.001 * dmgN3 * dmgW3 + 0.005 * dmgDent
+    + ${FLEX_CRUMPLE_AMP} * flexCrumple(dmgP));
   // scrape streaks: long horizontal scratches (stretched along y) broken up by coarse noise
   float dmgWF = clamp(1.0 - dmgPx * 90.0, 0.0, 1.0);
   float dmgS1 = mix(0.5, dmgNoise(dmgP * vec3(2.0, 90.0, 2.0)), dmgWF);
   float dmgS2 = dmgNoise(dmgP * vec3(1.3, 24.0, 1.3) + 5.0);
   float dmgS3 = dmgNoise(dmgP * 4.0 + 11.0);
   float dmgStreak = 0.42 * dmgS1 + 0.36 * dmgS2 + 0.22 * dmgS3;
-  float dmgCover = clamp(dmgScuff * 0.9 + max(dmgStrain - 0.6, 0.0) * 0.5 * dmgN3, 0.0, 1.0);
+  // Bent metal keeps its paint; only the sharpest fold crests of a heavily crushed panel crack
+  // it (small chips), everything broader is scrape damage.
+  float dmgChip = smoothstep(0.55, 1.0, dmgStrain) * smoothstep(0.5, 0.9, dmgFold) * 0.35;
+  float dmgCover = clamp(dmgScuff * 0.9 + dmgChip, 0.0, 1.0);
   float dmgT = 0.8 - 0.62 * dmgCover;
   float dmgOn = step(0.002, dmgCover);
   float dmgPrimer = smoothstep(dmgT, dmgT + 0.035, dmgStreak) * dmgOn;
   float dmgMetal = smoothstep(dmgT + 0.1, dmgT + 0.13, dmgStreak) * dmgOn;
-  float dmgHalo = smoothstep(dmgT - 0.16, dmgT, dmgStreak) * dmgOn;
+  // the polished-out halo around scrapes (not around crease chips)
+  float dmgHalo = smoothstep(dmgT - 0.16, dmgT, dmgStreak) * dmgOn * clamp(dmgScuff * 3.0, 0.0, 1.0);
   dmgH -= 0.00025 * dmgPrimer + 0.0002 * dmgMetal;
 `;
 
@@ -272,7 +280,8 @@ const DMG_PAINT = /* glsl */ `
   diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * 1.2 + 0.035, dmgHalo * 0.6 * (1.0 - dmgPrimer));
   diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.115, 0.12, 0.118) * (0.8 + 0.4 * dmgS2), dmgPrimer);
   diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.6, 0.6, 0.62) * (0.8 + 0.35 * dmgS1), dmgMetal);
-  diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.03, 0.027, 0.024), clamp(0.5 * dmgTorn + 0.1 * dmgStrain, 0.0, 0.7));
+  // torn-edge grime: vFlexDamage.w is a smooth triad-weighted share, so square it to keep it at the tear
+  diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.03, 0.027, 0.024), clamp(0.45 * dmgTorn * dmgTorn + 0.06 * dmgStrain, 0.0, 0.6));
   roughnessFactor = mix(roughnessFactor, 0.5, clamp(dmgStrain * 0.15 + dmgHalo * 0.7 + dmgTorn * 0.3, 0.0, 1.0));
   roughnessFactor = mix(roughnessFactor, 0.78, dmgPrimer);
   roughnessFactor = mix(roughnessFactor, 0.36 + 0.2 * dmgS1, dmgMetal);
@@ -321,7 +330,7 @@ function insertAfter(src: string, anchor: string, code: string): string {
 export function applyDamageGlsl(fragmentShader: string, variant: DamageVariant): string {
   let fs = fragmentShader;
   if (!fs.includes(ANCHOR_SURFACE)) return fs; // not a standard/physical shader: leave untouched
-  const common = DMG_COMMON + (variant === 'glass' ? GLASS_CRACK_GLSL : '');
+  const common = DMG_COMMON + FLEX_CRUMPLE_GLSL + (variant === 'glass' ? GLASS_CRACK_GLSL : '');
   fs = insertAfter(fs, '#include <common>', common);
   const body =
     variant === 'glass' ? DMG_INPUTS + DMG_GLASS : DMG_INPUTS + DMG_SURFACE + (variant === 'paint' ? DMG_PAINT : DMG_PLASTIC);

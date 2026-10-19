@@ -48,7 +48,7 @@ import {
 
 import type { VehicleTelemetryFrame } from '../../protocol/telemetry';
 import type { RenderContext } from '../types';
-import { vehicleTextures } from './textures';
+import { setVehicleTextureAnisotropy, vehicleTextures } from './textures';
 import type {
   CreateVehicleMaterials,
   LightState,
@@ -590,6 +590,60 @@ function track(m: Material, registry: Set<Material>): void {
   };
 }
 
+/** Anisotropic filtering cap per quality level (the renderer's max caps it further). */
+export const ANISOTROPY_CAP: Readonly<Record<RenderContext['quality']['level'], number>> = { low: 4, medium: 8, high: 16, ultra: 16 };
+
+/**
+ * FINE-DETAIL FADE (anti-moiré for periodic micro-relief, e.g.
+ * the honeycomb grille, 32-texel cells): from ~3 texels per pixel (cells
+ * ~10 px) to ~12 (cells ~2.5 px: the beat frequency) — distance, or grazing
+ * angles where the major axis of the footprint outruns even anisotropic
+ * filtering — the normal-map relief
+ * fades out, the lost micro-shadowing is folded into roughness, and the
+ * colour map blends toward its mean — the pattern dissolves into an even
+ * mesh tone instead of beating into moiré. `size` = map texels per tile.
+ */
+export function fineDetailHook(size: readonly [number, number], mapMean: number): Hook {
+  const sz = `vec2( ${size[0].toFixed(1)}, ${size[1].toFixed(1)} )`;
+  const pars = /* glsl */ `
+float crFineFade( vec2 uv ) {
+	vec2 t = fwidth( uv ) * ${sz};
+	return 1.0 - smoothstep( 3.0, 12.0, max( t.x, t.y ) );
+}`;
+  return (shader) => {
+    must(shader.fragmentShader, '#include <common>', 'fine detail');
+    must(shader.fragmentShader, '#include <normal_fragment_maps>', 'fine detail');
+    must(shader.fragmentShader, '#include <map_fragment>', 'fine detail');
+    const nrm = ShaderChunk.normal_fragment_maps.replace(
+      'mapN.xy *= normalScale;',
+      'float crFine = crFineFade( vNormalMapUv );\n\tmapN.xy *= normalScale * crFine;\n\troughnessFactor = mix( min( 1.0, roughnessFactor + 0.15 ), roughnessFactor, crFine );',
+    );
+    const map = ShaderChunk.map_fragment.replace(
+      'diffuseColor *= sampledDiffuseColor;',
+      `sampledDiffuseColor.rgb = mix( vec3( ${mapMean.toFixed(4)} ), sampledDiffuseColor.rgb, crFineFade( vMapUv ) );\n\tdiffuseColor *= sampledDiffuseColor;`,
+    );
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>\n${pars}`)
+      .replace('#include <map_fragment>', map)
+      .replace('#include <normal_fragment_maps>', nrm);
+  };
+}
+
+/** Mean of a colour texture in LINEAR units (sRGB-decoded). */
+function linearMean(t: Texture): number {
+  const img = t.image as { data?: ArrayLike<number> } | null;
+  const d = img?.data;
+  if (!d || d.length < 4) return 0.5;
+  let sum = 0;
+  let n = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    const c = d[i]! / 255;
+    sum += c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    n++;
+  }
+  return sum / n;
+}
+
 /** A per-material texture view with its own repeat (shares the GPU upload). */
 function tiled(t: Texture, perMetre: number): Texture {
   const c = t.clone();
@@ -663,6 +717,8 @@ export const createVehicleMaterials: CreateVehicleMaterials = (ctx: RenderContex
     return s;
   };
   const transmissive = ctx.quality.level === 'ultra';
+  const maxAniso = (ctx.renderer as { capabilities?: { getMaxAnisotropy?: () => number } } | undefined)?.capabilities?.getMaxAnisotropy?.() ?? 8;
+  setVehicleTextureAnisotropy(Math.min(maxAniso, ANISOTROPY_CAP[ctx.quality.level] ?? 8));
 
   // ---------------- paint
   let paint: PaintDef = def.paint;
@@ -802,17 +858,24 @@ export const createVehicleMaterials: CreateVehicleMaterials = (ctx: RenderContex
     side: DoubleSide,
   });
   const honey = vehicleTextures.honeycomb();
-  const grille = std('grille', {
-    color: srgb(0x1a1b1d),
-    map: tiled(honey.color, TEXTURE_DENSITY.honeycomb),
-    normalMap: tiled(honey.normal, TEXTURE_DENSITY.honeycomb),
-    normalScale: new Vector2(1, 1),
-    roughness: 0.28,
-    metalness: 0.15,
-    clearcoat: 0.6,
-    clearcoatRoughness: 0.08,
-    specularIntensity: 0.8,
-  });
+  const honeyImg = honey.normal.image as { width: number; height: number };
+  const grille = hooked(
+    new MeshPhysicalMaterial({
+      name: 'cr-grille',
+      color: srgb(0x1a1b1d),
+      map: tiled(honey.color, TEXTURE_DENSITY.honeycomb),
+      normalMap: tiled(honey.normal, TEXTURE_DENSITY.honeycomb),
+      normalScale: new Vector2(1, 1),
+      roughness: 0.28,
+      metalness: 0.15,
+      clearcoat: 0.6,
+      clearcoatRoughness: 0.08,
+      specularIntensity: 0.8,
+    }),
+    'crGrille1',
+    fineDetailHook([honeyImg.width, honeyImg.height], linearMean(honey.color)),
+    reg('grille'),
+  );
   const mirror = std('mirror', { color: srgb(0xdfe3e8), metalness: 1, roughness: 0.02 });
   const underbody = std('underbody', { color: srgb(0x17181a), roughness: 0.88, metalness: 0.1, specularIntensity: 0.4 });
   const plateTex = vehicleTextures.plate(def.plate ?? 'CR 4MPL').clone();

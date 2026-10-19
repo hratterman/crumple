@@ -321,64 +321,113 @@ export const VISUAL_DEFAULTS = {
 /** (vehicleDef) → one PanelGeometry per PanelDef, same order. Pure, deterministic; throws Error on malformed specs. */
 export type TessellateVehicle = (def: VehicleVisualDef) => PanelGeometry[];
 
-// ====================================================================== BindingSet (A2 binder, FREEZES end of P4)
+// ====================================================================== BindingSet v2 (A2 binder, FREEZES end of P4)
 /**
- * FLEXBODY RECONSTRUCTION — EXACTLY what the vertex shader (and the CPU
- * mirror evalFlexVertex) computes, per vertex with triad (iR, iX, iY),
- * coefficients (a, b, c, d0) and frame-local normal/tangent (fn, ft):
+ * FLEXBODY RECONSTRUCTION v2 — K = FLEX_TRIADS BLENDED TRIADS PER VERTEX.
+ * EXACTLY what the vertex shader (and the CPU mirror evalFlexVertex)
+ * computes. Vertex v carries, for k = 0..K−1: triad (iR, iX, iY)_k,
+ * coefficients (a, b, c, d0)_k, bind weight w_k (Σ w_k = 1, w_0 ≥ w_1 ≥ …)
+ * and frame-local normal/tangent (fn, ft)_k. Per triad k:
  *
  *   R = node(iR), X = node(iX), Y = node(iY)          (skin space, block A .xyz)
- *   e1 = X − R ;  e2 = Y − R
- *   cr = cross(e1, e2) ;  L = length(cr)
- *   n̂  = cr / max(L, FLEX_CROSS_FLOOR)               ONLY the cross product is normalized
- *   P  = R + a·e1 + b·e2 + c·n̂                       e1, e2 stay UNnormalized (RoR flexbody)
- *   clamp: if !(length(P − R) ≤ FLEX_MAX_STRETCH·d0 + FLEX_MAX_SLACK) then P = R
- *          (NaN-safe: the negated comparison also collapses NaN; a collapsed
- *          vertex degenerates its triangles → torn / exploded triads vanish
- *          instead of spiking across the screen)
- *   Gram–Schmidt frame (normals/tangents only):
- *     f1 = e1 / max(|e1|, FLEX_GS_FLOOR)
- *     t  = e2 − (e2·f1)·f1 ;  f2 = t / max(|t|, FLEX_GS_FLOOR)
- *     f3 = cross(f1, f2)                               (= n̂ direction)
- *   N = normalize(fn.x·f1 + fn.y·f2 + fn.z·f3)
- *   T = normalize(ft.x·f1 + ft.y·f2 + ft.z·f3), handedness ft.w
+ *   e1 = X − R ;  e2 = Y − R ;  cr = cross(e1, e2) ;  L = |cr|
+ *   m  = max(|e1|·|e2|, FLEX_CROSS_FLOOR)
+ *   s  = L / m                                        (sin of the triad angle; 0 = collapsed to a line)
+ *   n  = cr / max(L, FLEX_SIN_FLOOR·m)                 unit while s ≥ FLEX_SIN_FLOOR (rest s ≥ sin 25°);
+ *                                                      shrinks to 0 as the triad collapses, so the
+ *                                                      c·n offset FOLDS flat instead of flipping sides
+ *   o  = a·e1 + b·e2 + c·n ;  lo = |o|                 e1, e2 stay UNnormalized (RoR flexbody)
+ *   lim = FLEX_MAX_STRETCH·d0 + FLEX_MAX_SLACK
+ *   if !(lo ≤ lim): o = (lo finite) ? o·(lim/lo) : 0   graceful clamp: the offset is length-limited
+ *                                                      (continuous), never snapped; NaN → R
+ *   P_k = R + o
+ *   quality q_k = (1 − smoothstep(FLEX_HEALTHY_STRETCH·d0 + FLEX_HEALTHY_SLACK, lim, lo))
+ *               · smoothstep(FLEX_SIN_FLOOR / 2, 2·FLEX_SIN_FLOOR, s)        (q_k = 0 when !(lo ≤ lim)
+ *                                                      before clamping, or s is NaN)
+ *   W_k = w_k · max(q_k, FLEX_QUALITY_FLOOR)           torn / collapsed triads hand their share to the
+ *                                                      healthy ones; at rest and under rigid motion q = 1
+ *   GS frame F_k: f1 = e1/max(|e1|, FLEX_GS_FLOOR), t = e2 − (e2·f1)f1,
+ *                 f2 = t/max(|t|, FLEX_GS_FLOOR), f3 = f1 × f2
+ * BLEND (positions blended, frames blended then re-orthonormalized), with
+ * a CONSENSUS pass so one distorted triad cannot drag the vertex:
+ *   P̄ = Σ W_k P_k / Σ W_k
+ *   C_k = W_k / (1 + |P_k − P̄|² / FLEX_CONSENSUS²)
+ *   P = Σ C_k P_k / Σ C_k
+ *   N_k = F_k·fn_k, T_k = F_k·ft_k ;  N̄ = safeNormalize(Σ C_k N_k)
+ *   A_k = C_k · (FLEX_AGREE_FLOOR + smoothstep(−0.2, 0.8, N_k·N̄))
+ *   N = safeNormalize(Σ A_k N_k)
+ *   T = safeNormalize(Tb − (Tb·N)N),  Tb = Σ A_k T_k ; handedness = restTangent.w
+ *   (safeNormalize: length ≤ FLEX_NORMAL_EPS → +Y; never NaN.)
+ * Under rest and rigid motion every P_k / N_k is identical and exact, so the
+ * consensus factors are uniform and the blend is exact too.
  *
- * BIND (rest, f64): (a, b, c) solve P_rest = R0 + a·e1₀ + b·e2₀ + c·n̂₀
+ * BIND (rest, f64) per triad: (a, b, c) solve P_rest = R0 + a·e1₀ + b·e2₀ + c·n̂₀
  * (c = (P−R0)·n̂₀; a, b from the 2×2 Gram system); d0 = |P_rest − R0|;
  * fn = (n·f1₀, n·f2₀, n·f3₀), ft likewise, with the same GS frame at rest.
  *
- * TRIAD SELECTION (deterministic):
- *   candidates = the k nearest bind-set nodes to the vertex (ties: lower
- *   index), k = FLEX_CANDIDATE_STEPS[0]; enumerate R among the first 3,
- *   X < Y among the rest; ACCEPT iff
- *     angle(e1₀, e2₀) ∈ [FLEX_MIN_ANGLE_DEG, 180 − FLEX_MIN_ANGLE_DEG],
- *     |e1₀|, |e2₀| ∈ [FLEX_MIN_EDGE, FLEX_MAX_EDGE], max/min ≤ FLEX_MAX_EDGE_RATIO,
- *     |c| ≤ FLEX_MAX_ABS_C, |a|, |b| ≤ FLEX_MAX_AB;
- *   score = |c| + 0.5·|P − R0| + 0.2·max(0, |a| + |b| − 1); lowest wins,
- *   ties → lexicographic (iR, iX, iY).
- *   REPAIR: none accepted → next k in FLEX_CANDIDATE_STEPS (finally the
- *   whole bind set); still none → BindError naming panel + vertex. Never
- *   falls back to nodes outside the panel's bind set. Repairs are counted
- *   in BindingStats.
+ * TRIAD POOL (per panel, deterministic): for every bind node r, its
+ * FLEX_POOL_STEPS[0] nearest bind nodes (ties: lower index); every triple
+ * {r, x, y} among them, deduplicated. R = the corner whose angle is closest
+ * to 90° (ties: lower index), X < Y the others. STATIC ACCEPT iff
+ *   angle(e1₀, e2₀) ∈ [FLEX_MIN_ANGLE_DEG, 180 − FLEX_MIN_ANGLE_DEG],
+ *   |e1₀|, |e2₀| ∈ [FLEX_MIN_EDGE, FLEX_MAX_EDGE], max/min ≤ FLEX_MAX_EDGE_RATIO.
+ * Reference point g = centroid of the three nodes, size ρ = max corner
+ * distance from g, conditioning κ = 1 + 0.5·(1 − sin θ_R).
+ * TRIAD SELECTION per vertex P (spatially spread, well conditioned):
+ *   metric  μ(T) = κ·(|P − g| + FLEX_SIZE_WEIGHT·ρ)   (small triads around P win)
+ *   per-vertex accept: |c| ≤ FLEX_MAX_ABS_C, |a|, |b| ≤ FLEX_MAX_AB;
+ *   the K + 1 accepted triads with the lowest μ (ties: pool order) → the
+ *   first K are bound with weights w_k ∝ 1/μ_k − 1/μ_K (inverse distance
+ *   minus the first REJECTED candidate's, so a triad's weight reaches 0
+ *   exactly where it swaps with the next one: the blended surface is
+ *   CONTINUOUS across the panel even where neighbouring vertices bind
+ *   different triad sets), normalized. Fewer than K + 1 accepted → plain
+ *   1/μ weights; fewer than K → the unused slots repeat triad 0 with w = 0;
+ *   all weights 0 (exact ties) → equal weights.
+ *   REPAIR: no accepted triad → rebuild the pool with the next
+ *   FLEX_POOL_STEPS entry (finally every triple of the bind set, capped at a
+ *   32-node neighbourhood above 120 k triples); still none
+ *   → BindError naming panel + vertex. Never binds outside the bind set.
  * SEAMS: vertices of one panel with bit-equal rest positions (quantized to
- * FLEX_SEAM_QUANTUM) are bound ONCE and share the identical triad +
- * coefficients (normals/tangents stay per-vertex), so UV seams and creases
+ * FLEX_SEAM_QUANTUM) are bound ONCE and share identical triads, coefficients
+ * and weights (normals/tangents stay per-vertex), so UV seams and creases
  * never crack. Panels never share vertices (shut lines are real gaps).
  */
+export const FLEX_TRIADS = 3;
 export const FLEX_MIN_ANGLE_DEG = 25;
 export const FLEX_MIN_EDGE = 0.04;
 export const FLEX_MAX_EDGE = 1.6;
 export const FLEX_MAX_EDGE_RATIO = 6;
 export const FLEX_MAX_ABS_C = 0.3;
 export const FLEX_MAX_AB = 3;
-export const FLEX_CANDIDATE_STEPS: readonly number[] = [8, 16, Infinity];
+/** Pool neighbourhood sizes (nearest bind nodes per node); Infinity = every triple of the bind set. */
+export const FLEX_POOL_STEPS: readonly number[] = [8, 16, Infinity];
+/** Selection metric: weight of the triad size ρ against the distance to its centroid. */
+export const FLEX_SIZE_WEIGHT = 0.5;
 export const FLEX_SEAM_QUANTUM = 1e-5;
-/** |cross| floor, m² (rest |cross| of a 4 cm × 4 cm 25° triad ≈ 6.8e-4). */
+/** |e1|·|e2| floor, m² (rest |e1||e2| of a 4 cm × 4 cm triad = 1.6e-3). */
 export const FLEX_CROSS_FLOOR = 1e-4;
+/** Below this sin(triad angle) the normal offset shrinks with the collapsing triad. */
+export const FLEX_SIN_FLOOR = 0.15;
 export const FLEX_GS_FLOOR = 1e-6;
-/** Runtime clamp: |P − R| ≤ FLEX_MAX_STRETCH·d0 + FLEX_MAX_SLACK (m) else collapse to R. */
-export const FLEX_MAX_STRETCH = 2;
-export const FLEX_MAX_SLACK = 0.15;
+/** Runtime clamp: |o| ≤ FLEX_MAX_STRETCH·d0 + FLEX_MAX_SLACK (m), length-limited beyond. */
+export const FLEX_MAX_STRETCH = 1.5;
+export const FLEX_MAX_SLACK = 0.1;
+/** Quality: a triad offset longer than FLEX_HEALTHY_STRETCH·d0 + FLEX_HEALTHY_SLACK fades out toward the clamp. */
+export const FLEX_HEALTHY_STRETCH = 1.15;
+export const FLEX_HEALTHY_SLACK = 0.02;
+export const FLEX_QUALITY_FLOOR = 1e-3;
+/** Consensus scale, m: a triad whose point is this far from the blend keeps half its weight. */
+export const FLEX_CONSENSUS = 0.05;
+/** Normal-consensus floor (a disagreeing frame keeps this share). */
+export const FLEX_AGREE_FLOOR = 0.05;
+/**
+ * Crumple folds (GPU-only cosmetic, FLEXBODY SHADER PATCH v2): displacement
+ * along the blended normal = FLEX_CRUMPLE_AMP · strain · damageWeight ·
+ * flexCrumple(rest), m at full strain. 0 for a pristine body, so the CPU
+ * mirror (which has no block B) matches the GPU wherever strain is 0.
+ */
+export const FLEX_CRUMPLE_AMP = 0.04;
 /** Triads are Uint16: objects above this node count cannot be skinned. */
 export const FLEX_MAX_OBJECT_NODES = 65535;
 
@@ -397,13 +446,15 @@ export interface BindingPanel {
   restTangent: Float32Array | null;
   uv: Float32Array;
   index: Uint32Array;
-  /** iR, iX, iY per vertex (object-local node indices). */
+  /** FLEX_TRIADS × (iR, iX, iY) per vertex (object-local node indices); vertex v, triad k at 3·(K·v + k). */
   triad: Uint16Array;
-  /** a, b, c, d0 per vertex. */
+  /** FLEX_TRIADS × (a, b, c, d0) per vertex, at 4·(K·v + k). */
   coef: Float32Array;
-  /** Rest normal in the triad's rest GS frame, xyz per vertex. */
+  /** FLEX_TRIADS bind weights per vertex (Σ = 1, descending), at K·v + k. */
+  weight: Float32Array;
+  /** Rest normal in each triad's rest GS frame, FLEX_TRIADS × xyz per vertex, at 3·(K·v + k). */
   frameNormal: Float32Array;
-  /** Rest tangent in the GS frame, xyzw (w = handedness) per vertex, or null. */
+  /** Rest tangent in each triad's GS frame, FLEX_TRIADS × xyz per vertex (handedness = restTangent.w), or null. */
   frameTangent: Float32Array | null;
   /** 0..1 per vertex (PanelGeometry.damageWeight or PanelDef default). */
   damageWeight: Float32Array;
@@ -428,12 +479,16 @@ export interface BindingPanel {
 export interface BindingStats {
   vertices: number;
   triangles: number;
-  /** Vertices that needed a larger candidate set (FLEX_CANDIDATE_STEPS > 0). */
+  /** Vertices that needed a larger triad pool (FLEX_POOL_STEPS > 0). */
   repaired: number;
   /** Seam-welded duplicate vertices. */
   welded: number;
   maxAbsC: number;
   minAngleDeg: number;
+  /** Statically accepted pool triads over all panels. */
+  poolTriads: number;
+  /** Mean number of triads with w > 0 per bound (non-welded) vertex. */
+  meanTriads: number;
 }
 
 export interface BindingSet {
@@ -469,9 +524,9 @@ export type BindPanels = (
 /**
  * CPU mirror of the shader (A2 exports `evalFlexVertex` from binder.ts):
  * writes vertex v of `panel` (position xyz, normal xyz) into out[0..6) from
- * node positions `nodes` (xyz interleaved, object-local). Bit-for-bit the
- * formula above in f64; tests assert rest-pose round trip ≤ 1e-5 m and
- * rigid-motion invariance.
+ * node positions `nodes` (xyz interleaved, object-local). The v2 formula
+ * above in f64; tests assert rest-pose round trip ≤ 1e-5 m, rigid-motion
+ * invariance, and continuity under a synthetic crush field.
  */
 export type EvalFlexVertex = (panel: BindingPanel, v: number, nodes: ArrayLike<number>, out: Float64Array) => void;
 
@@ -495,35 +550,46 @@ export const NODE_TEX_FLAG_BROKEN = 1;
 export const NODE_TEX_FLAG_DETACHED = 2;
 
 /**
- * FLEXBODY SHADER PATCH (FlexSkin.patch, MaterialFeatures.flexbody;
+ * FLEXBODY SHADER PATCH v2 (FlexSkin.patch, MaterialFeatures.flexbody;
  * targets color + depth + distance). GLSL contract:
  *   uniforms  `uFlexNodes` (sampler2D, the node texture),
  *             `uFlexRows` (int, rows per block);
- *   attributes `flexTriad` vec3 (node indices as EXACT floats; decoded
- *             `ivec3(flexTriad + 0.5)` — float attributes avoid the
- *             signedness pitfalls of integer attributes in three/ANGLE),
- *             `flexCoef` vec4 (a, b, c, d0), `flexNormal` vec3 (frameNormal),
- *             `flexTangent` vec4 (only under USE_TANGENT), `flexDamage` float
- *             (damageWeight);
+ *   attributes (k = 0, 1, 2; float attributes — node indices are EXACT
+ *             floats decoded `ivec3(v + 0.5)`, avoiding the signedness
+ *             pitfalls of integer attributes in three/ANGLE):
+ *             `flexTriad{k}` vec4 (iR, iX, iY, w_k),
+ *             `flexCoef{k}`  vec4 (a, b, c, d0),
+ *             `flexFrame{k}` vec4 (fn.xyz, ft.x),
+ *             `flexFrameT`   vec4 (ft0.y, ft0.z, ft1.y, ft1.z)  (color only),
+ *             `flexFrameU`   vec4 (ft2.y, ft2.z, damageWeight, 0).
+ *             Active vertex attribute slots: color 11 + three's position,
+ *             uv, tangent = 14 (the `normal` attribute is never read),
+ *             depth/distance 10 + position = 11 — inside the WebGL2
+ *             minimum of 16. flexEvaluate() runs first in main();
+ *             texel fetches per vertex 9 (block A) + 9 (block B);
+ *   crumple   every target adds FLEX_CRUMPLE_AMP · strain · damageWeight ·
+ *             flexCrumple(rest) along the blended normal (FLEX_CRUMPLE_GLSL;
+ *             the damage bump adds the same height so the folds shade);
  *   replaces  <begin_vertex>, <beginnormal_vertex> (objectNormal, and
- *             objectTangent under USE_TANGENT) with the reconstruction;
+ *             objectTangent under USE_TANGENT) with the v2 reconstruction;
  *   defines   `FLEXBODY`; on the COLOR target also the varyings
  *             `vFlexRest` vec3 (REST rig-local position = `position`
  *             attribute: stable coordinates for flake / crack / scuff
  *             noise that never swim) and `vFlexDamage` vec4 =
- *             (strain, scuff, crack from block B blended over the triad
- *             with weights wX = clamp(a,0,1), wY = clamp(b,0,1),
- *             wR = max(0, 1 − wX − wY), renormalized; × flexDamage;
- *             w = 1 if any triad node has NODE_TEX_FLAG_BROKEN).
- *   key       'flex1' (identical GLSL for every vehicle; uniforms per material).
+ *             (strain, scuff, crack from block B blended over every triad
+ *             node with weights w_k × (wR, wX, wY), wX = clamp(a,0,1),
+ *             wY = clamp(b,0,1), wR = max(0, 1 − wX − wY), renormalized per
+ *             triad; × damageWeight; w = Σ w_k·[any node of triad k has
+ *             NODE_TEX_FLAG_BROKEN] — continuous, so torn-edge grime fades).
+ *   key       'flex2' (identical GLSL for every vehicle; uniforms per material).
  * Material hooks (A3 flake, A4 damage) may read vFlexRest / vFlexDamage
  * under `#ifdef FLEXBODY`, in fragment chunks after <normal_fragment_maps>.
  * Bounds: skin.update sets each panel geometry's boundingSphere from its
- * `nodes` (skin space, + 0.1 m) every frame, so frustum and shadow culling
- * stay correct for flying panels; the `position` attribute is REST and is
- * never used for bounds.
+ * `nodes` (skin space, + FLEX_MAX_STRETCH·max d0 + FLEX_MAX_SLACK) every
+ * frame, so frustum and shadow culling stay correct for flying panels; the
+ * `position` attribute is REST and is never used for bounds.
  */
-export const FLEXBODY_PATCH_KEY = 'flex1';
+export const FLEXBODY_PATCH_KEY = 'flex2';
 
 /** One frame of sim input for a vehicle (built by the app from SimClient). */
 export interface VehicleFrameInput {
@@ -568,8 +634,8 @@ export interface FlexSkinOptions {
 }
 /**
  * A2 flexskin.ts. Per panel: BufferGeometry (position = restPosition,
- * normal, uv, flexTriad, flexCoef, flexNormal, [tangent, flexTangent],
- * flexDamage, index), material = patchMaterial(materials.base(slot).clone(),
+ * normal, uv, [tangent], flexTriad0..2, flexCoef0..2, flexFrame0..2,
+ * flexFrameT, flexFrameU, index), material = patchMaterial(materials.base(slot).clone(),
  * {csm, flexbody: skin.patch, damage: damage?.patchFor(panelIndex)});
  * mesh.material / customDepthMaterial / customDistanceMaterial from the
  * set; castShadow per panel, receiveShadow true.

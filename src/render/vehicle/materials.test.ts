@@ -147,6 +147,27 @@ describe('createVehicleMaterials', () => {
     set.dispose();
   });
 
+  it('grille: fine-detail fade compiles against r185 chunks; anisotropy follows the renderer max and the quality cap', () => {
+    const r = (max: number) => ({ capabilities: { getMaxAnisotropy: () => max } });
+    const set = createVehicleMaterials({ ...ctx('high'), renderer: r(16) } as unknown as RenderContext, DEF);
+    const g = set.base('grille') as MeshPhysicalMaterial;
+    const sh = physicalShader();
+    g.onBeforeCompile(sh, null as never);
+    expect(sh.fragmentShader).toContain('float crFineFade( vec2 uv )');
+    expect(sh.fragmentShader).toContain('mapN.xy *= normalScale * crFine;');
+    expect(sh.fragmentShader).toContain('crFineFade( vMapUv )');
+    expect(sh.fragmentShader).not.toContain('#include <normal_fragment_maps>');
+    expect(g.normalMap!.anisotropy).toBe(16);
+    expect(g.normalMap!.generateMipmaps).toBe(true);
+    set.dispose();
+    const low = createVehicleMaterials({ ...ctx(), quality: QUALITY_PRESETS.low, renderer: r(16) } as unknown as RenderContext, DEF);
+    expect((low.base('grille') as MeshPhysicalMaterial).map!.anisotropy).toBe(4);
+    low.dispose();
+    const weak = createVehicleMaterials({ ...ctx('high'), renderer: r(2) } as unknown as RenderContext, DEF);
+    expect((weak.base('trim') as MeshPhysicalMaterial).normalMap!.anisotropy).toBe(2);
+    weak.dispose();
+  });
+
   it('distinct program keys per hooked slot', () => {
     const set = createVehicleMaterials(ctx(), DEF);
     const keys = (['paint', 'glass', 'lightHead', 'lightTail', 'lightReverse', 'lightIndicator'] as const).map((s) => set.base(s).customProgramCacheKey());

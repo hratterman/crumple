@@ -624,6 +624,24 @@ export function plateImage(text: string): PixelImage {
 
 // ============================================================ three wrappers + cache
 const cache = new Map<string, DataTexture>();
+let anisotropy = 8;
+
+/**
+ * Anisotropic filtering level of every procedural vehicle texture (the
+ * cached ones are updated in place; `tiled` clones copy it). Fine periodic
+ * patterns (honeycomb grille, tread, lens prisms) alias into moiré at
+ * grazing angles without it. createVehicleMaterials sets it from the
+ * renderer's max, capped by quality level.
+ */
+export function setVehicleTextureAnisotropy(level: number): void {
+  const a = Math.max(1, Math.floor(level));
+  if (a === anisotropy) return;
+  anisotropy = a;
+  for (const t of cache.values()) {
+    t.anisotropy = a;
+    t.needsUpdate = true;
+  }
+}
 
 /** DataTexture from an image: repeat-wrapped, trilinear + anisotropic, mipmapped. */
 export function imageTexture(img: PixelImage, color: boolean, name: string): DataTexture {
@@ -633,7 +651,7 @@ export function imageTexture(img: PixelImage, color: boolean, name: string): Dat
   t.magFilter = LinearFilter;
   t.minFilter = LinearMipmapLinearFilter;
   t.generateMipmaps = true;
-  t.anisotropy = 8;
+  t.anisotropy = anisotropy;
   t.flipY = false;
   t.colorSpace = color ? SRGBColorSpace : NoColorSpace;
   t.needsUpdate = true;

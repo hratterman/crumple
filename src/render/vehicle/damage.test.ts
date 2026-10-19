@@ -23,6 +23,7 @@ import {
 } from './damage';
 import {
   DAMAGE_DEFAULTS,
+  FLEX_TRIADS,
   NODE_TEX_FLAG_BROKEN,
   NODE_TEX_FLAG_DETACHED,
   NODE_TEX_WIDTH,
@@ -82,9 +83,10 @@ function panel(
     restTangent: null,
     uv: new Float32Array(2),
     index: new Uint32Array(0),
-    triad: new Uint16Array(3),
-    coef: new Float32Array(4),
-    frameNormal: new Float32Array(3),
+    triad: new Uint16Array(3 * FLEX_TRIADS),
+    coef: new Float32Array(4 * FLEX_TRIADS),
+    weight: new Float32Array([1, 0, 0]),
+    frameNormal: new Float32Array(3 * FLEX_TRIADS),
     frameTangent: null,
     damageWeight: new Float32Array([1]),
     nodes: u16,
@@ -145,7 +147,7 @@ function fixture(
     nodeCount: rig.nodeCount,
     rigHash: 0,
     panels,
-    stats: { vertices: 0, triangles: 0, repaired: 0, welded: 0, maxAbsC: 0, minAngleDeg: 0 },
+    stats: { vertices: 0, triangles: 0, repaired: 0, welded: 0, maxAbsC: 0, minAngleDeg: 0, poolTriads: 0, meanTriads: 0 },
   };
   const compiled = vehicleOf(rig, opts.bodyNodeCount);
   const dmg = createVehicleDamage(compiled, binding, {} as VehicleVisualDef);

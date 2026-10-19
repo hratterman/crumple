@@ -7,16 +7,28 @@ import { bindPanels, boundaryBeams, evalFlexFrame, evalFlexVertex, rigHashOf, re
 import { syntheticCubeSubject } from './synthetic';
 import {
   BindError,
+  FLEX_AGREE_FLOOR,
+  FLEX_CONSENSUS,
+  FLEX_CROSS_FLOOR,
+  FLEX_HEALTHY_SLACK,
+  FLEX_HEALTHY_STRETCH,
   FLEX_MAX_AB,
   FLEX_MAX_ABS_C,
   FLEX_MAX_EDGE,
   FLEX_MAX_EDGE_RATIO,
+  FLEX_MAX_SLACK,
+  FLEX_MAX_STRETCH,
   FLEX_MIN_ANGLE_DEG,
   FLEX_MIN_EDGE,
+  FLEX_QUALITY_FLOOR,
+  FLEX_SIN_FLOOR,
+  FLEX_TRIADS,
   type BindingPanel,
   type PanelGeometry,
   type VehicleVisualDef,
 } from './types';
+
+const K = FLEX_TRIADS;
 
 const subject = syntheticCubeSubject();
 const binding = bindPanels(subject.compiled, subject.def, subject.geoms);
@@ -62,27 +74,47 @@ describe('bindPanels on the synthetic cube shell', () => {
     expect(binding.stats.minAngleDeg).toBeGreaterThanOrEqual(FLEX_MIN_ANGLE_DEG - 1e-9);
   });
 
-  it('every triad satisfies the acceptance rules', () => {
+  it('every bound triad satisfies the acceptance rules; weights are normalized, descending and spread', () => {
     const pos = rig.nodePos;
+    let multi = 0;
+    let bound = 0;
     for (const p of binding.panels) {
       for (let v = 0; v < p.vertexCount; v++) {
-        const [r, x, y] = [p.triad[3 * v]!, p.triad[3 * v + 1]!, p.triad[3 * v + 2]!];
-        expect(x).toBeLessThan(y);
-        expect(r !== x && r !== y).toBe(true);
-        const e1 = [0, 1, 2].map((k) => pos[3 * x + k]! - pos[3 * r + k]!);
-        const e2 = [0, 1, 2].map((k) => pos[3 * y + k]! - pos[3 * r + k]!);
-        const l1 = Math.hypot(...e1);
-        const l2 = Math.hypot(...e2);
-        expect(l1).toBeGreaterThanOrEqual(FLEX_MIN_EDGE);
-        expect(l2).toBeLessThanOrEqual(FLEX_MAX_EDGE);
-        expect(Math.max(l1, l2) / Math.min(l1, l2)).toBeLessThanOrEqual(FLEX_MAX_EDGE_RATIO);
-        const ang = (Math.acos((e1[0]! * e2[0]! + e1[1]! * e2[1]! + e1[2]! * e2[2]!) / (l1 * l2)) * 180) / Math.PI;
-        expect(ang).toBeGreaterThanOrEqual(FLEX_MIN_ANGLE_DEG - 1e-9);
-        expect(ang).toBeLessThanOrEqual(180 - FLEX_MIN_ANGLE_DEG + 1e-9);
-        expect(Math.abs(p.coef[4 * v]!)).toBeLessThanOrEqual(FLEX_MAX_AB);
-        expect(Math.abs(p.coef[4 * v + 2]!)).toBeLessThanOrEqual(FLEX_MAX_ABS_C);
+        let sum = 0;
+        let used = 0;
+        for (let k = 0; k < K; k++) {
+          const s = K * v + k;
+          const w = p.weight[s]!;
+          expect(w).toBeGreaterThanOrEqual(0);
+          if (k > 0) expect(w).toBeLessThanOrEqual(p.weight[s - 1]! + 1e-7);
+          sum += w;
+          if (w > 0) used++;
+          const [r, x, y] = [p.triad[3 * s]!, p.triad[3 * s + 1]!, p.triad[3 * s + 2]!];
+          expect(x).toBeLessThan(y);
+          expect(r !== x && r !== y).toBe(true);
+          const e1 = [0, 1, 2].map((c) => pos[3 * x + c]! - pos[3 * r + c]!);
+          const e2 = [0, 1, 2].map((c) => pos[3 * y + c]! - pos[3 * r + c]!);
+          const l1 = Math.hypot(...e1);
+          const l2 = Math.hypot(...e2);
+          expect(Math.min(l1, l2)).toBeGreaterThanOrEqual(FLEX_MIN_EDGE);
+          expect(Math.max(l1, l2)).toBeLessThanOrEqual(FLEX_MAX_EDGE);
+          expect(Math.max(l1, l2) / Math.min(l1, l2)).toBeLessThanOrEqual(FLEX_MAX_EDGE_RATIO);
+          const ang = (Math.acos((e1[0]! * e2[0]! + e1[1]! * e2[1]! + e1[2]! * e2[2]!) / (l1 * l2)) * 180) / Math.PI;
+          expect(ang).toBeGreaterThanOrEqual(FLEX_MIN_ANGLE_DEG - 1e-9);
+          expect(ang).toBeLessThanOrEqual(180 - FLEX_MIN_ANGLE_DEG + 1e-9);
+          expect(Math.abs(p.coef[4 * s]!)).toBeLessThanOrEqual(FLEX_MAX_AB);
+          expect(Math.abs(p.coef[4 * s + 1]!)).toBeLessThanOrEqual(FLEX_MAX_AB);
+          expect(Math.abs(p.coef[4 * s + 2]!)).toBeLessThanOrEqual(FLEX_MAX_ABS_C);
+        }
+        expect(Math.abs(sum - 1)).toBeLessThan(1e-6);
+        bound++;
+        if (used > 1) multi++;
       }
     }
+    // Blending is the norm, not the exception.
+    expect(multi / bound).toBeGreaterThan(0.9);
+    expect(binding.stats.meanTriads).toBeGreaterThan(2);
+    expect(binding.stats.poolTriads).toBeGreaterThan(100);
   });
 
   it('panels bind only to their own nodes', () => {
@@ -201,32 +233,141 @@ describe('bindPanels on the synthetic cube shell', () => {
     }
   });
 
-  it('collapsed, exploded and NaN triads never produce NaN (clamp to R)', () => {
+  it('collapsed, exploded and NaN triads never produce NaN or spikes', () => {
     const p = binding.panels[0]!;
     const out = new Float64Array(6);
     const tan = new Float64Array(4);
+    /** A vertex never leaves the box around its triads' (current) R nodes, grown by the clamp. */
+    const inHull = (v: number, nodes: Float64Array, q: ArrayLike<number>): boolean => {
+      let lim = 0;
+      const lo = [Infinity, Infinity, Infinity];
+      const hi = [-Infinity, -Infinity, -Infinity];
+      for (let k = 0; k < K; k++) {
+        const s = K * v + k;
+        lim = Math.max(lim, FLEX_MAX_STRETCH * p.coef[4 * s + 3]! + FLEX_MAX_SLACK);
+        const r = p.triad[3 * s]!;
+        for (let c = 0; c < 3; c++) {
+          const x = Number.isFinite(nodes[3 * r + c]!) ? nodes[3 * r + c]! : 0;
+          lo[c] = Math.min(lo[c]!, x);
+          hi[c] = Math.max(hi[c]!, x);
+        }
+      }
+      return [0, 1, 2].every((c) => q[c]! >= lo[c]! - lim - 1e-9 && q[c]! <= hi[c]! + lim + 1e-9);
+    };
     for (let v = 0; v < p.vertexCount; v += 37) {
-      const [r, x, y] = [p.triad[3 * v]!, p.triad[3 * v + 1]!, p.triad[3 * v + 2]!];
-      // Collapse: all three nodes at one point.
+      // Collapse: every node of every triad of v onto one point.
       const nodes = restNodes();
-      for (const i of [x, y]) for (let k = 0; k < 3; k++) nodes[3 * i + k] = nodes[3 * r + k]!;
+      const r0 = p.triad[3 * K * v]!;
+      for (let k = 0; k < 3 * K; k++) {
+        const i = p.triad[3 * K * v + k]!;
+        for (let c = 0; c < 3; c++) nodes[3 * i + c] = nodes[3 * r0 + c]!;
+      }
       evalFlexFrame(p, v, nodes, out, tan);
       expect(Array.from(out).every(Number.isFinite)).toBe(true);
       expect(Array.from(tan).every(Number.isFinite)).toBe(true);
       expect(Math.hypot(out[3]!, out[4]!, out[5]!)).toBeCloseTo(1, 9);
-      // Explosion: X flung 1 km away → vertex clamps onto R.
-      const boom = restNodes();
-      boom[3 * x] = 1000;
-      evalFlexFrame(p, v, boom, out, tan);
-      const off = Math.hypot(out[0]! - boom[3 * r]!, out[1]! - boom[3 * r + 1]!, out[2]! - boom[3 * r + 2]!);
-      expect(off).toBeLessThanOrEqual(2 * p.coef[4 * v + 3]! + 0.15);
-      if (Math.abs(p.coef[4 * v]!) > 1e-3) expect(off).toBe(0);
-      expect(Array.from(out).every(Number.isFinite)).toBe(true);
-      // NaN node.
+      expect(inHull(v, nodes, out)).toBe(true);
+      // Explosion: a node of the primary triad flung 1 km away: offsets are length-limited, never a spike.
+      for (let c = 0; c < 3; c++) {
+        const boom = restNodes();
+        boom[3 * p.triad[3 * K * v + c]!] = 1000;
+        evalFlexFrame(p, v, boom, out, tan);
+        expect(Array.from(out).every(Number.isFinite)).toBe(true);
+        expect(inHull(v, boom, out)).toBe(true);
+      }
+      // NaN node: finite output.
       const bad = restNodes();
-      bad[3 * y + 1] = NaN;
-      evalFlexVertex(p, v, bad, out);
-      expect([out[0], out[1], out[2]]).toEqual([bad[3 * r], bad[3 * r + 1], bad[3 * r + 2]]);
+      bad[3 * p.triad[3 * K * v + 2]! + 1] = NaN;
+      evalFlexFrame(p, v, bad, out, tan);
+      expect(Array.from(out).every(Number.isFinite)).toBe(true);
+      expect(inHull(v, bad, out)).toBe(true);
+    }
+  });
+
+  it('a tearing node moves the vertex continuously (graceful clamp, no snap) and the healthy triads take over', () => {
+    const p = binding.panels[0]!;
+    const out = new Float64Array(6);
+    // A vertex whose triads do not all share the torn node.
+    let v = 0;
+    let torn = -1;
+    for (; v < p.vertexCount; v++) {
+      const x0 = p.triad[3 * K * v + 1]!;
+      let shared = 0;
+      for (let k = 0; k < K; k++) for (let c = 0; c < 3; c++) if (p.triad[3 * (K * v + k) + c] === x0) shared++;
+      if (shared === 1 && p.weight[K * v + 1]! > 0.1) {
+        torn = x0;
+        break;
+      }
+    }
+    expect(torn).toBeGreaterThanOrEqual(0);
+    const nodes = restNodes();
+    const start = [nodes[3 * torn]!, nodes[3 * torn + 1]!, nodes[3 * torn + 2]!];
+    let prev: number[] | null = null;
+    let maxStep = 0;
+    const STEPS = 400;
+    for (let i = 0; i <= STEPS; i++) {
+      const t = (4 * i) / STEPS; // 0 → 4 m away
+      nodes[3 * torn] = start[0]! + 0.6 * t;
+      nodes[3 * torn + 1] = start[1]! + 0.8 * t;
+      nodes[3 * torn + 2] = start[2]!;
+      evalFlexVertex(p, v, nodes, out);
+      if (prev) maxStep = Math.max(maxStep, Math.hypot(out[0]! - prev[0]!, out[1]! - prev[1]!, out[2]! - prev[2]!));
+      prev = [out[0]!, out[1]!, out[2]!];
+    }
+    // 1 cm node steps never make the vertex jump.
+    expect(maxStep).toBeLessThan(0.02);
+    // Fully torn: the vertex sits with its healthy triads, near its rest place.
+    const rest = [p.restPosition[3 * v]!, p.restPosition[3 * v + 1]!, p.restPosition[3 * v + 2]!];
+    expect(Math.hypot(prev![0]! - rest[0]!, prev![1]! - rest[1]!, prev![2]! - rest[2]!)).toBeLessThan(0.05);
+  });
+
+  it('crush continuity: neighbouring vertices stay together where single triads tear apart (regression)', () => {
+    // Synthetic crumple: the cube squashed 35 % along z toward its back face, every node
+    // jittered ±7 cm (deterministic hash) — strongly non-affine, like a frontal crush.
+    const src = restNodes();
+    const nodes = new Float64Array(src.length);
+    const hash = (i: number): number => {
+      const x = Math.sin(i * 12.9898 + 78.233) * 43758.5453;
+      return x - Math.floor(x) - 0.5;
+    };
+    for (let i = 0; i < src.length; i += 3) {
+      const z = src[i + 2]!;
+      nodes[i] = src[i]! + 0.14 * hash(i);
+      nodes[i + 1] = src[i + 1]! + 0.14 * hash(i + 1);
+      nodes[i + 2] = 0.75 - (0.75 - z) * 0.65 + 0.14 * hash(i + 2);
+    }
+    const single = (p: BindingPanel): BindingPanel => {
+      const weight = new Float32Array(p.weight.length);
+      for (let v = 0; v < p.vertexCount; v++) weight[K * v] = 1;
+      return { ...p, weight };
+    };
+    const maxJump = (p: BindingPanel): { max: number; p99: number } => {
+      const disp = new Float64Array(p.vertexCount * 3);
+      const out = new Float64Array(6);
+      for (let v = 0; v < p.vertexCount; v++) {
+        evalFlexVertex(p, v, nodes, out);
+        for (let c = 0; c < 3; c++) disp[3 * v + c] = out[c]! - p.restPosition[3 * v + c]!;
+      }
+      const jumps: number[] = [];
+      for (let t = 0; t < p.index.length; t += 3) {
+        for (let e = 0; e < 3; e++) {
+          const a = p.index[t + e]!;
+          const b = p.index[t + ((e + 1) % 3)]!;
+          jumps.push(Math.hypot(disp[3 * a]! - disp[3 * b]!, disp[3 * a + 1]! - disp[3 * b + 1]!, disp[3 * a + 2]! - disp[3 * b + 2]!));
+        }
+      }
+      jumps.sort((x, y) => x - y);
+      return { max: jumps[jumps.length - 1]!, p99: jumps[Math.floor(jumps.length * 0.99)]! };
+    };
+    for (const p of binding.panels) {
+      const blended = maxJump(p);
+      const one = maxJump(single(p));
+      console.info(`[crush continuity] ${p.panelId}: blended max ${(blended.max * 100).toFixed(1)} cm p99 ${(blended.p99 * 100).toFixed(1)} cm; single-triad max ${(one.max * 100).toFixed(1)} cm p99 ${(one.p99 * 100).toFixed(1)} cm`);
+      // ~6 cm edges in a field whose node-to-node differences reach 20 cm over 50 cm: single
+      // triads tear neighbours ~11 cm apart; the continuous K-blend keeps them together.
+      expect(blended.max).toBeLessThan(0.08);
+      expect(blended.max).toBeLessThan(0.65 * one.max);
+      expect(blended.p99).toBeLessThan(0.6 * one.p99);
     }
   });
 
@@ -272,18 +413,46 @@ function structuredCloneRig(): RigDef {
   };
 }
 
-/** f32 emulation of the shader (Math.fround after every op that the GPU rounds). */
+/** f32 emulation of the shader position path (Math.fround after every op that the GPU rounds). */
 function evalF32(p: BindingPanel, v: number, nodes: Float32Array, out: Float64Array): void {
   const F = Math.fround;
-  const r = p.triad[3 * v]! * 3, x = p.triad[3 * v + 1]! * 3, y = p.triad[3 * v + 2]! * 3;
-  const R = [nodes[r]!, nodes[r + 1]!, nodes[r + 2]!];
-  const e1 = [0, 1, 2].map((k) => F(nodes[x + k]! - R[k]!));
-  const e2 = [0, 1, 2].map((k) => F(nodes[y + k]! - R[k]!));
-  const cr = [F(F(e1[1]! * e2[2]!) - F(e1[2]! * e2[1]!)), F(F(e1[2]! * e2[0]!) - F(e1[0]! * e2[2]!)), F(F(e1[0]! * e2[1]!) - F(e1[1]! * e2[0]!))];
-  const L = F(Math.sqrt(F(F(cr[0]! * cr[0]!) + F(cr[1]! * cr[1]!) + F(cr[2]! * cr[2]!))));
-  const [a, b, c] = [p.coef[4 * v]!, p.coef[4 * v + 1]!, p.coef[4 * v + 2]!];
-  for (let k = 0; k < 3; k++) out[k] = F(R[k]! + F(F(F(a * e1[k]!) + F(b * e2[k]!)) + F(c * F(cr[k]! / Math.max(L, 1e-4)))));
+  const len = (a: number[]): number => F(Math.sqrt(F(F(F(a[0]! * a[0]!) + F(a[1]! * a[1]!)) + F(a[2]! * a[2]!))));
+  const smooth = (e0: number, e1: number, x: number): number => {
+    const t = Math.min(1, Math.max(0, F(F(x - e0) / F(e1 - e0))));
+    return F(F(t * t) * F(3 - 2 * t));
+  };
+  const P: number[][] = [];
+  const W: number[] = [];
+  for (let k = 0; k < K; k++) {
+    const s = K * v + k;
+    const r = p.triad[3 * s]! * 3, x = p.triad[3 * s + 1]! * 3, y = p.triad[3 * s + 2]! * 3;
+    const R = [nodes[r]!, nodes[r + 1]!, nodes[r + 2]!];
+    const e1 = [0, 1, 2].map((c) => F(nodes[x + c]! - R[c]!));
+    const e2 = [0, 1, 2].map((c) => F(nodes[y + c]! - R[c]!));
+    const cr = [F(F(e1[1]! * e2[2]!) - F(e1[2]! * e2[1]!)), F(F(e1[2]! * e2[0]!) - F(e1[0]! * e2[2]!)), F(F(e1[0]! * e2[1]!) - F(e1[1]! * e2[0]!))];
+    const L = len(cr);
+    const m = Math.max(F(len(e1) * len(e2)), FLEX_CROSS_FLOOR);
+    const den = Math.max(L, F(FLEX_SIN_FLOOR * m));
+    const [a, b, c, d0] = [p.coef[4 * s]!, p.coef[4 * s + 1]!, p.coef[4 * s + 2]!, p.coef[4 * s + 3]!];
+    const o = [0, 1, 2].map((i) => F(F(F(a * e1[i]!) + F(b * e2[i]!)) + F(c * F(cr[i]! / den))));
+    const lo = len(o);
+    const lim = F(F(FLEX_MAX_STRETCH * d0) + FLEX_MAX_SLACK);
+    let q = 0;
+    if (lo <= lim) q = F((1 - smooth(F(F(FLEX_HEALTHY_STRETCH * d0) + FLEX_HEALTHY_SLACK), lim, lo)) * smooth(0.5 * FLEX_SIN_FLOOR, 2 * FLEX_SIN_FLOOR, F(L / m)));
+    else for (let i = 0; i < 3; i++) o[i] = F(o[i]! * F(lim / lo));
+    P.push([0, 1, 2].map((i) => F(R[i]! + o[i]!)));
+    W.push(F(p.weight[s]! * Math.max(q, FLEX_QUALITY_FLOOR)));
+  }
+  const sw = F(F(W[0]! + W[1]!) + W[2]!);
+  const pm = [0, 1, 2].map((i) => F(F(F(F(W[0]! * P[0]![i]!) + F(W[1]! * P[1]![i]!)) + F(W[2]! * P[2]![i]!)) / sw));
+  const C = P.map((q, k) => {
+    const d = [0, 1, 2].map((i) => F(q[i]! - pm[i]!));
+    return F(W[k]! / F(1 + F(F(F(F(d[0]! * d[0]!) + F(d[1]! * d[1]!)) + F(d[2]! * d[2]!)) * F(1 / (FLEX_CONSENSUS * FLEX_CONSENSUS)))));
+  });
+  const sc = F(F(C[0]! + C[1]!) + C[2]!);
+  for (let i = 0; i < 3; i++) out[i] = F(F(F(F(C[0]! * P[0]![i]!) + F(C[1]! * P[1]![i]!)) + F(C[2]! * P[2]![i]!)) / sc);
 }
+void FLEX_AGREE_FLOOR;
 
 describe('bindPanels errors and repair', () => {
   const tinyVehicle = (rigDef: RigDef): CompiledVehicle =>
@@ -303,14 +472,15 @@ describe('bindPanels errors and repair', () => {
     panels: [{ id: 'p', kind: 'body', material: 'glass', surface: { type: 'mesh', position: [], index: [] }, bind, detach: null }],
   });
 
-  it('repairs when the nearest candidates are degenerate (collinear cluster)', () => {
-    // 10 collinear nodes hugging the panel (nearest 8 are all on one line), 3 good nodes farther out.
+  it('repairs when every node neighbourhood is degenerate (two collinear rows)', () => {
+    // Two parallel rows of 12 collinear nodes 1.2 m apart: each node's 10 nearest are its own row
+    // (no valid triangle in the first pool), the 16-node neighbourhood reaches across.
     const nodes: RigDef['nodes'] = [];
-    for (let i = 0; i < 10; i++) nodes.push({ id: `l${i}`, pos: [-0.25 + 0.06 * i, 0.02, 0], mass: 1 });
-    nodes.push({ id: 'g0', pos: [-0.4, -0.4, 0], mass: 1 }, { id: 'g1', pos: [0.5, -0.4, 0], mass: 1 }, { id: 'g2', pos: [0, 0.6, 0], mass: 1 });
-    const v = tinyVehicle({ name: 'rep', nodes, beams: [{ a: 'l0', b: 'g0', type: 'normal' }] });
+    for (let i = 0; i < 12; i++) nodes.push({ id: `a${i}`, pos: [-0.3 + 0.06 * i, -0.6, 0], mass: 1 });
+    for (let i = 0; i < 12; i++) nodes.push({ id: `b${i}`, pos: [-0.3 + 0.06 * i, 0.6, 0], mass: 1 });
+    const v = tinyVehicle({ name: 'rep', nodes, beams: [{ a: 'a0', b: 'b0', type: 'normal' }] });
     const b = bindPanels(v, def('rep', ['*']), [quad(0.01)]);
-    expect(b.stats.repaired).toBeGreaterThan(0);
+    expect(b.stats.repaired).toBe(3);
     const out = new Float64Array(6);
     evalFlexVertex(b.panels[0]!, 1, v.rig.nodePos, out);
     expect(out[0]).toBeCloseTo(0.1, 6);

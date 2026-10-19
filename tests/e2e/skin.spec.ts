@@ -13,7 +13,7 @@ interface SkinHooks {
   parity(panel?: number): Parity;
 }
 
-// Flexbody skin harness (dev/skin.html): the exact flex1 GLSL compiles in the
+// Flexbody skin harness (dev/skin.html): the exact flex2 GLSL compiles in the
 // color (CSM-patched physical), depth and distance programs, and its GPU
 // reconstruction read back from a float target matches the CPU mirror
 // (binder.ts evalFlexFrame) at rest, under rigid roll, a crumple and an

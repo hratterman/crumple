@@ -3,10 +3,10 @@
  * Open /crumple/dev/skin.html.
  *
  * The synthetic subject (render/vehicle/synthetic: rounded box shell on the
- * soft-cube rig) skinned through the real patchMaterial (CSM → flex1),
+ * soft-cube rig) skinned through the real patchMaterial (CSM → flex2),
  * posed procedurally (no physics worker): ?pose=rest|roll|dent|explode.
  * window.__skin exposes hooks for the e2e (GPU ⇄ CPU parity readback of the
- * exact flex1 GLSL, program errors) and screenshots.
+ * exact flex2 GLSL, program errors) and screenshots.
  */
 import {
   BufferAttribute,
@@ -120,13 +120,13 @@ pose(poseName);
 camera.position.set(ORIGIN[0] + 3.4, ORIGIN[1] + 1.7, ORIGIN[2] + 3.9);
 camera.lookAt(ORIGIN[0], ORIGIN[1] - 0.2, ORIGIN[2]);
 
-// ------------------------------------------------------------ GPU ⇄ CPU parity (exact flex1 GLSL, readback)
+// ------------------------------------------------------------ GPU ⇄ CPU parity (exact flex2 GLSL, readback)
 const W = 256;
 function parity(panelIndex = 0): { maxPos: number; maxNrm: number; vertices: number; nan: number } {
   const p = binding.panels[panelIndex]!;
   const src = skin.meshes[panelIndex]!.geometry;
   const g = new BufferGeometry();
-  for (const name of ['position', 'normal', 'flexTriad', 'flexCoef', 'flexNormal', 'flexDamage']) g.setAttribute(name, src.getAttribute(name));
+  for (const [name, attr] of Object.entries(src.attributes)) g.setAttribute(name, attr);
   const H = Math.ceil(p.vertexCount / W);
   const mat = new ShaderMaterial({
     uniforms: { uMode: { value: 0 }, uSize: { value: [W, H] } },
@@ -151,7 +151,8 @@ function parity(panelIndex = 0): { maxPos: number; maxNrm: number; vertices: num
     depthTest: false,
     depthWrite: false,
   });
-  mat.onBeforeCompile = (s, r) => skin.patch.apply(s, 'depth', r);
+  // The color target: it is the one that reconstructs frames (normals).
+  mat.onBeforeCompile = (s, r) => skin.patch.apply(s, 'color', r);
   const pts = new Points(g, mat);
   pts.frustumCulled = false;
   const pscene = new Scene();

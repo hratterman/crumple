@@ -9,17 +9,26 @@ import {
   applyFlexGlsl,
   cloneBaseMaterial,
   createFlexSkin,
+  FLEX_MAIN_CALL,
   FLEX_NORMAL_CHUNK,
   FLEX_POSITION_CHUNK,
   FLEX_VERTEX_PARS,
   nodeTextureRows,
+  SETTLE_DEFAULTS,
 } from './flexskin';
 import { syntheticCubeSubject } from './synthetic';
 import {
+  FLEX_AGREE_FLOOR,
   FLEX_CROSS_FLOOR,
+  FLEX_CRUMPLE_AMP,
   FLEX_GS_FLOOR,
+  FLEX_HEALTHY_SLACK,
+  FLEX_HEALTHY_STRETCH,
   FLEX_MAX_SLACK,
   FLEX_MAX_STRETCH,
+  FLEX_QUALITY_FLOOR,
+  FLEX_SIN_FLOOR,
+  FLEX_TRIADS,
   FLEXBODY_PATCH_KEY,
   NODE_TEX_FLAG_BROKEN,
   type VehicleFrameInput,
@@ -44,15 +53,21 @@ function frameFor(nodes: Float32Array, nodeOffset = 0): VehicleFrameInput {
   return { nodes, nodeOffset, tick: 1, broken: new Uint8Array(0), repairEpoch: 0, telemetry: null, dtS: 1 / 60 };
 }
 
-describe('flex1 GLSL', () => {
+describe('flex2 GLSL', () => {
   it('bakes the shared contract constants into the shader', () => {
     const glsl = FLEX_VERTEX_PARS + FLEX_POSITION_CHUNK + FLEX_NORMAL_CHUNK;
-    expect(glsl).toContain(`max( length( flexCr ), ${FLEX_CROSS_FLOOR} )`);
-    expect(glsl).toContain(`${FLEX_MAX_STRETCH}.0 * flexCoef.w + ${FLEX_MAX_SLACK}`);
-    expect(glsl).toContain(`max( length( e1 ), ${FLEX_GS_FLOOR} )`);
+    expect(glsl).toContain(`max( l1 * length( e2 ), ${FLEX_CROSS_FLOOR} )`);
+    expect(glsl).toContain(`max( L, ${FLEX_SIN_FLOOR} * m )`);
+    expect(glsl).toContain(`float lim = ${FLEX_MAX_STRETCH} * coef.w + ${FLEX_MAX_SLACK};`);
+    expect(glsl).toContain(`smoothstep( ${FLEX_HEALTHY_STRETCH} * coef.w + ${FLEX_HEALTHY_SLACK}, lim, lo )`);
+    expect(glsl).toContain(`max( q, ${FLEX_QUALITY_FLOOR} )`);
+    expect(glsl).toContain(`max( l1, ${FLEX_GS_FLOOR} )`);
     expect(glsl).toContain(`l > ${FLEX_NORMAL_EPS}`);
+    expect(glsl).toContain(`${FLEX_AGREE_FLOOR} + smoothstep( -0.2, 0.8, dot( N, Nm ) )`);
+    expect(glsl).toContain(`${FLEX_CRUMPLE_AMP} * accD.x * flexFrameU.z * flexCrumple( position )`);
     expect(glsl).toContain('texelFetch( uFlexNodes, ivec2( i & 63, ( i >> 6 ) + block * uFlexRows ), 0 )');
     expect(glsl).toContain(`& ${NODE_TEX_FLAG_BROKEN}`);
+    for (let k = 0; k < FLEX_TRIADS; k++) expect(glsl).toContain(`flexTriad( flexTriad${k}, flexCoef${k}, flexFrame${k}.xyz`);
   });
 
   it.each([
@@ -64,10 +79,12 @@ describe('flex1 GLSL', () => {
     applyFlexGlsl(shader, target);
     expect(shader.vertexShader.startsWith('#define FLEXBODY\n')).toBe(true);
     expect(shader.vertexShader).not.toContain('#include <begin_vertex>');
-    expect(shader.vertexShader).toContain('flexLoad( flexIdx, flexR, flexE1, flexE2 )');
+    expect(shader.vertexShader).toContain(`void main() {\n${FLEX_MAIN_CALL}`);
+    expect(shader.vertexShader).toContain('vec3 transformed = flexP;');
     if (target === 'color') {
       expect(shader.vertexShader).not.toContain('#include <beginnormal_vertex>');
       expect(shader.vertexShader).toContain('#define FLEXBODY_COLOR');
+      expect(shader.vertexShader).toContain('vec3 objectNormal = flexN;');
       expect(shader.fragmentShader).toContain('varying vec4 vFlexDamage;');
     } else {
       expect(shader.vertexShader).not.toContain('#define FLEXBODY_COLOR');
@@ -94,10 +111,19 @@ describe('createFlexSkin', () => {
     expect(skin.patch.key).toBe(FLEXBODY_PATCH_KEY);
     for (const [i, mesh] of skin.meshes.entries()) {
       const g = mesh.geometry;
-      for (const a of ['position', 'normal', 'uv', 'flexTriad', 'flexCoef', 'flexNormal', 'flexDamage', 'tangent', 'flexTangent']) {
-        expect(g.getAttribute(a), a).toBeDefined();
-      }
-      expect(g.getAttribute('flexTriad').array[0]).toBe(binding.panels[i]!.triad[0]);
+      const attrs = ['position', 'normal', 'uv', 'tangent', 'flexFrameT', 'flexFrameU'];
+      for (let k = 0; k < FLEX_TRIADS; k++) attrs.push(`flexTriad${k}`, `flexCoef${k}`, `flexFrame${k}`);
+      for (const a of attrs) expect(g.getAttribute(a), a).toBeDefined();
+      // ≤ 16 vertex attribute slots (WebGL2 minimum), `normal` included even though flex2 never reads it.
+      expect(Object.keys(g.attributes).length).toBeLessThanOrEqual(15);
+      const p = binding.panels[i]!;
+      const t1 = g.getAttribute('flexTriad1').array;
+      expect([t1[0], t1[1], t1[2], t1[3]]).toEqual([p.triad[3], p.triad[4], p.triad[5], p.weight[1]]);
+      expect(g.getAttribute('flexCoef2').array[3]).toBe(p.coef[4 * 2 + 3]);
+      const fT = g.getAttribute('flexFrameT').array;
+      expect([fT[0], fT[1], fT[2], fT[3]]).toEqual([p.frameTangent![1], p.frameTangent![2], p.frameTangent![4], p.frameTangent![5]]);
+      const fU = g.getAttribute('flexFrameU').array;
+      expect([fU[0], fU[1], fU[2]]).toEqual([p.frameTangent![7], p.frameTangent![8], p.damageWeight[0]]);
       expect(mesh.customDepthMaterial).toBeInstanceOf(MeshDepthMaterial);
       expect(mesh.customDistanceMaterial).toBeInstanceOf(MeshDistanceMaterial);
       expect(mesh.castShadow).toBe(true);
@@ -105,12 +131,12 @@ describe('createFlexSkin', () => {
       // The depth twin really reconstructs (shadows of the deformed body).
       const depth = program(ShaderLib.depth);
       mesh.customDepthMaterial!.onBeforeCompile(depth, renderer);
-      expect(depth.vertexShader).toContain('flexCoef.z');
+      expect(depth.vertexShader).toContain('flexEvaluate();');
       expect(depth.uniforms.uFlexNodes!.value).toBe(skin.nodeTexture);
       expect(depth.uniforms.uFlexRows!.value).toBe(1);
       const color = program(ShaderLib.physical);
       (mesh.material as Material).onBeforeCompile(color, renderer);
-      expect(color.vertexShader).toContain('vFlexDamage = flexDamageBlend( flexIdx );');
+      expect(color.vertexShader).toContain('vFlexDamage = vec4( accD.xyz * flexFrameU.z, accD.w );');
       expect(color.uniforms.uFlexNodes!.value).toBe(skin.nodeTexture);
     }
     skin.setPanelVisible(1, false);
@@ -176,5 +202,60 @@ describe('createFlexSkin', () => {
     expect(c).not.toBe(base);
     expect(c.onBeforeCompile).toBe(hook);
     expect(c.customProgramCacheKey()).toBe('flake1');
+  });
+
+  it('settle calibration: a static sag at rest is hidden, a car on its roof is left alone, a wreck never calibrates', () => {
+    const rig = subject.compiled.rig;
+    const settle = { restNodes: rig.nodePos, frameNodes: subject.compiled.frameNodes, bodyNodeCount: rig.nodeCount };
+    const skin = createFlexSkin(binding, {
+      materials: stubMaterials(),
+      damage: null,
+      lighting,
+      patchMaterial,
+      anchorNode: subject.compiled.frameNodes[0]!,
+      settle,
+    });
+    const SAG = 7;
+    const yaw = 0.5;
+    const pose = (flip: boolean, sag: number): Float32Array => {
+      const out = new Float32Array(rig.nodeCount * 3);
+      for (let i = 0; i < rig.nodeCount; i++) {
+        let x = rig.nodePos[3 * i]!;
+        let y = rig.nodePos[3 * i + 1]! - (i === SAG ? sag : 0);
+        const z = rig.nodePos[3 * i + 2]!;
+        if (flip) [x, y] = [-x, -y]; // rolled onto its roof (about the forward axis)
+        out[3 * i] = 50 + Math.cos(yaw) * x + Math.sin(yaw) * z;
+        out[3 * i + 1] = 3 + y;
+        out[3 * i + 2] = -20 - Math.sin(yaw) * x + Math.cos(yaw) * z;
+      }
+      return out;
+    };
+    const run = (nodes: Float32Array, seconds: number, broken = new Uint8Array(4), epoch = 0): void => {
+      for (let t = 0; t < seconds * 60; t++) skin.update({ ...frameFor(nodes), dtS: 1 / 60, broken, repairEpoch: epoch });
+    };
+    const skinPos = (i: number): number[] => [0, 1, 2].map((k) => skin.nodeData[4 * i + k]!);
+    const anchor = subject.compiled.frameNodes[0]!;
+    const rigid = pose(false, 0);
+    const want = (i: number): number[] => [0, 1, 2].map((k) => rigid[3 * i + k]! - rigid[3 * anchor + k]!);
+
+    // A wreck that comes to rest (a beam is broken) is never calibrated.
+    run(pose(false, 0.06), 2, Uint8Array.of(0, 1, 0, 0));
+    expect(skin.settle!.calibrated).toBe(false);
+    // Spawn / repair (new epoch): settles, calibrates, fades in.
+    run(pose(false, 0.06), SETTLE_DEFAULTS.waitS + SETTLE_DEFAULTS.sampleS + SETTLE_DEFAULTS.fadeS + 0.3, new Uint8Array(4), 1);
+    expect(skin.settle!.calibrated).toBe(true);
+    expect(skin.settle!.maxOffset).toBeCloseTo(0.06, 4);
+    expect(skin.settle!.strength).toBe(1);
+    for (const i of [SAG, 3, 40]) {
+      const got = skinPos(i);
+      const exp = want(i);
+      for (let k = 0; k < 3; k++) expect(got[k]!).toBeCloseTo(exp[k]!, 4);
+    }
+    // Rolled onto its roof: the sag points the other way, so no correction at all.
+    const rolled = pose(true, -0.06);
+    run(rolled, 0.1, new Uint8Array(4), 1);
+    expect(skin.settle!.strength).toBe(0);
+    expect(skin.nodeData[4 * SAG + 1]!).toBeCloseTo(rolled[3 * SAG + 1]! - rolled[3 * anchor + 1]!, 5);
+    skin.dispose();
   });
 });

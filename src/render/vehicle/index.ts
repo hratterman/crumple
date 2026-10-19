@@ -14,7 +14,7 @@ import type { CompiledVehicle } from '../../sim/vehicle/types';
 import type { LightingStack, PatchMaterial, RenderContext } from '../types';
 import { bindPanels } from './binder';
 import { createVehicleDamage } from './damage';
-import { createFlexSkin } from './flexskin';
+import { createFlexSkin, type FlexSkinImpl } from './flexskin';
 import { tessellateVehicle } from './loft';
 import { createLightState, createVehicleMaterials, lightStateFromTelemetry } from './materials';
 import { createDamageFx, type DamageFxSystem } from './shatter';
@@ -44,9 +44,12 @@ export interface VehicleVisualOptions {
   groundAt?: ((x: number, z: number) => number) | null;
   /** Damage FX (glass shards, debris) — default true. */
   fx?: boolean;
+  /** Static-sag calibration of the skin (flexskin SettleCalibration) — default true. */
+  settle?: boolean;
 }
 
 export interface VehicleVisualHandle extends VehicleVisual {
+  readonly skin: FlexSkinImpl;
   readonly fx: DamageFxSystem | null;
   /** Bake timings, ms (tessellate, bind, total incl. GPU resource creation). */
   readonly timings: { tessellateMs: number; bindMs: number; totalMs: number };
@@ -115,6 +118,7 @@ export function createVehicleVisual(
     lighting: opts.lighting,
     patchMaterial: opts.patchMaterial,
     anchorNode: compiled.frameNodes[0] ?? 0,
+    settle: opts.settle === false ? null : { restNodes: compiled.rig.nodePos, frameNodes: compiled.frameNodes, bodyNodeCount: compiled.bodyNodeCount },
   });
   const wheels = createWheelVisuals(compiled, def.wheels, {
     materials,
