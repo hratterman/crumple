@@ -47,6 +47,22 @@ describe('validateLayout', () => {
     rejects((l) => (l.pads[0].height = Number.NaN), /finite/);
   });
 
+  it('checks prop placement shapes (P5)', () => {
+    const cone = { id: 'c', prop: 'cone', pos: [10, null, 10] };
+    rejects((l) => (l.props = [cone, { ...cone }]), /props: duplicate id/);
+    rejects((l) => (l.props = [{ ...cone, prop: '' }]), /catalog key/);
+    rejects((l) => (l.props = [{ ...cone, pos: [900, null, 0] }]), /outside the map/);
+    rejects((l) => (l.props = [{ ...cone, facing: [1, 1] }]), /unit vector/);
+    rejects((l) => (l.props = [{ ...cone, stack: 0 }]), /stack/);
+    rejects((l) => (l.props = [{ ...cone, row: { count: 2.5, step: [1, 0] } }]), /row.count/);
+    rejects((l) => (l.props = [{ ...cone, row: { count: 400, step: [1, 0] } }]), /row.count/);
+    rejects((l) => (l.props = [{ ...cone, row: { count: 200, step: [10, 0] } }]), /last row copy/);
+    rejects((l) => (l.props = [{ ...cone, padId: 'nope' }]), /unknown pad/);
+    const ok = clone() as Mut;
+    ok.props = [{ ...cone, facing: [0.6, -0.8], stack: 1, row: { count: 3, step: [1, 0] }, padId: ok.pads[0].id }];
+    expect(() => validateLayout(ok as WorldLayout)).not.toThrow();
+  });
+
   it('generateTerrain validates (static and junction geometry)', () => {
     const bad = clone() as Mut;
     bad.size = 1000;

@@ -8,7 +8,11 @@
 import {
   RIG_BEAM_TYPE_ID,
   RIG_DEFAULTS,
+  OBJ_RADIUS_MAX,
+  OBJ_RADIUS_MIN,
+  OBJ_RADIUS_SPACING_FACTOR,
   RIG_NODE_FLAG_COLLIDABLE,
+  RIG_NODE_FLAG_OBJ_CONTACT,
   RIG_NODE_FLAG_TREAD,
   type CompiledRig,
   type RigBeamType,
@@ -102,6 +106,9 @@ export function compileRig(def: RigDef): CompiledRig {
   const nodeFriction = new Float64Array(nodeCount);
   const nodeRadius = new Float64Array(nodeCount);
   const nodeContactK = new Float64Array(nodeCount);
+  const nodeObjRadius = new Float64Array(nodeCount);
+  /** Explicit RigNodeDef.objRadius (> 0) or 0 = derive from the incident beams below. */
+  const objRadiusDecl = new Float64Array(nodeCount);
   const nodeFlags = new Uint8Array(nodeCount);
   const nodeGroup = new Int32Array(nodeCount);
   const groups: string[] = [];
@@ -148,7 +155,13 @@ export function compileRig(def: RigDef): CompiledRig {
     nodeContactK[i] = opt(rig, where, 'contactSpring', n.contactSpring, gd?.contactSpring ?? 0, true);
     if (n.collidable !== undefined && typeof n.collidable !== 'boolean') fail(rig, `${where} collidable must be a boolean`);
     if (n.tread !== undefined && typeof n.tread !== 'boolean') fail(rig, `${where} tread must be a boolean`);
-    nodeFlags[i] = (n.collidable === false ? 0 : RIG_NODE_FLAG_COLLIDABLE) | (n.tread === true ? RIG_NODE_FLAG_TREAD : 0);
+    if (n.objContact !== undefined && typeof n.objContact !== 'boolean') fail(rig, `${where} objContact must be a boolean`);
+    objRadiusDecl[i] = opt(rig, where, 'objRadius', n.objRadius, 0, false);
+    const objContact = n.objContact ?? n.collidable !== false;
+    nodeFlags[i] =
+      (n.collidable === false ? 0 : RIG_NODE_FLAG_COLLIDABLE) |
+      (n.tread === true ? RIG_NODE_FLAG_TREAD : 0) |
+      (objContact ? RIG_NODE_FLAG_OBJ_CONTACT : 0);
   }
 
   const beamA = new Int32Array(beamCount);
@@ -197,6 +210,25 @@ export function compileRig(def: RigDef): CompiledRig {
     beamHydroTravel[i] = opt(rig, where, 'hydroTravel', b.hydroTravel, RIG_DEFAULTS.hydroTravel, false);
   }
 
+  // P5 object-contact radius: explicit, else 0.6 × median incident rest length (clamped).
+  const incident: number[][] = Array.from({ length: nodeCount }, () => []);
+  for (let i = 0; i < beamCount; i++) {
+    incident[beamA[i]!]!.push(beamRestLen[i]!);
+    incident[beamB[i]!]!.push(beamRestLen[i]!);
+  }
+  for (let i = 0; i < nodeCount; i++) {
+    const decl = objRadiusDecl[i]!;
+    if (decl > 0) {
+      nodeObjRadius[i] = decl;
+      continue;
+    }
+    const lens = incident[i]!.sort((x, y) => x - y);
+    const n = lens.length;
+    const median = n === 0 ? nodeRadius[i]! / OBJ_RADIUS_SPACING_FACTOR : n & 1 ? lens[n >> 1]! : (lens[n / 2 - 1]! + lens[n / 2]!) / 2;
+    const r = OBJ_RADIUS_SPACING_FACTOR * median;
+    nodeObjRadius[i] = r < OBJ_RADIUS_MIN ? OBJ_RADIUS_MIN : r > OBJ_RADIUS_MAX ? OBJ_RADIUS_MAX : r;
+  }
+
   return {
     name: def.name,
     nodeCount,
@@ -207,6 +239,7 @@ export function compileRig(def: RigDef): CompiledRig {
     nodeInvMass,
     nodeFriction,
     nodeContactK,
+    nodeObjRadius,
     nodeRadius,
     nodeFlags,
     groups,

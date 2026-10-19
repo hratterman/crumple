@@ -40,6 +40,7 @@ function makeState(nodes: number, beams = 0): SimState {
     treadAxY: f64(nodes),
     treadAxZ: f64(nodes),
     treadF: f64(nodes),
+    objRadius: f64(nodes),
     flags: new Uint8Array(nodes).fill(NODE_FLAG_COLLIDABLE),
     aIdx: new Int32Array(beams),
     bIdx: new Int32Array(beams),

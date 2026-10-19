@@ -17,8 +17,11 @@ import {
   type MainToWorkerType,
   type WorkerToMain,
 } from '../protocol/messages';
-import type { TerrainData, WorldLayout } from '../world/types';
+import type { TerrainData, VegetationScatter, WorldLayout } from '../world/types';
 import { generateTerrain, hashTerrain } from '../world/terrain';
+import { scatterVegetation } from '../world/vegetation';
+import { resolveWater } from '../world/water';
+import { resolvePropInstances } from './props/placement';
 import { SIM_DT, SIM_HZ, SimCommandError, SimEngine } from './engine';
 
 export const MAX_STEPS_PER_WAKE = 200;
@@ -62,9 +65,11 @@ function defaultScheduler(): HostScheduler {
 export interface TerrainDeps {
   generateTerrain(layout: WorldLayout): TerrainData;
   hashTerrain(terrain: TerrainData): number;
+  /** P5 (optional for older test doubles; default the real scatter). */
+  scatterVegetation?(layout: WorldLayout, terrain: TerrainData): VegetationScatter;
 }
 
-const DEFAULT_TERRAIN_DEPS: TerrainDeps = { generateTerrain, hashTerrain };
+const DEFAULT_TERRAIN_DEPS: TerrainDeps = { generateTerrain, hashTerrain, scatterVegetation };
 
 function hex(h: number): string {
   return `0x${(h >>> 0).toString(16).padStart(8, '0')}`;
@@ -172,6 +177,14 @@ export class WorkerHost {
           engine.setExtraColliders(msg.colliders);
           this.dirty = true;
           return;
+        case 'spawnProps':
+          engine.spawnProps(msg.items);
+          this.dirty = true;
+          return;
+        case 'resetProps':
+          engine.resetProps(msg.objectIds);
+          this.dirty = true;
+          return;
         default:
           throw new SimCommandError(`unknown command ${String(type)}`);
       }
@@ -230,7 +243,11 @@ export class WorkerHost {
    * the whole blocking time (generate + hash + sampler build). The layout's
    * static colliders install with it (resolved against this terrain; an
    * invalid set posts `error` after terrainReady and leaves the previous
-   * layout set). Generation
+   * layout set). P5 sequence: vegetation scatter (needs the splat) →
+   * heightfield → layout + vegetation colliders → water bodies → layout
+   * props (resolvePropInstances, spawned asleep) → terrainReady with the
+   * P5 counts; each failing stage posts its own `error` after
+   * terrainReady and the rest still installs. Generation
    * blocks the worker for a while: the wall clock is re-based afterwards,
    * so that time is skipped rather than caught up (no 200-step burst).
    */
@@ -244,22 +261,65 @@ export class WorkerHost {
     const t0 = this.scheduler.now();
     const terrain = this.terrainDeps.generateTerrain(layout);
     const hash = this.terrainDeps.hashTerrain(terrain) >>> 0;
-    engine.setGroundTerrain({ ...terrain, splat: new Uint8Array(0) });
-    // Layout colliders resolve against this terrain (same helper as main's meshes).
-    let colliderError: string | null = null;
+    // P5: the vegetation scatter needs the splat weights, so it runs before they are dropped.
+    const scatterFn = this.terrainDeps.scatterVegetation ?? scatterVegetation;
+    const errors: string[] = [];
+    let scatter: VegetationScatter | null = null;
     try {
-      engine.setLayoutColliders(layout.colliders ?? []);
+      scatter = scatterFn(layout, terrain);
     } catch (e) {
-      colliderError = errMessage(e);
+      errors.push(`vegetation not scattered: ${errMessage(e)}`);
+    }
+    engine.setGroundTerrain({ ...terrain, splat: new Uint8Array(0) });
+    // Layout colliders resolve against this terrain (same helper as main's meshes),
+    // then the vegetation colliders (ids veg:*), before the extra set.
+    const vegColliders = scatter?.colliders ?? [];
+    let vegInstalled = 0;
+    try {
+      engine.setLayoutColliders([...(layout.colliders ?? []), ...vegColliders]);
+      vegInstalled = vegColliders.length;
+    } catch (e) {
+      try {
+        engine.setLayoutColliders(layout.colliders ?? []);
+        errors.push(`vegetation colliders not installed: ${errMessage(e)}`);
+      } catch (e2) {
+        errors.push(`layout colliders not installed: ${errMessage(e2)}`);
+      }
+    }
+    let waterBodies = 0;
+    try {
+      engine.setWater(resolveWater(layout, terrain));
+      waterBodies = engine.water.length;
+    } catch (e) {
+      engine.setWater([]);
+      errors.push(`water not installed: ${errMessage(e)}`);
+    }
+    let props = 0;
+    try {
+      const sampler = engine.sampler!;
+      const instances = resolvePropInstances(layout.props ?? [], (x, z) => sampler.heightAt(x, z));
+      engine.spawnLayoutProps(instances);
+      props = instances.length;
+    } catch (e) {
+      errors.push(`layout props not spawned: ${errMessage(e)}`);
     }
     const t1 = this.scheduler.now();
     this.lastWall = t1;
     this.dirty = true;
     const matched = expected !== 0 && hash === expected;
-    this.post({ type: 'terrainReady', layoutId: terrain.layoutId, terrainHash: hash, matched, generateMs: t1 - t0 });
-    if (colliderError !== null) {
-      this.post({ type: 'error', command: 'groundHeightfield', message: `layout colliders not installed: ${colliderError}` });
-    }
+    const ready: WorkerToMain = {
+      type: 'terrainReady',
+      layoutId: terrain.layoutId,
+      terrainHash: hash,
+      matched,
+      generateMs: t1 - t0,
+      props,
+      vegetationColliders: vegInstalled,
+      waterBodies,
+    };
+    if (scatter) ready.vegetationHash = scatter.hash >>> 0;
+    this.post(ready);
+    for (const message of errors) this.post({ type: 'error', command: 'groundHeightfield', message });
     if (expected !== 0 && !matched) {
       this.post({
         type: 'error',

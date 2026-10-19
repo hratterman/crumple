@@ -69,6 +69,10 @@ export interface RigNodeDef {
 
 /** P5: compiled node flag — node-vs-node contact participant (sim NODE_FLAG_OBJ_CONTACT, same bit; U1 sets it in compileRig). */
 export const RIG_NODE_FLAG_OBJ_CONTACT = 1 << 3;
+/** P5 default object-contact radius = this × median incident beam rest length (≈ 0.6 × local node spacing). */
+export const OBJ_RADIUS_SPACING_FACTOR = 0.6;
+export const OBJ_RADIUS_MIN = 0.04;
+export const OBJ_RADIUS_MAX = 0.35;
 
 export interface RigBeamDef {
   /** Node ids. */
@@ -164,6 +168,13 @@ export interface CompiledRig {
   nodeRadius: Float64Array;
   /** Per-node soft-layer ground stiffness N/m, 0 = rigid-contact law (additive P2). */
   nodeContactK: Float64Array;
+  /**
+   * P5: node-vs-node contact radius, m (RigNodeDef.objRadius; default
+   * OBJ_RADIUS_SPACING_FACTOR × the median incident beam rest length,
+   * clamped to [OBJ_RADIUS_MIN, OBJ_RADIUS_MAX]; a node without beams
+   * takes its ground radius, clamped likewise).
+   */
+  nodeObjRadius: Float64Array;
   /** RIG_NODE_FLAG_* bits. */
   nodeFlags: Uint8Array;
   /** Group names in first-seen order; nodeGroup indexes into it (-1 = none). */

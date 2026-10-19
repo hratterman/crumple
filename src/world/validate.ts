@@ -16,6 +16,9 @@ import {
 
 /** MaterialId count (FROZEN values 0..6 in protocol/messages.ts; world may only `import type` from protocol). */
 const MATERIAL_COUNT = 7;
+/** Prop placement shape limits (P5). */
+export const PROP_MAX_STACK = 16;
+export const PROP_MAX_ROW = 256;
 
 const fail = (msg: string): never => {
   throw new WorldLayoutError(msg);
@@ -215,6 +218,37 @@ export function validateLayout(layout: WorldLayout): void {
       if (seen.has(id)) fail(`${w}: road '${id}' listed twice`);
       seen.add(id);
     }
+  });
+
+  // Props (P5): shape checks only — the catalog key, stackability and proxy
+  // overlap are checked by resolvePropInstances (src/world never imports src/sim).
+  uniqueIds(layout.props, 'props');
+  const padIds = new Set(layout.pads.map((p) => p.id));
+  layout.props.forEach((p, i) => {
+    const w = `props[${i}] '${p.id}'`;
+    if (typeof p.prop !== 'string' || p.prop.length === 0) fail(`${w}.prop: expected a catalog key`);
+    if (!Array.isArray(p.pos) || p.pos.length !== 3) fail(`${w}.pos: expected [x, y|null, z]`);
+    checkVec2([p.pos[0], p.pos[2]], `${w}.pos`, half);
+    if (p.pos[1] !== null) finite(p.pos[1], `${w}.pos[1]`);
+    if (p.facing !== undefined) {
+      const fx = finite(p.facing[0], `${w}.facing[0]`);
+      const fz = finite(p.facing[1], `${w}.facing[1]`);
+      if (Math.abs(Math.sqrt(fx * fx + fz * fz) - 1) > 1e-3) fail(`${w}.facing must be a unit vector`);
+    }
+    if (p.stack !== undefined && (!Number.isInteger(p.stack) || p.stack < 1 || p.stack > PROP_MAX_STACK)) {
+      fail(`${w}.stack must be an integer in 1..${PROP_MAX_STACK}`);
+    }
+    if (p.row !== undefined) {
+      if (!p.row || !Number.isInteger(p.row.count) || p.row.count < 1 || p.row.count > PROP_MAX_ROW) {
+        fail(`${w}.row.count must be an integer in 1..${PROP_MAX_ROW}`);
+      }
+      if (!Array.isArray(p.row.step) || p.row.step.length !== 2) fail(`${w}.row.step: expected [x, z]`);
+      finite(p.row.step[0], `${w}.row.step[0]`);
+      finite(p.row.step[1], `${w}.row.step[1]`);
+      const last: Vec2 = [p.pos[0] + (p.row.count - 1) * p.row.step[0], p.pos[2] + (p.row.count - 1) * p.row.step[1]];
+      checkVec2(last, `${w}: last row copy`, half);
+    }
+    if (p.padId !== undefined && !padIds.has(p.padId)) fail(`${w}: unknown pad '${p.padId}'`);
   });
 
   layout.spawnPoints.forEach((s, i) => {

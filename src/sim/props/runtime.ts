@@ -1,0 +1,186 @@
+/**
+ * Prop runtime (P5, U1) — WORKER ONLY (imports sim state types).
+ *
+ * INTERNAL DAMPING: beam dampers act along beams with ζ relative to each
+ * beam's own (2 kHz-scale) frequency, i.e. stiffness-proportional damping:
+ * a prop's lowest structural modes (a cone's 5 Hz sway, a pole's 1 Hz
+ * sway) get ζ_mode ≈ ζ_beam·ω_mode/ω_beam ≈ 1 % and rang for many seconds
+ * (keeping the prop awake). Every awake prop therefore also gets a
+ * mass-proportional damper on its velocity RELATIVE TO ITS RIGID-BODY
+ * MOTION, F_i = −c·m_i·(v_i − V − ω × (p_i − C)) (C, V = centre of mass and
+ * its velocity, ω = I⁻¹·L the best-fit angular velocity), which leaves
+ * flight and tumbling untouched; while the prop is still ANCHORED (some
+ * anchor beam intact) the reference is the ground (F_i = −c·m_i·v_i), and
+ * likewise while its rigid motion is slower than PROP_SETTLE_SPEED (a
+ * settling prop: friction holds its base, so the rigid fit would read half
+ * of a sway as rotation and leave it undamped).
+ * c = PROP_INTERNAL_DAMPING: ζ = c/(2ω) is 6 % at 5 Hz, 30 % at 1 Hz, and
+ * c·dt = 0.002 (explicitly stable). Forces are accumulated before the
+ * ground pass so the implicit friction sees them.
+ *
+ * NUMERICS: hot loop, + − × ÷ only, no allocation, ascending node order.
+ */
+import type { Transform } from '../../protocol/messages';
+import type { SimState } from '../types';
+import type { PropDef, PropKey } from './types';
+
+/** Internal (rigid-relative) damping rate, 1/s. */
+export const PROP_INTERNAL_DAMPING = 4;
+/** Below this rigid-body speed (COM, and ω at the gyration radius), m/s, the damping reference is the ground. */
+export const PROP_SETTLE_SPEED = 0.25;
+
+export interface PropRuntime {
+  key: PropKey;
+  def: PropDef;
+  /** Spawn / reset transform (resetProps re-places here). */
+  spawn: Transform;
+  /** Object-local indices of the anchor beams (beams touching a pinned node); empty = free prop. */
+  anchorBeams: Int32Array;
+  /** Seconds of continuous stillness (sleep bookkeeping). */
+  stillS: number;
+}
+
+/** True while any anchor beam of the prop (beam range starting at beamStart) is intact. */
+export function propAnchored(state: SimState, rt: PropRuntime, beamStart: number): boolean {
+  const ab = rt.anchorBeams;
+  for (let i = 0; i < ab.length; i++) if (state.active[beamStart + ab[i]!] !== 0) return true;
+  return false;
+}
+
+/** Applies the internal damping force to nodes [first, first+count) (see header). */
+export function applyPropDamping(state: SimState, first: number, count: number, c: number, anchored: boolean): void {
+  const { posX, posY, posZ, velX, velY, velZ, frcX, frcY, frcZ, invMass } = state;
+  const end = first + count;
+  if (anchored) {
+    for (let i = first; i < end; i++) {
+      const im = invMass[i]!;
+      if (im === 0) continue;
+      const k = c / im;
+      frcX[i] = frcX[i]! - k * velX[i]!;
+      frcY[i] = frcY[i]! - k * velY[i]!;
+      frcZ[i] = frcZ[i]! - k * velZ[i]!;
+    }
+    return;
+  }
+  // Pass 1: mass, COM, momentum, angular momentum about the origin, raw inertia sums.
+  let M = 0;
+  let mx = 0;
+  let my = 0;
+  let mz = 0;
+  let px = 0;
+  let py = 0;
+  let pz = 0;
+  let lx = 0;
+  let ly = 0;
+  let lz = 0;
+  let sxx = 0;
+  let syy = 0;
+  let szz = 0;
+  let sxy = 0;
+  let sxz = 0;
+  let syz = 0;
+  for (let i = first; i < end; i++) {
+    const im = invMass[i]!;
+    if (im === 0) continue;
+    const m = 1 / im;
+    const x = posX[i]!;
+    const y = posY[i]!;
+    const z = posZ[i]!;
+    const vx = velX[i]!;
+    const vy = velY[i]!;
+    const vz = velZ[i]!;
+    M += m;
+    mx += m * x;
+    my += m * y;
+    mz += m * z;
+    px += m * vx;
+    py += m * vy;
+    pz += m * vz;
+    lx += m * (y * vz - z * vy);
+    ly += m * (z * vx - x * vz);
+    lz += m * (x * vy - y * vx);
+    sxx += m * x * x;
+    syy += m * y * y;
+    szz += m * z * z;
+    sxy += m * x * y;
+    sxz += m * x * z;
+    syz += m * y * z;
+  }
+  if (!(M > 0)) return;
+  const iM = 1 / M;
+  const cx = mx * iM;
+  const cy = my * iM;
+  const cz = mz * iM;
+  const vcx = px * iM;
+  const vcy = py * iM;
+  const vcz = pz * iM;
+  // About the COM: L_c = L − M·C×V; second moments S_c = S − M·C Cᵀ.
+  const Lx = lx - M * (cy * vcz - cz * vcy);
+  const Ly = ly - M * (cz * vcx - cx * vcz);
+  const Lz = lz - M * (cx * vcy - cy * vcx);
+  const cxx = sxx - M * cx * cx;
+  const cyy = syy - M * cy * cy;
+  const czz = szz - M * cz * cz;
+  const cxy = sxy - M * cx * cy;
+  const cxz = sxz - M * cx * cz;
+  const cyz = syz - M * cy * cz;
+  // Inertia tensor I = tr(S)·1 − S (symmetric), ω = I⁻¹ L by cofactors.
+  const a = cyy + czz;
+  const b = cxx + czz;
+  const d = cxx + cyy;
+  const e = -cxy;
+  const f = -cxz;
+  const g = -cyz;
+  // | a e f |
+  // | e b g |
+  // | f g d |
+  const A00 = b * d - g * g;
+  const A01 = f * g - e * d;
+  const A02 = e * g - b * f;
+  const A11 = a * d - f * f;
+  const A12 = e * f - a * g;
+  const A22 = a * b - e * e;
+  const det = a * A00 + e * A01 + f * A02;
+  let wx = 0;
+  let wy = 0;
+  let wz = 0;
+  const scale = a + b + d;
+  if (det > 1e-12 * scale * scale * scale) {
+    const id = 1 / det;
+    wx = (A00 * Lx + A01 * Ly + A02 * Lz) * id;
+    wy = (A01 * Lx + A11 * Ly + A12 * Lz) * id;
+    wz = (A02 * Lx + A12 * Ly + A22 * Lz) * id;
+  }
+  // Settling: a prop whose rigid motion is slow (COM and gyration-radius
+  // speeds below PROP_SETTLE_SPEED) is resting or about to; its reference
+  // is the ground (absolute damping), which kills the sway of a prop whose
+  // base is held by friction (the rigid fit would call half of it rotation).
+  const rot2 = (wx * wx + wy * wy + wz * wz) * scale * 0.5 * iM;
+  const s2 = PROP_SETTLE_SPEED * PROP_SETTLE_SPEED;
+  let rvx = vcx;
+  let rvy = vcy;
+  let rvz = vcz;
+  if (vcx * vcx + vcy * vcy + vcz * vcz < s2 && rot2 < s2) {
+    rvx = 0;
+    rvy = 0;
+    rvz = 0;
+    wx = 0;
+    wy = 0;
+    wz = 0;
+  }
+  // Pass 2: F_i = −c·m_i·(v_i − V − ω×r_i).
+  for (let i = first; i < end; i++) {
+    const im = invMass[i]!;
+    if (im === 0) continue;
+    const k = c / im;
+    const rx = posX[i]! - cx;
+    const ry = posY[i]! - cy;
+    const rz = posZ[i]! - cz;
+    const ux = velX[i]! - rvx - (wy * rz - wz * ry);
+    const uy = velY[i]! - rvy - (wz * rx - wx * rz);
+    const uz = velZ[i]! - rvz - (wx * ry - wy * rx);
+    frcX[i] = frcX[i]! - k * ux;
+    frcY[i] = frcY[i]! - k * uy;
+    frcZ[i] = frcZ[i]! - k * uz;
+  }
+}

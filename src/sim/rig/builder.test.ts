@@ -7,7 +7,15 @@ import {
   withMasses,
 } from './builder';
 import { beamPendulum, softCube, wreckingBall } from './testrigs';
-import { RIG_BEAM_TYPE_ID, RIG_DEFAULTS, RIG_NODE_FLAG_COLLIDABLE, type RigDef } from './types';
+import {
+  OBJ_RADIUS_MAX,
+  OBJ_RADIUS_MIN,
+  RIG_BEAM_TYPE_ID,
+  RIG_DEFAULTS,
+  RIG_NODE_FLAG_COLLIDABLE,
+  RIG_NODE_FLAG_OBJ_CONTACT,
+  type RigDef,
+} from './types';
 
 function tri(): RigDef {
   return {
@@ -56,8 +64,43 @@ describe('compileRig', () => {
     const neg = compileRig({ ...tri(), nodes: tri().nodes.map((n) => (n.id === 'z' ? { ...n, mass: -3 } : n)) });
     expect(neg.nodeMass[0]).toBe(0);
     expect(neg.nodeInvMass[0]).toBe(0);
-    expect(Array.from(c.nodeFlags)).toEqual([RIG_NODE_FLAG_COLLIDABLE, RIG_NODE_FLAG_COLLIDABLE, RIG_NODE_FLAG_COLLIDABLE]);
+    const both = RIG_NODE_FLAG_COLLIDABLE | RIG_NODE_FLAG_OBJ_CONTACT;
+    expect(Array.from(c.nodeFlags)).toEqual([both, both, both]);
     expect(compileRig(beamPendulum()).nodeFlags[0]).toBe(0);
+  });
+
+  it('P5: objContact defaults to collidable; objRadius = 0.6 × median incident rest length, clamped, or explicit', () => {
+    const def: RigDef = {
+      name: 'obj',
+      nodes: [
+        { id: 'a', pos: [0, 0, 0], mass: 1 },
+        { id: 'b', pos: [0.5, 0, 0], mass: 1, collidable: false },
+        { id: 'c', pos: [0, 0.2, 0], mass: 1, collidable: false, objContact: true },
+        { id: 'd', pos: [0, 0, 2], mass: 1, objContact: false, objRadius: 0.07 },
+        { id: 'e', pos: [9, 9, 9], mass: 1 },
+      ],
+      beams: [
+        { a: 'a', b: 'b', type: 'normal' },
+        { a: 'a', b: 'c', type: 'normal' },
+        { a: 'a', b: 'd', type: 'normal' },
+        { a: 'b', b: 'c', type: 'normal' },
+      ],
+    };
+    const c = compileRig(def);
+    const obj = (i: number) => (c.nodeFlags[i]! & RIG_NODE_FLAG_OBJ_CONTACT) !== 0;
+    expect([0, 1, 2, 3, 4].map(obj)).toEqual([true, false, true, false, true]);
+    // a: incident 0.5, 0.2, 2 → median 0.5 → 0.3; b: 0.5, √0.29 → mean of the two; c: 0.2, √0.29.
+    expect(c.nodeObjRadius[0]).toBeCloseTo(0.3, 12);
+    expect(c.nodeObjRadius[1]).toBeCloseTo(0.6 * ((0.5 + Math.sqrt(0.29)) / 2), 12);
+    expect(c.nodeObjRadius[2]).toBeCloseTo(0.6 * ((0.2 + Math.sqrt(0.29)) / 2), 12);
+    expect(c.nodeObjRadius[3]).toBe(0.07);
+    // No beams: ground radius (0.05) / 0.6 × 0.6 clamped → 0.05.
+    expect(c.nodeObjRadius[4]).toBeCloseTo(RIG_DEFAULTS.radius, 12);
+    const far = compileRig({ ...def, nodes: def.nodes.map((n) => (n.id === 'd' ? { ...n, objRadius: undefined } : n)) });
+    expect(far.nodeObjRadius[3]).toBe(OBJ_RADIUS_MAX);
+    const tiny = compileRig({ name: 't', nodes: [{ id: 'p', pos: [0, 0, 0], mass: 1 }, { id: 'q', pos: [0.01, 0, 0], mass: 1 }], beams: [{ a: 'p', b: 'q', type: 'normal' }] });
+    expect(tiny.nodeObjRadius[0]).toBe(OBJ_RADIUS_MIN);
+    expect(() => compileRig({ ...def, nodes: [{ ...def.nodes[0]!, objContact: 1 as unknown as boolean }] })).toThrow(/objContact/);
   });
 
   it('applies beam defaults and maps deform/breakF <= 0 to Infinity', () => {

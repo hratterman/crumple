@@ -194,8 +194,9 @@ export interface PropInstance {
  * (spawn on groundHeightfield) AND main (visuals, vegetation keep-out):
  * expands layout.props in declaration order — per placement, row copies
  * (row.count, ascending) × stack levels (bottom → top) — resolves y null
- * with heightAt(x, z) at the placement point (copies of a row each sample
- * their own point), builds yaw quats from `facing` with sqrt only
+ * to the highest heightAt over the footprint (the placement point and the
+ * 4 corners of the rotated proxy AABB; U1 amendment, see CONTRACTS; copies
+ * of a row each sample their own footprint), builds yaw quats from `facing` with sqrt only
  * (facing (fx, fz) = local −Z; q = (0, s, 0, c) with c = sqrt((1 − fz)/2),
  * s = (fx > 0 ? −1 : 1)·sqrt((1 + fz)/2)), checks
  * unknown keys, stack on a non-stackable prop, > PROP_LAYOUT_MAX_INSTANCES

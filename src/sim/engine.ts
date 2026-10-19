@@ -18,7 +18,12 @@ import {
   ACTION_RANGES,
   Action,
   DEFAULT_CAPACITY,
+  isLayoutPropId,
+  isPropObjectId,
+  PROP_DYNAMIC_ID_BASE,
+  PROP_DYNAMIC_MAX,
   type ActionState,
+  type PropSpawn,
   type SnapshotCapacity,
   type Transform,
 } from '../protocol/messages';
@@ -27,13 +32,16 @@ import { applyColliderContacts, compileColliders, resetColliderContactState } fr
 import { applyGroundContacts, PlaneSampler, resetGroundContactState } from './collision/ground';
 import type { ColliderWorld } from './collision/types';
 import { resolveColliders } from '../world/colliders';
-import type { ColliderDef, ResolvedCollider } from '../world/types';
+import type { ColliderDef, ResolvedCollider, WaterBody } from '../world/types';
 import { DEFAULT_MATERIALS } from './collision/materials';
 import { integrateNodes } from './integrator';
 import { compileRig } from './rig/builder';
 import type { CompiledRig, RigDef } from './rig/types';
 import { SimArena } from './state';
-import type { EventSink, HeightSampler, MaterialTable, SimObject, SimState } from './types';
+import { SIM_OBJECT_FLAG_SLEEPING, type EventSink, type HeightSampler, type MaterialTable, type SimObject, type SimState } from './types';
+import { compilePropRig, getPropDef, isPropKey } from './props/catalog';
+import { applyPropDamping, PROP_INTERNAL_DAMPING, propAnchored, type PropRuntime } from './props/runtime';
+import type { PropInstance, PropKey } from './props/types';
 import { compileVehicle } from './vehicle/builder';
 import { createTerrainSampler, type HeightfieldSampler } from '../world/sampler';
 import type { TerrainData } from '../world/types';
@@ -218,6 +226,8 @@ export class SimEngine {
   extraColliders: ResolvedCollider[] = [];
   /** Compiled active collider set (layout then extra); null = none. */
   colliderWorld: ColliderWorld | null = null;
+  /** P5 water bodies (resolveWater, installed with the heightfield): buoyancy + drag. */
+  water: WaterBody[] = [];
   /** Repair epoch per objectId (+1 per reset; snapshot OBJ_REPAIR_EPOCH). */
   private readonly repairEpochs = new Map<number, number>();
   /** Compiled rig per objectId (needed for reset/repair). */
@@ -226,6 +236,10 @@ export class SimEngine {
   private readonly vehicles = new Map<number, VehicleRuntime>();
   /** Parallel to arena.objects: the object's vehicle runtime or null (hot-loop lookup). */
   private vehicleSlots: (VehicleRuntime | null)[] = [];
+  /** Prop runtime per objectId (layout + dynamic props). */
+  private readonly props = new Map<number, PropRuntime>();
+  /** Parallel to arena.objects: the object's prop runtime or null. */
+  private propSlots: (PropRuntime | null)[] = [];
 
   constructor(config: EngineConfig) {
     const cap = config.capacity ?? DEFAULT_CAPACITY;
@@ -300,6 +314,16 @@ export class SimEngine {
   setLayoutColliders(defs: readonly ColliderDef[]): void {
     this.layoutColliders = this.resolve(defs);
     this.rebuildColliders();
+  }
+
+  /** Installs the water bodies (worker: with groundHeightfield). */
+  setWater(bodies: readonly WaterBody[]): void {
+    for (const b of bodies) {
+      if (![b.level, b.minX, b.maxX, b.minZ, b.maxZ].every(Number.isFinite) || !(b.minX <= b.maxX && b.minZ <= b.maxZ)) {
+        throw new SimCommandError(`invalid water body '${b.id}'`);
+      }
+    }
+    this.water = bodies.map((b) => ({ ...b }));
   }
 
   /** Replaces the EXTRA collider set (protocol setColliders), appended after the layout set. */
@@ -412,10 +436,11 @@ export class SimEngine {
     resetColliderContactState(this.state, obj.nodeStart, obj.nodeCount);
   }
 
-  /** Rebuilds the per-object vehicle slots and rebases every vehicle onto its current arena range. */
+  /** Rebuilds the per-object vehicle/prop slots and rebases every vehicle onto its current arena range. */
   private syncVehicles(): void {
     const objs = this.arena.objects;
     const slots: (VehicleRuntime | null)[] = new Array(objs.length);
+    const pslots: (PropRuntime | null)[] = new Array(objs.length);
     for (let o = 0; o < objs.length; o++) {
       const obj = objs[o]!;
       const v = this.vehicles.get(obj.objectId) ?? null;
@@ -423,8 +448,131 @@ export class SimEngine {
         rebaseVehicle(v, obj.nodeStart, obj.beamStart);
       }
       slots[o] = v;
+      pslots[o] = this.props.get(obj.objectId) ?? null;
     }
     this.vehicleSlots = slots;
+    this.propSlots = pslots;
+  }
+
+  // ------------------------------------------------------------------ props (P5)
+  /** The prop runtime of objectId, if it is a prop. */
+  getProp(objectId: number): PropRuntime | undefined {
+    return this.props.get(objectId);
+  }
+
+  /**
+   * Spawns one catalog prop (compiled rig cached per key). `asleep`
+   * (default true) freezes it in the rest pose until woken.
+   */
+  spawnProp(objectId: number, key: PropKey, transform: Transform, asleep = true): SimObject {
+    if (!isPropKey(key)) throw new SimCommandError(`unknown prop key '${String(key)}'`, objectId);
+    const def = getPropDef(key);
+    const rig = compilePropRig(key);
+    const obj = this.spawnCompiled(objectId, rig, transform);
+    const anchor: number[] = [];
+    for (let b = 0; b < rig.beamCount; b++) {
+      if (rig.nodeInvMass[rig.beamA[b]!] === 0 || rig.nodeInvMass[rig.beamB[b]!] === 0) anchor.push(b);
+    }
+    this.props.set(objectId, {
+      key,
+      def,
+      spawn: { pos: [transform.pos[0], transform.pos[1], transform.pos[2]], quat: [transform.quat[0], transform.quat[1], transform.quat[2], transform.quat[3]] },
+      anchorBeams: Int32Array.from(anchor),
+      stillS: 0,
+    });
+    this.syncVehicles();
+    this.setAsleep(obj, asleep);
+    return obj;
+  }
+
+  /** Puts an object to sleep (velocities zeroed, skipped by every pass) or wakes it. */
+  setAsleep(obj: SimObject, asleep: boolean): void {
+    const rt = this.props.get(obj.objectId);
+    if (rt) rt.stillS = 0;
+    if (asleep) {
+      obj.flags |= SIM_OBJECT_FLAG_SLEEPING;
+      const s = this.state;
+      const end = obj.nodeStart + obj.nodeCount;
+      for (let i = obj.nodeStart; i < end; i++) {
+        s.velX[i] = 0;
+        s.velY[i] = 0;
+        s.velZ[i] = 0;
+        s.frcX[i] = 0;
+        s.frcY[i] = 0;
+        s.frcZ[i] = 0;
+      }
+    } else {
+      obj.flags &= ~SIM_OBJECT_FLAG_SLEEPING;
+    }
+  }
+
+  /**
+   * Protocol `spawnProps`: atomic batch. Every item is validated first
+   * (key, id in the dynamic range, unique and unused, capacity); any
+   * failure throws naming the first bad item and nothing spawns.
+   */
+  spawnProps(items: readonly PropSpawn[]): void {
+    if (!Array.isArray(items)) throw new SimCommandError('spawnProps: items must be an array');
+    const s = this.state;
+    const seen = new Set<number>();
+    let nodes = 0;
+    let beams = 0;
+    items.forEach((it, i) => {
+      const where = `spawnProps.items[${i}]`;
+      if (!it || typeof it !== 'object') throw new SimCommandError(`${where}: not an object`);
+      const id = it.objectId;
+      if (!Number.isInteger(id) || id < PROP_DYNAMIC_ID_BASE || id >= PROP_DYNAMIC_ID_BASE + PROP_DYNAMIC_MAX) {
+        throw new SimCommandError(`${where}: objectId ${String(id)} outside the dynamic prop range`, id);
+      }
+      if (seen.has(id) || this.arena.indexOf(id) >= 0) throw new SimCommandError(`${where}: objectId ${id} already in use`, id);
+      seen.add(id);
+      if (!isPropKey(it.prop)) throw new SimCommandError(`${where}: unknown prop key '${String(it.prop)}'`, id);
+      const t = it.transform;
+      if (!t || !Array.isArray(t.pos) || !Array.isArray(t.quat) || t.pos.length !== 3 || t.quat.length !== 4 || ![...t.pos, ...t.quat].every(Number.isFinite)) {
+        throw new SimCommandError(`${where}: invalid transform`, id);
+      }
+      if (it.asleep !== undefined && typeof it.asleep !== 'boolean') throw new SimCommandError(`${where}: asleep must be a boolean`, id);
+      const rig = compilePropRig(it.prop);
+      nodes += rig.nodeCount;
+      beams += rig.beamCount;
+    });
+    if (this.arena.objects.length + items.length > this.arena.maxObjects) throw new SimCommandError(`spawnProps: object capacity ${this.arena.maxObjects} exceeded`);
+    if (s.nodeCount + nodes > s.nodeCapacity) throw new SimCommandError(`spawnProps: node capacity ${s.nodeCapacity} exceeded`);
+    if (s.beamCount + beams > s.beamCapacity) throw new SimCommandError(`spawnProps: beam capacity ${s.beamCapacity} exceeded`);
+    for (const it of items) this.spawnProp(it.objectId, it.prop, it.transform, it.asleep ?? true);
+  }
+
+  /**
+   * Layout props (worker, on groundHeightfield): despawns every previous
+   * layout prop, then spawns the instances asleep (objectId per instance).
+   */
+  spawnLayoutProps(instances: readonly PropInstance[]): void {
+    const old = this.arena.objects.filter((o) => isLayoutPropId(o.objectId)).map((o) => o.objectId);
+    for (const id of old) this.despawn(id);
+    for (const inst of instances) this.spawnProp(inst.objectId, inst.prop, inst.transform, true);
+  }
+
+  /**
+   * Protocol `resetProps`: full repair + re-place at the spawn transform,
+   * asleep; omitted ids = every layout prop. Unknown / non-prop ids throw
+   * before anything changes.
+   */
+  resetProps(objectIds?: readonly number[]): void {
+    let ids: number[];
+    if (objectIds === undefined) {
+      ids = this.arena.objects.filter((o) => isLayoutPropId(o.objectId)).map((o) => o.objectId);
+    } else {
+      if (!Array.isArray(objectIds)) throw new SimCommandError('resetProps: objectIds must be an array');
+      for (const id of objectIds) {
+        if (!isPropObjectId(id) || !this.props.has(id)) throw new SimCommandError(`resetProps: ${String(id)} is not a live prop`, id);
+      }
+      ids = [...objectIds];
+    }
+    for (const id of ids) {
+      const rt = this.props.get(id)!;
+      this.reset(id, rt.spawn);
+      this.setAsleep(this.arena.get(id)!, true);
+    }
   }
 
   despawn(objectId: number): void {
@@ -435,6 +583,7 @@ export class SimEngine {
     this.arena.remove(objectId);
     this.rigs.delete(objectId);
     this.vehicles.delete(objectId);
+    this.props.delete(objectId);
     this.repairEpochs.delete(objectId);
     resetGroundContactState(this.state, start, this.state.nodeCount + n - start);
     resetColliderContactState(this.state, start, this.state.nodeCount + n - start);
@@ -500,12 +649,14 @@ export class SimEngine {
     const gz = this.gravityZ;
     const restLen = s.restLen;
     const vslots = this.vehicleSlots;
+    const pslots = this.propSlots;
     const cw = this.colliderWorld;
     // The wheel kernels' ground is module state: point it at THIS engine's
     // ground every step (several engines may coexist, e.g. in tests).
     if (this.vehicles.size > 0) setWheelGround(sampler, this.materials, SIM_DT);
     for (let o = 0; o < objs.length; o++) {
       const obj = objs[o]!;
+      if ((obj.flags & SIM_OBJECT_FLAG_SLEEPING) !== 0) continue;
       const veh = vslots[o];
       if (veh) vehiclePreStep(s, veh, obj.actions, SIM_DT);
       const hb = obj.hydroBeams;
@@ -516,6 +667,11 @@ export class SimEngine {
         for (let h = 0; h < hb.length; h++) restLen[hb[h]!] = base[h]! * (1 + travel[h]! * steer);
       }
       applyBeamForces(s, obj.beamStart, obj.beamCount, sink, dbg);
+      const prop = pslots[o];
+      if (prop) {
+        const anchored = prop.anchorBeams.length > 0 && propAnchored(s, prop, obj.beamStart);
+        applyPropDamping(s, obj.nodeStart, obj.nodeCount, PROP_INTERNAL_DAMPING, anchored);
+      }
       if (sampler !== null) {
         applyGroundContacts(s, obj.nodeStart, obj.nodeCount, sampler, this.materials, SIM_DT, obj.objectId, sink, gx, gy, gz);
       }

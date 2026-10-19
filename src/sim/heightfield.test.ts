@@ -5,14 +5,16 @@
  * "hum" check against an analytic (exact, smooth) reference surface.
  */
 import { describe, expect, it } from 'vitest';
-import type { MainToWorker, Transform, WorkerToMain } from '../protocol/messages';
+import { GAME_CAPACITY, type MainToWorker, type Transform, type WorkerToMain } from '../protocol/messages';
+import { resolveWater } from '../world/water';
+import { resolvePropInstances } from './props/placement';
 import { DEFAULT_LAYOUT } from '../world/layout';
 import { createTerrainSampler } from '../world/sampler';
 import { syntheticTerrain } from '../world/sampler.testkit';
 import { SIM_DT, SIM_HZ, SimEngine } from './engine';
 import { softCube, wreckingBall } from './rig/testrigs';
 import type { RigDef } from './rig/types';
-import type { HeightSampler, SimState } from './types';
+import { SIM_OBJECT_FLAG_SLEEPING, type HeightSampler, type SimState } from './types';
 import { WorkerHost, type TerrainDeps } from './worker';
 import type { TerrainData, WorldLayout } from '../world/types';
 import { SEDAN } from './vehicle/defs/sedan';
@@ -287,7 +289,8 @@ describe('WorkerHost groundHeightfield', () => {
     };
     return { deps, calls };
   }
-  const layout = (id: string): WorldLayout => ({ ...DEFAULT_LAYOUT, id });
+  /** DEFAULT_LAYOUT under another id, without props (the stub terrain is tiny; P5 props are tested below). */
+  const layout = (id: string): WorldLayout => ({ ...DEFAULT_LAYOUT, id, props: [] });
 
   it('installs the regenerated terrain and answers terrainReady (matched / unchecked / mismatch + error)', () => {
     const { deps, calls } = stubDeps();
@@ -362,7 +365,7 @@ describe('WorkerHost groundHeightfield', () => {
 
   it('DEFAULT_LAYOUT end to end: the real generator, u32 hash, cube rests on a resolved spawn', () => {
     const h = makeHost();
-    h.send(INIT);
+    h.send({ ...INIT, capacity: GAME_CAPACITY } as MainToWorker);
     h.posted.length = 0;
     const t0 = performance.now();
     h.send({ type: 'groundHeightfield', layout: DEFAULT_LAYOUT, terrainHash: 0 });
@@ -372,7 +375,16 @@ describe('WorkerHost groundHeightfield', () => {
     expect(ready.layoutId).toBe(DEFAULT_LAYOUT.id);
     expect(Number.isInteger(ready.terrainHash) && ready.terrainHash > 0 && ready.terrainHash <= 0xffffffff).toBe(true);
     expect(ready.matched).toBe(false);
+    expect(h.posted.filter((m) => m.type === 'error')).toEqual([]);
     const eng = h.host.engine!;
+    // P5: every layout prop is spawned asleep at its resolved placement.
+    const instances = resolvePropInstances(DEFAULT_LAYOUT.props, (x, z) => eng.sampler!.heightAt(x, z));
+    expect(ready.props).toBe(instances.length);
+    for (const inst of instances) {
+      const o = eng.arena.get(inst.objectId)!;
+      expect(o.flags & SIM_OBJECT_FLAG_SLEEPING).toBe(SIM_OBJECT_FLAG_SLEEPING);
+    }
+    expect(ready.waterBodies).toBe(resolveWater(DEFAULT_LAYOUT, eng.terrain!).length);
     const t = eng.terrain!;
     expect(t.cols * t.rows).toBe(t.heights.length);
     const sp = t.spawns[0]!;

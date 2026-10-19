@@ -74,6 +74,8 @@ export const NODE_FLAG_IN_CONTACT = 1 << 1;
  * tangential force (vehicle/wheels.ts applyTreadBrush).
  */
 export const NODE_FLAG_TREAD = 1 << 2;
+/** P5: node-vs-node contact participant (= RIG_NODE_FLAG_OBJ_CONTACT; collision/objects.ts). */
+export const NODE_FLAG_OBJ_CONTACT = 1 << 3;
 
 /** SimObject.flags bits (same value as protocol OBJECT_FLAG_SLEEPING). */
 export const SIM_OBJECT_FLAG_SLEEPING = 1 << 0;
@@ -120,6 +122,8 @@ export interface SimState {
   treadAxY: Float64Array;
   treadAxZ: Float64Array;
   treadF: Float64Array;
+  /** P5 node-vs-node contact radius, m (CompiledRig.nodeObjRadius). f64: contact math. */
+  objRadius: Float64Array;
   /** NODE_FLAG_* bits (u8: dense, bit tests only). */
   flags: Uint8Array;
 
