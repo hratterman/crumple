@@ -31,6 +31,8 @@ import type { CompiledRig, RigDef } from './rig/types';
 import { SimArena } from './state';
 import type { EventSink, HeightSampler, MaterialTable, SimObject, SimState } from './types';
 import { compileVehicle } from './vehicle/builder';
+import { createTerrainSampler, type HeightfieldSampler } from '../world/sampler';
+import type { TerrainData } from '../world/types';
 import {
   createVehicleRuntime,
   rebaseVehicle,
@@ -202,6 +204,8 @@ export class SimEngine {
   gravityY: number;
   gravityZ: number;
   sampler: HeightSampler | null = null;
+  /** The installed heightfield (setGroundTerrain), null for plane / no ground. */
+  terrain: TerrainData | null = null;
   materials: MaterialTable = DEFAULT_MATERIALS;
   /** Fixed steps taken since init. */
   tick = 0;
@@ -244,10 +248,35 @@ export class SimEngine {
       throw new SimCommandError(`invalid materialId ${materialId}`);
     }
     this.sampler = new PlaneSampler(y, materialId);
+    this.terrain = null;
+  }
+
+  /**
+   * Installs a heightfield ground (P3): builds the TerrainSampler (vertex
+   * normal grid) over `terrain`, which the engine then holds by reference
+   * (do not mutate it). Every material byte must be a valid MaterialId (the
+   * friction lookup in the contact kernels is unchecked). Returns the sampler.
+   */
+  setGroundTerrain(terrain: TerrainData): HeightfieldSampler {
+    const mats = terrain.material;
+    const nMat = this.materials.friction.length;
+    for (let i = 0; i < mats.length; i++) {
+      if (mats[i]! >= nMat) throw new SimCommandError(`terrain material ${mats[i]} at sample ${i} is not a MaterialId`);
+    }
+    let sampler: HeightfieldSampler;
+    try {
+      sampler = createTerrainSampler(terrain);
+    } catch (e) {
+      throw new SimCommandError(`invalid terrain: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    this.sampler = sampler;
+    this.terrain = terrain;
+    return sampler;
   }
 
   clearGround(): void {
     this.sampler = null;
+    this.terrain = null;
   }
 
   spawn(objectId: number, def: RigDef, transform: Transform): SimObject {

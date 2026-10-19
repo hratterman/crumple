@@ -25,6 +25,7 @@ import {
   type MainToWorker,
   type MaterialId,
   type SnapshotCapacity,
+  type TerrainReadyMsg,
   type Transform,
   type WorkerToMain,
 } from '../protocol/messages';
@@ -35,6 +36,7 @@ import { compileRig } from '../sim/rig/builder';
 import type { RigDef } from '../sim/rig/types';
 import { buildVehicleRig } from '../sim/vehicle/builder';
 import type { TransmissionMode, VehicleDef } from '../sim/vehicle/types';
+import type { WorldLayout } from '../world/types';
 
 export interface SimClientOptions {
   seed: number;
@@ -80,6 +82,15 @@ export interface SimClientStats {
   snapshotsReceived: number;
   /** Main-side event queue drops (events not drained fast enough). */
   eventsDropped: number;
+}
+
+/** The worker's answer to `groundHeightfield` (TerrainReadyMsg without `type`). */
+export type TerrainReadyInfo = Omit<TerrainReadyMsg, 'type'>;
+
+interface PendingTerrain {
+  hash: number;
+  resolve(info: TerrainReadyInfo): void;
+  reject(err: Error): void;
 }
 
 /** Main-side pending-event cap per kind; beyond it events are dropped and counted. */
@@ -133,6 +144,11 @@ export class SimClient {
   private rateWindowStart = -1;
   private rateWindowCount = 0;
 
+  private readonly pendingTerrain: PendingTerrain[] = [];
+  /** `error` replies still due for terrainReady{matched:false} already resolved (hash mismatch). */
+  private mismatchErrorsDue = 0;
+  private _terrain: TerrainReadyInfo | null = null;
+
   private _ready = false;
   private _fatal: string | null = null;
   private disposed = false;
@@ -177,6 +193,34 @@ export class SimClient {
   // ------------------------------------------------------------ commands
   ground(y: number, materialId: MaterialId): void {
     this.post({ type: 'ground', mode: 'plane', y, materialId });
+  }
+
+  /**
+   * Replaces the ground with the heightfield of `layout` (P3). The worker
+   * regenerates the terrain itself and compares its hashTerrain() with
+   * `terrainHash` (main's own result for the same layout; 0 = don't
+   * compare). Resolves with the worker's `terrainReady` (also kept in
+   * `terrain`); `matched: false` with a non-zero hash means build skew —
+   * the worker still installed ITS terrain and also logs an `error`.
+   * Rejects if the worker rejects the layout (e.g. WorldLayoutError) or
+   * dies. Send it before spawning (spawns queue behind it) and INSTEAD of
+   * `ground()`: switching plane ⇄ heightfield in one worker leaves the
+   * contact kernels' sampler calls polymorphic (not inlined, slower).
+   */
+  groundHeightfield(layout: WorldLayout, terrainHash: number): Promise<TerrainReadyInfo> {
+    if (this.disposed || this._fatal) {
+      return Promise.reject(new Error(`[sim] groundHeightfield: worker ${this.disposed ? 'disposed' : 'dead'}`));
+    }
+    const hash = terrainHash >>> 0;
+    return new Promise<TerrainReadyInfo>((resolve, reject) => {
+      this.pendingTerrain.push({ hash, resolve, reject });
+      this.post({ type: 'groundHeightfield', layout, terrainHash: hash });
+    });
+  }
+
+  /** The latest `terrainReady` (null before the first heightfield is active). */
+  get terrain(): TerrainReadyInfo | null {
+    return this._terrain;
   }
 
   /**
@@ -260,6 +304,7 @@ export class SimClient {
     if (this.disposed) return;
     this.disposed = true;
     this.worker.terminate();
+    this.rejectTerrain('[sim] worker disposed');
     this.prev = this.cur = null;
     this.prevBuffer = this.curBuffer = null;
   }
@@ -400,6 +445,7 @@ export class SimClient {
   private fail(message: string, stack?: string): void {
     if (this._fatal) return;
     this._fatal = message;
+    this.rejectTerrain(`[sim] worker fatal: ${message}`);
     console.error(`[sim] fatal: ${message}${stack ? `\n${stack}` : ''}`);
     this.onFatal?.(message);
   }
@@ -416,7 +462,26 @@ export class SimClient {
         console.warn(
           `[sim] ${msg.command} rejected${msg.objectId !== undefined ? ` (object ${msg.objectId})` : ''}: ${msg.message}`,
         );
+        if (msg.command === 'groundHeightfield') {
+          // A hash-mismatch error trails its (already resolved) terrainReady;
+          // any other one means the request failed outright.
+          if (this.mismatchErrorsDue > 0) this.mismatchErrorsDue--;
+          else this.pendingTerrain.shift()?.reject(new Error(msg.message));
+        }
         break;
+      case 'terrainReady': {
+        const info: TerrainReadyInfo = {
+          layoutId: msg.layoutId,
+          terrainHash: msg.terrainHash,
+          matched: msg.matched,
+          generateMs: msg.generateMs,
+        };
+        this._terrain = info;
+        const req = this.pendingTerrain.shift();
+        if (req && req.hash !== 0 && !info.matched) this.mismatchErrorsDue++;
+        req?.resolve(info);
+        break;
+      }
       case 'unimplemented':
         console.warn(`[sim] worker: '${msg.command}' not implemented yet`);
         break;
@@ -465,6 +530,11 @@ export class SimClient {
       this.rateWindowStart = now;
       this.rateWindowCount = 0;
     }
+  }
+
+  private rejectTerrain(reason: string): void {
+    const pending = this.pendingTerrain.splice(0);
+    for (const p of pending) p.reject(new Error(reason));
   }
 
   private returnBuffer(buffer: ArrayBuffer): void {

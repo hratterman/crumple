@@ -17,6 +17,8 @@ import {
   type MainToWorkerType,
   type WorkerToMain,
 } from '../protocol/messages';
+import type { TerrainData, WorldLayout } from '../world/types';
+import { generateTerrain, hashTerrain } from '../world/terrain';
 import { SIM_DT, SIM_HZ, SimCommandError, SimEngine } from './engine';
 
 export const MAX_STEPS_PER_WAKE = 200;
@@ -56,6 +58,18 @@ function defaultScheduler(): HostScheduler {
   };
 }
 
+/** Terrain source for `groundHeightfield` (injectable for tests). */
+export interface TerrainDeps {
+  generateTerrain(layout: WorldLayout): TerrainData;
+  hashTerrain(terrain: TerrainData): number;
+}
+
+const DEFAULT_TERRAIN_DEPS: TerrainDeps = { generateTerrain, hashTerrain };
+
+function hex(h: number): string {
+  return `0x${(h >>> 0).toString(16).padStart(8, '0')}`;
+}
+
 function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
@@ -83,6 +97,7 @@ export class WorkerHost {
   constructor(
     private readonly post: PostFn,
     scheduler?: HostScheduler,
+    private readonly terrainDeps: TerrainDeps = DEFAULT_TERRAIN_DEPS,
   ) {
     this.scheduler = scheduler ?? defaultScheduler();
   }
@@ -123,6 +138,9 @@ export class WorkerHost {
           } else {
             this.post({ type: 'unimplemented', command: 'ground' });
           }
+          return;
+        case 'groundHeightfield':
+          this.groundHeightfield(engine, msg);
           return;
         case 'spawn':
           engine.spawn(msg.objectId, msg.rig, msg.transform);
@@ -197,6 +215,43 @@ export class WorkerHost {
     this.lastWall = this.scheduler.now();
     this.post({ type: 'ready' });
     this.requestWake(false);
+  }
+
+  /**
+   * `groundHeightfield`: regenerate the terrain from the layout (pure, same
+   * code as main), hash it, install it as the ground (even on a hash
+   * mismatch: the car must have ground) and answer `terrainReady`; a
+   * mismatch with a non-zero main hash also posts `error`. The splat
+   * weights are dropped after hashing (render-only, 8 MB). `generateMs` is
+   * the whole blocking time (generate + hash + sampler build). Generation
+   * blocks the worker for a while: the wall clock is re-based afterwards,
+   * so that time is skipped rather than caught up (no 200-step burst).
+   */
+  private groundHeightfield(engine: SimEngine, msg: Extract<MainToWorker, { type: 'groundHeightfield' }>): void {
+    const layout = msg.layout;
+    if (!layout || typeof layout !== 'object') throw new SimCommandError('groundHeightfield: layout must be a WorldLayout');
+    const expected = msg.terrainHash;
+    if (typeof expected !== 'number' || !Number.isInteger(expected) || expected < 0 || expected > 0xffffffff) {
+      throw new SimCommandError('groundHeightfield: terrainHash must be a u32 (0 = do not compare)');
+    }
+    const t0 = this.scheduler.now();
+    const terrain = this.terrainDeps.generateTerrain(layout);
+    const hash = this.terrainDeps.hashTerrain(terrain) >>> 0;
+    engine.setGroundTerrain({ ...terrain, splat: new Uint8Array(0) });
+    const t1 = this.scheduler.now();
+    this.lastWall = t1;
+    this.dirty = true;
+    const matched = expected !== 0 && hash === expected;
+    this.post({ type: 'terrainReady', layoutId: terrain.layoutId, terrainHash: hash, matched, generateMs: t1 - t0 });
+    if (expected !== 0 && !matched) {
+      this.post({
+        type: 'error',
+        command: 'groundHeightfield',
+        message:
+          `terrain hash mismatch for layout '${terrain.layoutId}' v${terrain.layoutVersion}: ` +
+          `worker ${hex(hash)} vs main ${hex(expected)} (build skew or non-deterministic generator); worker terrain installed`,
+      });
+    }
   }
 
   private snapTickFor(index: number): number {
