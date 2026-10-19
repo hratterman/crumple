@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Road Preview</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+      canvas { display: block; }
+      #hud {
+        position: fixed; left: 10px; top: 10px; padding: 8px 10px;
+        font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: #f2efe8; background: rgba(10, 12, 16, 0.62); border-radius: 6px;
+        white-space: pre; pointer-events: none;
+      }
+      #hud.hidden { display: none; }
+    </style>
+  </head>
+  <body>
+    <canvas id="view"></canvas>
+    <div id="hud">loading…</div>
+    <script type="module" src="./roads.ts"></script>
+  </body>
+</html>

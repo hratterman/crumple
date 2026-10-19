@@ -2,6 +2,9 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: 'tests/e2e',
+  // *.slow.spec.ts are full-scene SwiftShader renders that take minutes;
+  // opt in with E2E_SLOW=1 instead of running them on every push.
+  testIgnore: process.env.E2E_SLOW ? [] : ['**/*.slow.spec.ts'],
   // SwiftShader (software WebGL) is slow — keep timeouts generous.
   timeout: 60_000,
   expect: { timeout: 15_000 },
