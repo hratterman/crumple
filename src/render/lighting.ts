@@ -60,9 +60,15 @@ export const SUN_MIN_ELEVATION_DEG = 16;
 /** Linear RGB (contract: linear hex) — the linear value of sRGB #ffd9a8, a golden-hour orange. */
 export const DEFAULT_SUN_COLOR = 0xffb164;
 export const DEFAULT_SUN_INTENSITY = 6;
-export const DEFAULT_FOG_DENSITY = 0.0012;
-/** Height-fog falloff, 1/m: density halves every ln2/falloff ≈ 92 m of altitude. */
-export const FOG_HEIGHT_FALLOFF = 1 / 133;
+/**
+ * Height-fog density at FOG_BASE_HEIGHT, 1/m. Gentle aerial perspective:
+ * ≈ 34 % over 1 km at valley level, ≈ 18 % from the 150 m summit down to the
+ * valley 800 m away (0.0012 washed the whole valley out from the summit).
+ * Distant HDRI mountains fade through the sky's haze band, not this.
+ */
+export const DEFAULT_FOG_DENSITY = 0.00045;
+/** Height-fog falloff, 1/m: density halves every ln2/falloff ≈ 83 m of altitude. */
+export const FOG_HEIGHT_FALLOFF = 1 / 120;
 /** Altitude where fog density equals fogDensity, m. */
 export const FOG_BASE_HEIGHT = 0;
 /** Sky haze band (deg): fully haze below LOW, pure HDRI above HIGH. */

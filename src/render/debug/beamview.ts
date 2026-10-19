@@ -70,9 +70,17 @@ export class BeamView {
     depthWrite: false,
   });
   private readonly views = new Map<number, ObjectView>();
+  private readonly gain: number;
 
-  constructor() {
+  /**
+   * `gain` scales every line/point colour (linear). Under a tone-mapped HDR
+   * pipeline (exposure ≈ 2.4 into ACES) the raw 0.85 grey reads as clipped
+   * white and the strain hues wash out; ≈ 0.3 keeps them saturated.
+   */
+  constructor(opts: { gain?: number } = {}) {
     this.group.name = 'beamview';
+    this.gain = opts.gain ?? 1;
+    this.mode = this.viewMode;
   }
 
   /** The whole debug view (beams and nodes). */
@@ -92,7 +100,7 @@ export class BeamView {
     for (const v of this.views.values()) v.lines.visible = beams;
     this.pointMaterial.size = beams ? POINT_SIZE_BEAMS : POINT_SIZE_NODES;
     this.pointMaterial.opacity = beams ? POINT_OPACITY_BEAMS : 1;
-    this.pointMaterial.color.setHex(beams ? 0x9aa4b0 : 0xd8e2ec);
+    this.pointMaterial.color.setHex(beams ? 0x9aa4b0 : 0xd8e2ec).multiplyScalar(this.gain ?? 1);
   }
 
   /** beams → nodes → beams. */
@@ -224,9 +232,10 @@ export class BeamView {
           bl = BASE_B + (1 - BASE_B) * t;
         }
       }
-      lc[o] = lc[o + 3] = r;
-      lc[o + 1] = lc[o + 4] = g;
-      lc[o + 2] = lc[o + 5] = bl;
+      const k = this.gain;
+      lc[o] = lc[o + 3] = r * k;
+      lc[o + 1] = lc[o + 4] = g * k;
+      lc[o + 2] = lc[o + 5] = bl * k;
     }
 
     const pp = v.pointPos.array as Float32Array;

@@ -7,6 +7,10 @@ export default defineConfig({
   testIgnore: process.env.E2E_SLOW ? [] : ['**/*.slow.spec.ts'],
   // SwiftShader (software WebGL) is slow — keep timeouts generous.
   timeout: 60_000,
+  // One browser at a time: each spec software-renders a full scene (and the
+  // game generates the island twice); two in parallel on a 4-core runner
+  // push single specs past the 60 s budget.
+  workers: 1,
   expect: { timeout: 15_000 },
   retries: process.env.CI ? 1 : 0,
   forbidOnly: !!process.env.CI,

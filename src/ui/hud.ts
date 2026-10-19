@@ -128,6 +128,10 @@ export class Hud {
   private readonly badges: HTMLDivElement;
   private readonly hint: HTMLDivElement;
   private readonly hintTimer: number;
+  private readonly toast: HTMLDivElement;
+  private readonly toastTitle: HTMLDivElement;
+  private readonly toastSub: HTMLDivElement;
+  private toastTimer = 0;
   private spec: HudVehicleSpec;
   private tachMax = 8000;
   private rpmSmooth = 0;
@@ -140,6 +144,10 @@ export class Hud {
     this.root = root;
 
     this.badges = div('hud-badges', root);
+
+    this.toast = div('hud-toast hud-toast--hidden', root);
+    this.toastSub = div('hud-toast-sub', this.toast);
+    this.toastTitle = div('hud-toast-title', this.toast);
 
     const cluster = div('hud-cluster', root);
     const tachWrap = div('hud-gauge hud-gauge--tach', cluster);
@@ -173,6 +181,7 @@ export class Hud {
       ['B', 'beams'],
       ['P', 'pause'],
       ['T', 'slow-mo'],
+      ['1–8', 'spawn points'],
     ]
       .map(([k, v]) => `<span><kbd>${k}</kbd>${v}</span>`)
       .join('');
@@ -231,6 +240,15 @@ export class Hud {
     }
   }
 
+  /** Location card at the top centre (e.g. after a teleport); fades after `ms`. */
+  showToast(title: string, subtitle = '', ms = 2600): void {
+    this.toastTitle.textContent = title;
+    this.toastSub.textContent = subtitle;
+    this.toast.classList.remove('hud-toast--hidden');
+    window.clearTimeout(this.toastTimer);
+    this.toastTimer = window.setTimeout(() => this.toast.classList.add('hud-toast--hidden'), ms);
+  }
+
   /** Shows the controls hint again for HINT_MS. */
   showHint(): void {
     this.hint.classList.remove('hud-hint--hidden');
@@ -239,6 +257,7 @@ export class Hud {
 
   dispose(): void {
     window.clearTimeout(this.hintTimer);
+    window.clearTimeout(this.toastTimer);
     this.root.remove();
   }
 

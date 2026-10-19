@@ -1,113 +1,98 @@
+/**
+ * CRUMPLE — the game on Crumple Valley (P3).
+ *
+ * Boot (src/ui/loading.ts shows the steps; everything that can overlaps):
+ *   - the physics worker gets `groundHeightfield(layout)` FIRST (never a
+ *     plane: switching ground types de-inlines the sampler and makes the sim
+ *     allocate) and regenerates its own terrain;
+ *   - main's render copy is generated in a helper worker (no page freeze)
+ *     and its hash checked against the physics worker's terrainReady;
+ *   - textures + HDRI load in parallel; the lighting stack is created before
+ *     any material compiles (it installs the fog chunks);
+ *   - terrain/road renderers, post stack, quality controller; the sedan
+ *     spawns only after terrainReady; shaders compile and the first frames
+ *     render behind the loading screen, which then fades out.
+ * Frame order follows render/types.ts: sim → camera → lighting → terrain /
+ * roads → quality → post.
+ */
 import './style.css';
-import {
-  ACESFilmicToneMapping,
-  AmbientLight,
-  BackSide,
-  Color,
-  DirectionalLight,
-  HemisphereLight,
-  Mesh,
-  MeshStandardMaterial,
-  PerspectiveCamera,
-  PlaneGeometry,
-  Scene,
-  ShaderMaterial,
-  SphereGeometry,
-  SRGBColorSpace,
-  Vector3,
-  WebGLRenderer,
-} from 'three';
+import { NoToneMapping, PerspectiveCamera, Scene, SRGBColorSpace, Vector3, WebGLRenderer } from 'three';
 
+import { createQualityControllerWith, isQualityLevel, loadQualityLevel } from './app/quality';
 import { SimClient, type ObjectRange } from './app/simClient';
-import { loadTerrainSet } from './assets/loader';
+import { placeOnGround, yawOf } from './app/spawn';
+import { loadTerrain } from './app/world';
+import { loadAllTerrainSets } from './assets/loader';
 import { quatFromAxisAngle, quatRotateVec3, vec3Normalize, type Quat, type Vec3 } from './core/math';
 import { createInputMapper } from './input/actions';
 import { attachInputDevices } from './input/devices';
-import { MaterialId, type ActionState, type Transform } from './protocol/messages';
+import type { ActionState, Transform } from './protocol/messages';
 import { VehicleTelemetry } from './protocol/telemetry';
 import { vehiclePoseFromNodes, type ChaseTarget } from './render/cameras/chase';
 import { CameraDirector } from './render/cameras/director';
 import { BeamView } from './render/debug/beamview';
+import { createLightingStack } from './render/lighting';
+import { patchMaterial } from './render/material';
+import { createPostStack } from './render/post';
+import { createRoadRenderer } from './render/roads';
+import { createTerrainRenderer } from './render/terrain';
+import {
+  DEFAULT_QUALITY,
+  QUALITY_LEVELS,
+  QUALITY_PRESETS,
+  type PostStack,
+  type QualityController,
+  type RenderContext,
+} from './render/types';
 import { compileRig } from './sim/rig/builder';
 import { softCube } from './sim/rig/testrigs';
 import { buildVehicleRig } from './sim/vehicle/builder';
 import { SEDAN } from './sim/vehicle/defs/sedan';
 import { Hud } from './ui/hud';
+import { LoadingScreen } from './ui/loading';
+import { DEFAULT_LAYOUT } from './world/layout';
+import { createTerrainSampler } from './world/sampler';
+import type { TerrainData, TerrainSampler } from './world/types';
 
+const LAYOUT = DEFAULT_LAYOUT;
+/** First view (layout spawn id; overridable with ?spawn=<id>). */
+const DEFAULT_SPAWN = 'highway';
+const VEHICLE_ID = 1;
+const CUBE_ID = 2;
+/** Beam/node colour gain under the HDR post pipeline (see BeamView). */
+const WIREFRAME_GAIN = 0.32;
+const SLOW_MO_SCALE = 0.25;
+
+const params = new URLSearchParams(location.search);
+const loading = new LoadingScreen();
+
+// ------------------------------------------------------------ renderer + context
 const canvas = document.getElementById('app') as HTMLCanvasElement;
-
-const renderer = new WebGLRenderer({ canvas, antialias: true });
-renderer.toneMapping = ACESFilmicToneMapping;
+const renderer = new WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
 renderer.outputColorSpace = SRGBColorSpace;
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.toneMapping = NoToneMapping;
+renderer.shadowMap.enabled = true;
+/** ?q=low|medium|high|ultra forces a preset for this page load (not persisted; tests, screenshots). */
+const forcedLevel = ((q) => (isQualityLevel(q) ? q : null))(params.get('q'));
+const startLevel = forcedLevel ?? loadQualityLevel() ?? DEFAULT_QUALITY;
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, QUALITY_PRESETS[startLevel].pixelRatioCap));
 renderer.setSize(window.innerWidth, window.innerHeight);
 
 const scene = new Scene();
+const camera = new PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 2600);
+scene.add(camera);
 
-const camera = new PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 2000);
-camera.position.set(6, 3.5, 8);
-camera.lookAt(0, 0.5, 0);
+const ctx: RenderContext = {
+  renderer,
+  scene,
+  camera,
+  quality: QUALITY_PRESETS[startLevel],
+  width: window.innerWidth,
+  height: window.innerHeight,
+  sampler: null,
+};
 
-// Warm golden-hour gradient sky: large inverted dome, gradient by view direction.
-const skyMaterial = new ShaderMaterial({
-  side: BackSide,
-  depthWrite: false,
-  uniforms: {
-    topColor: { value: new Color(0x2e5a8f) },
-    horizonColor: { value: new Color(0xf2a65a) },
-  },
-  vertexShader: /* glsl */ `
-    varying vec3 vDir;
-    void main() {
-      vDir = position;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-    }
-  `,
-  fragmentShader: /* glsl */ `
-    uniform vec3 topColor;
-    uniform vec3 horizonColor;
-    varying vec3 vDir;
-    void main() {
-      float h = normalize(vDir).y;
-      float t = pow(clamp(h, 0.0, 1.0), 0.6);
-      gl_FragColor = vec4(mix(horizonColor, topColor, t), 1.0);
-    }
-  `,
-});
-const sky = new Mesh(new SphereGeometry(900, 32, 16), skyMaterial);
-sky.frustumCulled = false;
-scene.add(sky);
-
-// Ground: large asphalt plane at y = 0 (the sim's ground plane is infinite).
-const GROUND_SIZE = 600;
-const TEXTURE_TILE_M = 4;
-const groundMaterial = new MeshStandardMaterial({ color: 0x3a3c40, roughness: 0.95 });
-const ground = new Mesh(new PlaneGeometry(GROUND_SIZE, GROUND_SIZE), groundMaterial);
-ground.rotation.x = -Math.PI / 2;
-scene.add(ground);
-
-void loadTerrainSet('asphalt', { anisotropy: renderer.capabilities.getMaxAnisotropy() }).then(
-  (set) => {
-    const repeat = GROUND_SIZE / TEXTURE_TILE_M;
-    for (const tex of [set.color, set.normal, set.rough, set.ao]) tex?.repeat.set(repeat, repeat);
-    groundMaterial.color.set(0xffffff);
-    groundMaterial.map = set.color;
-    groundMaterial.normalMap = set.normal;
-    groundMaterial.roughnessMap = set.rough;
-    groundMaterial.roughness = 1;
-    groundMaterial.aoMap = set.ao;
-    groundMaterial.needsUpdate = true;
-  },
-);
-
-// Physical light units: Lambert divides by π, so dark asphalt needs strong light.
-const sun = new DirectionalLight(0xffd9a8, 6);
-sun.position.set(30, 20, 10);
-scene.add(sun);
-scene.add(new HemisphereLight(0xa8c4e8, 0x5a4632, 2.2));
-scene.add(new AmbientLight(0x8899bb, 0.4));
-
-// ------------------------------------------------------------ sim
+// ------------------------------------------------------------ sim (heightfield first, never a plane)
 const fatalBox = document.createElement('div');
 fatalBox.className = 'fatal';
 fatalBox.hidden = true;
@@ -123,55 +108,40 @@ const client = new SimClient({
     fatalBox.hidden = false;
   },
 });
-const GROUND_Y = 0;
-client.ground(GROUND_Y, MaterialId.asphalt);
-
-const VEHICLE_ID = 1;
-const CUBE_ID = 2;
+// The worker regenerates in parallel with main's own copy; main compares the two hashes once both exist.
+const physicsReady = client.groundHeightfield(LAYOUT, 0);
 
 // Rest-pose facts of the sedan (pure build; same canonical order the worker uses).
-const sedanRig = compileRig(buildVehicleRig(SEDAN));
-const SPAWN_DROP_M = 0.06;
-let restMinY = Infinity;
-for (let i = 0; i < sedanRig.nodeCount; i++) {
-  restMinY = Math.min(restMinY, sedanRig.nodePos[3 * i + 1]! - sedanRig.nodeRadius[i]!);
-}
-const spawnLift = GROUND_Y - restMinY + SPAWN_DROP_M;
-
-const vehicleSpawn: Transform = { pos: [0, spawnLift, 0], quat: [0, 0, 0, 1] };
+const sedanDef = buildVehicleRig(SEDAN);
+const sedanRig = compileRig(sedanDef);
+const SEDAN_FRAME_ORIGIN = Math.max(0, sedanDef.nodes.findIndex((n) => n.id === SEDAN.frame.origin));
+const cubeRig = compileRig(softCube());
 const transmission = SEDAN.drivetrain.transmission ?? 'auto';
-client.spawnVehicle(VEHICLE_ID, SEDAN, vehicleSpawn, transmission);
 
-// Soft cube target off to the side, ahead of the car (vehicle forward is −Z).
-const tumbleAxis = vec3Normalize([0, 0, 0] as Vec3, [1, 0.35, 0.6]);
-const cubeSpawn: Transform = {
-  pos: [6, 3, -18],
-  quat: quatFromAxisAngle([0, 0, 0, 1] as Quat, tumbleAxis, 0.45),
-};
-client.spawn(CUBE_ID, softCube(), cubeSpawn);
+// ------------------------------------------------------------ state filled in by boot()
+let terrain: TerrainData | null = null;
+let sampler: TerrainSampler | null = null;
+let quality: QualityController | null = null;
+let post: PostStack | null = null;
+let running = false;
+let spawnIndex = 0;
+let lastSpawn: Transform = { pos: [0, 0, 0], quat: [0, 0, 0, 1] };
+/** After a reset/teleport: snap the chase camera once a snapshot past this tick shows the new pose (−1 = none). */
+let snapAfterTick = -1;
 
-const beamView = new BeamView();
+const beamView = new BeamView({ gain: WIREFRAME_GAIN });
 beamView.visible = true;
 scene.add(beamView.group);
 
-// ------------------------------------------------------------ cameras, input, HUD
 const director = new CameraDirector(camera, renderer.domElement, {
   initial: 'chase',
-  chase: { groundHeight: () => GROUND_Y },
+  chase: { groundHeight: (x, z) => (sampler ? sampler.heightAt(x, z) : 0) },
 });
 
 const mapper = createInputMapper({ transmission, gearCount: SEDAN.drivetrain.gearRatios.length });
-const devices = attachInputDevices(mapper);
-
-const hud = new Hud(document.body, {
-  idleRpm: SEDAN.drivetrain.idleRpm,
-  redlineRpm: SEDAN.drivetrain.redlineRpm,
-  revLimitRpm: SEDAN.drivetrain.revLimitRpm,
-});
-
+let hud: Hud | null = null;
 let paused = false;
 let slowMo = false;
-const SLOW_MO_SCALE = 0.25;
 function applyTimescale(): void {
   client.setTimescale(paused ? 0 : slowMo ? SLOW_MO_SCALE : 1);
 }
@@ -205,26 +175,58 @@ function updateVehiclePose(): boolean {
   return true;
 }
 
-/** Full repair: despawn + spawn a fresh sedan where the car is now, heading kept. */
+/** The chase target a freshly placed sedan will have (camera setup before its first snapshot). */
+function poseFromTransform(t: Transform, out: ChaseTarget): void {
+  const o = SEDAN_FRAME_ORIGIN;
+  const r = quatRotateVec3([0, 0, 0] as Vec3, t.quat, [sedanRig.nodePos[3 * o]!, sedanRig.nodePos[3 * o + 1]!, sedanRig.nodePos[3 * o + 2]!]);
+  out.position.set(t.pos[0] + r[0], t.pos[1] + r[1], t.pos[2] + r[2]);
+  const f = quatRotateVec3([0, 0, 0] as Vec3, t.quat, [0, 0, -1]);
+  out.forward.set(f[0], f[1], f[2]);
+  out.up.set(0, 1, 0);
+  out.velocity.set(0, 0, 0);
+}
+
+// ------------------------------------------------------------ spawning
+function spawnTransformAt(i: number): Transform {
+  const s = terrain!.spawns[i]!;
+  return placeOnGround(sedanRig, sampler!, s.pos[0], s.pos[2], s.yaw);
+}
+
+/** Teleport (full repair) to layout spawn point `i` (keys 1–8). */
+function teleport(i: number): void {
+  if (!terrain || i < 0 || i >= terrain.spawns.length) return;
+  spawnIndex = i;
+  lastSpawn = spawnTransformAt(i);
+  client.reset(VEHICLE_ID, lastSpawn);
+  lastSent.gearSelect = NaN; // force a full input resend
+  snapAfterTick = client.latestTick;
+  hud?.showToast(terrain.spawns[i]!.name.toUpperCase(), `SPAWN ${i + 1}`);
+}
+
+/** F: full repair in place (heading kept), dropped onto the terrain. */
 function repairVehicle(): void {
-  const t: Transform = { pos: vehicleSpawn.pos, quat: vehicleSpawn.quat };
-  const info = client.vehicleInfo(VEHICLE_ID);
-  if (poseValid && info) {
+  let t = lastSpawn;
+  if (poseValid && sampler) {
     const f = pose.forward;
-    const h = Math.hypot(f.x, f.z);
-    // Rotation about +Y taking rig forward (−Z) to the current horizontal heading.
-    const yaw = h > 0.2 ? Math.atan2(-f.x, -f.z) : 0;
-    const q = quatFromAxisAngle([0, 0, 0, 1] as Quat, [0, 1, 0], yaw);
-    const o = info.frameNodes[0]!;
-    const rest: Vec3 = [sedanRig.nodePos[3 * o]!, sedanRig.nodePos[3 * o + 1]!, sedanRig.nodePos[3 * o + 2]!];
-    const r = quatRotateVec3([0, 0, 0] as Vec3, q, rest);
-    t.pos = [pose.position.x - r[0], spawnLift, pose.position.z - r[2]];
-    t.quat = q;
+    const yaw = Math.hypot(f.x, f.z) > 0.2 ? yawOf(f.x, f.z) : 0;
+    t = placeOnGround(sedanRig, sampler, pose.position.x, pose.position.z, yaw);
   }
-  client.despawn(VEHICLE_ID);
-  client.spawnVehicle(VEHICLE_ID, SEDAN, t, mapper.transmission);
-  lastSent.gearSelect = NaN; // force a full input resend for the fresh object
-  director.snap();
+  client.reset(VEHICLE_ID, t);
+  lastSent.gearSelect = NaN;
+  snapAfterTick = client.latestTick;
+}
+
+/** The soft cube: a target dropped in the crash-test arena, ahead of the arena spawn. */
+function spawnCube(): void {
+  const arena = terrain!.spawns.find((s) => s.id === 'arena');
+  const x = arena ? arena.pos[0] : 360;
+  const z = arena ? arena.pos[2] - 45 : 355;
+  let ground = -Infinity;
+  for (let i = 0; i < cubeRig.nodeCount; i++) {
+    ground = Math.max(ground, sampler!.heightAt(x + cubeRig.nodePos[3 * i]!, z + cubeRig.nodePos[3 * i + 2]!));
+  }
+  const axis = vec3Normalize([0, 0, 0] as Vec3, [1, 0.35, 0.6]);
+  client.spawn(CUBE_ID, softCube(), { pos: [x, ground + 3, z], quat: quatFromAxisAngle([0, 0, 0, 1] as Quat, axis, 0.45) });
 }
 
 // ------------------------------------------------------------ input plumbing
@@ -270,13 +272,31 @@ function handleCommands(): void {
         break;
       case 'shiftUp':
       case 'shiftDown':
-        // Manual gear stepping lives in the mapper (gearSelect); nothing else to do.
+        // Manual gear stepping lives in the mapper (gearSelect).
         break;
     }
   }
 }
 
+// Spawn menu (1–8) and quality cycling (L); the driving keys go through the mapper.
+window.addEventListener('keydown', (e) => {
+  if (!running || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+  const m = /^(?:Digit|Numpad)([1-9])$/.exec(e.code);
+  if (m) {
+    teleport(Number(m[1]) - 1);
+    e.preventDefault();
+  } else if (e.code === 'KeyL' && quality) {
+    const next = QUALITY_LEVELS[(QUALITY_LEVELS.indexOf(quality.preset.level) + 1) % QUALITY_LEVELS.length]!;
+    quality.setLevel(next);
+    hud?.showToast(next.toUpperCase(), 'QUALITY', 1500);
+  }
+});
+
 // ------------------------------------------------------------ debug/test global
+const stats = { loadMs: 0, terrainMs: 0, physicsMs: 0, fps: 0, terrainMatched: false, stages: {} as Record<string, number> };
+/** Test/screenshot hook: while true the loop skips frames (the sim keeps running); renderOnce draws one. */
+let hold = false;
+let renderOnce: (() => void) | null = null;
 const crumple = {
   get tick(): number {
     return client.latestTick;
@@ -289,12 +309,21 @@ const crumple = {
     return client.stats.snapshotHz;
   },
   idleRpm: SEDAN.drivetrain.idleRpm,
+  /** True once the game loop runs (the loading screen is fading out). */
+  get ready(): boolean {
+    return running;
+  },
+  stats,
   /** Latest vehicle telemetry (subset), or null before the car appears. */
   get vehicle(): { speed: number; rpm: number; gear: number; damage: number } | null {
     const t = client.telemetry(VEHICLE_ID);
     if (!t) return null;
     const T = VehicleTelemetry;
     return { speed: t[T.speed]!, rpm: t[T.engineRpm]!, gear: t[T.gear]!, damage: t[T.damage]! };
+  },
+  /** Vehicle chassis position (world m), or null. */
+  get position(): [number, number, number] | null {
+    return poseValid ? [pose.position.x, pose.position.y, pose.position.z] : null;
   },
   get camera(): string {
     return director.mode;
@@ -312,53 +341,221 @@ const crumple = {
   get timescale(): number {
     return paused ? 0 : slowMo ? SLOW_MO_SCALE : 1;
   },
+  /** Layout spawn ids (keys 1–8 in this order). */
+  get spawns(): string[] {
+    return terrain ? terrain.spawns.map((s) => s.id) : [];
+  },
+  get spawnIndex(): number {
+    return spawnIndex;
+  },
+  get quality(): { level: string; scale: number } | null {
+    return quality ? { level: quality.preset.level, scale: quality.scale } : null;
+  },
+  /** Teleport to spawn point i (0-based, layout order). */
+  spawn(i: number): void {
+    teleport(i);
+  },
+  /** Screenshot helpers: hold the render loop, draw single frames on demand. */
+  set hold(v: boolean) {
+    hold = v;
+  },
+  get hold(): boolean {
+    return hold;
+  },
+  renderOnce(): void {
+    renderOnce?.();
+  },
+  /** Dev handles for tuning from the console (not a contract). */
+  debug: { scene, camera, renderer, ctx } as Record<string, unknown>,
 };
 (window as unknown as { __crumple: typeof crumple }).__crumple = crumple;
 
 window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
+  ctx.width = window.innerWidth;
+  ctx.height = window.innerHeight;
+  camera.aspect = ctx.width / ctx.height;
   camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setSize(ctx.width, ctx.height);
+  post?.setSize(ctx.width, ctx.height);
 });
 
-// ------------------------------------------------------------ frame loop
-const hudStatus = { paused: false, slowMo: false, camera: 'chase', transmission, beamView: true };
-let lastTime = performance.now();
-
-function frame(now: number): void {
-  const dt = Math.min((now - lastTime) / 1000, 0.1);
-  lastTime = now;
-
-  // Input → worker.
-  devices.poll();
-  const tel = client.telemetry(VEHICLE_ID);
-  const speed = tel ? (tel[VehicleTelemetry.speed] ?? 0) : 0;
-  sendInput(mapper.update(dt, speed));
-  handleCommands();
-
-  // Interpolated nodes → beam view + camera subject.
-  const need = client.nodeTotal * 3;
-  if (positions.length < need) positions = new Float32Array(need);
-  if (client.interpolate(client.renderTime(now), positions) > 0) {
-    beamView.update(client, positions);
-    poseValid = updateVehiclePose();
-  } else {
-    poseValid = false;
-  }
-  // No FX consumers yet; drain so the queue never saturates.
-  client.drainEvents({});
-
-  director.update(dt, poseValid ? pose : null);
-  sky.position.copy(camera.position);
-
-  hudStatus.paused = paused;
-  hudStatus.slowMo = slowMo;
-  hudStatus.camera = director.mode;
-  hudStatus.transmission = mapper.transmission;
-  hudStatus.beamView = beamView.visible && beamView.mode === 'beams';
-  hud.update(client.telemetry(VEHICLE_ID), hudStatus, dt);
-
-  renderer.render(scene, camera);
-  requestAnimationFrame(frame);
+// ------------------------------------------------------------ boot
+function nextFrame(): Promise<void> {
+  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
 }
-requestAnimationFrame(frame);
+
+async function boot(): Promise<void> {
+  const t0 = performance.now();
+  physicsReady.then(
+    (info) => {
+      stats.physicsMs = info.generateMs;
+      loading.set('physics', 'done');
+    },
+    () => loading.set('physics', 'error'),
+  );
+  const terrainP = loadTerrain(LAYOUT).then((r) => {
+    stats.terrainMs = r.generateMs;
+    loading.set('terrain', 'done');
+    return r;
+  });
+  const materialsP = loadAllTerrainSets({ anisotropy: renderer.capabilities.getMaxAnisotropy() });
+  // Before any material compiles: the stack installs the height-fog chunks and CSM.
+  const lightingP = createLightingStack(ctx);
+  void Promise.all([materialsP, lightingP]).then(() => loading.set('textures', 'done'));
+
+  const mark = (name: string): void => {
+    stats.stages[name] = Math.round(performance.now() - t0);
+  };
+  const [loaded, materials, lighting] = await Promise.all([terrainP, materialsP, lightingP]);
+  mark('assets+terrain');
+  crumple.debug.lighting = lighting;
+  const world = loaded.terrain;
+  terrain = world;
+  const smp = createTerrainSampler(world);
+  sampler = smp;
+  ctx.sampler = smp;
+  await nextFrame();
+
+  const postStack = createPostStack(ctx);
+  post = postStack;
+  const terrainR = createTerrainRenderer(ctx, world, materials, { lighting, patchMaterial });
+  scene.add(terrainR.object);
+  const roadsR = createRoadRenderer(ctx, world, smp, materials, { lighting, patchMaterial });
+  scene.add(roadsR.object);
+  const qc = createQualityControllerWith(
+    ctx,
+    { lighting, post: postStack, others: [terrainR, roadsR] },
+    forcedLevel ? { initial: forcedLevel, storage: null } : {},
+  );
+  quality = qc;
+  Object.assign(crumple.debug, { terrain: terrainR, roads: roadsR, post: postStack, director });
+  mark('renderers');
+  await nextFrame();
+
+  // Physics: spawn only once the worker's heightfield is installed.
+  const info = await physicsReady;
+  stats.terrainMatched = info.terrainHash >>> 0 === world.hash >>> 0;
+  if (!stats.terrainMatched) {
+    console.error(
+      `[world] terrain hash mismatch: physics 0x${(info.terrainHash >>> 0).toString(16)} vs render 0x${(world.hash >>> 0).toString(16)}`,
+    );
+  }
+  mark('physics');
+  loading.set('shaders', 'active');
+  const wanted = params.get('spawn') ?? DEFAULT_SPAWN;
+  spawnIndex = Math.max(0, world.spawns.findIndex((s) => s.id === wanted));
+  lastSpawn = spawnTransformAt(spawnIndex);
+  client.spawnVehicle(VEHICLE_ID, SEDAN, lastSpawn, transmission);
+  spawnCube();
+
+  // Camera at the spawn, the first view's LODs built and its programs compiled behind the overlay.
+  const startPose = { position: new Vector3(), forward: new Vector3(), up: new Vector3(), velocity: new Vector3() } satisfies ChaseTarget;
+  poseFromTransform(lastSpawn, startPose);
+  director.snap();
+  director.update(0, startPose);
+  lighting.update(camera);
+  terrainR.prime(camera);
+  roadsR.update(camera);
+  mark('prime');
+  try {
+    await renderer.compileAsync(scene, camera);
+  } catch (e) {
+    console.warn('[boot] compileAsync failed; programs compile on first draw', e);
+  }
+  mark('compile');
+  postStack.render(0);
+  await nextFrame();
+  mark('firstRender');
+
+  // Bounded wait for the sedan's first snapshot so the first visible frame shows it.
+  const waitStart = performance.now();
+  while (!findRange(VEHICLE_ID) && performance.now() - waitStart < 8000) await nextFrame();
+  mark('vehicle');
+
+  const devices = attachInputDevices(mapper);
+  const hudView = new Hud(document.body, {
+    idleRpm: SEDAN.drivetrain.idleRpm,
+    redlineRpm: SEDAN.drivetrain.redlineRpm,
+    revLimitRpm: SEDAN.drivetrain.revLimitRpm,
+  });
+  hud = hudView;
+
+  const hudStatus = { paused: false, slowMo: false, camera: 'chase', transmission, beamView: true };
+  const frame = (dt: number): void => {
+    // Input → worker.
+    devices.poll();
+    const tel = client.telemetry(VEHICLE_ID);
+    const speed = tel ? (tel[VehicleTelemetry.speed] ?? 0) : 0;
+    sendInput(mapper.update(dt, speed));
+    handleCommands();
+
+    // Sim → interpolated nodes → beam view + camera subject.
+    const need = client.nodeTotal * 3;
+    if (positions.length < need) positions = new Float32Array(need);
+    if (client.interpolate(client.renderTime(), positions) > 0) {
+      beamView.update(client, positions);
+      poseValid = updateVehiclePose();
+    } else {
+      poseValid = false;
+    }
+    client.drainEvents({}); // no FX consumers yet; keep the queue from saturating
+    // Commands apply at the next step boundary: two snapshots later the pose is the reset one.
+    if (snapAfterTick >= 0 && poseValid && client.latestTick > snapAfterTick + 40) {
+      snapAfterTick = -1;
+      director.snap();
+    }
+
+    director.update(dt, poseValid ? pose : null);
+    lighting.update(camera);
+    terrainR.update(camera);
+    roadsR.update(camera);
+    qc.frame(dt);
+    postStack.render(dt);
+
+    hudStatus.paused = paused;
+    hudStatus.slowMo = slowMo;
+    hudStatus.camera = director.mode;
+    hudStatus.transmission = mapper.transmission;
+    hudStatus.beamView = beamView.visible && beamView.mode === 'beams';
+    hudView.update(client.telemetry(VEHICLE_ID), hudStatus, dt);
+  };
+
+  // One real frame under the overlay (shadow + post programs), then fade into the scene.
+  frame(0);
+  await nextFrame();
+  mark('firstFrame');
+  loading.set('shaders', 'done');
+  stats.loadMs = performance.now() - t0;
+  console.info(
+    `[boot] ready in ${(stats.loadMs / 1000).toFixed(2)} s (terrain ${stats.terrainMs.toFixed(0)} ms ${loaded.worker ? 'in a worker' : 'on main'}, physics ${stats.physicsMs.toFixed(0)} ms)`,
+  );
+
+  let last = performance.now();
+  let fpsEma = 0;
+  renderOnce = () => {
+    const now = performance.now();
+    frame(Math.min(Math.max((now - last) / 1000, 0), 0.1));
+    last = now;
+  };
+  const loop = (now: number): void => {
+    const dt = Math.min(Math.max((now - last) / 1000, 0), 0.1);
+    last = now;
+    if (hold) {
+      requestAnimationFrame(loop);
+      return;
+    }
+    frame(dt);
+    if (dt > 0) fpsEma += (1 / dt - fpsEma) * 0.05;
+    stats.fps = fpsEma;
+    requestAnimationFrame(loop);
+  };
+  requestAnimationFrame(loop);
+  running = true;
+  await loading.hide();
+  hudView.showToast(world.spawns[spawnIndex]!.name.toUpperCase(), LAYOUT.name.toUpperCase(), 3200);
+}
+
+boot().catch((e: unknown) => {
+  console.error('[boot] failed', e);
+  loading.fail(`Failed to start: ${e instanceof Error ? e.message : String(e)}`);
+});

@@ -39,6 +39,39 @@
   text-shadow: none;
 }
 
+/* ---------------------------------------------------------- toast */
+.hud-toast {
+  position: absolute;
+  top: 9vh;
+  left: 50%;
+  transform: translate(-50%, 0);
+  min-width: 260px;
+  padding: 10px 26px 12px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, rgba(12, 14, 18, 0), rgba(12, 14, 18, 0.62) 18%, rgba(12, 14, 18, 0.62) 82%, rgba(12, 14, 18, 0));
+  text-align: center;
+  opacity: 1;
+  transition:
+    opacity 0.6s ease,
+    transform 0.6s ease;
+}
+.hud-toast--hidden {
+  opacity: 0;
+  transform: translate(-50%, -8px);
+}
+.hud-toast-sub {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.24em;
+  color: var(--hud-accent);
+}
+.hud-toast-title {
+  margin-top: 3px;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
 /* ---------------------------------------------------------- cluster */
 .hud-cluster {
   position: absolute;

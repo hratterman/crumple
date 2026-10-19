@@ -403,9 +403,11 @@ describe('generateTerrain (DEFAULT_LAYOUT)', () => {
         expect(Math.abs(proj.d - def.road.d)).toBeLessThan(0.05);
         expect(Math.abs(y - proj.y)).toBeLessThan(0.05);
         // Heading = direction of travel: yaw 0 faces −Z, π/2 faces −X.
+        // `reverse` faces against the station order.
         const smp = sampleRoad(prof, proj.s, createRoadSample());
-        expect(-Math.sin(s.yaw)).toBeCloseTo(smp.tx, 3);
-        expect(-Math.cos(s.yaw)).toBeCloseTo(smp.tz, 3);
+        const dir = def.road.reverse ? -1 : 1;
+        expect(-Math.sin(s.yaw)).toBeCloseTo(dir * smp.tx, 3);
+        expect(-Math.cos(s.yaw)).toBeCloseTo(dir * smp.tz, 3);
       } else {
         expect(s.yaw).toBe(def.yaw);
       }

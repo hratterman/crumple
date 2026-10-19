@@ -458,9 +458,9 @@ export const DEFAULT_LAYOUT: WorldLayout = {
   spawnPoints: [
     { id: 'arena', name: 'Crash Test Arena', pos: [360, 400], yaw: 0 },
     { id: 'arenaRunway', name: 'Arena Runway', road: { id: 'arenaRunway', s: 8, d: 3 } },
-    { id: 'highway', name: 'Highway East', road: { id: 'highway', s: 2400, d: 5.25 } },
+    { id: 'highway', name: 'Highway East', road: { id: 'highway', s: 2400, d: -5.25, reverse: true } },
     { id: 'mountainBase', name: 'Ridge Pass Base', road: { id: 'ridgePass', s: 30, d: 1.75 } },
-    { id: 'summit', name: 'Summit Lookout', pos: [150, -372], yaw: Math.PI },
+    { id: 'summit', name: 'Summit Lookout', pos: [146, -353], yaw: Math.PI },
     { id: 'dirtTrail', name: 'Hollow Creek Trailhead', road: { id: 'dirtTrail', s: 15, d: 0 } },
     { id: 'lakeshore', name: 'Lakeshore Drive', road: { id: 'lakeshore', s: 120, d: 1.9 } },
     { id: 'town', name: 'Millbrook', road: { id: 'mainStreet', s: 12, d: 2 } },

@@ -9,21 +9,24 @@ interface VehicleSample {
 interface CrumpleDriveGlobal {
   tick: number;
   idleRpm: number;
+  ready: boolean;
   vehicle: VehicleSample | null;
+  position: [number, number, number] | null;
   camera: string;
   beamView: boolean;
   viewMode: string;
   nodesVisible: boolean;
+  spawns: string[];
+  spawnIndex: number;
 }
 
-function sample(page: import('@playwright/test').Page): Promise<{ vehicle: VehicleSample | null; idleRpm: number }> {
-  return page.evaluate(() => {
-    const g = (window as unknown as { __crumple: CrumpleDriveGlobal }).__crumple;
-    return { vehicle: g.vehicle, idleRpm: g.idleRpm };
+const g = (page: import('@playwright/test').Page) =>
+  page.evaluate(() => {
+    const c = (window as unknown as { __crumple: CrumpleDriveGlobal }).__crumple;
+    return { vehicle: c.vehicle, idleRpm: c.idleRpm, position: c.position, spawnIndex: c.spawnIndex, spawns: c.spawns };
   });
-}
 
-test('drive: holding W accelerates the sedan; zero errors', async ({ page }) => {
+test('drive: hold W on the spawn road accelerates the sedan; spawn keys teleport; zero errors', async ({ page }) => {
   const pageErrors: string[] = [];
   const consoleErrors: string[] = [];
   page.on('pageerror', (err) => pageErrors.push(err.stack ?? String(err)));
@@ -31,26 +34,34 @@ test('drive: holding W accelerates the sedan; zero errors', async ({ page }) => 
     if (msg.type() === 'error') consoleErrors.push(msg.text());
   });
 
-  await page.goto('/crumple/');
+  await page.setViewportSize({ width: 480, height: 270 });
+  await page.goto('/crumple/?q=low');
   await expect(page.locator('canvas')).toBeAttached();
 
-  // Wait for the vehicle's telemetry to appear, then let it settle on its wheels.
-  await page.waitForFunction(() => {
-    const g = (window as unknown as { __crumple?: CrumpleDriveGlobal }).__crumple;
-    return !!g && g.tick > 0 && g.vehicle !== null;
-  });
-  await page.waitForTimeout(1500);
+  // Island loaded and the sedan settled on its wheels on the highway.
+  await page.waitForFunction(
+    () => {
+      const c = (window as unknown as { __crumple?: CrumpleDriveGlobal }).__crumple;
+      return !!c && c.ready && c.vehicle !== null && c.position !== null;
+    },
+    null,
+    { timeout: 50_000 },
+  );
+  await page.waitForTimeout(1000);
 
-  const before = await sample(page);
+  const before = await g(page);
   expect(before.vehicle).not.toBeNull();
   expect(Math.abs(before.vehicle!.speed)).toBeLessThan(1.5);
+  // On the island, resting on the road surface (spawn = the highway, ~11 m up).
+  expect(before.spawns[before.spawnIndex]).toBe('highway');
+  expect(before.position![1]).toBeGreaterThan(5);
 
   const cam = await page.evaluate(() => (window as unknown as { __crumple: CrumpleDriveGlobal }).__crumple.camera);
   expect(cam).toBe('chase');
 
   await page.keyboard.down('KeyW');
   await page.waitForTimeout(3000);
-  const during = await sample(page);
+  const during = await g(page);
   await page.keyboard.up('KeyW');
 
   expect(during.vehicle).not.toBeNull();
@@ -67,10 +78,18 @@ test('drive: holding W accelerates the sedan; zero errors', async ({ page }) => 
     return { mode: c.viewMode, nodes: c.nodesVisible };
   });
   expect(view).toEqual({ mode: 'nodes', nodes: true });
-  // …and back to beams.
   await page.keyboard.press('KeyB');
   await expect
     .poll(() => page.evaluate(() => (window as unknown as { __crumple: CrumpleDriveGlobal }).__crumple.beamView))
+    .toBe(true);
+
+  // 5 → the summit lookout spawn (150 m up the mountain).
+  await page.keyboard.press('Digit5');
+  await expect
+    .poll(async () => {
+      const s = await g(page);
+      return s.spawns[s.spawnIndex] === 'summit' && !!s.position && s.position[1] > 140;
+    }, { timeout: 30_000 })
     .toBe(true);
 
   expect(pageErrors).toEqual([]);

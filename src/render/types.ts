@@ -165,7 +165,7 @@ export interface LightingOptions {
   sunIntensity?: number;
   /** scene.environmentIntensity; default 1. */
   envIntensity?: number;
-  /** Height-fog density (FogExp2), 0 disables; default ~0.0012 (haze over 1.4 km). */
+  /** Height-fog density (FogExp2) at the base height, 0 disables; default 0.00045 (gentle haze over 1.4 km). */
   fogDensity?: number;
 }
 

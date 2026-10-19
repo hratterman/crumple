@@ -5,9 +5,191 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="CRUMPLE — soft-body physics driving sandbox in the browser" />
     <title>CRUMPLE</title>
+    <style>
+      /* Loading screen: inline so it paints before any script or stylesheet loads (src/ui/loading.ts drives it). */
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #0b0c10;
+      }
+      #loading {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+        color: #eef0f3;
+        font: 500 14px/1.4 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        background:
+          radial-gradient(120% 80% at 50% 115%, rgba(255, 150, 70, 0.32), rgba(255, 150, 70, 0) 60%),
+          radial-gradient(90% 60% at 50% -10%, rgba(80, 110, 170, 0.28), rgba(80, 110, 170, 0) 70%),
+          linear-gradient(180deg, #0c0e14 0%, #15131a 55%, #241712 100%);
+        opacity: 1;
+        transition: opacity 0.9s ease;
+        user-select: none;
+      }
+      #loading.loading--fade {
+        opacity: 0;
+        pointer-events: none;
+      }
+      #loading::after {
+        content: '';
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 74%;
+        height: 1px;
+        background: linear-gradient(90deg, transparent, rgba(255, 190, 130, 0.35), transparent);
+      }
+      .loading-card {
+        position: relative;
+        z-index: 1;
+        width: min(440px, calc(100vw - 48px));
+        display: flex;
+        flex-direction: column;
+        gap: 22px;
+      }
+      .loading-title {
+        align-self: center;
+        width: max-content;
+        margin: 0;
+        font-size: clamp(44px, 9vw, 76px);
+        font-weight: 800;
+        line-height: 1;
+        letter-spacing: 0.16em;
+        text-indent: 0.16em;
+        text-align: center;
+        background: linear-gradient(180deg, #ffffff 0%, #d9dde4 45%, #8a919c 52%, #c9ced6 100%);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        filter: drop-shadow(0 6px 18px rgba(0, 0, 0, 0.55));
+      }
+      .loading-sub {
+        margin-top: -12px;
+        text-align: center;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.32em;
+        text-indent: 0.32em;
+        color: rgba(238, 240, 243, 0.5);
+        text-transform: uppercase;
+      }
+      .loading-bar {
+        height: 3px;
+        border-radius: 2px;
+        background: rgba(255, 255, 255, 0.1);
+        overflow: hidden;
+      }
+      .loading-bar-fill {
+        height: 100%;
+        width: 100%;
+        background: linear-gradient(90deg, #ff8a3c, #ffc46b);
+        transform: scaleX(0.02);
+        transform-origin: left center;
+        transition: transform 0.45s ease-out;
+        box-shadow: 0 0 12px rgba(255, 160, 80, 0.7);
+      }
+      .loading-steps {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px 18px;
+      }
+      .loading-step {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        height: 22px;
+        font-size: 13px;
+        color: rgba(238, 240, 243, 0.38);
+        transition: color 0.3s ease;
+        white-space: nowrap;
+      }
+      .loading-step::before {
+        content: '';
+        flex: none;
+        width: 12px;
+        height: 12px;
+        box-sizing: border-box;
+        border-radius: 50%;
+        border: 1.5px solid rgba(255, 255, 255, 0.22);
+      }
+      .loading-step[data-state='active'] {
+        color: #eef0f3;
+      }
+      .loading-step[data-state='active']::before {
+        border-color: #ffb066;
+        border-right-color: transparent;
+        animation: loading-spin 0.8s linear infinite;
+      }
+      .loading-step[data-state='done'] {
+        color: rgba(238, 240, 243, 0.72);
+      }
+      .loading-step[data-state='done']::before {
+        border: none;
+        background:
+          url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M3 6.2l2 2 4-4.4' fill='none' stroke='%2314100c' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")
+            center / 12px no-repeat,
+          #ffb066;
+      }
+      .loading-step[data-state='error'] {
+        color: #ff8f8f;
+      }
+      .loading-step[data-state='error']::before {
+        border-color: #ff6060;
+        background: #ff6060;
+      }
+      .loading-foot {
+        min-height: 18px;
+        text-align: center;
+        font-size: 12px;
+        color: rgba(238, 240, 243, 0.42);
+        letter-spacing: 0.04em;
+      }
+      .loading-foot kbd {
+        padding: 1px 5px;
+        border-radius: 3px;
+        background: rgba(255, 255, 255, 0.1);
+        color: rgba(238, 240, 243, 0.8);
+        font: 600 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .loading-foot[data-error] {
+        color: #ff9a9a;
+        white-space: pre-wrap;
+      }
+      @keyframes loading-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .loading-step[data-state='active']::before {
+          animation: none;
+        }
+      }
+    </style>
   </head>
   <body>
     <canvas id="app"></canvas>
+    <div id="loading" role="status" aria-live="polite">
+      <div class="loading-card">
+        <h1 class="loading-title">CRUMPLE</h1>
+        <div class="loading-sub">Soft-body driving</div>
+        <div class="loading-bar"><div class="loading-bar-fill"></div></div>
+        <ul class="loading-steps">
+          <li class="loading-step" data-step="terrain" data-state="active">Generating terrain</li>
+          <li class="loading-step" data-step="physics" data-state="active">Building physics</li>
+          <li class="loading-step" data-step="textures" data-state="active">Loading textures</li>
+          <li class="loading-step" data-step="shaders" data-state="pending">Compiling shaders</li>
+        </ul>
+        <div class="loading-foot"><kbd>W A S D</kbd> drive &nbsp;·&nbsp; <kbd>1</kbd>–<kbd>8</kbd> spawn points &nbsp;·&nbsp; <kbd>C</kbd> camera</div>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
