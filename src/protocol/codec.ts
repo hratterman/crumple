@@ -63,6 +63,7 @@ import {
   HDR_U32_BEAM_BREAKS_OFFSET,
   HDR_U32_BEAM_CAPACITY,
   HDR_U32_BEAM_TOTAL,
+  HDR_U32_BROKEN_OFFSET,
   HDR_U32_FLAGS,
   HDR_U32_IMPACT_COUNT,
   HDR_U32_IMPACT_OVERFLOW,
@@ -90,9 +91,10 @@ import {
   OBJ_NODE_COUNT,
   OBJ_NODE_OFFSET,
   OBJ_RECORD_WORDS,
-  OBJ_RESERVED0,
+  OBJ_REPAIR_EPOCH,
   OBJ_RESERVED1,
   OBJ_TELEMETRY,
+  SNAPSHOT_FLAG_BROKEN_BEAMS,
   SNAPSHOT_FLAG_DEBUG_STRAINS,
   SNAPSHOT_MAGIC,
   SNAPSHOT_VERSION,
@@ -131,7 +133,8 @@ export function checkSnapshot(buffer: ArrayBuffer): SnapshotCheck {
  * Worker-side writer. Usage per snapshot:
  *   w.attach(buf); w.begin(tick, simTime, timeScale);
  *   for objects in ASCENDING objectId: i = w.addObject(...); w.writeNodesSoA(i, …);
- *     w.writeStrains(i, …); w.setTelemetry(i, slot, v)…
+ *     w.writeStrains(i, …); w.writeBrokenBeams(i, …) (P4); w.setRepairEpoch(i, n) (P4);
+ *     w.setTelemetry(i, slot, v)…
  *   w.pushImpact(…)… (any time after begin; discovery order)
  */
 export class SnapshotWriter {
@@ -145,6 +148,7 @@ export class SnapshotWriter {
   private readonly skW: number;
   private readonly nodeW: number;
   private readonly strainW: number;
+  private readonly brokenW: number;
   private lastObjectId = -1;
 
   constructor(layout: SnapshotLayout) {
@@ -155,6 +159,7 @@ export class SnapshotWriter {
     this.skW = layout.skidsOffset >> 2;
     this.nodeW = layout.nodesOffset >> 2;
     this.strainW = layout.strainsOffset >> 2;
+    this.brokenW = layout.brokenOffset >> 2;
   }
 
   /** Binds the writer to `buffer` (creates views) and writes the static header. */
@@ -170,7 +175,7 @@ export class SnapshotWriter {
     for (let i = 0; i < HEADER_BYTES >> 2; i++) u[i] = 0;
     u[HDR_U32_MAGIC] = SNAPSHOT_MAGIC;
     u[HDR_U32_VERSION] = SNAPSHOT_VERSION;
-    u[HDR_U32_FLAGS] = L.debugStrains ? SNAPSHOT_FLAG_DEBUG_STRAINS : 0;
+    u[HDR_U32_FLAGS] = (L.debugStrains ? SNAPSHOT_FLAG_DEBUG_STRAINS : 0) | SNAPSHOT_FLAG_BROKEN_BEAMS;
     u[HDR_U32_OBJECTS_OFFSET] = L.objectsOffset;
     u[HDR_U32_IMPACTS_OFFSET] = L.impactsOffset;
     u[HDR_U32_BEAM_BREAKS_OFFSET] = L.beamBreaksOffset;
@@ -181,6 +186,7 @@ export class SnapshotWriter {
     u[HDR_U32_NODE_CAPACITY] = L.nodeCapacity;
     u[HDR_U32_BEAM_CAPACITY] = L.beamCapacity;
     u[HDR_U32_TOTAL_BYTES] = L.totalBytes;
+    u[HDR_U32_BROKEN_OFFSET] = L.brokenOffset;
     this.lastObjectId = -1;
     return this;
   }
@@ -215,7 +221,8 @@ export class SnapshotWriter {
 
   /**
    * Appends an object record (ids must be strictly ascending) and reserves
-   * its node/beam ranges. Telemetry is zeroed. Returns the object index.
+   * its node/beam ranges. Telemetry, the repair epoch and the object's
+   * broken-beam bits are zeroed. Returns the object index.
    * Capacity overruns are programming errors and throw.
    */
   addObject(objectId: number, flags: number, nodeCount: number, beamCount: number): number {
@@ -236,8 +243,9 @@ export class SnapshotWriter {
     u[r + OBJ_NODE_COUNT] = nodeCount;
     u[r + OBJ_BEAM_OFFSET] = beamOffset;
     u[r + OBJ_BEAM_COUNT] = beamCount;
-    u[r + OBJ_RESERVED0] = 0;
+    u[r + OBJ_REPAIR_EPOCH] = 0;
     u[r + OBJ_RESERVED1] = 0;
+    this.clearBrokenRange(beamOffset, beamCount);
     const f = this.f32;
     const t = r + OBJ_TELEMETRY;
     for (let s = 0; s < TELEMETRY_SLOTS; s++) f[t + s] = 0;
@@ -249,6 +257,58 @@ export class SnapshotWriter {
 
   setObjectFlags(objectIndex: number, flags: number): void {
     this.u32[this.objW + objectIndex * OBJ_RECORD_WORDS + OBJ_FLAGS] = flags;
+  }
+
+  /** P4: the object's repair epoch (0 at spawn, +1 per `reset`; see OBJ_REPAIR_EPOCH). */
+  setRepairEpoch(objectIndex: number, epoch: number): void {
+    this.u32[this.objW + objectIndex * OBJ_RECORD_WORDS + OBJ_REPAIR_EPOCH] = epoch;
+  }
+
+  private clearBrokenRange(first: number, count: number): void {
+    const u = this.u32;
+    const end = first + count;
+    let g = first;
+    // Partial leading word, whole words, partial trailing word.
+    while (g < end && (g & 31) !== 0) {
+      u[this.brokenW + (g >>> 5)]! &= ~(1 << (g & 31));
+      g++;
+    }
+    while (g + 32 <= end) {
+      u[this.brokenW + (g >>> 5)] = 0;
+      g += 32;
+    }
+    while (g < end) {
+      u[this.brokenW + (g >>> 5)]! &= ~(1 << (g & 31));
+      g++;
+    }
+  }
+
+  /**
+   * P4: packs object `objectIndex`'s broken flags from the sim's per-beam
+   * `active` array (1 = intact, 0 = broken) starting at `srcStart` into the
+   * broken-beam bitset. Writes every bit of the object's range.
+   */
+  writeBrokenBeams(objectIndex: number, active: Uint8Array, srcStart: number): void {
+    const rec = this.objW + objectIndex * OBJ_RECORD_WORDS;
+    const n = this.u32[rec + OBJ_BEAM_COUNT]!;
+    const off = this.u32[rec + OBJ_BEAM_OFFSET]!;
+    this.clearBrokenRange(off, n);
+    const u = this.u32;
+    const w = this.brokenW;
+    for (let i = 0; i < n; i++) {
+      if (active[srcStart + i] === 0) {
+        const g = off + i;
+        u[w + (g >>> 5)]! |= 1 << (g & 31);
+      }
+    }
+  }
+
+  /** P4: sets one broken bit by GLOBAL snapshot beam index. */
+  setBeamBroken(globalBeamIndex: number, broken: boolean): void {
+    const i = this.brokenW + (globalBeamIndex >>> 5);
+    const bit = 1 << (globalBeamIndex & 31);
+    if (broken) this.u32[i]! |= bit;
+    else this.u32[i]! &= ~bit;
   }
 
   /** Copies object `objectIndex`'s nodes from f64 SoA arrays starting at `srcStart` (f64→f32). */
@@ -408,6 +468,8 @@ export class SnapshotReader {
   private skW = 0;
   private nodeW = 0;
   private strainW = 0;
+  private brokenW = 0;
+  private _hasBroken = false;
   private _objectCount = 0;
   private _nodeTotal = 0;
   private _beamTotal = 0;
@@ -438,6 +500,8 @@ export class SnapshotReader {
     this._beamTotal = u[HDR_U32_BEAM_TOTAL]!;
     this._hasStrains =
       (u[HDR_U32_FLAGS]! & SNAPSHOT_FLAG_DEBUG_STRAINS) !== 0 && u[HDR_U32_STRAINS_OFFSET]! !== 0;
+    this.brokenW = u[HDR_U32_BROKEN_OFFSET]! >> 2;
+    this._hasBroken = (u[HDR_U32_FLAGS]! & SNAPSHOT_FLAG_BROKEN_BEAMS) !== 0 && this.brokenW !== 0;
     this.nodesView = null;
     this.strainsView = null;
     const n = this._objectCount;
@@ -471,6 +535,10 @@ export class SnapshotReader {
   }
   get hasStrains(): boolean {
     return this._hasStrains;
+  }
+  /** P4: the broken-beam bitset section is present (false for pre-P4 writers). */
+  get hasBrokenBeams(): boolean {
+    return this._hasBroken;
   }
   get maxObjects(): number {
     return this.u32[HDR_U32_MAX_OBJECTS]!;
@@ -524,6 +592,39 @@ export class SnapshotReader {
   }
   telemetry(i: number, slot: number): number {
     return this.f32[this.rec(i) + OBJ_TELEMETRY + slot]!;
+  }
+  /** P4: object i's repair epoch (OBJ_REPAIR_EPOCH; 0 from pre-P4 writers). */
+  objectRepairEpoch(i: number): number {
+    return this.u32[this.rec(i) + OBJ_REPAIR_EPOCH]!;
+  }
+  /** P4: GLOBAL snapshot beam `g` is broken (false when the section is absent). */
+  isBeamBroken(globalBeamIndex: number): boolean {
+    if (!this._hasBroken) return false;
+    return ((this.u32[this.brokenW + (globalBeamIndex >>> 5)]! >>> (globalBeamIndex & 31)) & 1) === 1;
+  }
+  /**
+   * P4: writes object i's broken flags (object-local beam order, 1 = broken,
+   * 0 = intact) into out[0..beamCount). Returns the number of broken beams.
+   * All zeros when the section is absent. Allocation-free.
+   */
+  readObjectBroken(i: number, out: Uint8Array): number {
+    const n = this.objectBeamCount(i);
+    if (out.length < n) throw new RangeError(`readObjectBroken: out holds ${out.length}, need ${n}`);
+    if (!this._hasBroken) {
+      out.fill(0, 0, n);
+      return 0;
+    }
+    const off = this.objectBeamOffset(i);
+    const u = this.u32;
+    const w = this.brokenW;
+    let broken = 0;
+    for (let k = 0; k < n; k++) {
+      const g = off + k;
+      const b = (u[w + (g >>> 5)]! >>> (g & 31)) & 1;
+      out[k] = b;
+      broken += b;
+    }
+    return broken;
   }
   /** Object index for `objectId` (binary search; ids are ascending), or -1. */
   findObject(objectId: number): number {

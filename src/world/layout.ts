@@ -53,7 +53,7 @@ import type { WorldLayout } from './types';
 export const DEFAULT_LAYOUT: WorldLayout = {
   id: 'crumple-valley',
   name: 'Crumple Valley',
-  version: 2,
+  version: 3,
   seed: 0x5eed_c0de,
   size: 1408,
   terrain: {
@@ -139,7 +139,7 @@ export const DEFAULT_LAYOUT: WorldLayout = {
       id: 'arena',
       name: 'Crash Test Arena',
       kind: 'arena',
-      // 180 × 180 m flat concrete; P5 places ramps, walls, poles, barriers here.
+      // 180 × 180 m flat concrete; the wall, poles, ramp and barriers are `colliders` below (P4).
       shape: { type: 'rect', center: [360, 330], halfX: 90, halfZ: 90, blend: 30 },
       params: { height: 10.5, material: MaterialId.concrete },
     },
@@ -466,7 +466,35 @@ export const DEFAULT_LAYOUT: WorldLayout = {
     { id: 'town', name: 'Millbrook', road: { id: 'mainStreet', s: 12, d: 2 } },
   ],
 
-  colliders: [],
+  // Crash Test Arena furniture (P4, arena core x 270..450, z 240..420, y 10.5).
+  // Version 3: colliders added (terrain unchanged; replays key on the version).
+  colliders: [
+    // Rigid crash wall: 20 m × 2 m tall × 1.2 m thick concrete barrier, face
+    // toward the arena spawn (360, 400) — 134 m of run-up heading north.
+    { id: 'crashWall', kind: 'box', pos: [360, null, 265], quat: [0, 0, 0, 1], size: [10, 1, 0.6], material: MaterialId.concrete, visual: 'wall' },
+    // Pole row (side-pole and slalom tests): r 0.15 m, 6 m tall steel, 12 m apart.
+    ...[276, 288, 300, 312, 324].map((z, k) => ({
+      id: `pole${k + 1}`,
+      kind: 'cylinder' as const,
+      pos: [300, null, z] as const,
+      quat: [0, 0, 0, 1] as const,
+      size: [0.15, 3, 0] as const,
+      material: MaterialId.metal,
+      visual: 'pole' as const,
+    })),
+    // Kicker ramp: 5 m wide, 9 m long, 1.4 m lip (≈ 8.8°), climbs heading north.
+    { id: 'ramp', kind: 'ramp', pos: [410, null, 290], quat: [0, 0, 0, 1], size: [2.5, 0.7, 4.5], material: MaterialId.concrete, visual: 'ramp' },
+    // Jersey-barrier line: 8 × (3.0 m × 0.81 m × 0.6 m) segments, 0.1 m gaps, along X.
+    ...[0, 1, 2, 3, 4, 5, 6, 7].map((k) => ({
+      id: `jersey${k + 1}`,
+      kind: 'box' as const,
+      pos: [283.5 + 3.1 * k, null, 385] as const,
+      quat: [0, 0, 0, 1] as const,
+      size: [1.5, 0.405, 0.3] as const,
+      material: MaterialId.concrete,
+      visual: 'jersey' as const,
+    })),
+  ],
   props: [],
 };
 

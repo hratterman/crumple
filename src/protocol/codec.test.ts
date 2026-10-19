@@ -22,7 +22,9 @@ import {
   HEADER_BYTES,
   OBJECT_FLAG_SLEEPING,
   SECTION_ALIGN,
+  SNAPSHOT_FLAG_BROKEN_BEAMS,
   SNAPSHOT_FLAG_DEBUG_STRAINS,
+  brokenSectionBytes,
   Telemetry,
   computeSnapshotBytes,
   computeSnapshotLayout,
@@ -214,6 +216,73 @@ describe('format validation', () => {
     expect(checkSnapshot(buf)).toBe('bad-magic');
     expect(checkSnapshot(new ArrayBuffer(16))).toBe('too-small');
     expect(checkSnapshot(new ArrayBuffer(HEADER_BYTES))).toBe('bad-magic');
+  });
+});
+
+describe('P4 broken-beam bitset + repair epoch', () => {
+  it('places the bitset last, aligned, sized for beamCapacity bits', () => {
+    for (const strains of [true, false]) {
+      const L = computeSnapshotLayout(4, 64, 100, strains);
+      expect(L.brokenOffset % SECTION_ALIGN).toBe(0);
+      expect(L.brokenOffset).toBeGreaterThanOrEqual(strains ? L.strainsOffset + 100 * 4 : L.nodesOffset + 64 * 12);
+      expect(L.totalBytes).toBeGreaterThanOrEqual(L.brokenOffset + brokenSectionBytes(100));
+      expect(brokenSectionBytes(100)).toBe(16);
+    }
+  });
+
+  it('roundtrips broken bits per object (unaligned offsets) and the repair epoch', () => {
+    const L = computeSnapshotLayout(4, 64, 128, false);
+    const buf = new ArrayBuffer(L.totalBytes);
+    const w = new SnapshotWriter(L).attach(buf);
+    w.begin(1, 0.0005, 1);
+    // Object A: 37 beams (crosses a word boundary); object B: 40 beams starting at 37.
+    const activeA = new Uint8Array(37).fill(1);
+    activeA[0] = 0;
+    activeA[31] = 0;
+    activeA[32] = 0;
+    activeA[36] = 0;
+    const activeB = new Uint8Array(45).fill(1);
+    activeB[5 + 0] = 0;
+    activeB[5 + 26] = 0; // global 63
+    activeB[5 + 39] = 0; // global 76
+    const a = w.addObject(2, 0, 1, 37);
+    w.writeBrokenBeams(a, activeA, 0);
+    w.setRepairEpoch(a, 3);
+    const b = w.addObject(5, 0, 1, 40);
+    w.writeBrokenBeams(b, activeB, 5);
+    const r = new SnapshotReader().attach(buf);
+    expect(r.flags & SNAPSHOT_FLAG_BROKEN_BEAMS).toBeTruthy();
+    expect(r.hasBrokenBeams).toBe(true);
+    expect(r.objectRepairEpoch(0)).toBe(3);
+    expect(r.objectRepairEpoch(1)).toBe(0);
+    const outA = new Uint8Array(37);
+    expect(r.readObjectBroken(0, outA)).toBe(4);
+    expect([outA[0], outA[1], outA[31], outA[32], outA[35], outA[36]]).toEqual([1, 0, 1, 1, 0, 1]);
+    const outB = new Uint8Array(40);
+    expect(r.readObjectBroken(1, outB)).toBe(3);
+    expect([outB[0], outB[26], outB[39], outB[1]]).toEqual([1, 1, 1, 0]);
+    expect(r.isBeamBroken(37)).toBe(true);
+    expect(r.isBeamBroken(63)).toBe(true);
+    expect(r.isBeamBroken(64)).toBe(false);
+    expect(() => r.readObjectBroken(0, new Uint8Array(3))).toThrow(RangeError);
+  });
+
+  it('addObject clears stale bits from a reused buffer', () => {
+    const L = computeSnapshotLayout(2, 8, 64, false);
+    const buf = new ArrayBuffer(L.totalBytes);
+    const w = new SnapshotWriter(L).attach(buf);
+    w.begin(1, 0, 1);
+    const i = w.addObject(1, 0, 1, 64);
+    w.writeBrokenBeams(i, new Uint8Array(64), 0); // all broken
+    w.attach(buf);
+    w.begin(2, 0, 1);
+    w.addObject(1, 0, 1, 64); // sim did not write bits this frame
+    const r = new SnapshotReader().attach(buf);
+    expect(r.readObjectBroken(0, new Uint8Array(64))).toBe(0);
+    w.setBeamBroken(10, true);
+    expect(new SnapshotReader().attach(buf).isBeamBroken(10)).toBe(true);
+    w.setBeamBroken(10, false);
+    expect(new SnapshotReader().attach(buf).isBeamBroken(10)).toBe(false);
   });
 });
 

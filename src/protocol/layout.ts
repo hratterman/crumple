@@ -6,7 +6,12 @@
  * (no DataView anywhere). Byte order is the platform's (little-endian on all
  * supported targets); worker and main always share it.
  *
- *   [header][objects][impacts][beamBreaks][skids][nodes][strains?]
+ *   [header][objects][impacts][beamBreaks][skids][nodes][strains?][broken]
+ *
+ * P4 additive: the `broken` bitset section (always present, header flag
+ * SNAPSHOT_FLAG_BROKEN_BEAMS, offset at HDR_BROKEN_OFFSET_BYTE) and the
+ * per-object repair epoch in the former OBJ_RESERVED0 word. Readers that
+ * predate them ignore both; SNAPSHOT_VERSION is unchanged.
  *
  * Fixed-size sections (header, objects, events) come first; their byte
  * offsets depend only on maxObjects. The header ALSO stores every section
@@ -59,7 +64,9 @@ export const HDR_MAX_OBJECTS_BYTE = 88; // u32 capacity
 export const HDR_NODE_CAPACITY_BYTE = 92; // u32 capacity
 export const HDR_BEAM_CAPACITY_BYTE = 96; // u32 capacity
 export const HDR_TOTAL_BYTES_BYTE = 100; // u32, layout size (buffer may be larger)
-// bytes 104..127 reserved (zero)
+/** P4 additive: u32 byte offset of the broken-beam bitset section (0 = absent: pre-P4 writer). */
+export const HDR_BROKEN_OFFSET_BYTE = 104;
+// bytes 108..127 reserved (zero)
 
 export const HDR_U32_MAGIC = HDR_MAGIC_BYTE >> 2;
 export const HDR_U32_VERSION = HDR_VERSION_BYTE >> 2;
@@ -86,9 +93,12 @@ export const HDR_U32_MAX_OBJECTS = HDR_MAX_OBJECTS_BYTE >> 2;
 export const HDR_U32_NODE_CAPACITY = HDR_NODE_CAPACITY_BYTE >> 2;
 export const HDR_U32_BEAM_CAPACITY = HDR_BEAM_CAPACITY_BYTE >> 2;
 export const HDR_U32_TOTAL_BYTES = HDR_TOTAL_BYTES_BYTE >> 2;
+export const HDR_U32_BROKEN_OFFSET = HDR_BROKEN_OFFSET_BYTE >> 2;
 
 /** Header flag bits. */
 export const SNAPSHOT_FLAG_DEBUG_STRAINS = 1 << 0;
+/** P4 additive: the broken-beam bitset section is present (always set by P4 writers). */
+export const SNAPSHOT_FLAG_BROKEN_BEAMS = 1 << 1;
 
 // ============================================================ objects
 /**
@@ -104,8 +114,16 @@ export const OBJ_NODE_OFFSET = 2; // u32
 export const OBJ_NODE_COUNT = 3; // u32
 export const OBJ_BEAM_OFFSET = 4; // u32
 export const OBJ_BEAM_COUNT = 5; // u32
-export const OBJ_RESERVED0 = 6; // u32, zero
+export const OBJ_RESERVED0 = 6; // u32 — P4: OBJ_REPAIR_EPOCH (below)
 export const OBJ_RESERVED1 = 7; // u32, zero
+/**
+ * P4 additive (was OBJ_RESERVED0, always 0 before): u32 REPAIR EPOCH of the
+ * object. 0 at spawn; the worker increments it on every `reset` (full
+ * repair) of that object, never otherwise. Main-side damage visuals
+ * (strain ratchet, scuffs, glass, detached panels) reset when it changes,
+ * so in-flight snapshots from before the repair cannot re-damage the body.
+ */
+export const OBJ_REPAIR_EPOCH = OBJ_RESERVED0;
 export const OBJ_TELEMETRY = 8; // first f32 of the telemetry block
 export const TELEMETRY_SLOTS = 32;
 export const OBJ_RECORD_WORDS = OBJ_TELEMETRY + TELEMETRY_SLOTS; // 40
@@ -160,6 +178,21 @@ export const NODE_BYTES = NODE_STRIDE * 4;
  * (positive = tension, negative = compression), NaN for broken beams.
  */
 export const STRAIN_BYTES = 4;
+/**
+ * BROKEN-BEAM BITSET (P4 additive, always present with SNAPSHOT_FLAG_BROKEN_BEAMS):
+ * u32 words, bit (g & 31) of word (g >> 5) = 1 when GLOBAL snapshot beam g
+ * (same indexing as strains: object beamOffset + object-local index) is
+ * broken (sim `active` = 0). Sized for beamCapacity bits. Authoritative
+ * broken state: main derives panel detach / glass shatter / node BROKEN
+ * flags from it, so dropped beamBreak events (ring overflow) and replay
+ * seeks (P7, no events for a restored state) cannot desync the visuals.
+ * The writer clears an object's bit range in addObject; until a sim writes
+ * it, every beam reads "intact".
+ */
+export const BROKEN_WORD_BITS = 32;
+export function brokenSectionBytes(beamCapacity: number): number {
+  return Math.ceil(beamCapacity / BROKEN_WORD_BITS) * 4;
+}
 
 // ============================================================ layout calc
 export interface SnapshotLayout {
@@ -174,6 +207,8 @@ export interface SnapshotLayout {
   nodesOffset: number;
   /** 0 when !debugStrains. */
   strainsOffset: number;
+  /** P4 additive: broken-beam bitset (always present). */
+  brokenOffset: number;
   totalBytes: number;
 }
 
@@ -194,7 +229,9 @@ export function computeSnapshotLayout(
   const nodesOffset = alignUp(skidsOffset + SKID_CAPACITY * SKID_BYTES);
   const nodesEnd = alignUp(nodesOffset + nodeCapacity * NODE_BYTES);
   const strainsOffset = debugStrains ? nodesEnd : 0;
-  const totalBytes = debugStrains ? alignUp(nodesEnd + beamCapacity * STRAIN_BYTES) : nodesEnd;
+  const strainsEnd = debugStrains ? alignUp(nodesEnd + beamCapacity * STRAIN_BYTES) : nodesEnd;
+  const brokenOffset = strainsEnd;
+  const totalBytes = alignUp(brokenOffset + brokenSectionBytes(beamCapacity));
   return {
     maxObjects,
     nodeCapacity,
@@ -206,6 +243,7 @@ export function computeSnapshotLayout(
     skidsOffset,
     nodesOffset,
     strainsOffset,
+    brokenOffset,
     totalBytes,
   };
 }

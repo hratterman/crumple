@@ -182,21 +182,69 @@ export interface PadDef {
 }
 
 /**
- * P5 placeholder — static collider primitive (sim static-primitive pass).
- * quat [x, y, z, w]; y of `pos` null = terrain height at (x, z) + the
- * shape's half height (resolved when the world is built).
+ * STATIC COLLIDER — P4 contract (replaces the P3 placeholder; nothing
+ * consumed it). Pure layout data shared by the sim (static-primitive
+ * contact pass, src/sim/collision/types.ts) and render (barrier / pole /
+ * ramp meshes). Lives HERE, not in src/sim, because render must draw
+ * exactly what the sim collides with and may not import src/sim, and the
+ * worker already receives the WorldLayout in `groundHeightfield`.
+ *
+ * LOCAL FRAME of a collider: centre at `pos`, axes = columns of the
+ * rotation `quat` ([x, y, z, w], unit; layout rule: rotations are data,
+ * never angles). `size` per kind (all metres):
+ *   box       [hx, hy, hz]  half extents (an OBB).
+ *   cylinder  [r, hh, 0]    radius, half height; axis = local +Y (poles).
+ *   sphere    [r, 0, 0].
+ *   plane     [hx, 0, hz]   finite one-sided rectangle in local y = 0,
+ *                           solid side local −Y (slab COLLIDER_PLANE_DEPTH
+ *                           deep, src/sim/collision/types.ts); e.g. a steel
+ *                           plate or a test deck over terrain.
+ *   ramp      [hx, hy, hz]  WEDGE inside the box |x| ≤ hx, |z| ≤ hz,
+ *                           −hy ≤ y ≤ −hy + 2hy·(hz − z)/(2hz): the driving
+ *                           surface rises from y = −hy at z = +hz (toe, flush
+ *                           with the ground) to y = +hy at z = −hz (lip, with a
+ *                           vertical back face). With quat identity a car
+ *                           driving forward (vehicle −Z) climbs it.
+ * pos y = null: rests on the terrain — y = heightAt(x, z) + hy (box,
+ * cylinder, ramp), + r (sphere), + 0 (plane). Only valid with a yaw-only
+ * quat (rotation about +Y); resolveColliders() (src/world/colliders.ts,
+ * P4 agent 5) rejects a tilted collider with y null.
  */
-export type ColliderShape =
-  | { type: 'obb'; halfExtents: WorldVec3 }
-  | { type: 'cylinder'; radius: number; halfHeight: number }
-  | { type: 'sphere'; radius: number };
+export type ColliderKind = 'box' | 'cylinder' | 'sphere' | 'plane' | 'ramp';
+/** Render style hint (the sim ignores it). Default by kind: box 'block', cylinder 'pole', sphere 'block', plane 'plate', ramp 'ramp'. */
+export type ColliderVisual = 'wall' | 'jersey' | 'pole' | 'ramp' | 'block' | 'plate' | 'none';
 export interface ColliderDef {
   id: string;
-  shape: ColliderShape;
+  kind: ColliderKind;
   pos: RoadPoint;
   quat: readonly [number, number, number, number];
+  size: WorldVec3;
+  /** Contact μ = node friction × material friction (same table as the ground). */
   material: MaterialId;
+  /**
+   * RESERVED (P5 breakable poles/signs): the collider snaps (becomes
+   * inactive, P5 swaps in a dynamic prop) once the summed contact force on
+   * it exceeds anchorForce N within one tick. P4 kernels treat every
+   * collider as static and unbreakable.
+   */
+  breakable?: { anchorForce: number };
+  visual?: ColliderVisual;
 }
+/** A ColliderDef with y resolved against the terrain (resolveColliders output, both sides). */
+export interface ResolvedCollider extends Omit<ColliderDef, 'pos'> {
+  pos: WorldVec3;
+}
+/**
+ * Pure, deterministic (src/world/colliders.ts, P4 agent 5): validates
+ * (unique ids, unit quat ±1e-6, positive sizes per kind, y null ⇒ yaw-only)
+ * and resolves y. Throws WorldLayoutError. Both the worker (collision) and
+ * main (meshes) call it with the same terrain sampler, so visual ==
+ * collision by construction.
+ */
+export type ResolveColliders = (
+  colliders: readonly ColliderDef[],
+  heightAt: (x: number, z: number) => number,
+) => ResolvedCollider[];
 /** P5 placeholder — prop spawn (soft props are rigs, static props are colliders + meshes). */
 export interface PropPlacement {
   id: string;
@@ -338,7 +386,11 @@ export interface WorldLayout {
   /** Stable id (protocol, saves, replays). */
   id: string;
   name: string;
-  /** Bump on ANY change that alters generated terrain (replays key on the terrain hash too). */
+  /**
+   * Bump on ANY change that alters generated terrain OR the static
+   * colliders (replays key on the terrain hash and this version; colliders
+   * are not in hashTerrain).
+   */
   version: number;
   seed: number;
   /** Square map edge length, m, centred on the origin. size/terrain.spacing must be an integer multiple of TERRAIN_CHUNK_CELLS. */
@@ -351,8 +403,12 @@ export interface WorldLayout {
   roads: readonly RoadDef[];
   junctions: readonly JunctionDef[];
   spawnPoints: readonly SpawnPoint[];
-  /** P5: empty in P3. */
+  /**
+   * Static colliders (P4). The worker installs them on `groundHeightfield`
+   * (resolved against its own terrain) in declaration order = collider index.
+   */
   colliders: readonly ColliderDef[];
+  /** P5: empty until then. */
   props: readonly PropPlacement[];
 }
 

@@ -13,7 +13,7 @@
 import type { Quat, Vec3 } from '../core/math';
 import type { RigDef } from '../sim/rig/types';
 import type { TransmissionMode, VehicleDef } from '../sim/vehicle/types';
-import type { WorldLayout } from '../world/types';
+import type { ColliderDef, WorldLayout } from '../world/types';
 
 // ============================================================ MaterialId
 /**
@@ -241,6 +241,20 @@ export interface GroundHeightfieldCmd {
   terrainHash: number;
 }
 
+// ---------------------------------------------------------------- colliders (P4, additive)
+/**
+ * Replace the EXTRA static-collider set (tests, challenge set-ups, the
+ * plane-ground soft-cube demo). The layout's own `colliders` are installed
+ * by `groundHeightfield` and are not affected; the active set is layout
+ * colliders (declaration order) followed by these. `y: null` resolves
+ * against the current ground (plane or heightfield) when the command
+ * applies. Invalid defs → `error` (set unchanged). [] clears the extra set.
+ */
+export interface SetCollidersMsg {
+  type: 'setColliders';
+  colliders: ColliderDef[];
+}
+
 /** RESERVED (P6): awake bubble around the player. Worker may answer `unimplemented`. */
 export interface SetBubbleMsg {
   type: 'setBubble';
@@ -271,6 +285,7 @@ export type MainToWorker =
   | SetTransmissionMsg
   | RecoverMsg
   | GroundHeightfieldCmd
+  | SetCollidersMsg
   | SetBubbleMsg
   | KeyframeRequestMsg
   | ReplaySeekMsg;
