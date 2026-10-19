@@ -187,3 +187,35 @@ describe('createQualityController', () => {
     expect((post.setSize as ReturnType<typeof vi.fn>).mock.calls.length).toBe(before + 1);
   });
 });
+
+describe('software GL / anisotropy helpers (perf pass)', () => {
+  it('detects software rasterizers', async () => {
+    const { isSoftwareRenderer } = await import('./quality');
+    expect(isSoftwareRenderer('ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)')).toBe(true);
+    expect(isSoftwareRenderer('llvmpipe (LLVM 15.0.7, 256 bits)')).toBe(true);
+    expect(isSoftwareRenderer('ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)')).toBe(false);
+    expect(isSoftwareRenderer('Apple M2')).toBe(false);
+  });
+
+  it('anisotropy per preset', async () => {
+    const { anisotropyFor } = await import('./quality');
+    expect(anisotropyFor('low', 16)).toBe(1);
+    expect(anisotropyFor('medium', 16)).toBe(4);
+    expect(anisotropyFor('high', 16)).toBe(16);
+    expect(anisotropyFor('high', 0)).toBe(1);
+  });
+
+  it('maxPixelRatio caps the final ratio', () => {
+    const ratios: number[] = [];
+    const ctx = {
+      renderer: { setPixelRatio: (r: number) => ratios.push(r) },
+      quality: QUALITY_PRESETS.high,
+      width: 100,
+      height: 100,
+    } as unknown as RenderContext;
+    const post = { setSize: () => {}, setQuality: () => {} } as unknown as PostStack;
+    const lighting = { setQuality: () => {} } as unknown as LightingStack;
+    createQualityControllerWith(ctx, { lighting, post }, { storage: null, devicePixelRatio: () => 2, maxPixelRatio: 0.5 });
+    expect(ratios.at(-1)).toBe(0.5);
+  });
+});

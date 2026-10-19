@@ -29,6 +29,13 @@ import type { TerrainData, TerrainSampler } from '../../world/types';
 import { buildRoadRibbons, type RibbonGeometryData, type RoadRibbons } from './geometry';
 import { createRoadMaterials, createRoadNoiseTexture, createWhiteTexture, type RoadMaterialPair } from './material';
 
+/** Material define selecting the one-tap road path (shader.ts RD_LITE). */
+export const RD_LITE_DEFINE = 'RD_LITE';
+/** Presets that use the lite road path. */
+export function roadLite(level: string): boolean {
+  return level === 'low';
+}
+
 export { buildRoadRibbons } from './geometry';
 
 /** LOD switch distances (camera → piece sphere surface, m) before lodBias. */
@@ -115,6 +122,21 @@ export function createRoadRenderer(
     };
   });
 
+  /** Low preset: one texture tap per map (RD_LITE, shader.ts). */
+  const applyLite = (q: QualityPreset): void => {
+    const lite = roadLite(q.level);
+    for (const m of mats) {
+      for (const mat of [m.core, m.fringe]) {
+        const defines = (mat.defines ??= {});
+        if (lite === (RD_LITE_DEFINE in defines)) continue;
+        if (lite) defines[RD_LITE_DEFINE] = '';
+        else delete defines[RD_LITE_DEFINE];
+        mat.needsUpdate = true;
+      }
+    }
+  };
+  applyLite(ctx.quality);
+
   let lodBias = ctx.quality.terrainLodBias;
   const stats: RoadRendererStats = {
     pieces: pieces.length,
@@ -151,6 +173,7 @@ export function createRoadRenderer(
     update,
     setQuality(q: QualityPreset) {
       lodBias = q.terrainLodBias;
+      applyLite(q);
     },
     dispose() {
       for (const p of pieces) for (const g of p.lods) g.dispose();

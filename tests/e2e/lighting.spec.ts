@@ -7,6 +7,8 @@ interface LightingHooks {
   setQuality(level: string): void;
   setView(v: string): void;
   sample(): { mean: number; std: number };
+  setHotPixels(kind: 'nan' | 'inf' | 'huge' | null): void;
+  setSanitize(on: boolean): void;
   info(): { cascades: number; sunDirection: number[]; proceduralSky: boolean; level: string };
 }
 
@@ -52,6 +54,31 @@ test('lighting preview: full stack renders and switches presets', async ({ page 
   });
   expect(high.info.cascades).toBe(4);
   expect(high.px.std).toBeGreaterThan(10);
+
+  // NaN / black-frame guard: non-finite and overflowing pixels in view must not blank the
+  // frame through bloom (the sanitize pass runs before the EffectPass whenever bloom is on).
+  for (const kind of ['nan', 'inf', 'huge'] as const) {
+    const px = await page.evaluate((k) => {
+      const l = (window as unknown as { __lighting: LightingHooks }).__lighting;
+      l.setHotPixels(k);
+      l.sample();
+      return l.sample();
+    }, kind);
+    expect(px.mean, `${kind} pixels blanked the frame`).toBeGreaterThan(0.5 * high.px.mean);
+    expect(px.std).toBeGreaterThan(10);
+  }
+  // Control: the same NaN quad without the guard blanks the whole frame (bloom spreads it).
+  const unguarded = await page.evaluate(() => {
+    const l = (window as unknown as { __lighting: LightingHooks }).__lighting;
+    l.setSanitize(false);
+    l.setHotPixels('nan');
+    l.sample();
+    const px = l.sample();
+    l.setSanitize(true);
+    l.setHotPixels(null);
+    return px;
+  });
+  expect(unguarded.mean).toBeLessThan(5);
 
   expect(errors.filter((e) => !/GPU stall|RGBELoader/.test(e))).toEqual([]);
 });

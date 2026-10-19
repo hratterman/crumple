@@ -177,6 +177,19 @@ export function saveQualityLevel(level: QualityLevel, storage: StorageLike | nul
   }
 }
 
+/** True for software WebGL (SwiftShader, llvmpipe, Microsoft Basic Render): the game then defaults to low. */
+export function isSoftwareRenderer(rendererString: string): boolean {
+  return /swiftshader|llvmpipe|softpipe|software|basic render/i.test(rendererString);
+}
+
+/** Texture anisotropy per preset (low: off — every anisotropic tap multiplies the fetch cost). */
+export function anisotropyFor(level: QualityLevel, maxAnisotropy: number): number {
+  const max = Math.max(1, maxAnisotropy | 0);
+  if (level === 'low') return 1;
+  if (level === 'medium') return Math.min(4, max);
+  return max;
+}
+
 /** Pixel ratio for a preset at an adaptive scale (devicePixelRatio capped, then scaled). */
 export function pixelRatioFor(preset: QualityPreset, scale: number, devicePixelRatio: number): number {
   const dpr = devicePixelRatio > 0 ? devicePixelRatio : 1;
@@ -191,7 +204,19 @@ export interface QualityControllerOptions {
   storage?: StorageLike | null;
   /** Override devicePixelRatio lookup. */
   devicePixelRatio?: () => number;
+  /**
+   * Upper bound on the final pixel ratio (after preset cap × adaptive
+   * scale), e.g. SOFTWARE_GL_PIXEL_RATIO under a software rasterizer.
+   */
+  maxPixelRatio?: number;
 }
+
+/**
+ * Pixel-ratio ceiling under software WebGL (SwiftShader / llvmpipe): every
+ * pixel is shaded on the CPU, and the frame cost is ∝ pixels (1280×720 →
+ * 640×360 internal; the browser upscales the canvas, the HUD stays crisp).
+ */
+export const SOFTWARE_GL_PIXEL_RATIO = 0.5;
 
 export const createQualityController: CreateQualityController = (ctx, targets) =>
   createQualityControllerWith(ctx, targets);
@@ -205,8 +230,9 @@ export function createQualityControllerWith(
   const dpr = opts.devicePixelRatio ?? (() => (typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1));
   const scaler = new AdaptiveScaler(ctx.quality.adaptiveResolution);
 
+  const maxRatio = opts.maxPixelRatio ?? Infinity;
   const applyResolution = (): void => {
-    ctx.renderer.setPixelRatio(pixelRatioFor(ctx.quality, scaler.scale, dpr()));
+    ctx.renderer.setPixelRatio(Math.min(maxRatio, pixelRatioFor(ctx.quality, scaler.scale, dpr())));
     targets.post.setSize(ctx.width, ctx.height);
   };
 

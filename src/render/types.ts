@@ -193,8 +193,9 @@ export type CreateLightingStack = (ctx: RenderContext, opts?: LightingOptions) =
 
 // ============================================================ post (C: src/render/post.ts)
 /**
- * Pipeline (FROZEN order): RenderPass → N8AOPostPass → EffectPass(SMAA,
- * Bloom, [DoF P7], ToneMapping ACES_FILMIC). Composer frameBufferType
+ * Pipeline (FROZEN order): RenderPass → N8AOPostPass → [SanitizePass, when
+ * bloom is on: NaN/Inf/overflow guard, docs/CONTRACTS.md "Render budget
+ * amendments"] → EffectPass(SMAA, Bloom, [DoF P7], ToneMapping ACES_FILMIC). Composer frameBufferType
  * HalfFloatType, multisampling 0. n8ao `gammaCorrection = false` (the final
  * EffectPass does the sRGB output conversion); `configuration.screenSpaceRadius`
  * false, aoRadius ~2 m. Disabled effects are removed from the pass, not

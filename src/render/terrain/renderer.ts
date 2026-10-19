@@ -36,7 +36,9 @@ import {
   applyTerrainColorPatch,
   applyTerrainDepthPatch,
   createTerrainUniforms,
+  TERRAIN_LITE_DEFINE,
   TERRAIN_SHADER_KEY,
+  terrainLite,
 } from './shader';
 import type { TerrainUniforms } from './shader';
 import {
@@ -45,8 +47,15 @@ import {
   buildNormalTexture,
   buildSplatTexture,
   buildTerrainArrays,
+  takePrebuiltTerrainArrays,
   TERRAIN_LAYERS,
+  terrainTextureSize,
 } from './textures';
+
+/** Anisotropy of the terrain arrays: off on the lite (low) path — it multiplies every terrain fetch. */
+export function terrainAnisotropy(level: string, maxAnisotropy: number): number {
+  return terrainLite(level) ? 1 : Math.min(8, maxAnisotropy);
+}
 
 /** Morph band as a fraction of each LOD range: [start, end]. End < 1 so morph completes before the switch. */
 const MORPH_START = 0.62;
@@ -132,9 +141,9 @@ export function createTerrainRenderer(
 
   // ------------------------------------------------------------ textures
   const level = ctx.quality.level;
-  const texSize = level === 'low' ? 1024 : level === 'medium' ? 1024 : 2048;
-  const aniso = Math.min(8, renderer.capabilities.getMaxAnisotropy());
-  const arrays = buildTerrainArrays(materials, texSize, aniso);
+  const texSize = terrainTextureSize(level);
+  const aniso = terrainAnisotropy(level, renderer.capabilities.getMaxAnisotropy());
+  const arrays = takePrebuiltTerrainArrays(materials, texSize, aniso) ?? buildTerrainArrays(materials, texSize, aniso);
   const splatTex = buildSplatTexture(terrain);
   const normalTex = buildNormalTexture(terrain);
   const concreteTex = buildConcreteTexture(terrain);
@@ -229,6 +238,13 @@ export function createTerrainRenderer(
   let csmFar = ctx.quality.csmFar;
   const applyQuality = (q: QualityPreset): void => {
     csmFar = q.csmFar;
+    const lite = terrainLite(q.level);
+    const defines = (color.defines ??= {});
+    if (lite !== (TERRAIN_LITE_DEFINE in defines)) {
+      if (lite) defines[TERRAIN_LITE_DEFINE] = '';
+      else delete defines[TERRAIN_LITE_DEFINE];
+      color.needsUpdate = true;
+    }
     const morph = uniforms.uTMorph!.value as { set(x: number, y: number): void }[];
     for (let k = 0; k < TERRAIN_LOD_COUNT; k++) {
       const r = k < TERRAIN_LOD_DISTANCES.length ? TERRAIN_LOD_DISTANCES[k]! * q.terrainLodBias : Infinity;

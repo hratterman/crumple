@@ -22,11 +22,24 @@
  *     detail (the same texture at 1/9 scale modulating colour beyond ~60 m),
  *     distance fade of normal strength;
  *  6. concrete tint on the paved layer, wet darkening near the water line.
+ *
+ * TERRAIN_LITE (define; the low preset, see renderer.ts): only the TWO
+ * strongest splat layers, each with ONE planar tap (2 fetches instead of up
+ * to 3 planes × (6 hex + 2 plain + 2 far) for every layer a pixel quad
+ * touches); no hex tiling, side planes or far detail. Under a software
+ * rasterizer (SwiftShader, CI) the full path was ~90 % of the frame.
  */
 import type { IUniform, WebGLProgramParametersWithUniforms } from 'three';
 import { Vector2, Vector3, Vector4 } from 'three';
 
 export const TERRAIN_SHADER_KEY = 'terrain-b1';
+/** Material define selecting the one-tap terrain path (low preset). */
+export const TERRAIN_LITE_DEFINE = 'TERRAIN_LITE';
+
+/** Presets that use the lite terrain path. */
+export function terrainLite(level: string): boolean {
+  return level === 'low';
+}
 
 export interface TerrainUniforms {
   [name: string]: IUniform;
@@ -90,6 +103,7 @@ vec2 tHash22(vec2 p) {
   return fract((p3.xx + p3.yz) * p3.zy);
 }
 
+#ifndef TERRAIN_LITE
 // Triangle-grid (hex tiling) state for one projection plane.
 struct THex {
   vec3 w;
@@ -193,6 +207,31 @@ void tSampleHex(in THex g, vec2 p, vec2 dpx, vec2 dpy, float layer, float tInv, 
   srf = mix(srf, ms, meanK);
 }
 
+#else
+// One planar tap (+ the layer mean in the moiré band): the low-preset path.
+void tSamplePlain(vec2 p, vec2 dpx, vec2 dpy, float layer, float tInv, float footprint, out vec4 alb, out vec4 srf) {
+  float meanK = smoothstep(0.12, 0.35, footprint * tInv);
+  vec4 ma = vec4(0.0);
+  vec4 ms = vec4(0.0);
+  if (meanK > 0.0) {
+    ma = textureLod(tTAlbedo, vec3(0.5, 0.5, layer), 16.0);
+    ms = textureLod(tTSurface, vec3(0.5, 0.5, layer), 16.0);
+    ms.xy = vec2(0.0);
+    if (meanK >= 1.0) {
+      alb = ma;
+      srf = ms;
+      return;
+    }
+  }
+  vec2 up = p * tInv;
+  alb = textureGrad(tTAlbedo, vec3(up, layer), dpx * tInv, dpy * tInv);
+  srf = textureGrad(tTSurface, vec3(up, layer), dpx * tInv, dpy * tInv);
+  srf.xy = srf.xy * 2.0 - 1.0;
+  alb = mix(alb, ma, meanK);
+  srf = mix(srf, ms, meanK);
+}
+#endif
+
 vec3 tGrade(vec3 c, int l, float macro) {
   // Albedo levels: re-centre the texture on a target mean (the raw ambientCG
   // sets range from near-black rock to near-white gravel), keeping its detail
@@ -203,6 +242,25 @@ vec3 tGrade(vec3 c, int l, float macro) {
   vec3 o = uTTint[l] * pow(max(ratio, vec3(0.0)), vec3(uTContrast[l]));
   return o * mix(uTMacroA[l], uTMacroB[l], macro);
 }
+
+#ifdef TERRAIN_LITE
+// One lite layer: graded colour (+ concrete on the paved layer), planar normal, roughness.
+void tLayerLite(int l, vec4 alb, vec4 srf, vec3 N, float nFade, float macro, float concrete, float slabTone, float slabJoint,
+                out vec3 col, out vec3 n, out float rough) {
+  float nStr = uTNormalStr[l] * nFade;
+  vec3 tn = vec3(srf.xy * nStr, 1.0);
+  tn = vec3(tn.xy + N.xz, tn.z * N.y);
+  n = normalize(tn.xzy);
+  col = tGrade(alb.rgb, l, macro);
+  if (l == 0 && concrete > 0.0) {
+    float rl = dot(alb.rgb / max(uTMean[0], vec3(1e-4)), vec3(0.2126, 0.7152, 0.0722));
+    vec3 conc = uTConcrete * pow(max(rl, 0.0), 0.6) * mix(0.9, 1.08, macro);
+    conc *= slabTone * (1.0 - 0.6 * slabJoint);
+    col = mix(col, conc, concrete);
+  }
+  rough = mix(uTRough[l].x, uTRough[l].y, srf.z);
+}
+#endif
 `;
 
 const FRAG_MAIN = /* glsl */ `
@@ -239,6 +297,10 @@ float tSpec = uTSpec;
   float slabJoint = max(1.0 - smoothstep(0.012, 0.012 + sfw.x, je.x), 1.0 - smoothstep(0.012, 0.012 + sfw.y, je.y));
   slabJoint *= 1.0 - smoothstep(0.02, 0.08, max(sfw.x, sfw.y));
 
+#ifdef TERRAIN_LITE
+  vec3 tw = vec3(0.0, 1.0, 0.0);
+  vec2 pY = P.xz;
+#else
   // Projection weights: XZ plane always; side planes fade in on steep slopes.
   vec3 tw = pow(abs(N), vec3(4.0));
   float steep = smoothstep(0.88, 0.62, N.y);
@@ -256,15 +318,62 @@ float tSpec = uTSpec;
   THex gZ = gY;
   if (useX) gX = tHexGrid(pX + 31.0);
   if (useZ) gZ = tHexGrid(pZ + 57.0);
+#endif
 
   float macro = clamp(nzB.r * 0.65 + nzC.g * 0.35, 0.0, 1.0);
   macro = smoothstep(0.2, 0.8, macro);
-  float detailFar = smoothstep(uTBlend.z, uTBlend.w, tDist);
   // Pixel footprint (m) → hex tiling fades to a plain tap once cells are ~sub-pixel.
   float footprint = sqrt(length(dPdx) * length(dPdy));
+#ifndef TERRAIN_LITE
+  float detailFar = smoothstep(uTBlend.z, uTBlend.w, tDist);
   float hexK = smoothstep(0.22 * uTHex.x / 2.2, 0.5 * uTHex.x / 2.2, footprint);
+#endif
   float nFade = mix(1.0, 0.45, smoothstep(25.0, 260.0, tDist));
 
+#ifdef TERRAIN_LITE
+  // The two strongest layers only: bounded work per pixel (a SIMD quad straddling a blend ran up
+  // to all five layers), one planar tap each, same grading / concrete / height blend.
+  int i0 = 4;
+  int i1 = 4;
+  float w0 = -1.0;
+  float w1 = -1.0;
+  for (int l = 0; l < 5; l++) {
+    float wl = w[l];
+    if (wl > w0) {
+      w1 = w0; i1 = i0;
+      w0 = wl; i0 = l;
+    } else if (wl > w1) {
+      w1 = wl; i1 = l;
+    }
+  }
+  vec3 albedo = vec3(0.0);
+  vec3 nW = vec3(0.0);
+  tRough = 0.0;
+  tAO = 0.0;
+  float hgt = 0.0;
+  {
+    vec4 a0, s0, a1, s1;
+    tSamplePlain(pY, dPdx.xz, dPdy.xz, float(i0), uTTileInv[i0], footprint, a0, s0);
+    bool two = w1 >= 0.003;
+    if (two) tSamplePlain(pY, dPdx.xz, dPdy.xz, float(i1), uTTileInv[i1], footprint, a1, s1);
+    else { a1 = a0; s1 = s0; }
+    vec3 c0, c1, n0, n1;
+    float r0, r1, h0, h1;
+    tLayerLite(i0, a0, s0, N, nFade, macro, concrete, slabTone, slabJoint, c0, n0, r0);
+    tLayerLite(i1, a1, s1, N, nFade, macro, concrete, slabTone, slabJoint, c1, n1, r1);
+    h0 = w0 + uTBlend.y * a0.a * min(w0 * 4.0, 1.0);
+    h1 = two ? w1 + uTBlend.y * a1.a * min(w1 * 4.0, 1.0) : -1.0;
+    float hmax = max(h0, h1);
+    float b0 = max(h0 - (hmax - uTBlend.x), 0.0);
+    float b1 = two ? max(h1 - (hmax - uTBlend.x), 0.0) : 0.0;
+    float ib = 1.0 / max(b0 + b1, 1e-5);
+    albedo = (c0 * b0 + c1 * b1) * ib;
+    nW = normalize(n0 * b0 + n1 * b1);
+    tRough = (r0 * b0 + r1 * b1) * ib;
+    tAO = (s0.w * b0 + s1.w * b1) * ib;
+    hgt = (a0.a * b0 + a1.a * b1) * ib;
+  }
+#else
   vec3 lAlb[5];
   vec3 lN[5];
   float lH[5];
@@ -283,11 +392,16 @@ float tSpec = uTSpec;
     vec3 nAcc = vec3(0.0);
     float nStr = uTNormalStr[l] * nFade;
     // Y (planar) projection
+#ifdef TERRAIN_LITE
+    tSamplePlain(pY, dPdx.xz, dPdy.xz, layer, ti, footprint, alb, srf);
+#else
     tSampleHex(gY, pY, dPdx.xz, dPdy.xz, layer, ti, hexK, footprint, alb, srf);
+#endif
     {
       vec3 tn = vec3(srf.xy * nStr, 1.0);
       tn = vec3(tn.xy + N.xz, tn.z * N.y);
       nAcc += tn.xzy * tw.y;
+#ifndef TERRAIN_LITE
       // Far detail: the same texture at ~1/9 scale modulates colour.
       if (detailFar > 0.0) {
         // Two rotated, incommensurate scales (1/9 and 1/31): their product
@@ -304,9 +418,11 @@ float tSpec = uTSpec;
         vec3 fr = sqrt(clamp(f1 * im, 0.3, 3.0) * clamp(f2 * im, 0.3, 3.0));
         alb.rgb *= mix(vec3(1.0), fr, detailFar * 0.7);
       }
+#endif
       albAcc += alb * tw.y;
       srfAcc += srf * tw.y;
     }
+#ifndef TERRAIN_LITE
     if (useX) {
       tSampleHex(gX, pX, vec2(dPdx.z * sgn.x, dPdx.y), vec2(dPdy.z * sgn.x, dPdy.y), layer, ti, hexK, footprint, alb, srf);
       vec3 tn = vec3(srf.xy * nStr, 1.0);
@@ -325,6 +441,7 @@ float tSpec = uTSpec;
       albAcc += alb * tw.z;
       srfAcc += srf * tw.z;
     }
+#endif
     lAlb[l] = tGrade(albAcc.rgb, l, macro);
     if (l == 0 && concrete > 0.0) {
       // Concrete: the paved set re-levelled lighter/greyer, keeping its detail.
@@ -362,6 +479,8 @@ float tSpec = uTSpec;
   float ib = 1.0 / max(bsum, 1e-5);
   albedo *= ib; tRough *= ib; tAO *= ib; hgt *= ib;
   nW = normalize(nW);
+
+#endif
 
   // Mid-scale breakup (1–10 m) so no surface reads as a flat colour at 20–80 m.
   albedo *= mix(0.84, 1.14, clamp(nzA.g * 0.65 + nzC.a * 0.35, 0.0, 1.0));

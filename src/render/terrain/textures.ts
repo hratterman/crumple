@@ -195,6 +195,38 @@ export function buildTerrainArrays(materials: TerrainMaterialSet, size: number, 
   };
 }
 
+/** Edge of the packed array layers per preset (low: 512 — packing cost and fetch cost ∝ texels). */
+export function terrainTextureSize(level: string): number {
+  return level === 'low' ? 512 : level === 'medium' ? 1024 : 2048;
+}
+
+/**
+ * Prebuilt arrays, handed over exactly once (the renderer owns and disposes
+ * them; their CPU copy is dropped on upload, so they cannot be shared).
+ */
+const prebuilt = new WeakMap<TerrainMaterialSet, Map<string, TerrainArrays>>();
+
+/**
+ * Packs the arrays ahead of createTerrainRenderer (boot calls this while the
+ * terrain is still generating in its worker: main is idle then, and the
+ * packing leaves the critical path).
+ */
+export function prebuildTerrainArrays(materials: TerrainMaterialSet, size: number, anisotropy: number): void {
+  let m = prebuilt.get(materials);
+  if (!m) prebuilt.set(materials, (m = new Map()));
+  const key = `${size}|${anisotropy}`;
+  if (!m.has(key)) m.set(key, buildTerrainArrays(materials, size, anisotropy));
+}
+
+/** The arrays prebuildTerrainArrays made for these arguments (removed from the cache), else null. */
+export function takePrebuiltTerrainArrays(materials: TerrainMaterialSet, size: number, anisotropy: number): TerrainArrays | null {
+  const m = prebuilt.get(materials);
+  const key = `${size}|${anisotropy}`;
+  const a = m?.get(key) ?? null;
+  if (a) m!.delete(key);
+  return a;
+}
+
 /** Splat weights (RGBA8, linear, no mips) — TerrainData.splat as-is. */
 export function buildSplatTexture(t: TerrainData): DataTexture {
   const tex = new DataTexture(t.splat, t.cols, t.rows, RGBAFormat, UnsignedByteType);

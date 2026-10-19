@@ -18,7 +18,8 @@
 import './style.css';
 import { MeshPhysicalMaterial, NoToneMapping, PerspectiveCamera, Scene, SRGBColorSpace, Vector3, WebGLRenderer } from 'three';
 
-import { createQualityControllerWith, isQualityLevel, loadQualityLevel } from './app/quality';
+import { FrameProfiler, gpuSyncFn, PassCounter, perfGpuSync, perfRequested } from './app/perf';
+import { anisotropyFor, createQualityControllerWith, isQualityLevel, isSoftwareRenderer, loadQualityLevel, SOFTWARE_GL_PIXEL_RATIO } from './app/quality';
 import { SimClient, type ObjectRange } from './app/simClient';
 import { placeOnGround, yawOf } from './app/spawn';
 import { loadTerrain } from './app/world';
@@ -32,11 +33,11 @@ import { createVehicleTelemetryFrame, VehicleTelemetry } from './protocol/teleme
 import { vehiclePoseFromNodes, type ChaseTarget } from './render/cameras/chase';
 import { CameraDirector } from './render/cameras/director';
 import { BeamView } from './render/debug/beamview';
-import { createLightingStack } from './render/lighting';
+import { createLightingStack, setNearCasters } from './render/lighting';
 import { patchMaterial } from './render/material';
 import { createPostStack } from './render/post';
 import { createRoadRenderer } from './render/roads';
-import { createTerrainRenderer } from './render/terrain';
+import { createTerrainRenderer, prebuildTerrainArrays, terrainAnisotropy, terrainTextureSize } from './render/terrain';
 import { createFarLand, FARLAND_OUTER_M } from './render/terrain/farland';
 import { createColliderRenderer } from './render/world/colliders';
 import { bindPanels } from './render/vehicle/binder';
@@ -59,6 +60,7 @@ import { buildVehicleRig, compileVehicle } from './sim/vehicle/builder';
 import { SEDAN } from './sim/vehicle/defs/sedan';
 import { Hud } from './ui/hud';
 import { LoadingScreen } from './ui/loading';
+import type { PerfOverlay, PerfOverlayData } from './ui/perfOverlay';
 import { resolveColliders } from './world/colliders';
 import { DEFAULT_LAYOUT } from './world/layout';
 import { createTerrainSampler } from './world/sampler';
@@ -82,16 +84,45 @@ const renderer = new WebGLRenderer({ canvas, antialias: false, powerPreference: 
 renderer.outputColorSpace = SRGBColorSpace;
 renderer.toneMapping = NoToneMapping;
 renderer.shadowMap.enabled = true;
+function rendererString(r: WebGLRenderer): string {
+  const gl = r.getContext();
+  const ext = gl.getExtension('WEBGL_debug_renderer_info');
+  return String(gl.getParameter(ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER) ?? '');
+}
 /** ?q=low|medium|high|ultra forces a preset for this page load (not persisted; tests, screenshots). */
 const forcedLevel = ((q) => (isQualityLevel(q) ? q : null))(params.get('q'));
-const startLevel = forcedLevel ?? loadQualityLevel() ?? DEFAULT_QUALITY;
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, QUALITY_PRESETS[startLevel].pixelRatioCap));
+/** A software rasterizer (SwiftShader, llvmpipe: no usable GPU) starts on low unless the player chose a level. */
+const softwareGl = isSoftwareRenderer(rendererString(renderer));
+const startLevel = forcedLevel ?? loadQualityLevel() ?? (softwareGl ? 'low' : DEFAULT_QUALITY);
+/** ?swcap=0 lifts the software-GL resolution cap (full-resolution screenshots under SwiftShader). */
+const maxPixelRatio = softwareGl && params.get('swcap') !== '0' ? SOFTWARE_GL_PIXEL_RATIO : Infinity;
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, QUALITY_PRESETS[startLevel].pixelRatioCap, maxPixelRatio));
 renderer.setSize(window.innerWidth, window.innerHeight);
 
 const scene = new Scene();
 // Far plane: the far-land ring's outer edge seen from the opposite map corner.
 const camera = new PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, Math.ceil(FARLAND_OUTER_M + 704 * Math.SQRT2 + 200));
 scene.add(camera);
+
+// ------------------------------------------------------------ profiling (?perf=1 or the ` key)
+const prof = new FrameProfiler(perfRequested(location.search));
+const passCounter = new PassCounter(renderer);
+if (perfGpuSync(location.search)) passCounter.sync = gpuSyncFn(renderer.getContext() as WebGL2RenderingContext);
+/** The overlay UI is a lazily loaded chunk (dev / rare). */
+let perfOverlay: PerfOverlay | null = null;
+function setProfiling(on: boolean): void {
+  prof.enabled = on;
+  if (perfOverlay) perfOverlay.visible = on;
+  else if (on) {
+    void import('./ui/perfOverlay').then((m) => {
+      perfOverlay ??= new m.PerfOverlay();
+      perfOverlay.visible = prof.enabled;
+    });
+  }
+  if (on) passCounter.attach();
+  else passCounter.detach();
+}
+setProfiling(prof.enabled);
 
 const ctx: RenderContext = {
   renderer,
@@ -237,6 +268,21 @@ function updateVisuals(dt: number): void {
       cubeSkin.update(cubeFrame);
     }
   }
+}
+
+/**
+ * Shadow LOD: the sedan (~100 draws per cascade) only renders into the
+ * cascades that hold its shadow's receivers: view depths within its camera
+ * distance + NEAR_CASTER_REACH_M (body radius + a 16° sun's shadow length),
+ * down to half of distance − reach (a receiver at the screen edge has a
+ * smaller view depth than its distance).
+ */
+const NEAR_CASTER_REACH_M = 9;
+const casterPos = new Vector3();
+function updateNearCasters(lighting: Parameters<typeof setNearCasters>[0]): void {
+  const root = sedanVisual ? sedanVisual.object : null;
+  const d = sedanVisual ? camera.position.distanceTo(sedanVisual.skin.object.getWorldPosition(casterPos)) : 0;
+  setNearCasters(lighting, renderer, camera, root, 0.5 * (d - NEAR_CASTER_REACH_M), d + NEAR_CASTER_REACH_M);
 }
 
 /** Sim events → the sedan's damage (allocation-free routing; FX consumers come in P5). */
@@ -404,12 +450,29 @@ window.addEventListener('keydown', (e) => {
   if (m) {
     teleport(Number(m[1]) - 1);
     e.preventDefault();
+  } else if (e.code === 'Backquote') {
+    setProfiling(!prof.enabled);
+    e.preventDefault();
   } else if (e.code === 'KeyL' && quality) {
     const next = QUALITY_LEVELS[(QUALITY_LEVELS.indexOf(quality.preset.level) + 1) % QUALITY_LEVELS.length]!;
     quality.setLevel(next);
     hud?.showToast(next.toUpperCase(), 'QUALITY', 1500);
   }
 });
+
+function perfData(): PerfOverlayData {
+  const info = renderer.info;
+  return {
+    profile: prof.snapshot(),
+    gpu: passCounter.snapshot(),
+    extra: {
+      quality: quality ? `${quality.preset.level} ×${quality.scale.toFixed(2)}` : '-',
+      buffer: `${renderer.domElement.width}×${renderer.domElement.height}`,
+      programs: info.programs?.length ?? 0,
+      'geometries/textures': `${info.memory.geometries}/${info.memory.textures}`,
+    },
+  };
+}
 
 // ------------------------------------------------------------ debug/test global
 const stats = { loadMs: 0, terrainMs: 0, physicsMs: 0, fps: 0, terrainMatched: false, stages: {} as Record<string, number> };
@@ -509,6 +572,14 @@ const crumple = {
   settleCamera(seconds: number): void {
     for (let t = 0; t < seconds; t += 1 / 30) director.update(1 / 30, poseValid ? pose : null);
   },
+  /** Profiler snapshot (?perf=1 or the ` key; zeros while off). */
+  get perf(): PerfOverlayData & { loadStages: Record<string, number> } {
+    return { ...perfData(), loadStages: stats.stages };
+  },
+  /** Turn profiling (and the overlay) on/off. */
+  setProfiling(on: boolean): void {
+    setProfiling(on);
+  },
   /** Dev handles for tuning from the console (not a contract). */
   debug: { scene, camera, renderer, ctx, client } as Record<string, unknown>,
 };
@@ -542,7 +613,8 @@ async function boot(): Promise<void> {
     loading.set('terrain', 'done');
     return r;
   });
-  const materialsP = loadAllTerrainSets({ anisotropy: renderer.capabilities.getMaxAnisotropy() });
+  // Road ribbons sample these directly: anisotropic taps are the low preset's (and SwiftShader's) worst cost.
+  const materialsP = loadAllTerrainSets({ anisotropy: anisotropyFor(startLevel, renderer.capabilities.getMaxAnisotropy()) });
   // Before any material compiles: the stack installs the height-fog chunks and CSM.
   const lightingP = createLightingStack(ctx);
   void Promise.all([materialsP, lightingP]).then(() => loading.set('textures', 'done'));
@@ -550,39 +622,29 @@ async function boot(): Promise<void> {
   const mark = (name: string): void => {
     stats.stages[name] = Math.round(performance.now() - t0);
   };
-  const [loaded, materials, lighting] = await Promise.all([terrainP, materialsP, lightingP]);
-  mark('assets+terrain');
+  // Loading-screen phases (ms since boot start; the perf overlay / ?perf=1 report them).
+  void terrainP.then(() => mark('terrainGenerated'));
+  void materialsP.then(() => mark('texturesLoaded'));
+  void lightingP.then(() => mark('lightingReady'));
+  void physicsReady.then(() => mark('physicsTerrain'));
+  // Pack the terrain texture arrays while the terrain still generates in its worker (main is idle).
+  let terrainDone = false;
+  void terrainP.then(() => (terrainDone = true));
+  void materialsP.then(async (m) => {
+    await nextFrame();
+    if (terrainDone) return; // the renderer builds them itself, on the critical path either way
+    const level = ctx.quality.level;
+    prebuildTerrainArrays(m, terrainTextureSize(level), terrainAnisotropy(level, renderer.capabilities.getMaxAnisotropy()));
+    mark('terrainTexturesPacked');
+  });
+  const lighting = await lightingP;
   crumple.debug.lighting = lighting;
-  const world = loaded.terrain;
-  terrain = world;
-  const smp = createTerrainSampler(world);
-  sampler = smp;
-  ctx.sampler = smp;
-  await nextFrame();
-
   const postStack = createPostStack(ctx);
   post = postStack;
-  const terrainR = createTerrainRenderer(ctx, world, materials, { lighting, patchMaterial });
-  scene.add(terrainR.object);
-  const roadsR = createRoadRenderer(ctx, world, smp, materials, { lighting, patchMaterial });
-  scene.add(roadsR.object);
-  scene.add(createFarLand(world, { lighting, patchMaterial }).object);
-  // Static colliders (arena wall, poles, ramp, barriers): drawn exactly where the worker collides with them.
-  const collidersR = createColliderRenderer(ctx, resolveColliders(LAYOUT.colliders, (x, z) => smp.heightAt(x, z)), {
-    lighting,
-    patchMaterial,
-  });
-  scene.add(collidersR.object);
-  const qc = createQualityControllerWith(
-    ctx,
-    { lighting, post: postStack, others: [terrainR, roadsR, collidersR] },
-    forcedLevel ? { initial: forcedLevel, storage: null } : {},
-  );
-  quality = qc;
-  Object.assign(crumple.debug, { terrain: terrainR, roads: roadsR, post: postStack, director });
-  mark('renderers');
+  mark('postStack');
 
-  // Flexbody bodies: built (tessellate + bind) before the shader compile below so their programs warm up too.
+  // Flexbody bodies: built (tessellate + bind) while the terrain still generates in its worker (they
+  // need only the lighting stack), then their programs start compiling in the GPU process right away.
   // ?body=0 skips them (wireframe only: perf comparisons, debugging the sim).
   const withBody = params.get('body') !== '0';
   try {
@@ -590,7 +652,7 @@ async function boot(): Promise<void> {
     sedanVisual = createVehicleVisual(ctx, sedanCompiled, SEDAN_VISUAL, {
       lighting,
       patchMaterial,
-      groundAt: (x, z) => smp.heightAt(x, z),
+      groundAt: (x, z) => (sampler ? sampler.heightAt(x, z) : 0),
     });
     sedanVisual.object.visible = false;
     scene.add(sedanVisual.object);
@@ -620,7 +682,55 @@ async function boot(): Promise<void> {
   }
   applyDebugView();
   Object.assign(crumple.debug, { sedanVisual, cubeSkin });
+  if (sedanVisual) {
+    // Vehicle internals (nested in the 'vehicle' lap); wrapping is free while profiling is off.
+    prof.wrap(sedanVisual.damage, 'update', 'vehicle.damage');
+    prof.wrap(sedanVisual.skin, 'update', 'vehicle.flexskin');
+    prof.wrap(sedanVisual.wheels, 'update', 'vehicle.wheels');
+    if (sedanVisual.fx) prof.wrap(sedanVisual.fx, 'update', 'vehicle.fx');
+  }
   mark('vehicleVisual');
+  // Off the critical path: compile the bodies' programs against the composer target (see compileAsync below).
+  for (const obj of [sedanVisual?.object, cubeSkin?.object]) {
+    if (!obj) continue;
+    renderer.setRenderTarget(postStack.composer.inputBuffer);
+    const p = renderer.compileAsync(obj, camera, scene);
+    renderer.setRenderTarget(null);
+    p.catch((e: unknown) => console.warn('[boot] vehicle program pre-compile failed', e));
+  }
+  await nextFrame();
+
+  const [loaded, materials] = await Promise.all([terrainP, materialsP]);
+  mark('assets+terrain');
+  const world = loaded.terrain;
+  terrain = world;
+  const smp = createTerrainSampler(world);
+  sampler = smp;
+  ctx.sampler = smp;
+  await nextFrame();
+
+  const terrainR = createTerrainRenderer(ctx, world, materials, { lighting, patchMaterial });
+  scene.add(terrainR.object);
+  mark('terrainRenderer');
+  stats.stages.terrainTextureMs = Math.round(terrainR.stats.textureMs);
+  const roadsR = createRoadRenderer(ctx, world, smp, materials, { lighting, patchMaterial });
+  scene.add(roadsR.object);
+  mark('roadRenderer');
+  scene.add(createFarLand(world, { lighting, patchMaterial }).object);
+  // Static colliders (arena wall, poles, ramp, barriers): drawn exactly where the worker collides with them.
+  const collidersR = createColliderRenderer(ctx, resolveColliders(LAYOUT.colliders, (x, z) => smp.heightAt(x, z)), {
+    lighting,
+    patchMaterial,
+  });
+  scene.add(collidersR.object);
+  const qc = createQualityControllerWith(
+    ctx,
+    { lighting, post: postStack, others: [terrainR, roadsR, collidersR] },
+    forcedLevel ? { initial: forcedLevel, storage: null, maxPixelRatio } : { maxPixelRatio },
+  );
+  quality = qc;
+  Object.assign(crumple.debug, { terrain: terrainR, roads: roadsR, post: postStack, director });
+  mark('renderers');
   await nextFrame();
 
   // Physics: spawn only once the worker's heightfield is installed.
@@ -649,16 +759,20 @@ async function boot(): Promise<void> {
   roadsR.update(camera);
   mark('prime');
   try {
-    await renderer.compileAsync(scene, camera);
+    // Compile against the composer's HalfFloat target: programs key on the output colour space, and
+    // compiling for the canvas (sRGB) built a second, never-used copy of every scene program.
+    renderer.setRenderTarget(postStack.composer.inputBuffer);
+    const compiled = renderer.compileAsync(scene, camera);
+    renderer.setRenderTarget(null);
+    await compiled;
   } catch (e) {
     console.warn('[boot] compileAsync failed; programs compile on first draw', e);
   }
   mark('compile');
-  postStack.render(0);
-  await nextFrame();
-  mark('firstRender');
 
-  // Bounded wait for the sedan's first snapshot so the first visible frame shows it.
+  // Bounded wait for the sedan's first snapshot so the first visible frame shows it. No draw before
+  // it: the one real frame below compiles the remaining (shadow, post) programs behind the overlay,
+  // and a software rasterizer pays seconds per full frame.
   const waitStart = performance.now();
   while (!findRange(VEHICLE_ID) && performance.now() - waitStart < 8000) await nextFrame();
   mark('vehicle');
@@ -673,24 +787,37 @@ async function boot(): Promise<void> {
 
   const hudStatus = { paused: false, slowMo: false, camera: 'chase', transmission, beamView: true, view: debugView as string };
   const frame = (dt: number): void => {
+    prof.begin();
     // Input → worker.
     devices.poll();
     const tel = client.telemetry(VEHICLE_ID);
     const speed = tel ? (tel[VehicleTelemetry.speed] ?? 0) : 0;
     sendInput(mapper.update(dt, speed));
     handleCommands();
+    prof.lap('input');
 
     // Sim → interpolated nodes → beam view + camera subject.
     const need = client.nodeTotal * 3;
     if (positions.length < need) positions = new Float32Array(need);
-    if (client.interpolate(client.renderTime(), positions) > 0) {
+    const interpolated = client.interpolate(client.renderTime(), positions) > 0;
+    prof.lap('interpolate');
+    if (interpolated) {
       if (beamView.visible) beamView.update(client, positions);
       poseValid = updateVehiclePose();
+      prof.lap('beamView+pose');
       updateVisuals(dt);
+      prof.lap('vehicle');
+      if (prof.enabled && sedanVisual) {
+        // Upload the node texture here (it would happen inside the render) so its cost is visible.
+        renderer.initTexture(sedanVisual.skin.nodeTexture);
+        if (cubeSkin) renderer.initTexture(cubeSkin.nodeTexture);
+        prof.lap('nodeTexUpload');
+      }
     } else {
       poseValid = false;
     }
     client.drainEvents(eventSink);
+    prof.lap('events');
     // Commands apply at the next step boundary: two snapshots later the pose is the reset one.
     if (snapAfterTick >= 0 && poseValid && client.latestTick > snapAfterTick + 40) {
       snapAfterTick = -1;
@@ -702,11 +829,26 @@ async function boot(): Promise<void> {
       settleNext = 0;
     }
     director.update(dt, poseValid ? pose : null);
+    prof.lap('camera');
     lighting.update(camera);
+    updateNearCasters(lighting);
+    prof.lap('csm');
     terrainR.update(camera);
+    prof.lap('terrain');
     roadsR.update(camera);
+    prof.lap('roads');
     qc.frame(dt);
+    prof.lap('quality');
+    if (passCounter.attached) {
+      const csm = lighting.csm;
+      if (csm) for (let i = 0; i < csm.lights.length; i++) passCounter.label(csm.lights[i]!.shadow.map, `csm${i}`);
+      else passCounter.label(lighting.sun.shadow.map, 'sun');
+      passCounter.watchPasses(postStack.composer.passes);
+      passCounter.beginFrame();
+    }
     postStack.render(dt);
+    passCounter.endFrame();
+    prof.lap('render');
 
     hudStatus.paused = paused;
     hudStatus.slowMo = slowMo;
@@ -715,6 +857,8 @@ async function boot(): Promise<void> {
     hudStatus.beamView = beamView.visible && beamView.mode === 'beams';
     hudStatus.view = debugView;
     hudView.update(client.telemetry(VEHICLE_ID), hudStatus, dt);
+    prof.lap('hud');
+    perfOverlay?.update(perfData);
   };
 
   // One real frame under the overlay (shadow + post programs), then fade into the scene.

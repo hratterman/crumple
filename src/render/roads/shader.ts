@@ -8,7 +8,8 @@
  *    the pulse train, so a 12 m dash cycle at 400 m is a stable grey line;
  *  - the asphalt set is sampled twice (second sample rotated 53° at 1.2×
  *    scale) and blended by low-frequency noise to break 4 m tiling;
- *  - every period divides V_PERIOD_M (48 m) so closed loops wrap seamlessly.
+ *  - every period divides V_PERIOD_M (48 m) so closed loops wrap seamlessly;
+ *  - RD_LITE (low preset): one tap per map instead of the anti-tiling pair.
  * Junction data (cut/mark/crosswalk distances) come per vertex; see
  * junctions.ts.
  */
@@ -158,6 +159,13 @@ float rdNStr = mix(1.0, 0.4, smoothstep(30.0, 220.0, rdViewDist));
 const mat2 rdRot = mat2(0.6, 0.8, -0.8, 0.6);
 vec2 rdT1 = rdW / uTile;
 vec2 rdT2 = (rdRot * rdW) / (uTile * 1.2);
+#ifdef RD_LITE
+// Low preset: one tap per map (the anti-tiling second sample doubles the fetches).
+vec3 rdC = texture2D(tCol, rdT1).rgb;
+vec3 rdNP = rdUnpack(texture2D(tNrm, rdT1));
+float rdRgT = texture2D(tRgh, rdT1).g;
+float rdAOT = texture2D(tAO, rdT1).r;
+#else
 float rdMixT = smoothstep(0.4, 0.6, rdN1.g);
 vec3 rdC = mix(texture2D(tCol, rdT1).rgb, texture2D(tCol, rdT2).rgb, rdMixT);
 vec3 rdNb2 = rdUnpack(texture2D(tNrm, rdT2));
@@ -165,6 +173,7 @@ rdNb2.xy = rdNb2.xy * rdRot;
 vec3 rdNP = normalize(mix(rdUnpack(texture2D(tNrm, rdT1)), rdNb2, rdMixT));
 float rdRgT = mix(texture2D(tRgh, rdT1).g, texture2D(tRgh, rdT2).g, rdMixT);
 float rdAOT = mix(texture2D(tAO, rdT1).r, texture2D(tAO, rdT2).r, rdMixT);
+#endif
 float rdTexL = rdLum(rdC);
 
 // ---- gravel verge ---------------------------------------------------

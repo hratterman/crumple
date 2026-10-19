@@ -48,7 +48,7 @@ import {
   SRGBColorSpace,
   Vector3,
 } from 'three';
-import type { Camera, Material, Texture } from 'three';
+import type { Camera, Material, Object3D, Texture, WebGLRenderer } from 'three';
 import { CSM } from 'three/examples/jsm/csm/CSM.js';
 
 import { loadEnvironmentHDR } from '../assets/loader';
@@ -412,6 +412,113 @@ export function cascadeSplits(count: number, near: number, far: number, lambda =
   return target;
 }
 
+// ============================================================ shadow-map budget
+/**
+ * Far-cascade throttling: cascades 0–1 re-render every frame; cascade k ≥ 2
+ * every 2nd frame, staggered (k even on even frames, odd on odd), so a
+ * 4-cascade preset renders 3 shadow maps per frame. A skipped cascade keeps
+ * its map AND its shadow matrix (three updates the matrix only when it
+ * renders the map), so receivers stay consistent; its light box carries
+ * CSM_THROTTLE_MARGIN of extra extent so one frame of camera motion stays
+ * inside it. A camera jump > CSM_THROTTLE_JUMP_M re-renders everything.
+ */
+export const CSM_THROTTLE_FROM = 2;
+export const CSM_THROTTLE_PERIOD = 2;
+export const CSM_THROTTLE_MARGIN = 0.04;
+export const CSM_THROTTLE_JUMP_M = 8;
+
+/** Whether cascade `index` re-renders its shadow map on frame `frame` (pure). */
+export function cascadeDue(index: number, frame: number): boolean {
+  if (index < CSM_THROTTLE_FROM) return true;
+  return (frame + index) % CSM_THROTTLE_PERIOD === 0;
+}
+
+/**
+ * Bitmask of the cascades whose view-depth range overlaps [dMin, dMax] m
+ * (pure). `breaks` are CSM's split fractions of `far`; each range is widened
+ * by CSM's fade band (CSMShader: ±0.125·edge² in units of far). Never empty.
+ */
+export function cascadesOverlapping(breaks: readonly number[], far: number, dMin: number, dMax: number): number {
+  let mask = 0;
+  let a = 0;
+  for (let i = 0; i < breaks.length; i++) {
+    const b = breaks[i]!;
+    const lo = (a - 0.125 * a * a) * far;
+    const hi = i === breaks.length - 1 ? Infinity : (b + 0.125 * b * b) * far;
+    if (lo <= dMax && hi >= dMin) mask |= 1 << i;
+    a = b;
+  }
+  return mask === 0 && breaks.length > 0 ? 1 << (breaks.length - 1) : mask;
+}
+
+interface NearCasterState {
+  root: Object3D | null;
+  mask: number;
+  /** root.visible as the app left it, while shadow maps render. */
+  saved: boolean;
+  wrapped: WeakSet<object>;
+}
+const nearCasters = new WeakMap<LightingStack, NearCasterState>();
+const NEAR_CASTER_ALL = 0x7fffffff;
+
+/**
+ * Shadow LOD for one subtree (a vehicle: ~100 draws per cascade): it is
+ * rendered only into the cascades covering camera distances [dMin, dMax]
+ * (the receivers of its shadow). three tests object layers against the
+ * VIEW camera in the shadow pass, so the subtree's `visible` is toggled per
+ * cascade instead: each cascade light's shadow.updateMatrices (called right
+ * before that cascade's casters render) applies its mask bit, and
+ * renderer.shadowMap.render restores the flag afterwards. The main pass is
+ * unaffected (its render list is built before the shadow maps render).
+ * Call every frame after update(camera); root null disables it.
+ */
+export function setNearCasters(
+  stack: LightingStack,
+  renderer: WebGLRenderer,
+  camera: Camera,
+  root: Object3D | null,
+  dMin: number,
+  dMax: number,
+): void {
+  const csm = stack.csm;
+  let st = nearCasters.get(stack);
+  if (!st) {
+    st = { root: null, mask: NEAR_CASTER_ALL, saved: true, wrapped: new WeakSet() };
+    nearCasters.set(stack, st);
+    const state = st;
+    const shadowMap = renderer.shadowMap;
+    const orig = shadowMap.render;
+    shadowMap.render = function (this: unknown, ...args: Parameters<typeof orig>) {
+      const r = state.root;
+      if (r) state.saved = r.visible;
+      try {
+        orig.apply(this, args);
+      } finally {
+        if (r) r.visible = state.saved;
+      }
+    };
+  }
+  st.root = root;
+  if (!csm) {
+    st.mask = NEAR_CASTER_ALL;
+    return;
+  }
+  const far = Math.min((camera as Camera & { far?: number }).far ?? csm.maxFar, csm.maxFar);
+  st.mask = cascadesOverlapping(csm.breaks, far, dMin, dMax);
+  for (let i = 0; i < csm.lights.length; i++) {
+    const shadow = csm.lights[i]!.shadow;
+    if (st.wrapped.has(shadow)) continue;
+    st.wrapped.add(shadow);
+    const state = st;
+    const bit = 1 << i;
+    const origUpdate = shadow.updateMatrices;
+    shadow.updateMatrices = function (this: unknown, light) {
+      if (state.root) state.root.visible = state.saved && (state.mask & bit) !== 0;
+      return origUpdate.call(this, light);
+    };
+  }
+}
+
 /** Rotation (about +Y) that carries azimuth `fromAz` onto `toAz` for three's envMapRotation convention. */
 export function envYawFor(hdriDir: readonly number[], worldDir: readonly number[]): number {
   return Math.atan2(hdriDir[2]!, hdriDir[0]!) - Math.atan2(worldDir[2]!, worldDir[0]!);
@@ -693,8 +800,29 @@ export const createLightingStack: CreateLightingStack = async (ctx: RenderContex
       const cam = l.shadow.camera;
       const texelM = (cam.right - cam.left) / csm!.shadowMapSize;
       l.shadow.normalBias = CSM_NORMAL_BIAS_TEXELS * texelM;
+      l.shadow.autoUpdate = i < CSM_THROTTLE_FROM;
+      l.shadow.needsUpdate = true;
       l.name = `crumple.csm${i}`;
     });
+  };
+
+  /** csm.updateFrustums + the throttled cascades' margin (CSM re-fits the boxes from scratch each call). */
+  const fitCascades = (): void => {
+    if (!csm) return;
+    csm.updateFrustums();
+    csm.lights.forEach((l, i) => {
+      if (i < CSM_THROTTLE_FROM) return;
+      // throttled cascades: a little extra extent so a one-frame-old box still covers the slice
+      const cam = l.shadow.camera;
+      const mx = (cam.right - cam.left) * CSM_THROTTLE_MARGIN;
+      const my = (cam.top - cam.bottom) * CSM_THROTTLE_MARGIN;
+      cam.left -= mx;
+      cam.right += mx;
+      cam.bottom -= my;
+      cam.top += my;
+      cam.updateProjectionMatrix();
+    });
+    styleCsmLights();
   };
 
   if (useCsm) {
@@ -715,8 +843,7 @@ export const createLightingStack: CreateLightingStack = async (ctx: RenderContex
       lightMargin: CSM_LIGHT_MARGIN_M,
     });
     csm.fade = true;
-    csm.updateFrustums();
-    styleCsmLights();
+    fitCascades();
   } else {
     sun.castShadow = true;
     sun.shadow.mapSize.set(quality.shadowMapSize, quality.shadowMapSize);
@@ -735,8 +862,7 @@ export const createLightingStack: CreateLightingStack = async (ctx: RenderContex
     csm.shadowMapSize = q.shadowMapSize;
     csm.lightFar = lightFarFor(q);
     (csm as unknown as CSMInternals)._createLights();
-    csm.updateFrustums();
-    styleCsmLights();
+    fitCascades();
     for (const m of csm.shaders.keys() as IterableIterator<Material>) {
       m.defines = m.defines ?? {};
       if (m.defines.CSM_CASCADES !== q.csmCascades) {
@@ -763,6 +889,9 @@ export const createLightingStack: CreateLightingStack = async (ctx: RenderContex
   const fallbackTexel = new Vector3();
   let lastEnvIntensity = Number.NaN;
   let disposed = false;
+  let shadowFrame = 0;
+  const lastCamPos = new Vector3(Number.NaN, 0, 0);
+  const camPos = new Vector3();
 
   const stack: LightingStack = {
     sun,
@@ -787,11 +916,19 @@ export const createLightingStack: CreateLightingStack = async (ctx: RenderContex
           csm.camera = camera;
           lastProj.fill(Number.NaN);
         }
+        let all = false;
         if (projectionChanged(camera)) {
-          csm.updateFrustums();
-          styleCsmLights();
+          fitCascades();
+          all = true;
         }
         csm.update();
+        camPos.setFromMatrixPosition(camera.matrixWorld);
+        if (!(camPos.distanceToSquared(lastCamPos) <= CSM_THROTTLE_JUMP_M * CSM_THROTTLE_JUMP_M)) all = true;
+        lastCamPos.copy(camPos);
+        shadowFrame++;
+        for (let i = CSM_THROTTLE_FROM; i < csm.lights.length; i++) {
+          if (all || cascadeDue(i, shadowFrame)) csm.lights[i]!.shadow.needsUpdate = true;
+        }
       } else {
         // single shadow box following the camera, snapped to texels to stop shimmering
         const half = Math.min(quality.csmFar, 160) * 0.5;
@@ -855,8 +992,7 @@ export const createLightingStack: CreateLightingStack = async (ctx: RenderContex
       (sky.material.uniforms.uSunDir!.value as Vector3).copy(sunDirection);
       if (csm) {
         csm.lightDirection.copy(sunDirection).negate();
-        csm.updateFrustums();
-        styleCsmLights();
+        fitCascades();
       }
     },
     setSunColor(hex: number) {

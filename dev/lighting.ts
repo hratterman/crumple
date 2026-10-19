@@ -31,6 +31,7 @@ import {
   RepeatWrapping,
   RGBAFormat,
   Scene,
+  ShaderMaterial,
   SphereGeometry,
   SRGBColorSpace,
   Vector2,
@@ -781,8 +782,45 @@ function syncGpu(): void {
   gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
 }
 
+/**
+ * NaN/black-frame guard check: a camera-attached quad whose shader writes
+ * NaN / +Inf / 1e30 (uZero is a uniform 0, so the compiler cannot fold it).
+ * Unguarded, bloom's mip blur spreads it over the frame.
+ */
+let hotQuad: Mesh | null = null;
+function setHotPixels(kind: 'nan' | 'inf' | 'huge' | null): void {
+  if (hotQuad) {
+    camera.remove(hotQuad);
+    hotQuad.geometry.dispose();
+    (hotQuad.material as Material).dispose();
+    hotQuad = null;
+  }
+  if (!kind) return;
+  const value = kind === 'nan' ? 'uZero / uZero' : kind === 'inf' ? '1.0 / uZero' : '1e30 + uZero';
+  const mat = new ShaderMaterial({
+    uniforms: { uZero: { value: 0 } },
+    vertexShader: 'void main() { gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+    fragmentShader: `uniform float uZero; void main() { float v = ${value}; gl_FragColor = vec4(v, v, v, 1.0); }`,
+    depthTest: false,
+    depthWrite: false,
+  });
+  hotQuad = new Mesh(new PlaneGeometry(0.06, 0.06), mat);
+  hotQuad.position.set(0.1, 0.05, -1);
+  hotQuad.renderOrder = 10;
+  hotQuad.frustumCulled = false;
+  camera.add(hotQuad);
+  if (!camera.parent) scene.add(camera);
+}
+
 const hooks = {
   ready: false,
+  /** Inject non-finite / overflowing pixels (null removes them): the post stack must not blank the frame. */
+  setHotPixels,
+  /** Toggle the post stack's sanitize pass (control experiment for the guard). */
+  setSanitize(on: boolean) {
+    const p = postDebug(post).sanitize;
+    if (p) p.enabled = on;
+  },
   get texturesReady() {
     return texturesReady;
   },

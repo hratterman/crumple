@@ -138,6 +138,8 @@ export class Hud {
   private tachMax = 8000;
   private rpmSmooth = 0;
   private last = { speed: '', gear: '', mode: '', rpm: '', damage: '', badges: '', redline: false };
+  /** Numeric twins of `last` (no string formatting / Intl call on frames where nothing changed). */
+  private lastNum = { kmh: -1, rpm: -1 };
 
   constructor(parent: HTMLElement, spec: HudVehicleSpec) {
     this.spec = spec;
@@ -207,12 +209,20 @@ export class Hud {
 
     const kmh = speed * MS_TO_KMH;
     setDial(this.speedo, kmh / SPEEDO_MAX_KMH);
-    this.text('speed', this.speedText, String(Math.round(kmh)));
+    const kmhR = Math.round(kmh);
+    if (kmhR !== this.lastNum.kmh) {
+      this.lastNum.kmh = kmhR;
+      this.text('speed', this.speedText, String(kmhR));
+    }
 
     // Light smoothing hides 120 Hz telemetry quantization on the needle.
     this.rpmSmooth += (rpm - this.rpmSmooth) * (1 - Math.exp(-25 * Math.max(dt, 0)));
     setDial(this.tacho, this.rpmSmooth / this.tachMax);
-    this.text('rpm', this.rpmText, `${(Math.round(rpm / 50) * 50).toLocaleString('en-US')} rpm`);
+    const rpmR = Math.round(rpm / 50) * 50;
+    if (rpmR !== this.lastNum.rpm) {
+      this.lastNum.rpm = rpmR;
+      this.text('rpm', this.rpmText, `${rpmR.toLocaleString('en-US')} rpm`);
+    }
     const red = rpm >= this.spec.redlineRpm;
     if (red !== this.last.redline) {
       this.last.redline = red;
@@ -228,14 +238,15 @@ export class Hud {
       this.damageFill.classList.toggle('hud-damage-fill--high', damage > 0.35);
     }
 
-    const parts: string[] = [];
-    if (status.paused) parts.push('PAUSED');
-    else if (status.slowMo) parts.push('SLOW-MO 0.25×');
-    parts.push(`CAM ${status.camera.toUpperCase()}`);
-    parts.push(status.view ? status.view.toUpperCase() : status.beamView ? 'BEAMS' : 'NODES');
-    const key = parts.join('|');
+    // Cheap change key first: the badge list is only rebuilt (and formatted) when a field changed.
+    const key = `${status.paused ? 1 : 0}${status.slowMo ? 1 : 0}${status.beamView ? 1 : 0}|${status.camera}|${status.view ?? ''}`;
     if (key !== this.last.badges) {
       this.last.badges = key;
+      const parts: string[] = [];
+      if (status.paused) parts.push('PAUSED');
+      else if (status.slowMo) parts.push('SLOW-MO 0.25×');
+      parts.push(`CAM ${status.camera.toUpperCase()}`);
+      parts.push(status.view ? status.view.toUpperCase() : status.beamView ? 'BEAMS' : 'NODES');
       this.badges.replaceChildren(
         ...parts.map((p, i) => div(`hud-badge${i === 0 && (status.paused || status.slowMo) ? ' hud-badge--alert' : ''}`, undefined, p)),
       );

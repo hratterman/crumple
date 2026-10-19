@@ -4,7 +4,6 @@
  * loading screen; if workers are unavailable it is generated inline after a
  * yield (the page then freezes for the generation time).
  */
-import { generateTerrain, hashTerrain } from '../world/terrain';
 import type { TerrainData, WorldLayout } from '../world/types';
 import type { TerrainJob, TerrainJobResult } from './terrainWorker';
 
@@ -47,18 +46,20 @@ function generateInWorker(layout: WorldLayout): Promise<{ terrain: TerrainData; 
 }
 
 /**
- * Generates `layout`'s terrain off the main thread and re-verifies its hash
- * after the transfer (hashTerrain, ~30 ms). Rejects on a layout error.
+ * Generates `layout`'s terrain off the main thread. Rejects on a layout
+ * error. No main-thread re-hash after the transfer (it blocked main for
+ * ~30–100 ms): the worker's hash travels with the data and main.ts checks
+ * it against the physics worker's own generation (terrainReady).
+ * The generator itself is only loaded on main for the no-worker fallback.
  */
 export async function loadTerrain(layout: WorldLayout): Promise<LoadedTerrain> {
   try {
     const { terrain, ms } = await generateInWorker(layout);
-    const hash = hashTerrain(terrain) >>> 0;
-    if (hash !== terrain.hash >>> 0) throw new Error(`terrain transfer corrupted (hash ${hash} vs ${terrain.hash})`);
     return { terrain, generateMs: ms, worker: true };
   } catch (e) {
     if (!(e instanceof WorkerUnavailable)) throw e;
     console.warn('[world] terrain worker unavailable, generating on the main thread:', e);
+    const { generateTerrain } = await import('../world/terrain');
     await nextFrame();
     const t0 = performance.now();
     const terrain = generateTerrain(layout);
