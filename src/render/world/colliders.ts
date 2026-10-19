@@ -1,0 +1,571 @@
+/**
+ * Static-collider visuals (P4, A5): the crash-test arena furniture drawn
+ * from the SAME resolved colliders the worker collides with
+ * (src/world/colliders.ts `resolveColliders`), so what you see is what you
+ * hit:
+ *   wall    cast-concrete barrier: formwork panels + tie holes, hazard
+ *           band on both long faces, a crash-test target on the local +Z face.
+ *   pole    galvanized steel post, black/yellow sleeve, base plate + cap.
+ *   ramp    concrete wedge with a grooved deck, steel lip angle and a
+ *           painted lip line.
+ *   jersey  New-Jersey profile barrier (narrower at the top than its box
+ *           collider), weathered concrete with a reflector.
+ *   block / plate / sphere: plain concrete / steel.
+ * Every lit material goes through patchMaterial({csm}) (CSM shadows).
+ * Textures are procedural, tileable DataTextures (no DOM, deterministic).
+ * Geometry UVs are in metres; each texture's repeat sets its tile size.
+ */
+import {
+  BufferAttribute,
+  BufferGeometry,
+  ClampToEdgeWrapping,
+  CylinderGeometry,
+  DataTexture,
+  Group,
+  LinearFilter,
+  LinearMipmapLinearFilter,
+  Mesh,
+  MeshStandardMaterial,
+  RepeatWrapping,
+  RGBAFormat,
+  SphereGeometry,
+  SRGBColorSpace,
+  UnsignedByteType,
+  Vector2,
+  type Camera,
+  type Material,
+  type Object3D,
+  type Texture,
+} from 'three';
+import { createRng } from '../../core/rng';
+import { colliderVisual } from '../../world/colliders';
+import type { ResolvedCollider } from '../../world/types';
+import type { LightingStack, PatchMaterial, QualityPreset, RenderContext } from '../types';
+
+export interface ColliderRendererOptions {
+  lighting: LightingStack;
+  patchMaterial: PatchMaterial;
+}
+
+export interface ColliderRenderer {
+  readonly object: Object3D;
+  /** Static meshes: nothing per frame (kept for the renderer family's shape). */
+  update(camera: Camera): void;
+  setQuality(q: QualityPreset): void;
+  dispose(): void;
+}
+
+// ====================================================================== procedural textures
+const TEX = 256;
+
+/** Tileable value noise: lattice of `period` cells wrapping over [0, 1). */
+function periodicNoise(seed: number, period: number): (u: number, v: number) => number {
+  const rng = createRng(seed);
+  const lat = new Float32Array(period * period);
+  for (let i = 0; i < lat.length; i++) lat[i] = rng.float() * 2 - 1;
+  const at = (i: number, j: number): number => lat[((j % period) + period) % period * period + (((i % period) + period) % period)]!;
+  return (u, v) => {
+    const x = u * period;
+    const y = v * period;
+    const i = Math.floor(x);
+    const j = Math.floor(y);
+    const fx = x - i;
+    const fy = y - j;
+    const sx = fx * fx * (3 - 2 * fx);
+    const sy = fy * fy * (3 - 2 * fy);
+    const a = at(i, j) + (at(i + 1, j) - at(i, j)) * sx;
+    const b = at(i, j + 1) + (at(i + 1, j + 1) - at(i, j + 1)) * sx;
+    return a + (b - a) * sy;
+  };
+}
+
+function tileableFbm(seed: number, base: number, octaves: number): (u: number, v: number) => number {
+  const layers = Array.from({ length: octaves }, (_, k) => periodicNoise(seed + k * 101, base << k));
+  return (u, v) => {
+    let s = 0;
+    let amp = 1;
+    let norm = 0;
+    for (const n of layers) {
+      s += amp * n(u, v);
+      norm += amp;
+      amp *= 0.5;
+    }
+    return s / norm;
+  };
+}
+
+function makeTexture(data: Uint8Array, size: number, srgb: boolean, repeatU: number, repeatV: number): DataTexture {
+  const t = new DataTexture(data, size, size, RGBAFormat, UnsignedByteType);
+  t.wrapS = RepeatWrapping;
+  t.wrapT = RepeatWrapping;
+  t.magFilter = LinearFilter;
+  t.minFilter = LinearMipmapLinearFilter;
+  t.generateMipmaps = true;
+  t.anisotropy = 8;
+  t.repeat.set(repeatU, repeatV);
+  if (srgb) t.colorSpace = SRGBColorSpace;
+  t.needsUpdate = true;
+  return t;
+}
+
+/** Height field (0..1) → tangent-space normal map (tileable central differences). */
+function normalFromHeight(h: Float32Array, size: number, strength: number): Uint8Array {
+  const out = new Uint8Array(size * size * 4);
+  const H = (x: number, y: number): number => h[((y + size) % size) * size + ((x + size) % size)]!;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const dx = (H(x + 1, y) - H(x - 1, y)) * strength;
+      const dy = (H(x, y + 1) - H(x, y - 1)) * strength;
+      const l = Math.sqrt(dx * dx + dy * dy + 1);
+      const o = 4 * (y * size + x);
+      out[o] = Math.round((0.5 - (0.5 * dx) / l) * 255);
+      out[o + 1] = Math.round((0.5 - (0.5 * dy) / l) * 255);
+      out[o + 2] = Math.round((0.5 + 0.5 / l) * 255);
+      out[o + 3] = 255;
+    }
+  }
+  return out;
+}
+
+interface ConcreteStyle {
+  seed: number;
+  /** Base linear-ish grey (sRGB byte). */
+  tone: number;
+  /** Warm tint (sRGB byte offsets r, g, b). */
+  tint: [number, number, number];
+  /** Formwork: panel seams on the tile edges + tie holes. */
+  formwork?: boolean;
+  /** Grooves across v (anti-slip deck): count per tile. */
+  grooves?: number;
+  /** Water/rust streak strength (vertical, along −v). */
+  streaks?: number;
+}
+
+/** Concrete albedo (sRGB) + normal map, one tile. */
+function concreteTextures(style: ConcreteStyle): { albedo: Uint8Array; normal: Uint8Array } {
+  const fine = tileableFbm(style.seed, 16, 4);
+  const coarse = tileableFbm(style.seed + 7, 4, 3);
+  const streakN = periodicNoise(style.seed + 13, 24);
+  const rng = createRng(style.seed + 99);
+  const height = new Float32Array(TEX * TEX);
+  const albedo = new Uint8Array(TEX * TEX * 4);
+  // Pores: small dark pits.
+  const pores = new Float32Array(TEX * TEX);
+  for (let k = 0; k < 900; k++) {
+    const cx = rng.int(0, TEX - 1);
+    const cy = rng.int(0, TEX - 1);
+    const r = rng.range(0.6, 1.8);
+    for (let y = -2; y <= 2; y++)
+      for (let x = -2; x <= 2; x++) {
+        const d = Math.sqrt(x * x + y * y);
+        if (d > r) continue;
+        const i = ((cy + y + TEX) % TEX) * TEX + ((cx + x + TEX) % TEX);
+        pores[i] = Math.max(pores[i]!, 1 - d / r);
+      }
+  }
+  for (let y = 0; y < TEX; y++) {
+    for (let x = 0; x < TEX; x++) {
+      const u = x / TEX;
+      const v = y / TEX;
+      const i = y * TEX + x;
+      let h = 0.5 + 0.18 * fine(u, v) + 0.1 * coarse(u, v) - 0.35 * pores[i]!;
+      let shade = 1 + 0.07 * fine(u * 2, v * 2) + 0.09 * coarse(u, v) - 0.25 * pores[i]!;
+      if (style.formwork) {
+        // Seams on the tile border (≈ 1.5 cm at 1 m/128 px), 4 tie holes.
+        const su = Math.min(x, TEX - 1 - x);
+        const sv = Math.min(y, TEX - 1 - y);
+        const seam = Math.min(su, sv);
+        if (seam < 2) {
+          h -= 0.3;
+          shade *= 0.8;
+        } else if (seam < 4) shade *= 0.93;
+        for (const [tu, tv] of [[0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75]] as const) {
+          const d = Math.hypot(u - tu, v - tv) * TEX;
+          if (d < 4) {
+            h -= 0.5 * (1 - d / 4);
+            shade *= 0.62 + 0.38 * (d / 4);
+          } else if (d < 9) shade *= 1 - 0.05 * (1 - (d - 4) / 5);
+        }
+      }
+      if (style.grooves) {
+        const g = (v * style.grooves) % 1;
+        if (g < 0.12) {
+          h -= 0.35;
+          shade *= 0.86;
+        }
+      }
+      if (style.streaks) {
+        const s = Math.max(0, streakN(u, 0.05) * 1.6 - 0.3) * (0.4 + 0.6 * v);
+        shade *= 1 - style.streaks * s;
+      }
+      height[i] = h;
+      const o = 4 * i;
+      const base = style.tone * shade;
+      albedo[o] = clampByte(base + style.tint[0]);
+      albedo[o + 1] = clampByte(base + style.tint[1]);
+      albedo[o + 2] = clampByte(base + style.tint[2]);
+      albedo[o + 3] = 255;
+    }
+  }
+  return { albedo, normal: normalFromHeight(height, TEX, 3.5) };
+}
+
+const clampByte = (v: number): number => (v < 0 ? 0 : v > 255 ? 255 : Math.round(v));
+
+/** Black/yellow 45° hazard stripes, one stripe pair per tile. */
+function hazardStripes(): Uint8Array {
+  const n = 64;
+  const out = new Uint8Array(n * n * 4);
+  for (let y = 0; y < n; y++)
+    for (let x = 0; x < n; x++) {
+      const s = ((x + y) % n) / n;
+      const edge = Math.min(Math.abs(s - 0.5), s, 1 - s) * n; // px to a stripe boundary
+      const yellow = s < 0.5;
+      const aa = Math.min(1, edge / 1.2);
+      const c: [number, number, number] = yellow ? [242, 190, 24] : [22, 22, 22];
+      const o: [number, number, number] = yellow ? [22, 22, 22] : [242, 190, 24];
+      const i = 4 * (y * n + x);
+      for (let k = 0; k < 3; k++) out[i + k] = Math.round(c[k]! * (0.5 + 0.5 * aa) + o[k]! * (0.5 - 0.5 * aa));
+      out[i + 3] = 255;
+    }
+  return out;
+}
+
+/** Crash-test target: black/yellow quadrant disc with a white rim; alpha 0 outside. */
+function crashTarget(): Uint8Array {
+  const n = 128;
+  const out = new Uint8Array(n * n * 4);
+  for (let y = 0; y < n; y++)
+    for (let x = 0; x < n; x++) {
+      const u = (x + 0.5) / n - 0.5;
+      const v = (y + 0.5) / n - 0.5;
+      const r = Math.hypot(u, v) * 2;
+      const i = 4 * (y * n + x);
+      if (r > 1) {
+        out[i + 3] = 0;
+        continue;
+      }
+      const rim = r > 0.88;
+      const quad = (u >= 0) === (v >= 0);
+      const col: [number, number, number] = rim ? [235, 235, 230] : quad ? [242, 190, 24] : [18, 18, 18];
+      out[i] = col[0];
+      out[i + 1] = col[1];
+      out[i + 2] = col[2];
+      out[i + 3] = 255;
+    }
+  return out;
+}
+
+// ====================================================================== geometry (pure; UVs in metres)
+type V3 = readonly [number, number, number];
+
+/** Accumulates flat-shaded quads/triangles with per-face UVs (metres). */
+class GeoBuilder {
+  pos: number[] = [];
+  nrm: number[] = [];
+  uv: number[] = [];
+  idx: number[] = [];
+
+  /** Planar polygon (convex, CCW seen from outside), uv = (p·uAxis, p·vAxis). */
+  poly(pts: readonly V3[], uAxis: V3, vAxis: V3): void {
+    const a = pts[0]!;
+    const b = pts[1]!;
+    const c = pts[2]!;
+    const e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    const e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    let nx = e1[1]! * e2[2]! - e1[2]! * e2[1]!;
+    let ny = e1[2]! * e2[0]! - e1[0]! * e2[2]!;
+    let nz = e1[0]! * e2[1]! - e1[1]! * e2[0]!;
+    const l = Math.hypot(nx, ny, nz) || 1;
+    nx /= l;
+    ny /= l;
+    nz /= l;
+    const base = this.pos.length / 3;
+    for (const p of pts) {
+      this.pos.push(p[0], p[1], p[2]);
+      this.nrm.push(nx, ny, nz);
+      this.uv.push(p[0] * uAxis[0] + p[1] * uAxis[1] + p[2] * uAxis[2], p[0] * vAxis[0] + p[1] * vAxis[1] + p[2] * vAxis[2]);
+    }
+    for (let k = 1; k + 1 < pts.length; k++) this.idx.push(base, base + k, base + k + 1);
+  }
+
+  build(): BufferGeometry {
+    const g = new BufferGeometry();
+    g.setAttribute('position', new BufferAttribute(new Float32Array(this.pos), 3));
+    g.setAttribute('normal', new BufferAttribute(new Float32Array(this.nrm), 3));
+    g.setAttribute('uv', new BufferAttribute(new Float32Array(this.uv), 2));
+    g.setIndex(this.idx);
+    g.computeBoundingBox();
+    g.computeBoundingSphere();
+    return g;
+  }
+}
+
+const X: V3 = [1, 0, 0];
+const Y: V3 = [0, 1, 0];
+const Z: V3 = [0, 0, 1];
+const NX: V3 = [-1, 0, 0];
+const NZ: V3 = [0, 0, -1];
+
+/** Axis-aligned box [min, max] with world-scale UVs (u along the face's horizontal edge, v up). */
+export function boxGeometry(min: V3, max: V3): BufferGeometry {
+  const b = new GeoBuilder();
+  addBox(b, min, max);
+  return b.build();
+}
+
+function addBox(b: GeoBuilder, [x0, y0, z0]: V3, [x1, y1, z1]: V3): void {
+  b.poly([[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], X, Y); // +Z
+  b.poly([[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0]], NX, Y); // −Z
+  b.poly([[x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1]], NZ, Y); // +X
+  b.poly([[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], Z, Y); // −X
+  b.poly([[x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0]], X, NZ); // +Y
+  b.poly([[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]], X, Z); // −Y
+}
+
+/** Ramp wedge (ColliderDef 'ramp'): surface from y = −hy at z = +hz up to +hy at z = −hz. Deck v = slope distance. */
+export function rampGeometry(hx: number, hy: number, hz: number): { body: BufferGeometry; deck: BufferGeometry } {
+  const body = new GeoBuilder();
+  const deck = new GeoBuilder();
+  const slopeLen = Math.hypot(2 * hz, 2 * hy);
+  const sv: V3 = [0, (2 * hy) / slopeLen, (-2 * hz) / slopeLen]; // up the slope
+  deck.poly([[-hx, -hy, hz], [hx, -hy, hz], [hx, hy, -hz], [-hx, hy, -hz]], X, sv);
+  body.poly([[hx, -hy, -hz], [-hx, -hy, -hz], [-hx, hy, -hz], [hx, hy, -hz]], NX, Y); // back (lip face)
+  body.poly([[hx, -hy, hz], [hx, -hy, -hz], [hx, hy, -hz]], NZ, Y); // +X side
+  body.poly([[-hx, -hy, -hz], [-hx, -hy, hz], [-hx, hy, -hz]], Z, Y); // −X side
+  body.poly([[-hx, -hy, -hz], [hx, -hy, -hz], [hx, -hy, hz], [-hx, -hy, hz]], X, Z); // bottom
+  return { body: body.build(), deck: deck.build() };
+}
+
+/**
+ * New-Jersey barrier profile in (z, y) for half width hz and half height hy
+ * (standard 0.61 × 0.81 m: 75 mm toe, 55° face to 330 mm, 84° face to a
+ * 150 mm top), extruded along x over ±hx.
+ */
+export function jerseyGeometry(hx: number, hy: number, hz: number): BufferGeometry {
+  const H = 2 * hy;
+  const prof: [number, number][] = [
+    [hz, -hy],
+    [hz, -hy + (0.075 / 0.81) * H],
+    [hz * 0.41, -hy + (0.33 / 0.81) * H],
+    [hz * 0.25, hy],
+  ];
+  const loop: [number, number][] = [...prof, ...prof.slice().reverse().map(([z, y]) => [-z, y] as [number, number])];
+  const b = new GeoBuilder();
+  for (let k = 0; k < loop.length; k++) {
+    const [za, ya] = loop[k]!;
+    const [zb, yb] = loop[(k + 1) % loop.length]!;
+    if (za === zb && ya === yb) continue;
+    // Quad from profile edge a→b extruded along x; u along x, v along the profile edge.
+    const ex = [0, yb - ya, zb - za];
+    const el = Math.hypot(ex[1]!, ex[2]!) || 1;
+    const vAxis: V3 = [0, ex[1]! / el, ex[2]! / el];
+    b.poly([[hx, ya, za], [-hx, ya, za], [-hx, yb, zb], [hx, yb, zb]], NX, vAxis);
+  }
+  // End caps (convex profile).
+  b.poly(loop.map(([z, y]) => [hx, y, z] as V3), NZ, Y);
+  b.poly(loop.slice().reverse().map(([z, y]) => [-hx, y, z] as V3), Z, Y);
+  return b.build();
+}
+
+// ====================================================================== renderer
+interface Mats {
+  wall: MeshStandardMaterial;
+  concrete: MeshStandardMaterial;
+  jersey: MeshStandardMaterial;
+  deck: MeshStandardMaterial;
+  steel: MeshStandardMaterial;
+  hazard: MeshStandardMaterial;
+  target: MeshStandardMaterial;
+  paint: MeshStandardMaterial;
+  reflector: MeshStandardMaterial;
+}
+
+function createMaterials(maxAniso: number): { mats: Mats; textures: Texture[] } {
+  const textures: Texture[] = [];
+  const tex = (data: Uint8Array, size: number, srgb: boolean, ru: number, rv: number): DataTexture => {
+    const t = makeTexture(data, size, srgb, ru, rv);
+    t.anisotropy = Math.min(t.anisotropy, maxAniso);
+    textures.push(t);
+    return t;
+  };
+  const concreteSet = (style: ConcreteStyle, tileU: number, tileV: number, roughness: number): MeshStandardMaterial => {
+    const c = concreteTextures(style);
+    return new MeshStandardMaterial({
+      name: `collider-concrete-${style.seed}`,
+      map: tex(c.albedo, TEX, true, 1 / tileU, 1 / tileV),
+      normalMap: tex(c.normal, TEX, false, 1 / tileU, 1 / tileV),
+      normalScale: new Vector2(1, 1),
+      roughness,
+      metalness: 0,
+    });
+  };
+  const stripes = hazardStripes();
+  const mats: Mats = {
+    // Wall formwork panels 2.4 × 1.0 m.
+    wall: concreteSet({ seed: 11, tone: 158, tint: [4, 2, -3], formwork: true, streaks: 0.22 }, 2.4, 1.0, 0.9),
+    concrete: concreteSet({ seed: 23, tone: 150, tint: [3, 2, -2], streaks: 0.12 }, 2.0, 2.0, 0.92),
+    jersey: concreteSet({ seed: 37, tone: 176, tint: [3, 2, -1], streaks: 0.3 }, 1.5, 1.5, 0.88),
+    deck: concreteSet({ seed: 41, tone: 140, tint: [2, 1, -2], grooves: 8 }, 1.2, 1.2, 0.95),
+    steel: new MeshStandardMaterial({ name: 'collider-steel', color: 0xa9afb5, metalness: 0.85, roughness: 0.36 }),
+    hazard: new MeshStandardMaterial({ name: 'collider-hazard', map: tex(stripes, 64, true, 1 / 0.5, 1 / 0.5), roughness: 0.55, metalness: 0 }),
+    target: new MeshStandardMaterial({
+      name: 'collider-target',
+      map: tex(crashTarget(), 128, true, 1, 1),
+      alphaTest: 0.5,
+      roughness: 0.5,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    }),
+    paint: new MeshStandardMaterial({ name: 'collider-paint', color: 0xf0bf1a, roughness: 0.5, metalness: 0 }),
+    reflector: new MeshStandardMaterial({ name: 'collider-reflector', color: 0xff8a1c, emissive: 0x401800, roughness: 0.25, metalness: 0.1 }),
+  };
+  // The target texture shows one disc over the whole quad (UV 0..1).
+  mats.target.map!.wrapS = ClampToEdgeWrapping;
+  mats.target.map!.wrapT = ClampToEdgeWrapping;
+  return { mats, textures };
+}
+
+function mesh(g: BufferGeometry, m: Material, shadows = true): Mesh {
+  const me = new Mesh(g, m);
+  me.castShadow = shadows;
+  me.receiveShadow = true;
+  return me;
+}
+
+/** Builds one collider's visual group in its LOCAL frame (caller places it). */
+function buildCollider(c: ResolvedCollider, M: Mats): Group {
+  const g = new Group();
+  g.name = `collider:${c.id}`;
+  const [a, b, d] = c.size;
+  switch (colliderVisual(c)) {
+    case 'none':
+      break;
+    case 'wall': {
+      g.add(mesh(boxGeometry([-a, -b, -d], [a, b, d]), M.wall));
+      // Hazard bands near the top of both long faces (2 mm proud).
+      const band = Math.min(0.3, b * 0.3);
+      const y1 = b - 0.12;
+      g.add(mesh(boxGeometry([-a + 0.05, y1 - band, d], [a - 0.05, y1, d + 0.004]), M.hazard, false));
+      g.add(mesh(boxGeometry([-a + 0.05, y1 - band, -d - 0.004], [a - 0.05, y1, -d]), M.hazard, false));
+      // Crash target on the +Z face at bumper height.
+      const tr = Math.min(0.45, b * 0.4);
+      const tb = new GeoBuilder();
+      tb.poly([[-tr, -tr, 0], [tr, -tr, 0], [tr, tr, 0], [-tr, tr, 0]], [0.5 / tr, 0, 0], [0, 0.5 / tr, 0]);
+      const target = tb.build();
+      // uv = p/(2·tr) ∈ [−0.5, 0.5] → shift to [0, 1].
+      const uv = target.getAttribute('uv') as BufferAttribute;
+      for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) + 0.5, uv.getY(i) + 0.5);
+      const tm = mesh(target, M.target, false);
+      tm.position.set(0, -b + 0.55, d + 0.006);
+      g.add(tm);
+      break;
+    }
+    case 'pole': {
+      const r = a;
+      const hh = b;
+      g.add(mesh(new CylinderGeometry(r, r, 2 * hh, 28, 1), M.steel));
+      const sleeveH = Math.min(1.0, hh);
+      const sleeve = new CylinderGeometry(r * 1.015, r * 1.015, sleeveH, 28, 1, true);
+      // Wrap stripes: u = 1 around (≈ 2πr m) → repeat count via the uv itself.
+      const suv = sleeve.getAttribute('uv') as BufferAttribute;
+      const circ = 2 * Math.PI * r;
+      for (let i = 0; i < suv.count; i++) suv.setXY(i, suv.getX(i) * circ, suv.getY(i) * sleeveH);
+      const sm = mesh(sleeve, M.hazard, false);
+      sm.position.y = -hh + 0.3 + sleeveH / 2;
+      g.add(sm);
+      const plate = mesh(new CylinderGeometry(r * 1.45, r * 1.55, 0.03, 28), M.steel);
+      plate.position.y = -hh + 0.015;
+      g.add(plate);
+      const cap = mesh(new SphereGeometry(r * 1.02, 20, 8, 0, Math.PI * 2, 0, Math.PI / 2), M.steel);
+      cap.position.y = hh;
+      cap.scale.y = 0.35;
+      g.add(cap);
+      break;
+    }
+    case 'ramp': {
+      const w = rampGeometry(a, b, d);
+      g.add(mesh(w.body, M.concrete));
+      g.add(mesh(w.deck, M.deck));
+      // Steel lip angle along the top back edge and a painted line just below it.
+      g.add(mesh(boxGeometry([-a, b - 0.06, -d - 0.006], [a, b + 0.006, -d + 0.04]), M.steel));
+      // Painted line 12–24 cm down the slope from the lip.
+      const L = Math.hypot(2 * d, 2 * b);
+      const at = (sDown: number): [number, number] => [b - (2 * b * sDown) / L + 0.004, -d + (2 * d * sDown) / L];
+      const [ya, za] = at(0.24);
+      const [yb, zb] = at(0.12);
+      const lb = new GeoBuilder();
+      lb.poly([[-a + 0.05, ya, za], [a - 0.05, ya, za], [a - 0.05, yb, zb], [-a + 0.05, yb, zb]], X, Z);
+      g.add(mesh(lb.build(), M.paint, false));
+      break;
+    }
+    case 'jersey': {
+      g.add(mesh(jerseyGeometry(a, b, d), M.jersey));
+      // Reflector disc on both faces near the top.
+      const rg = new CylinderGeometry(0.035, 0.035, 0.01, 16);
+      for (const s of [1, -1]) {
+        const rm = mesh(rg, M.reflector, false);
+        rm.rotation.x = Math.PI / 2;
+        rm.position.set(0, b - 0.12, s * (d * 0.25 + 0.02));
+        g.add(rm);
+      }
+      break;
+    }
+    case 'plate': {
+      g.add(mesh(boxGeometry([-a, -0.05, -d], [a, 0, d]), M.steel));
+      break;
+    }
+    default: {
+      if (c.kind === 'sphere') g.add(mesh(new SphereGeometry(a, 32, 16), M.concrete));
+      else if (c.kind === 'cylinder') g.add(mesh(new CylinderGeometry(a, a, 2 * b, 28), M.concrete));
+      else if (c.kind === 'ramp') {
+        const w = rampGeometry(a, b, d);
+        g.add(mesh(w.body, M.concrete), mesh(w.deck, M.deck));
+      } else if (c.kind === 'plane') g.add(mesh(boxGeometry([-a, -0.05, -d], [a, 0, d]), M.concrete));
+      else g.add(mesh(boxGeometry([-a, -b, -d], [a, b, d]), M.concrete));
+    }
+  }
+  return g;
+}
+
+/**
+ * Builds the meshes for `resolved` colliders (call again with a new set; P5
+ * breakables will swap meshes per id). Materials are patched with CSM.
+ */
+export function createColliderRenderer(ctx: RenderContext, resolved: readonly ResolvedCollider[], opts: ColliderRendererOptions): ColliderRenderer {
+  let maxAniso = 8;
+  try {
+    maxAniso = ctx.renderer.capabilities.getMaxAnisotropy();
+  } catch {
+    maxAniso = 1;
+  }
+  const { mats, textures } = createMaterials(maxAniso);
+  const csm = opts.lighting.csm;
+  for (const m of Object.values(mats) as MeshStandardMaterial[]) opts.patchMaterial(m, { csm });
+
+  const root = new Group();
+  root.name = 'colliders';
+  for (const c of resolved) {
+    const g = buildCollider(c, mats);
+    g.position.set(c.pos[0], c.pos[1], c.pos[2]);
+    g.quaternion.set(c.quat[0], c.quat[1], c.quat[2], c.quat[3]);
+    g.updateMatrixWorld(true);
+    g.matrixAutoUpdate = false;
+    root.add(g);
+  }
+
+  return {
+    object: root,
+    update() {},
+    setQuality() {},
+    dispose() {
+      root.traverse((o) => {
+        if ((o as Mesh).isMesh) (o as Mesh).geometry.dispose();
+      });
+      for (const m of Object.values(mats) as Material[]) m.dispose();
+      for (const t of textures) t.dispose();
+      root.removeFromParent();
+    },
+  };
+}

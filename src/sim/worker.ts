@@ -168,6 +168,10 @@ export class WorkerHost {
           engine.recover(msg.objectId, msg.pos);
           this.dirty = true;
           return;
+        case 'setColliders':
+          engine.setExtraColliders(msg.colliders);
+          this.dirty = true;
+          return;
         default:
           throw new SimCommandError(`unknown command ${String(type)}`);
       }
@@ -223,7 +227,10 @@ export class WorkerHost {
    * mismatch: the car must have ground) and answer `terrainReady`; a
    * mismatch with a non-zero main hash also posts `error`. The splat
    * weights are dropped after hashing (render-only, 8 MB). `generateMs` is
-   * the whole blocking time (generate + hash + sampler build). Generation
+   * the whole blocking time (generate + hash + sampler build). The layout's
+   * static colliders install with it (resolved against this terrain; an
+   * invalid set posts `error` after terrainReady and leaves the previous
+   * layout set). Generation
    * blocks the worker for a while: the wall clock is re-based afterwards,
    * so that time is skipped rather than caught up (no 200-step burst).
    */
@@ -238,11 +245,21 @@ export class WorkerHost {
     const terrain = this.terrainDeps.generateTerrain(layout);
     const hash = this.terrainDeps.hashTerrain(terrain) >>> 0;
     engine.setGroundTerrain({ ...terrain, splat: new Uint8Array(0) });
+    // Layout colliders resolve against this terrain (same helper as main's meshes).
+    let colliderError: string | null = null;
+    try {
+      engine.setLayoutColliders(layout.colliders ?? []);
+    } catch (e) {
+      colliderError = errMessage(e);
+    }
     const t1 = this.scheduler.now();
     this.lastWall = t1;
     this.dirty = true;
     const matched = expected !== 0 && hash === expected;
     this.post({ type: 'terrainReady', layoutId: terrain.layoutId, terrainHash: hash, matched, generateMs: t1 - t0 });
+    if (colliderError !== null) {
+      this.post({ type: 'error', command: 'groundHeightfield', message: `layout colliders not installed: ${colliderError}` });
+    }
     if (expected !== 0 && !matched) {
       this.post({
         type: 'error',

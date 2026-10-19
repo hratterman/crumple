@@ -36,7 +36,7 @@ import {
  * few mm (m·g/KC_MAX) without creating 2 kHz ringing.
  */
 const KC_MAX = 2.5e5;
-const KC_STABILITY = 0.2;
+export const KC_STABILITY = 0.2;
 /**
  * Contact damping ratio ζ. The damper acts in both directions (approach and
  * rebound) with the total normal force clamped ≥ 0: an approach-only damper
@@ -45,7 +45,7 @@ const KC_STABILITY = 0.2;
  * lets the node separate while still moving, so e is above the unclamped
  * exp(-ζπ/sqrt(1-ζ²)) ≈ 0.07) and resting contacts settle quickly.
  */
-const CONTACT_ZETA = 0.65;
+export const CONTACT_ZETA = 0.65;
 /**
  * SOFT-LAYER contact law (nodes with contactK > 0: tyre tread). The penalty
  * stiffness is the node's contactK (stability-capped like the rigid law)
@@ -97,11 +97,11 @@ const SOFT_LAYER_ZETA = 0.08;
  * of magnitude below the real collision impulse — whereas m·vn is the impulse
  * the full contact event delivers (lower bound, excluding restitution).
  */
-const IMPACT_MIN_IMPULSE = 0.5;
+export const IMPACT_MIN_IMPULSE = 0.5;
 /** Skid events: slip speed threshold (m/s), minimum load (N), per-node cooldown (steps). */
-const SKID_MIN_SLIP = 0.5;
-const SKID_MIN_LOAD = 1;
-const SKID_COOLDOWN_STEPS = 20;
+export const SKID_MIN_SLIP = 0.5;
+export const SKID_MIN_LOAD = 1;
+export const SKID_COOLDOWN_STEPS = 20;
 /**
  * Normal sampling early-out: nodes higher than SLOPE_SKIP·radius above the
  * ground height are skipped without sampling the normal. Exact for slopes up
@@ -151,7 +151,8 @@ const normal = new Float64Array(3);
  */
 const skidCooldowns = new WeakMap<SimState, Uint8Array>();
 
-function cooldownsFor(state: SimState): Uint8Array {
+/** The per-node skid cooldown table (shared with the static-collider pass). */
+export function cooldownsFor(state: SimState): Uint8Array {
   let cd = skidCooldowns.get(state);
   if (cd === undefined || cd.length < state.nodeCapacity) {
     const next = new Uint8Array(state.nodeCapacity);

@@ -23,7 +23,11 @@ import {
   type Transform,
 } from '../protocol/messages';
 import { applyBeamForces } from './beams';
+import { applyColliderContacts, compileColliders, resetColliderContactState } from './collision/colliders';
 import { applyGroundContacts, PlaneSampler, resetGroundContactState } from './collision/ground';
+import type { ColliderWorld } from './collision/types';
+import { resolveColliders } from '../world/colliders';
+import type { ColliderDef, ResolvedCollider } from '../world/types';
 import { DEFAULT_MATERIALS } from './collision/materials';
 import { integrateNodes } from './integrator';
 import { compileRig } from './rig/builder';
@@ -209,6 +213,13 @@ export class SimEngine {
   materials: MaterialTable = DEFAULT_MATERIALS;
   /** Fixed steps taken since init. */
   tick = 0;
+  /** Layout colliders (installed with the heightfield), then the setColliders extra set. */
+  layoutColliders: ResolvedCollider[] = [];
+  extraColliders: ResolvedCollider[] = [];
+  /** Compiled active collider set (layout then extra); null = none. */
+  colliderWorld: ColliderWorld | null = null;
+  /** Repair epoch per objectId (+1 per reset; snapshot OBJ_REPAIR_EPOCH). */
+  private readonly repairEpochs = new Map<number, number>();
   /** Compiled rig per objectId (needed for reset/repair). */
   private readonly rigs = new Map<number, CompiledRig>();
   /** Vehicle runtime per objectId. */
@@ -279,6 +290,46 @@ export class SimEngine {
     this.terrain = null;
   }
 
+  /** Ground height for collider resolution (0 without ground). */
+  private groundHeightAt = (x: number, z: number): number => (this.sampler ? this.sampler.heightAt(x, z) : 0);
+
+  /**
+   * Installs the LAYOUT collider set (worker: with groundHeightfield):
+   * resolved against the current ground. Invalid → SimCommandError, set unchanged.
+   */
+  setLayoutColliders(defs: readonly ColliderDef[]): void {
+    this.layoutColliders = this.resolve(defs);
+    this.rebuildColliders();
+  }
+
+  /** Replaces the EXTRA collider set (protocol setColliders), appended after the layout set. */
+  setExtraColliders(defs: readonly ColliderDef[]): void {
+    this.extraColliders = this.resolve(defs);
+    this.rebuildColliders();
+  }
+
+  private resolve(defs: readonly ColliderDef[]): ResolvedCollider[] {
+    if (!Array.isArray(defs)) throw new SimCommandError('colliders must be an array');
+    try {
+      return resolveColliders(defs, this.groundHeightAt);
+    } catch (e) {
+      throw new SimCommandError(`invalid colliders: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  private rebuildColliders(): void {
+    const all = [...this.layoutColliders, ...this.extraColliders];
+    const ids = new Set<string>();
+    for (const c of all) {
+      if (ids.has(c.id)) throw new SimCommandError(`duplicate collider id '${c.id}' (layout and extra sets share one id space)`);
+      ids.add(c.id);
+    }
+    for (const c of all) {
+      if (c.material >= this.materials.friction.length) throw new SimCommandError(`collider '${c.id}': material ${c.material} is not in the material table`);
+    }
+    this.colliderWorld = all.length > 0 ? compileColliders(all) : null;
+  }
+
   spawn(objectId: number, def: RigDef, transform: Transform): SimObject {
     let rig: CompiledRig;
     try {
@@ -299,6 +350,8 @@ export class SimEngine {
     this.rigs.set(objectId, rig);
     // Ranges from here on shifted; per-node contact bookkeeping restarts.
     resetGroundContactState(this.state, obj.nodeStart, this.state.nodeCount - obj.nodeStart);
+    resetColliderContactState(this.state, obj.nodeStart, this.state.nodeCount - obj.nodeStart);
+    this.repairEpochs.set(objectId, 0);
     this.syncVehicles();
     return obj;
   }
@@ -356,6 +409,7 @@ export class SimEngine {
     }
     recoverVehicle(this.state, v, this.sampler, pos);
     resetGroundContactState(this.state, obj.nodeStart, obj.nodeCount);
+    resetColliderContactState(this.state, obj.nodeStart, obj.nodeCount);
   }
 
   /** Rebuilds the per-object vehicle slots and rebases every vehicle onto its current arena range. */
@@ -381,7 +435,9 @@ export class SimEngine {
     this.arena.remove(objectId);
     this.rigs.delete(objectId);
     this.vehicles.delete(objectId);
+    this.repairEpochs.delete(objectId);
     resetGroundContactState(this.state, start, this.state.nodeCount + n - start);
+    resetColliderContactState(this.state, start, this.state.nodeCount + n - start);
     this.syncVehicles();
   }
 
@@ -395,6 +451,8 @@ export class SimEngine {
       throw new SimCommandError(e instanceof Error ? e.message : String(e), objectId);
     }
     resetGroundContactState(this.state, obj.nodeStart, obj.nodeCount);
+    resetColliderContactState(this.state, obj.nodeStart, obj.nodeCount);
+    this.repairEpochs.set(objectId, ((this.repairEpochs.get(objectId) ?? 0) + 1) >>> 0);
     const v = this.vehicles.get(objectId);
     if (v) resetVehicleRuntime(v);
   }
@@ -429,7 +487,7 @@ export class SimEngine {
 
   /**
    * One fixed step (SIM_DT): per object ascending → [vehicle pre-step] →
-   * hydro drive → beams → ground → integrate.
+   * hydro drive → beams → ground → static colliders → integrate.
    */
   step(): void {
     const s = this.state;
@@ -442,6 +500,7 @@ export class SimEngine {
     const gz = this.gravityZ;
     const restLen = s.restLen;
     const vslots = this.vehicleSlots;
+    const cw = this.colliderWorld;
     // The wheel kernels' ground is module state: point it at THIS engine's
     // ground every step (several engines may coexist, e.g. in tests).
     if (this.vehicles.size > 0) setWheelGround(sampler, this.materials, SIM_DT);
@@ -460,6 +519,9 @@ export class SimEngine {
       if (sampler !== null) {
         applyGroundContacts(s, obj.nodeStart, obj.nodeCount, sampler, this.materials, SIM_DT, obj.objectId, sink, gx, gy, gz);
       }
+      if (cw !== null) {
+        applyColliderContacts(s, obj.nodeStart, obj.nodeCount, cw, this.materials, SIM_DT, obj.objectId, sink, gx, gy, gz);
+      }
       integrateNodes(s, obj.nodeStart, obj.nodeCount, SIM_DT, gx, gy, gz);
     }
     this.tick++;
@@ -468,6 +530,7 @@ export class SimEngine {
   /**
    * Fills an attached writer: header, objects (ascending id; vehicle
    * telemetry, zeros for plain rigs), nodes f64→f32, strains (debugStrains),
+   * broken-beam bitset + repair epoch (P4),
    * then all pending events, which are cleared. Only call for snapshots that
    * will actually be sent.
    */
@@ -480,6 +543,8 @@ export class SimEngine {
       const i = writer.addObject(obj.objectId, obj.flags, obj.nodeCount, obj.beamCount);
       writer.writeNodesSoA(i, s.posX, s.posY, s.posZ, obj.nodeStart);
       writer.writeStrains(i, s.strainOut, obj.beamStart);
+      writer.writeBrokenBeams(i, s.active, obj.beamStart);
+      writer.setRepairEpoch(i, this.repairEpochs.get(obj.objectId) ?? 0);
       const veh = this.vehicleSlots[o];
       if (veh) {
         const t = writeVehicleTelemetry(s, veh);
