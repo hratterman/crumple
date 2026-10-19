@@ -169,6 +169,9 @@ export class WorkerHost {
         case 'setTransmission':
           engine.setTransmission(msg.objectId, msg.mode);
           return;
+        case 'setAssists':
+          engine.setAssists(msg.objectId, msg);
+          return;
         case 'recover':
           engine.recover(msg.objectId, msg.pos);
           this.dirty = true;

@@ -248,6 +248,16 @@ export interface SetTransmissionMsg {
   mode: TransmissionMode;
 }
 /**
+ * Driver assists (additive P5): `tractionControl` engages / releases the
+ * vehicle's traction control (default on at spawn; kept across reset and
+ * recover). Omitted fields are unchanged. Non-vehicle ids answer `error`.
+ */
+export interface SetAssistsMsg {
+  type: 'setAssists';
+  objectId: number;
+  tractionControl?: boolean;
+}
+/**
  * Recover (R): rigidly re-place the CURRENT (deformed) node set upright —
  * vehicle frame up → world +Y, heading kept — with its frame origin at
  * `pos` (default: current origin + 0.5 m up, ground-clearance adjusted),
@@ -360,6 +370,7 @@ export type MainToWorker =
   | ReturnBufferMsg
   | SpawnVehicleMsg
   | SetTransmissionMsg
+  | SetAssistsMsg
   | RecoverMsg
   | GroundHeightfieldCmd
   | SetCollidersMsg

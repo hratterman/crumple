@@ -140,6 +140,9 @@ const MAX_OBJECT_ID = PROP_DYNAMIC_ID_BASE + 4096;
 const QUEUE = 1024;
 const SEG_M = 0.8;
 const PATCH_LENGTH_M = 0.28;
+/** Burnout (wheel spinning while its contact barely moves): a rubber patch is stamped under it every STAMP_S of slip. */
+const STAMP_S = 0.2;
+const STAMP_MAX_SPEED = 1.5;
 /** Sim step (s): WorldFrame.tick × SIM_DT = the latest snapshot's sim time. */
 const SIM_DT = 1 / 2000;
 const PLASTIC_BLACK: readonly [number, number, number] = [0.02, 0.02, 0.022];
@@ -195,6 +198,8 @@ interface WheelFx {
   smokeAcc: number;
   sprayAcc: number;
   roostAcc: number;
+  /** Seconds of near-stationary skid slip since the last burnout stamp. */
+  stampT: number;
 }
 
 interface VehicleFx {
@@ -474,6 +479,33 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
     w.pcz = z;
     w.lastS = 0;
   };
+  /**
+   * Burnout patch: one PATCH_LENGTH_M-long quad along heading (hx, hz) centred
+   * on the contact (a strip never grows while the contact stands still;
+   * repeated stamps darken the patch).
+   */
+  const stampPatch = (w: WheelFx, s: number, t: number, hx: number, hz: number, onObj: boolean): void => {
+    const hw = 0.5 * Math.max(0.06, w.tread);
+    const hl = 0.5 * PATCH_LENGTH_M * 1.6;
+    const ax = w.cx - hx * hl;
+    const az = w.cz - hz * hl;
+    const bx = w.cx + hx * hl;
+    const bz = w.cz + hz * hl;
+    const l0x = ax - hz * hw;
+    const l0z = az + hx * hw;
+    const r0x = ax + hz * hw;
+    const r0z = az - hx * hw;
+    const l1x = bx - hz * hw;
+    const l1z = bz + hx * hw;
+    const r1x = bx + hz * hw;
+    const r1z = bz - hx * hw;
+    skid.add(
+      l0x, edgeY(l0x, l0z, onObj, w.cy, w.slot), l0z, r0x, edgeY(r0x, r0z, onObj, w.cy, w.slot), r0z,
+      l1x, edgeY(l1x, l1z, onObj, w.cy, w.slot), l1z, r1x, edgeY(r1x, r1z, onObj, w.cy, w.slot), r1z,
+      w.along, w.along + 2 * hl, s, s, t, w.tr, w.tg, w.tb, w.sheen,
+    );
+    w.along += 2 * hl;
+  };
   /** Extends wheel w's open strip to its current contact (sub-segmented), coverage → s. */
   const extendStrip = (w: WheelFx, s: number, t: number, onObj: boolean): void => {
     const cx = w.cx;
@@ -681,6 +713,17 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
         }
         w.offT = 0;
         extendStrip(w, s, t1, onObj);
+        if (markKind === WHEEL_SKID && moveOk && gs < STAMP_MAX_SPEED) {
+          w.stampT += dtSim;
+          if (w.stampT >= STAMP_S) {
+            const n = Math.floor(w.stampT / STAMP_S);
+            w.stampT -= n * STAMP_S;
+            stampPatch(w, Math.min(1, 0.45 * n) * s, t1, fx, fz, onObj);
+            lastSkidBirth = t1;
+          }
+        } else {
+          w.stampT = 0;
+        }
       } else if (w.strip !== 0) {
         w.offT += dtSim;
         extendStrip(w, 0, t1, onObj);
@@ -1240,7 +1283,7 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
           hx: 0, hy: 0, hz: 0, cx: 0, cy: 0, cz: 0, valid: false, px: 0, py: 0, pz: 0, prevValid: false,
           wvx: 0, wvy: 0, wvz: 0, ahx: 1, ahz: 0, upright: false, groundY: 0,
           strip: 0, offT: 0, width: 0.2, tr: 1, tg: 1, tb: 1, sheen: 0, pcx: 0, pcz: 0, lx: 0, ly: 0, lz: 0, rx: 0, ry: 0, rz: 0, mx: 0, mz: 0, along: 0, lastS: 0,
-          smokeAcc: 0, sprayAcc: 0, roostAcc: 0,
+          smokeAcc: 0, sprayAcc: 0, roostAcc: 0, stampT: 0,
         };
       });
       const v: VehicleFx = {
@@ -1283,7 +1326,7 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
         for (const w of v.wheels) {
           w.strip = 0;
           w.valid = w.prevValid = false;
-          w.smokeAcc = w.sprayAcc = w.roostAcc = 0;
+          w.smokeAcc = w.sprayAcc = w.roostAcc = w.stampT = 0;
         }
       }
       lastDeathSoft = lastDeathBits = lastDeathSparks = lastSkidBirth = -1e9;

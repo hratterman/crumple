@@ -178,12 +178,12 @@ describe('pedals, gears and commands', () => {
 
   it('discrete commands and handbrake', () => {
     const m = createInputMapper();
-    for (const code of ['KeyR', 'KeyF', 'KeyC', 'KeyB', 'KeyP', 'KeyT']) {
+    for (const code of ['KeyR', 'KeyF', 'KeyC', 'KeyB', 'KeyP', 'KeyT', 'KeyX']) {
       expect(m.handleKeyEvent({ type: 'keydown', code })).toBe(true);
       m.handleKeyEvent({ type: 'keydown', code, repeat: true });
       m.handleKeyEvent({ type: 'keyup', code });
     }
-    expect(m.drainCommands()).toEqual(['recover', 'repair', 'cameraCycle', 'toggleBeamView', 'pause', 'slowMo']);
+    expect(m.drainCommands()).toEqual(['recover', 'repair', 'cameraCycle', 'toggleBeamView', 'pause', 'slowMo', 'toggleTractionControl']);
     expect(m.handleKeyEvent({ type: 'keydown', code: 'KeyZ' })).toBe(false);
     m.keyDown('Space');
     expect(m.update(DT, 0).handbrake).toBe(1);

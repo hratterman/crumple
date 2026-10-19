@@ -276,6 +276,13 @@ export class SimClient {
     this.post({ type: 'setTransmission', objectId, mode });
   }
 
+  /** Driver assists (SetAssistsMsg): traction control on/off. */
+  setAssists(objectId: number, assists: { tractionControl?: boolean }): void {
+    const msg: MainToWorker = { type: 'setAssists', objectId };
+    if (assists.tractionControl !== undefined) msg.tractionControl = assists.tractionControl;
+    this.post(msg);
+  }
+
   /** Rigidly re-places the current (deformed) vehicle upright; damage is kept (see RecoverMsg). */
   recover(objectId: number, pos?: Vec3): void {
     const msg: MainToWorker = { type: 'recover', objectId };

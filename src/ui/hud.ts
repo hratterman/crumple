@@ -21,6 +21,8 @@ export interface HudStatus {
   beamView: boolean;
   /** P4 debug view ('body' | 'body+beams' | 'beams' | 'nodes'); shown instead of BEAMS/NODES when set. */
   view?: string;
+  /** Traction control engaged (badge TC / TC OFF); omitted = no badge. */
+  tractionControl?: boolean;
 }
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -185,6 +187,7 @@ export class Hud {
       ['B', 'beams'],
       ['P', 'pause'],
       ['T', 'slow-mo'],
+      ['X', 'traction ctrl'],
       ['1–8', 'spawn points'],
     ]
       .map(([k, v]) => `<span><kbd>${k}</kbd>${v}</span>`)
@@ -239,7 +242,8 @@ export class Hud {
     }
 
     // Cheap change key first: the badge list is only rebuilt (and formatted) when a field changed.
-    const key = `${status.paused ? 1 : 0}${status.slowMo ? 1 : 0}${status.beamView ? 1 : 0}|${status.camera}|${status.view ?? ''}`;
+    const tc = status.tractionControl === undefined ? '' : status.tractionControl ? 'TC' : 'TC OFF';
+    const key = `${status.paused ? 1 : 0}${status.slowMo ? 1 : 0}${status.beamView ? 1 : 0}|${status.camera}|${status.view ?? ''}|${tc}`;
     if (key !== this.last.badges) {
       this.last.badges = key;
       const parts: string[] = [];
@@ -247,8 +251,11 @@ export class Hud {
       else if (status.slowMo) parts.push('SLOW-MO 0.25×');
       parts.push(`CAM ${status.camera.toUpperCase()}`);
       parts.push(status.view ? status.view.toUpperCase() : status.beamView ? 'BEAMS' : 'NODES');
+      if (tc) parts.push(tc);
       this.badges.replaceChildren(
-        ...parts.map((p, i) => div(`hud-badge${i === 0 && (status.paused || status.slowMo) ? ' hud-badge--alert' : ''}`, undefined, p)),
+        ...parts.map((p, i) =>
+          div(`hud-badge${(i === 0 && (status.paused || status.slowMo)) || p === 'TC OFF' ? ' hud-badge--alert' : ''}`, undefined, p),
+        ),
       );
     }
   }

@@ -14,6 +14,7 @@ import { Action } from '../../protocol/messages';
 import { groundNormalForce, tanhR } from '../collision/ground';
 import { DEFAULT_MATERIALS } from '../collision/materials';
 import type { HeightSampler, MaterialTable, SimState } from '../types';
+import type { DrivetrainStateEx } from './drivetrain';
 import {
   BRAKE_OMEGA_EPS,
   ROLL_RES_OMEGA_EPS,
@@ -796,6 +797,7 @@ export const applyParkingClamp: ApplyParkingClamp = (state, vehicle, actions, dt
   const hand = actions[Action.handbrake]!;
   const brakeOn = brake >= PARK_PEDAL;
   const handOn = hand >= PARK_PEDAL;
+  const lineLock = (vehicle.drivetrain as DrivetrainStateEx).lineLock === true;
   if ((!brakeOn && !handOn) || !(comSpeed(state, vehicle) < PARK_SPEED)) {
     for (let k = 0; k < nw; k++) release(wheels[k]!);
     return;
@@ -809,7 +811,8 @@ export const applyParkingClamp: ApplyParkingClamp = (state, vehicle, actions, dt
   for (let k = 0; k < nw; k++) {
     const w = wheels[k]!;
     const cw = w.wheel;
-    const service = cw.braked && brakeOn ? cw.brakeTorque * brake : 0;
+    // Line lock (drivetrain, TC off): the driven wheels' service brakes are released.
+    const service = cw.braked && brakeOn && !(lineLock && cw.driven) ? cw.brakeTorque * brake : 0;
     const parking = cw.handbrake && handOn ? cw.handbrakeTorque * hand : 0;
     const brakeMax = service > parking ? service : parking;
     if (!(brakeMax > 0)) {

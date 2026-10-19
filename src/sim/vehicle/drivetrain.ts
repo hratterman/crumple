@@ -94,6 +94,14 @@ export const TC_GAIN = 0.5;
 /** Cut attack / release time constants, s. */
 export const TC_ATTACK = 0.02;
 export const TC_RELEASE = 0.15;
+/**
+ * LINE LOCK (burnouts, P5): with traction control OFF, throttle and service
+ * brake both ≥ LINE_LOCK_PEDAL in a forward gear while the undriven wheels
+ * roll slower than LINE_LOCK_SPEED m/s, the driven wheels' SERVICE brakes are
+ * released (the undriven ones hold the car; the handbrake still acts).
+ */
+export const LINE_LOCK_PEDAL = 0.5;
+export const LINE_LOCK_SPEED = 3;
 /** Minimum time between automatic shifts, s (anti-hunting). */
 export const AUTO_SHIFT_COOLDOWN = 0.6;
 /**
@@ -165,6 +173,8 @@ export interface DrivetrainStateEx extends DrivetrainState {
   autoEngage: number;
   /** Traction-control throttle cut 0..1 (low-passed). */
   tcCut: number;
+  /** Line lock engaged this tick (driven wheels' service brakes released; see LINE_LOCK_PEDAL). */
+  lineLock: boolean;
   /** Clutch spring windup, rad (engine side). */
   clutchWind: number;
   /** Clutch torque this tick, N·m (+ drives the wheels forward in a forward gear). */
@@ -202,8 +212,10 @@ export function createDrivetrainState(
     revLimiterActive: false,
     engineTorque: 0,
     driveTorque: 0,
+    tractionControl: true,
     autoEngage: 0,
     tcCut: 0,
+    lineLock: false,
     clutchWind: 0,
     clutchTorque: 0,
     gearboxOmega: 0,
@@ -214,7 +226,7 @@ export function createDrivetrainState(
   };
 }
 
-/** Restores a state in place to createDrivetrainState values (keeps the transmission mode). */
+/** Restores a state in place to createDrivetrainState values (keeps the transmission mode and the assists). */
 export function resetDrivetrainState(s: DrivetrainStateEx, dt: CompiledDrivetrain): void {
   s.engineOmega = dt.idleRpm * RAD_S_PER_RPM;
   s.rpm = dt.idleRpm;
@@ -228,6 +240,7 @@ export function resetDrivetrainState(s: DrivetrainStateEx, dt: CompiledDrivetrai
   s.driveTorque = 0;
   s.autoEngage = 0;
   s.tcCut = 0;
+  s.lineLock = false;
   s.clutchWind = 0;
   s.clutchTorque = 0;
   s.gearboxOmega = 0;
@@ -443,7 +456,7 @@ export const stepDrivetrain: StepDrivetrain = (
   }
   // Traction control: compare the fastest driven wheel's rolling speed with
   // the undriven (reference) wheels' mean, cut throttle on the excess.
-  if (d.tcSlip > 0) {
+  if (d.tcSlip > 0 && s.tractionControl) {
     let target = 0;
     if (s.gear > 0 && throttle > 0 && rpm > idle * TC_RPM_FLOOR) {
       let vRef = 0;
@@ -470,6 +483,8 @@ export const stepDrivetrain: StepDrivetrain = (
     const tau = target > s.tcCut ? TC_ATTACK : TC_RELEASE;
     s.tcCut += (target - s.tcCut) * (dt / (tau + dt));
     throttle *= 1 - s.tcCut;
+  } else {
+    s.tcCut = 0;
   }
   if (s.revLimiterActive) throttle = 0;
   const gov = clamp01((idle - rpm) / IDLE_GOVERNOR_BAND_RPM);
@@ -587,11 +602,27 @@ export const stepDrivetrain: StepDrivetrain = (
     }
   }
 
+  // ---- line lock (TC off: throttle + brake at a standstill = burnout)
+  let lineLock = false;
+  if (!s.tractionControl && s.gear > 0 && pedalThrottle >= LINE_LOCK_PEDAL && brake >= LINE_LOCK_PEDAL) {
+    let vRef = 0;
+    let nRef = 0;
+    for (let w = 0; w < wheels.length; w++) {
+      const wr = wheels[w]!;
+      if (wr.wheel.driven || wr.detached !== 0) continue;
+      const v = wr.omega * wr.rollRadius;
+      vRef += v < 0 ? -v : v;
+      nRef++;
+    }
+    lineLock = nRef > 0 && vRef < LINE_LOCK_SPEED * nRef;
+  }
+  s.lineLock = lineLock;
+
   // ---- brakes (service with bias, handbrake; wheel gets the max)
   for (let w = 0; w < wheels.length; w++) {
     const wr = wheels[w]!;
     const cw = wr.wheel;
-    const sb = brake * cw.brakeTorque;
+    const sb = lineLock && cw.driven ? 0 : brake * cw.brakeTorque;
     const hb = handbrake * cw.handbrakeTorque;
     wr.brakeTorque = sb > hb ? sb : hb;
   }

@@ -445,6 +445,15 @@ export class SimEngine {
     v.drivetrain.transmission = mode;
   }
 
+  /** Driver assists (protocol `setAssists`); omitted fields keep their state. */
+  setAssists(objectId: number, assists: { tractionControl?: boolean }): void {
+    const v = this.vehicles.get(objectId);
+    if (!v) throw new SimCommandError(`objectId ${objectId} is not a vehicle`, objectId);
+    const tc = assists?.tractionControl;
+    if (tc !== undefined && typeof tc !== 'boolean') throw new SimCommandError('setAssists: tractionControl must be a boolean', objectId);
+    if (tc !== undefined) v.drivetrain.tractionControl = tc;
+  }
+
   /** Upright the vehicle in place (damage and drivetrain kept); see recoverVehicle. */
   recover(objectId: number, pos?: Vec3): void {
     const v = this.vehicles.get(objectId);

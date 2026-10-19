@@ -10,10 +10,11 @@
  *   throttle W / ArrowUp      brake S / ArrowDown      steer A,D / ArrowLeft,ArrowRight
  *   handbrake Space           shiftUp Shift / E        shiftDown Ctrl / Q
  *   recover R   repair F   cameraCycle C   toggleBeamView B   pause P   slowMo T
+ *   toggleTractionControl X (additive P5)
  * Gamepad (standard mapping): RT(7) throttle, LT(6) brake, left stick X (axis 0)
  *   steer, A(0) handbrake, RB(5)/LB(4) shift up/down, Y(3) recover,
  *   X(2) cameraCycle, Back(8) toggleBeamView, Start(9) pause,
- *   D-pad up(12) repair, D-pad down(13) slowMo.
+ *   D-pad up(12) repair, D-pad down(13) slowMo, D-pad left(14) toggleTractionControl.
  *
  * Steering (all parameters in InputTuning):
  *   limit(v)   = max(minSteerLimit, 1 / (1 + (v/steerLimitSpeed)²))      max |steer| at speed v
@@ -41,7 +42,8 @@ export type InputCommand =
   | 'cameraCycle'
   | 'toggleBeamView'
   | 'pause'
-  | 'slowMo';
+  | 'slowMo'
+  | 'toggleTractionControl';
 
 type HeldControl = 'throttle' | 'brake' | 'left' | 'right' | 'handbrake';
 export type InputControl = HeldControl | InputCommand;
@@ -68,6 +70,7 @@ export const KEY_BINDINGS: Readonly<Record<string, InputControl>> = {
   KeyB: 'toggleBeamView',
   KeyP: 'pause',
   KeyT: 'slowMo',
+  KeyX: 'toggleTractionControl',
 };
 
 /** Standard-mapping gamepad button → command (rising edge). */
@@ -80,6 +83,7 @@ export const GAMEPAD_COMMAND_BUTTONS: Readonly<Record<number, InputCommand>> = {
   9: 'pause',
   12: 'repair',
   13: 'slowMo',
+  14: 'toggleTractionControl',
 };
 export const GAMEPAD_BUTTON_THROTTLE = 7;
 export const GAMEPAD_BUTTON_BRAKE = 6;

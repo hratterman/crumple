@@ -334,6 +334,8 @@ const mapper = createInputMapper({ transmission, gearCount: SEDAN.drivetrain.gea
 let hud: Hud | null = null;
 let paused = false;
 let slowMo = false;
+/** Traction control (X); the worker spawns vehicles with it engaged. */
+let tractionControl = true;
 function applyTimescale(): void {
   client.setTimescale(paused ? 0 : slowMo ? SLOW_MO_SCALE : 1);
 }
@@ -450,6 +452,12 @@ function sendInput(a: ActionState): void {
   client.input(VEHICLE_ID, { ...a });
 }
 
+function setTractionControl(on: boolean): void {
+  tractionControl = on;
+  client.setAssists(VEHICLE_ID, { tractionControl: on });
+  hud?.showToast(on ? 'TRACTION CONTROL ON' : 'TRACTION CONTROL OFF', 'ASSISTS', 1500);
+}
+
 function handleCommands(): void {
   for (const c of mapper.drainCommands()) {
     switch (c) {
@@ -473,6 +481,9 @@ function handleCommands(): void {
       case 'slowMo':
         slowMo = !slowMo;
         applyTimescale();
+        break;
+      case 'toggleTractionControl':
+        setTractionControl(!tractionControl);
         break;
       case 'shiftUp':
       case 'shiftDown':
@@ -580,6 +591,13 @@ const crumple = {
       debugView = v as VehicleDebugView;
       applyDebugView();
     }
+  },
+  /** Traction control state (X toggles it). */
+  get tractionControl(): boolean {
+    return tractionControl;
+  },
+  setTractionControl(on: boolean): void {
+    setTractionControl(on);
   },
   get timescale(): number {
     return paused ? 0 : slowMo ? SLOW_MO_SCALE : 1;
@@ -869,7 +887,7 @@ async function boot(): Promise<void> {
   });
   hud = hudView;
 
-  const hudStatus = { paused: false, slowMo: false, camera: 'chase', transmission, beamView: true, view: debugView as string };
+  const hudStatus = { paused: false, slowMo: false, camera: 'chase', transmission, beamView: true, view: debugView as string, tractionControl };
   const bootTime = performance.now();
   const worldFrame: WorldFrame = {
     dtS: 0,
@@ -973,6 +991,7 @@ async function boot(): Promise<void> {
     hudStatus.transmission = mapper.transmission;
     hudStatus.beamView = beamView.visible && beamView.mode === 'beams';
     hudStatus.view = debugView;
+    hudStatus.tractionControl = tractionControl;
     hudView.update(client.telemetry(VEHICLE_ID), hudStatus, dt);
     prof.lap('hud');
     perfOverlay?.update(perfData);

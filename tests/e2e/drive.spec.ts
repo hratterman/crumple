@@ -87,6 +87,19 @@ test('drive: hold W on the spawn road accelerates the sedan; spawn keys teleport
   await page.keyboard.press('KeyB');
   await expect.poll(view).toEqual({ mode: 'body', beams: false, body: true, nodes: false });
 
+  // X toggles traction control (default on); the HUD badge follows.
+  const tc = () =>
+    page.evaluate(() => ({
+      on: (window as unknown as { __crumple: { tractionControl: boolean } }).__crumple.tractionControl,
+      badges: [...document.querySelectorAll('.hud-badge')].map((b) => b.textContent),
+    }));
+  expect((await tc()).on).toBe(true);
+  await expect.poll(async () => (await tc()).badges.includes('TC')).toBe(true);
+  await page.keyboard.press('KeyX');
+  await expect.poll(async () => { const t = await tc(); return !t.on && t.badges.includes('TC OFF'); }).toBe(true);
+  await page.keyboard.press('KeyX');
+  await expect.poll(async () => (await tc()).on).toBe(true);
+
   // 5 → the summit lookout spawn (150 m up the mountain).
   await page.keyboard.press('Digit5');
   await expect

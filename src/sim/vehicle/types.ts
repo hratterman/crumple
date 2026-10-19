@@ -540,6 +540,12 @@ export interface DrivetrainState {
   engineTorque: number;
   /** Total torque delivered to driven wheels, N·m. */
   driveTorque: number;
+  /**
+   * Driver assist (additive P5): traction control engaged. Default true;
+   * `setAssists` toggles it; reset/recover keep it. No effect when the
+   * def has no tractionControl.
+   */
+  tractionControl: boolean;
 }
 
 export interface VehicleRuntime {
