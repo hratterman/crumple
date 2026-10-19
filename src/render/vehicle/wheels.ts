@@ -31,6 +31,14 @@
  * Geometry is built once per (wheel def, dims) in wheel-local space
  * (x = axle outboard, (y, z) = wheel plane, φ = atan2(z, y)); left and
  * right wheels share it (the frame is always right-handed).
+ *
+ * MIRRORED wheels (P6, `WheelVisualDef.mirrored`: the inner wheel of a dual
+ * pair) use the same geometry and instance group: their frame axle s points
+ * INBOARD (the frame turned 180° about u, still right-handed), so the rim
+ * face and dish look toward the vehicle centre and the outer dual's face
+ * mates with it; the tyre rows swap accordingly (local +x = the inner node
+ * row). They get no brake disc / caliper of their own: their disc and
+ * upright instances are written as zero-scale matrices (no extra draw).
  */
 import {
   BufferAttribute,
@@ -130,6 +138,8 @@ export interface WheelRest {
   attach: number;
   /** Caliper angle about the axle from the upright's up axis (rear, ~25° above horizontal). */
   caliperAngle: number;
+  /** P6: frame axle turned inboard (inner dual): see the header. */
+  mirrored: boolean;
 }
 
 function sub(p: ArrayLike<number>, stride: number, i: number, out: Vector3): Vector3 {
@@ -147,7 +157,7 @@ function upBasis(s: Vector3, ref: Vector3 | null, u: Vector3): Vector3 {
   return u.normalize();
 }
 
-export function wheelRest(compiled: CompiledVehicle, w: CompiledWheel): WheelRest {
+export function wheelRest(compiled: CompiledVehicle, w: CompiledWheel, mirrored = false): WheelRest {
   const p = compiled.rig.nodePos;
   const n = w.rays;
   const cI = new Vector3();
@@ -161,6 +171,7 @@ export function wheelRest(compiled: CompiledVehicle, w: CompiledWheel): WheelRes
   cO.multiplyScalar(1 / n);
   const c = cI.clone().add(cO).multiplyScalar(0.5);
   const s = cO.clone().sub(cI).normalize();
+  if (mirrored) s.negate();
   const u = upBasis(s, null, new Vector3());
   const v = new Vector3().crossVectors(s, u);
   const rimCos = new Float64Array(2 * n);
@@ -201,6 +212,7 @@ export function wheelRest(compiled: CompiledVehicle, w: CompiledWheel): WheelRes
     a0: ang[order[0]!]!,
     attach,
     caliperAngle: rear * 0.72,
+    mirrored,
   };
 }
 
@@ -243,7 +255,7 @@ export function solveWheelFrame(rest: WheelRest, nodes: ArrayLike<number>, strid
   _b.sub(_a);
   const sl = _b.length();
   if (!(sl > 1e-4) || !Number.isFinite(cx + cy + cz)) return false;
-  const s = _b.multiplyScalar(1 / sl);
+  const s = _b.multiplyScalar((rest.mirrored ? -1 : 1) / sl);
   // u = Σ q cos α − (s × q) sin α
   let ux = 0, uy = 0, uz = 0;
   for (let k = 0; k < 2 * n; k++) {
@@ -325,7 +337,8 @@ export function updateTyreUniforms(
     if (!Number.isFinite(r)) continue;
     const d = r - rest.tyreR0[k]!;
     const slot = rest.slotOf[k]!;
-    if (k < n) u.di.value[slot] = d;
+    // Local +x is the outer row (tireO) — the inner one (tireI) on a mirrored wheel.
+    if (k < n !== rest.mirrored) u.di.value[slot] = d;
     else u.do.value[slot] = d;
     // lower half of the ring (radial direction pointing down) → ground estimate
     if (r > 1e-4 && -_q.y / r > 0.35) {
@@ -1134,6 +1147,8 @@ interface WheelInstance {
 interface VariantGroup {
   wheels: WheelInstance[];
   spinM: InstancedBufferAttribute;
+  /** Brake-disc instance matrices: spinM itself unless the group has a mirrored wheel (zero-scaled there). */
+  discM: InstancedBufferAttribute;
   uprightM: InstancedBufferAttribute;
   tyreU: TyreInstanceUniforms;
   /** Colour draws per LOD level. */
@@ -1332,12 +1347,14 @@ export const createWheelVisuals = (compiled: CompiledVehicle, def: WheelVisualDe
   const levelMeshes: Mesh[][] = [[], [], []];
   const allCasters: Mesh[] = [];
   const variants = new Map<string, { dims: WheelDims; rimDef: WheelVisualDef['rim']; tireDef: WheelVisualDef['tire']; wheels: CompiledWheel[] }>();
+  const mirroredIds = new Set(def.mirrored ?? []);
   for (const w of compiled.wheels) {
     const rear = w.axle === 'rear' && def.rear;
     const rimDef = rear && def.rear?.rim ? { ...def.rim, ...def.rear.rim } : def.rim;
     const tireDef = rear && def.rear?.tire ? { ...def.tire, ...def.rear.tire } : def.tire;
     const dims = wheelDims(compiled, w);
-    const key = JSON.stringify([dims, rimDef, tireDef]);
+    // Dims rounded to µm: wheels that differ only by float noise in the rig (a dual pair's rim rows) share a group.
+    const key = JSON.stringify([Object.values(dims).map((x) => Math.round(x * 1e6)), rimDef, tireDef]);
     let v = variants.get(key);
     if (!v) variants.set(key, (v = { dims, rimDef, tireDef, wheels: [] }));
     v.wheels.push(w);
@@ -1349,6 +1366,9 @@ export const createWheelVisuals = (compiled: CompiledVehicle, def: WheelVisualDe
     const uprightM = new InstancedBufferAttribute(new Float32Array(16 * n), 16);
     spinM.setUsage(DynamicDrawUsage);
     uprightM.setUsage(DynamicDrawUsage);
+    const anyMirrored = v.wheels.some((w) => mirroredIds.has(w.id));
+    const discM = anyMirrored ? new InstancedBufferAttribute(new Float32Array(16 * n), 16) : spinM;
+    if (anyMirrored) discM.setUsage(DynamicDrawUsage);
     const tyreU = createTyreInstanceUniforms(n);
     const patch = createTyreInstancedPatch(tyreU, n);
     // per-variant tyre materials (textures follow the tread / sidewall text)
@@ -1375,7 +1395,7 @@ export const createWheelVisuals = (compiled: CompiledVehicle, def: WheelVisualDe
     const casterSet = direct ? null : own(opts.patchMaterial(new MeshBasicMaterial({ name: 'wheelCasterColor', colorWrite: false, depthWrite: false }), { flexbody: patch }));
 
     const sphere = new Sphere();
-    const group: VariantGroup = { wheels: [], spinM, uprightM, tyreU, levels: [], casters: [], sphere };
+    const group: VariantGroup = { wheels: [], spinM, discM, uprightM, tyreU, levels: [], casters: [], sphere };
     const inst = (geo: BufferGeometry, mat: Material, matrices: InstancedBufferAttribute, name: string, cast: boolean, set?: { depth: Material | null; distance: Material | null }): InstancedMesh => {
       const mesh = new InstancedMesh(geo, mat, n);
       mesh.instanceMatrix = matrices;
@@ -1392,7 +1412,7 @@ export const createWheelVisuals = (compiled: CompiledVehicle, def: WheelVisualDe
       const g = buildLevel(v.dims, v.rimDef, v.tireDef, level as WheelDetail);
       const list: InstancedMesh[] = [];
       if (g.rim) list.push(inst(g.rim, rimMat, spinM, `wheelRim${level}`, direct));
-      list.push(inst(g.disc, discMat, spinM, `wheelDisc${level}`, direct));
+      list.push(inst(g.disc, discMat, discM, `wheelDisc${level}`, direct));
       if (g.upright) list.push(inst(g.upright, uprightMat, uprightM, `wheelUpright${level}`, direct));
       list.push(inst(g.tread, treadSet.color, spinM, `wheelTread${level}`, direct, treadSet));
       list.push(inst(g.sidewall, sideSet.color, spinM, `wheelSidewall${level}`, direct, sideSet));
@@ -1412,7 +1432,7 @@ export const createWheelVisuals = (compiled: CompiledVehicle, def: WheelVisualDe
     }
     v.wheels.forEach((w, slot) => {
       const dims = wheelDims(compiled, w);
-      const rest = wheelRest(compiled, w);
+      const rest = wheelRest(compiled, w, mirroredIds.has(w.id));
       const frame = createWheelFrame();
       solveWheelFrame(rest, compiled.rig.nodePos, 3, frame);
       const wi: WheelInstance = { rest, dims, frame, tyre: createTyreUniforms(dims, rest), slot, calRot: new Matrix4().makeRotationX(rest.caliperAngle) };
@@ -1429,8 +1449,17 @@ export const createWheelVisuals = (compiled: CompiledVehicle, def: WheelVisualDe
     const f = w.frame;
     _m.makeBasis(f.s, f.u, f.v).setPosition(f.centre);
     _m.toArray(g.spinM.array as Float32Array, 16 * w.slot);
-    _z.crossVectors(f.s, f.up);
-    _m.makeBasis(f.s, f.up, _z).setPosition(f.centre).multiply(w.calRot);
+    if (g.discM !== g.spinM) {
+      // Mirrored wheels carry no disc / caliper of their own: a zero-scale instance (degenerate, no fragments).
+      if (w.rest.mirrored) _m.makeScale(0, 0, 0).setPosition(f.centre);
+      _m.toArray(g.discM.array as Float32Array, 16 * w.slot);
+      g.discM.needsUpdate = true;
+    }
+    if (w.rest.mirrored) _m.makeScale(0, 0, 0).setPosition(f.centre);
+    else {
+      _z.crossVectors(f.s, f.up);
+      _m.makeBasis(f.s, f.up, _z).setPosition(f.centre).multiply(w.calRot);
+    }
     _m.toArray(g.uprightM.array as Float32Array, 16 * w.slot);
     g.spinM.needsUpdate = true;
     g.uprightM.needsUpdate = true;

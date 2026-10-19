@@ -1,10 +1,14 @@
-/** Catalog entry: medium box truck (owner: F3). Stats = P6 targets until F3 lands (see coupe.ts). */
-import { metallicPaint, notYetBuilt, solidPaint, type VehicleCatalogEntry } from '../catalogTypes';
+/**
+ * Catalog entry: medium box truck (owner: F3). Card numbers are the built
+ * truck's (src/sim/vehicle/boxtruck.test.ts: 0–80 ≈ 16.5 s, governed at
+ * ≈ 108 km/h in 6th; mass / power / torque checked by catalog.test.ts).
+ */
+import { metallicPaint, solidPaint, type VehicleCatalogEntry } from '../catalogTypes';
 
 /** Cab palettes only: the box panels carry their own `PanelFinish.color` (white) under any palette. */
 export const BOXTRUCK_ENTRY: VehicleCatalogEntry = {
   id: 'boxtruck',
-  available: false,
+  available: true,
   selectable: true,
   trafficEligible: false,
   stats: {
@@ -17,11 +21,12 @@ export const BOXTRUCK_ENTRY: VehicleCatalogEntry = {
     powerKw: 180,
     torqueNm: 900,
     massKg: 6500,
-    topSpeedKmh: 110,
+    topSpeedKmh: 108,
     zeroTo100S: null,
     ratings: { speed: 1, handling: 1, toughness: 5 },
   },
   palettes: [
+    // palettes[0] = BOXTRUCK_VISUAL.paint (src/render/vehicle/defs/boxtruck.ts BOXTRUCK_PAINT).
     { id: 'fleetWhite', name: 'Fleet White', paint: solidPaint(0xeeeeea, 0.42, 0.8) },
     { id: 'haulageYellow', name: 'Haulage Yellow', paint: solidPaint(0xe8b417, 0.4, 0.8) },
     { id: 'postalRed', name: 'Postal Red', paint: solidPaint(0xb01f1a, 0.4, 0.8) },
@@ -31,6 +36,9 @@ export const BOXTRUCK_ENTRY: VehicleCatalogEntry = {
   ],
   beamBudget: 3500,
   chase: { distance: 9.5, height: 3.4 },
-  extent: { min: [-1.25, 0, -3.8], max: [1.25, 3.4, 3.8] },
-  load: notYetBuilt('boxtruck'),
+  extent: { min: [-1.45, 0, -3.8], max: [1.45, 3.42, 3.8] },
+  load: async () => {
+    const [{ BOXTRUCK }, { BOXTRUCK_VISUAL }] = await Promise.all([import('../../sim/vehicle/defs/boxtruck'), import('../../render/vehicle/defs/boxtruck')]);
+    return { sim: BOXTRUCK, visual: BOXTRUCK_VISUAL };
+  },
 };
