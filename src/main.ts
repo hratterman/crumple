@@ -257,7 +257,8 @@ function handleCommands(): void {
         director.cycle();
         break;
       case 'toggleBeamView':
-        beamView.visible = !beamView.visible;
+        // Cycles beams → nodes (no body mesh until P4: never hide the car).
+        beamView.cycle();
         break;
       case 'pause':
         paused = !paused;
@@ -298,8 +299,15 @@ const crumple = {
   get camera(): string {
     return director.mode;
   },
+  /** True while the strain wireframe is shown. */
   get beamView(): boolean {
-    return beamView.visible;
+    return beamView.visible && beamView.mode === 'beams';
+  },
+  get viewMode(): string {
+    return beamView.mode;
+  },
+  get nodesVisible(): boolean {
+    return beamView.nodesVisible;
   },
   get timescale(): number {
     return paused ? 0 : slowMo ? SLOW_MO_SCALE : 1;
@@ -347,7 +355,7 @@ function frame(now: number): void {
   hudStatus.slowMo = slowMo;
   hudStatus.camera = director.mode;
   hudStatus.transmission = mapper.transmission;
-  hudStatus.beamView = beamView.visible;
+  hudStatus.beamView = beamView.visible && beamView.mode === 'beams';
   hud.update(client.telemetry(VEHICLE_ID), hudStatus, dt);
 
   renderer.render(scene, camera);

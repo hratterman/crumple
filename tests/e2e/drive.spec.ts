@@ -12,6 +12,8 @@ interface CrumpleDriveGlobal {
   vehicle: VehicleSample | null;
   camera: string;
   beamView: boolean;
+  viewMode: string;
+  nodesVisible: boolean;
 }
 
 function sample(page: import('@playwright/test').Page): Promise<{ vehicle: VehicleSample | null; idleRpm: number }> {
@@ -55,11 +57,21 @@ test('drive: holding W accelerates the sedan; zero errors', async ({ page }) => 
   expect(during.vehicle!.speed).toBeGreaterThan(3);
   expect(during.vehicle!.rpm).toBeGreaterThan(during.idleRpm);
 
-  // B toggles the beam view off.
+  // B cycles the debug view beams → nodes: the wireframe goes, the car stays visible.
   await page.keyboard.press('KeyB');
   await expect
     .poll(() => page.evaluate(() => (window as unknown as { __crumple: CrumpleDriveGlobal }).__crumple.beamView))
     .toBe(false);
+  const view = await page.evaluate(() => {
+    const c = (window as unknown as { __crumple: CrumpleDriveGlobal }).__crumple;
+    return { mode: c.viewMode, nodes: c.nodesVisible };
+  });
+  expect(view).toEqual({ mode: 'nodes', nodes: true });
+  // …and back to beams.
+  await page.keyboard.press('KeyB');
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { __crumple: CrumpleDriveGlobal }).__crumple.beamView))
+    .toBe(true);
 
   expect(pageErrors).toEqual([]);
   expect(consoleErrors).toEqual([]);

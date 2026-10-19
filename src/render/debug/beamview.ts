@@ -5,6 +5,10 @@
  *
  * Strain colors: tension white→red, compression white→blue, |s| > 0.8 hot.
  * Broken (NaN) beams collapse to a zero-length segment.
+ *
+ * Modes (B cycles): 'beams' = strain wireframe + dim nodes; 'nodes' =
+ * nodes only, larger and opaque. Until the P4 body mesh exists the nodes
+ * mode is what keeps the car visible with the wireframe off.
  */
 import {
   BufferAttribute,
@@ -47,15 +51,22 @@ interface ObjectView {
   seen: boolean;
 }
 
+export type BeamViewMode = 'beams' | 'nodes';
+
+const POINT_SIZE_BEAMS = 0.045;
+const POINT_OPACITY_BEAMS = 0.55;
+const POINT_SIZE_NODES = 0.08;
+
 export class BeamView {
   readonly group = new Group();
+  private viewMode: BeamViewMode = 'beams';
   private readonly lineMaterial = new LineBasicMaterial({ vertexColors: true, toneMapped: false });
   private readonly pointMaterial = new PointsMaterial({
     color: 0x9aa4b0,
-    size: 0.045,
+    size: POINT_SIZE_BEAMS,
     sizeAttenuation: true,
     transparent: true,
-    opacity: 0.55,
+    opacity: POINT_OPACITY_BEAMS,
     depthWrite: false,
   });
   private readonly views = new Map<number, ObjectView>();
@@ -64,10 +75,34 @@ export class BeamView {
     this.group.name = 'beamview';
   }
 
+  /** The whole debug view (beams and nodes). */
   set visible(v: boolean) {
     this.group.visible = v;
   }
   get visible(): boolean {
+    return this.group.visible;
+  }
+
+  get mode(): BeamViewMode {
+    return this.viewMode;
+  }
+  set mode(m: BeamViewMode) {
+    this.viewMode = m;
+    const beams = m === 'beams';
+    for (const v of this.views.values()) v.lines.visible = beams;
+    this.pointMaterial.size = beams ? POINT_SIZE_BEAMS : POINT_SIZE_NODES;
+    this.pointMaterial.opacity = beams ? POINT_OPACITY_BEAMS : 1;
+    this.pointMaterial.color.setHex(beams ? 0x9aa4b0 : 0xd8e2ec);
+  }
+
+  /** beams → nodes → beams. */
+  cycle(): BeamViewMode {
+    this.mode = this.viewMode === 'beams' ? 'nodes' : 'beams';
+    return this.viewMode;
+  }
+
+  /** True when node points are drawn (both modes while the view is visible). */
+  get nodesVisible(): boolean {
     return this.group.visible;
   }
 
@@ -114,6 +149,7 @@ export class BeamView {
     // Bounds change every frame; skip culling instead of recomputing spheres.
     lines.frustumCulled = false;
     lines.name = `beams:${objectId}`;
+    lines.visible = this.viewMode === 'beams';
 
     const pointGeo = new BufferGeometry();
     const pointPos = new BufferAttribute(new Float32Array(nodeCount * 3), 3).setUsage(DynamicDrawUsage);

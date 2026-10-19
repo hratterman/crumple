@@ -221,7 +221,7 @@ export class Hud {
     if (status.paused) parts.push('PAUSED');
     else if (status.slowMo) parts.push('SLOW-MO 0.25×');
     parts.push(`CAM ${status.camera.toUpperCase()}`);
-    if (status.beamView) parts.push('BEAMS');
+    parts.push(status.beamView ? 'BEAMS' : 'NODES');
     const key = parts.join('|');
     if (key !== this.last.badges) {
       this.last.badges = key;
