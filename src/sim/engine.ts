@@ -45,7 +45,12 @@ import { NODE_FLAG_OBJ_CONTACT, SIM_OBJECT_FLAG_SLEEPING, type EventSink, type H
 import { compilePropRig, getPropDef, isPropKey } from './props/catalog';
 import { applyPropDamping, PROP_BUDGET_SLEEP_SPEED, PROP_INTERNAL_DAMPING, PROP_UNMOVED_HOLD_FRACTION, PROP_WAKE_SPEED, propAnchored, type PropRuntime } from './props/runtime';
 import { PROP_AWAKE_BEAM_BUDGET, type PropInstance, type PropKey } from './props/types';
-import { compileVehicle } from './vehicle/builder';
+import { compileVehicle, TRAFFIC_BEAM_BUDGET, validateVehicle } from './vehicle/builder';
+import { isTrafficObjectId, TRAFFIC_AI_TICKS, type TrafficBubble, type TrafficDensity, type TrafficVariantSpec } from '../protocol/traffic';
+import { buildRouteNetwork } from '../world/routes';
+import type { RouteNetwork, WorldLayout } from '../world/types';
+import { clampDensity, TrafficSim } from './traffic/traffic';
+import { buildVariant, type TrafficVariant } from './traffic/templates';
 import { createTerrainSampler, type HeightfieldSampler } from '../world/sampler';
 import type { TerrainData } from '../world/types';
 import {
@@ -259,6 +264,12 @@ export class SimEngine {
   private readonly props = new Map<number, PropRuntime>();
   /** Parallel to arena.objects: the object's prop runtime or null. */
   private propSlots: (PropRuntime | null)[] = [];
+  /** AI traffic (P6), null = off. Runs at the start of every TRAFFIC_AI_TICKS-th tick. */
+  traffic: TrafficSim | null = null;
+  /** Route network cache (layout id/version + terrain hash). */
+  private routeCache: { key: string; net: RouteNetwork } | null = null;
+  /** VehicleCatalog id per vehicle objectId (spawnVehicle.catalogId; P7 replay header). */
+  readonly catalogIds = new Map<number, string>();
 
   constructor(config: EngineConfig) {
     const cap = config.capacity ?? DEFAULT_CAPACITY;
@@ -376,6 +387,7 @@ export class SimEngine {
   }
 
   spawn(objectId: number, def: RigDef, transform: Transform): SimObject {
+    if (isTrafficObjectId(objectId)) throw new SimCommandError(`objectId ${objectId} is in the traffic range (worker-owned)`, objectId);
     let rig: CompiledRig;
     try {
       rig = compileRig(def);
@@ -409,14 +421,18 @@ export class SimEngine {
    * map snapshot nodes) → arena insert → vehicle runtime. `transmission`
    * overrides the def's initial mode.
    */
-  spawnVehicle(objectId: number, def: VehicleDef, transform: Transform, transmission?: TransmissionMode): SimObject {
+  spawnVehicle(objectId: number, def: VehicleDef, transform: Transform, transmission?: TransmissionMode, catalogId?: string): SimObject {
+    if (isTrafficObjectId(objectId)) throw new SimCommandError(`objectId ${objectId} is in the traffic range (worker-owned)`, objectId);
+    if (catalogId !== undefined && typeof catalogId !== 'string') throw new SimCommandError('catalogId must be a string', objectId);
     let compiled: CompiledVehicle;
     try {
       compiled = compileVehicle(def);
     } catch (e) {
       throw new SimCommandError(`invalid vehicle: ${e instanceof Error ? e.message : String(e)}`, objectId);
     }
-    return this.spawnCompiledVehicle(objectId, compiled, transform, transmission);
+    const obj = this.spawnCompiledVehicle(objectId, compiled, transform, transmission);
+    if (catalogId !== undefined) this.catalogIds.set(objectId, catalogId);
+    return obj;
   }
 
   spawnCompiledVehicle(
@@ -690,6 +706,7 @@ export class SimEngine {
     this.props.delete(objectId);
     this.floods.delete(objectId);
     this.repairEpochs.delete(objectId);
+    this.catalogIds.delete(objectId);
     resetGroundContactState(this.state, start, this.state.nodeCount + n - start);
     resetColliderContactState(this.state, start, this.state.nodeCount + n - start);
     this.syncVehicles();
@@ -751,6 +768,8 @@ export class SimEngine {
    * hydro drive → beams → ground → static colliders → integrate.
    */
   step(): void {
+    // P6: traffic driver model + scheduler at the START of every TRAFFIC_AI_TICKS-th tick (may spawn/despawn).
+    if (this.traffic !== null && this.tick % TRAFFIC_AI_TICKS === 0) this.traffic.update(this);
     const s = this.state;
     const objs = this.arena.objects;
     const sampler = this.sampler;
@@ -995,6 +1014,89 @@ export class SimEngine {
         for (let k = 0; k < TELEMETRY_SLOTS; k++) writer.setTelemetry(i, k, t[k]!);
       }
     }
+    if (this.traffic !== null) this.traffic.writeRecords(writer, this);
     this.events.flushTo(writer);
+  }
+
+  // ------------------------------------------------------------------ traffic (P6)
+  /** Commands moved nodes outside the step (traffic promotions): rebuild the broadphase. */
+  markMoved(): void {
+    this.contactsDirty = true;
+  }
+
+  /**
+   * Protocol `setTraffic` (FULL REPLACE): removes every agent and awake
+   * traffic object, then (enabled, agents > 0) builds the route network from
+   * `layout` + the installed heightfield, validates (TRAFFIC_BEAM_BUDGET),
+   * compiles and settles each variant once, and places the ghosts. Throws
+   * SimCommandError (traffic stays off) on a bad config.
+   */
+  setTraffic(
+    cfg: { enabled: boolean; seed: number; variants: readonly TrafficVariantSpec[]; density: TrafficDensity; focusObjectId: number; bubble?: TrafficBubble },
+    layout: WorldLayout | null,
+  ): { routeHash: number; pathCount: number; agentCount: number; variants: { catalogId: string; nodeCount: number; settled: Float32Array }[] } {
+    if (!cfg || typeof cfg !== 'object') throw new SimCommandError('setTraffic: config must be an object');
+    if (this.traffic !== null) {
+      this.traffic.clear(this);
+      this.traffic = null;
+    }
+    const density = clampDensity(cfg.density);
+    if (!cfg.enabled || density.agents === 0) return { routeHash: 0, pathCount: 0, agentCount: 0, variants: [] };
+    if (!Number.isInteger(cfg.focusObjectId)) throw new SimCommandError('setTraffic: focusObjectId must be an integer');
+    if (typeof cfg.seed !== 'number' || !Number.isFinite(cfg.seed)) throw new SimCommandError('setTraffic: seed must be a finite number');
+    if (!this.terrain || !layout) throw new SimCommandError('setTraffic: needs the heightfield (groundHeightfield) first');
+    if (!Array.isArray(cfg.variants) || cfg.variants.length === 0) throw new SimCommandError('setTraffic: at least one variant is required');
+    const bubble = cfg.bubble;
+    if (bubble !== undefined && !(Number.isFinite(bubble.promoteM) && Number.isFinite(bubble.demoteM) && bubble.promoteM > 0 && bubble.demoteM > bubble.promoteM)) {
+      throw new SimCommandError('setTraffic: bubble needs 0 < promoteM < demoteM');
+    }
+    const compiled: { spec: TrafficVariantSpec; cv: CompiledVehicle }[] = [];
+    cfg.variants.forEach((spec, i) => {
+      if (!spec || typeof spec !== 'object' || typeof spec.catalogId !== 'string') throw new SimCommandError(`setTraffic: variants[${i}] must have a catalogId`);
+      if (!(typeof spec.weight === 'number' && spec.weight > 0 && Number.isFinite(spec.weight))) throw new SimCommandError(`setTraffic: variants[${i}].weight must be > 0`);
+      if (!(Number.isInteger(spec.paletteCount) && spec.paletteCount >= 0)) throw new SimCommandError(`setTraffic: variants[${i}].paletteCount must be an integer ≥ 0`);
+      const rep = validateVehicle(spec.vehicle, TRAFFIC_BEAM_BUDGET);
+      if (!rep.ok) throw new SimCommandError(`setTraffic: variants[${i}] (${spec.catalogId}) rejected: ${rep.errors[0] ?? 'invalid'}`);
+      try {
+        compiled.push({ spec, cv: compileVehicle(spec.vehicle) });
+      } catch (e) {
+        throw new SimCommandError(`setTraffic: variants[${i}] (${spec.catalogId}) does not compile: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    });
+    const key = `${layout.id}|${layout.version}|${this.terrain.hash}`;
+    let net: RouteNetwork;
+    if (this.routeCache && this.routeCache.key === key) net = this.routeCache.net;
+    else {
+      try {
+        net = buildRouteNetwork(layout, this.terrain);
+      } catch (e) {
+        throw new SimCommandError(`setTraffic: route network: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      this.routeCache = { key, net };
+    }
+    const g: [number, number, number] = [this.gravityX, this.gravityY, this.gravityZ];
+    const variants: TrafficVariant[] = compiled.map(({ spec, cv }) =>
+      buildVariant(spec.catalogId, cv, spec.weight, spec.paletteCount, spec.vehicle.steering.maxWheelAngleDeg, (nodes, beams) => {
+        const e = new SimEngine({ gravity: g, debugStrains: false, capacity: { maxObjects: 1, nodeCapacity: nodes, beamCapacity: beams } });
+        e.setGroundPlane(0, MaterialId.asphalt);
+        return e;
+      }),
+    );
+    const sim = new TrafficSim(net, variants, { seed: cfg.seed, variants, density, focusObjectId: cfg.focusObjectId, bubble: bubble ? { promoteM: bubble.promoteM, demoteM: bubble.demoteM } : undefined });
+    sim.init(this);
+    this.traffic = sim;
+    return {
+      routeHash: net.hash,
+      pathCount: net.paths.length,
+      agentCount: sim.agentCount,
+      variants: variants.map((v) => ({ catalogId: v.catalogId, nodeCount: v.compiled.rig.nodeCount, settled: Float32Array.from(v.settled) })),
+    };
+  }
+
+  /** Protocol `setTrafficDensity`. No traffic configured → SimCommandError. */
+  setTrafficDensity(density: TrafficDensity): void {
+    if (this.traffic === null) throw new SimCommandError('setTrafficDensity: no traffic configured');
+    if (!density || typeof density !== 'object') throw new SimCommandError('setTrafficDensity: density must be an object');
+    this.traffic.setDensity(density);
   }
 }

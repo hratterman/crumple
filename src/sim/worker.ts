@@ -98,6 +98,12 @@ export class WorkerHost {
   private nextSnapTick = 0;
   private dirty = false;
   private readonly scheduler: HostScheduler;
+  /** The layout of the last groundHeightfield (route network source for setTraffic). */
+  layout: WorldLayout | null = null;
+  /** Worker load (CPU ms per simulated ms), smoothed over ~1 s of stepping; informational (snapshot header). */
+  workerLoad = 0;
+  private loadCpuMs = 0;
+  private loadSimMs = 0;
 
   constructor(
     private readonly post: PostFn,
@@ -118,9 +124,6 @@ export class WorkerHost {
         case 'setBubble':
         case 'keyframeRequest':
         case 'replaySeek':
-        // P6 contracts landed; T1 implements traffic (docs/CONTRACTS.md "P6 contracts").
-        case 'setTraffic':
-        case 'setTrafficDensity':
           this.post({ type: 'unimplemented', command: msg.type });
           return;
         case 'returnBuffer':
@@ -166,8 +169,24 @@ export class WorkerHost {
           engine.setInput(msg.objectId, msg.actions);
           return;
         case 'spawnVehicle':
-          engine.spawnVehicle(msg.objectId, msg.vehicle, msg.transform, msg.transmission);
+          engine.spawnVehicle(msg.objectId, msg.vehicle, msg.transform, msg.transmission, msg.catalogId);
           this.dirty = true;
+          return;
+        case 'setTraffic': {
+          const t0 = this.scheduler.now();
+          const info = engine.setTraffic(msg, this.layout);
+          const t1 = this.scheduler.now();
+          // Setup blocks the worker (route network + settling): skip that time rather than catch up.
+          this.lastWall = t1;
+          this.dirty = true;
+          this.post(
+            { type: 'trafficReady', ...info, setupMs: t1 - t0 },
+            info.variants.map((v) => v.settled.buffer as ArrayBuffer),
+          );
+          return;
+        }
+        case 'setTrafficDensity':
+          engine.setTrafficDensity(msg.density);
           return;
         case 'setTransmission':
           engine.setTransmission(msg.objectId, msg.mode);
@@ -266,6 +285,7 @@ export class WorkerHost {
     }
     const t0 = this.scheduler.now();
     const terrain = this.terrainDeps.generateTerrain(layout);
+    this.layout = layout;
     const hash = this.terrainDeps.hashTerrain(terrain) >>> 0;
     // P5: the vegetation scatter needs the splat weights, so it runs before they are dropped.
     const scatterFn = this.terrainDeps.scatterVegetation ?? scatterVegetation;
@@ -366,13 +386,28 @@ export class WorkerHost {
         steps = MAX_STEPS_PER_WAKE;
         backlog = true;
       }
+      const c0 = this.scheduler.now();
       this.runSteps(steps);
+      this.noteLoad(this.scheduler.now() - c0, steps * SIM_DT * 1000);
     } catch (e) {
       this.fail(e);
       return;
     }
     this.requestWake(backlog);
   };
+
+  /** Accumulates CPU vs simulated time; the load updates every ~250 ms of sim (EMA ≈ 1 s). */
+  private noteLoad(cpuMs: number, simMs: number): void {
+    if (!(simMs > 0)) return;
+    this.loadCpuMs += cpuMs > 0 ? cpuMs : 0;
+    this.loadSimMs += simMs;
+    if (this.loadSimMs >= 250) {
+      const x = this.loadCpuMs / this.loadSimMs;
+      this.workerLoad = this.workerLoad === 0 ? x : this.workerLoad + 0.25 * (x - this.workerLoad);
+      this.loadCpuMs = 0;
+      this.loadSimMs = 0;
+    }
+  }
 
   /** Steps `steps` ticks, writing the last snapshot tick crossed (if any). */
   runSteps(steps: number): void {
@@ -398,6 +433,7 @@ export class WorkerHost {
     if (buffer === null) return; // skipped; pending events carry over
     writer.attach(buffer);
     engine.writeSnapshot(writer, this.timeScale);
+    writer.setWorkerLoad(this.workerLoad);
     this.dirty = false;
     this.snapshotsSent++;
     this.post({ type: 'snapshot', buffer }, [buffer]);

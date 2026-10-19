@@ -24,11 +24,14 @@
  *    and the strain-based crash classes carry over;
  *  - bulkheads triangulated within BULKHEAD_REACH 0.6 m (sedan 1.0), the
  *    rear-seat bulkhead s9 within 0.85 m (FULL_BULKHEADS: the rear
- *    subframe's anchor ring; softer, the 195 km/h straight weaved);
+ *    subframe's anchor ring; softer, the 195 km/h straight weaved) and the
+ *    rear-axle ring s10 braced in-plane (BRACED_STATIONS: rear toe
+ *    stiffness); bay cross braces within 1.0 m (sedan 1.2); the B-pillar
+ *    roof centre braced to the pillar tops (EXTRA_CAGE);
  *  - subframe pivots on 3 body anchors (sedan 4);
  *  - crumple-class yield floors ×CRUMPLE_FLOOR_FACTOR.
- * Measured (sedanTraffic.test.ts): 1494 beams (wheels 892), sag ≈ 5.4 cm,
- * 0–100 6.9 s, 100–0 35.8 m, R40 1.03 g, 50 km/h frontal crush ≈ 53 cm.
+ * Measured (sedanTraffic.test.ts): 1499 beams (wheels 892), sag ≈ 5.0 cm,
+ * 0–100 6.8 s, 100–0 35.8 m, R40 0.98 g, 50 km/h frontal crush ≈ 55 cm.
  * Everything else (stations, suspension, subframe, drivetrain, crash
  * classes, mass solve) is the sedan's.
  *
@@ -190,6 +193,21 @@ const BULKHEAD_REACH = 0.6;
  */
 const FULL_BULKHEADS: readonly number[] = [9];
 const FULL_BULKHEAD_REACH = 0.85;
+/** Non-bulkhead stations braced in-plane at BULKHEAD_REACH (traffic): the rear axle ring s10 (rear subframe anchors, toe stiffness). */
+const BRACED_STATIONS: readonly number[] = [10];
+/** Bumper faces (s0, s13): rigid beams of their own, triangulated at this reach. */
+const BUMPER_REACH = 0.5;
+const reachOf = (station: number): number =>
+  FULL_BULKHEADS.includes(station) ? FULL_BULKHEAD_REACH : station === 0 || station === 13 ? BUMPER_REACH : BULKHEAD_REACH;
+/**
+ * Extra cage members: the B-pillar hoop's roof centre s7_rf (the frame top)
+ * to the pillar tops. Without the door stations' roof centres it hung on two
+ * near-collinear roof links and sagged 17 cm at rest.
+ */
+const EXTRA_CAGE: readonly (readonly [string, string])[] = [
+  ['s7_rf', 's7_bt_R'],
+  ['s7_rf', 's7_bt_L'],
+];
 /**
  * Sedan nodes the traffic rig does not have (T2 re-points their panels):
  * the cabin floor-pan nodes between tunnel and sill at the door stations
@@ -201,7 +219,7 @@ const OMIT: ReadonlySet<string> = new Set(['s6_fl_R', 's6_fl_L', 's7_fl_R', 's7_
 /** Per-node (Σd/m)·dt target of the generator (validator limit 1). */
 const DAMP_BUDGET = 0.95;
 /** Open (bay) sections: cross-car braces between the two sides up to this length, m. */
-const BAY_CROSS_REACH = 1.2;
+const BAY_CROSS_REACH = 1.0;
 /**
  * Longitudinal members (rails, sills, roof rails, tunnel) take this many
  * times a diagonal's share of each node's budget: bending stiffness lives in
@@ -910,9 +928,9 @@ function buildSedanTraffic(): { def: VehicleDef; design: SedanTrafficDesign } {
     if (st.closed) link(ring[ring.length - 1]!, ring[0]!, st.cls);
     // Bulkhead: in-plane triangulation.
     const ids = stationIds[i]!;
-    if (st.bulkhead) {
+    if (st.bulkhead || BRACED_STATIONS.includes(i)) {
       for (let p = 0; p < ids.length; p++)
-        for (let q = p + 1; q < ids.length; q++) if (dist(ids[p]!, ids[q]!) <= (FULL_BULKHEADS.includes(i) ? FULL_BULKHEAD_REACH : BULKHEAD_REACH)) link(ids[p]!, ids[q]!, st.cls);
+        for (let q = p + 1; q < ids.length; q++) if (dist(ids[p]!, ids[q]!) <= reachOf(i)) link(ids[p]!, ids[q]!, st.cls);
     } else {
       for (const e of ids) if (!ring.includes(e)) for (const n of nearest(e, ids, 3)) link(e, n, st.cls);
       if (!st.closed) {
@@ -971,6 +989,7 @@ function buildSedanTraffic(): { def: VehicleDef; design: SedanTrafficDesign } {
       link(a, b, 'cage', ta === tb ? LONGITUDINAL_W : 1);
     }
   }
+  for (const [a, b] of EXTRA_CAGE) link(a, b, 'cage');
   for (const [i, ta, tb] of CROSS_CABIN) {
     if (!pos.has(sid(i, ta, 'R')) || !pos.has(sid(i, tb, 'R'))) continue;
     link(sid(i, ta, 'R'), sid(i, tb, 'L'), 'cage');

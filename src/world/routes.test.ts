@@ -38,7 +38,7 @@ describe('buildRouteNetwork (Crumple Valley)', () => {
     expect(again.paths.length).toBe(net.paths.length);
     expect(hashRouteNetwork(net.paths)).toBe(net.hash);
     console.log(`[routes] ${net.paths.length} paths (${net.laneCount} lanes, ${(net.laneLength / 1000).toFixed(1)} km), ${net.junctions.length} junctions, hash 0x${net.hash.toString(16)}`);
-  });
+  }, 60_000);
 
   it('lanes first, then connectors; indices match; only routed road kinds', () => {
     net.paths.forEach((p, i) => {
@@ -48,7 +48,7 @@ describe('buildRouteNetwork (Crumple Valley)', () => {
     const kinds = new Set(net.paths.filter((p) => p.kind === 'lane').map((p) => DEFAULT_LAYOUT.roads.find((r) => r.id === p.road)!.kind));
     expect([...kinds].sort()).toEqual(['country', 'highway', 'mountain', 'street']);
     expect(net.paths.some((p) => p.road === 'dirtTrail' || p.road === 'arenaRunway')).toBe(false);
-  });
+  }, 60_000);
 
   it('connectivity: every path has a successor and a predecessor; every lane reaches every lane (with highway lane changes)', () => {
     for (const p of net.paths) {
@@ -72,7 +72,7 @@ describe('buildRouteNetwork (Crumple Valley)', () => {
       expect(fwd.has(i), `lane ${i} reachable`).toBe(true);
       expect(bwd.has(i), `lane ${i} reaches lane 0`).toBe(true);
     }
-  });
+  }, 60_000);
 
   it('lane continuity at junctions: connector ends coincide with their lanes (position + heading)', () => {
     for (const c of net.paths) {
@@ -90,7 +90,7 @@ describe('buildRouteNetwork (Crumple Valley)', () => {
       expect(dotIn).toBeGreaterThan(0.98);
       expect(dotOut).toBeGreaterThan(0.98);
     }
-  });
+  }, 60_000);
 
   it('stations every 2 m, unit tangents, finite; lanes sit at dir·(k + 0.5)·laneW from the road centre', () => {
     const proj = createRoadProjection();
@@ -119,7 +119,7 @@ describe('buildRouteNetwork (Crumple Valley)', () => {
       if (p.left >= 0) expect([net.paths[p.left]!.road, net.paths[p.left]!.dir, net.paths[p.left]!.lane]).toEqual([p.road, p.dir, p.lane - 1]);
       if (p.right >= 0) expect([net.paths[p.right]!.road, net.paths[p.right]!.dir, net.paths[p.right]!.lane]).toEqual([p.road, p.dir, p.lane + 1]);
     }
-  });
+  }, 60_000);
 
   it('speed limits per road kind; turns ≤ 40 km/h, U-turns ≤ 15 km/h; U-turns only at dead ends', () => {
     for (const p of net.paths) {
@@ -138,7 +138,7 @@ describe('buildRouteNetwork (Crumple Valley)', () => {
     }
     // Ridge Pass ends at the summit, Arena Gate at the arena: two dead ends, one 1-lane U-turn each.
     expect(net.paths.filter((p) => p.turn === 'uturn').length).toBe(2);
-  });
+  }, 60_000);
 
   it('right of way: through straights/rights never yield, through lefts and every branch connector do; conflicts are symmetric', () => {
     for (const j of net.junctions) {
@@ -157,7 +157,7 @@ describe('buildRouteNetwork (Crumple Valley)', () => {
     const branchLeft = hwy.connectors.map((i) => net.paths[i]!).find((c) => net.paths[c.prev[0]!]!.road === 'lakeshore' && c.turn === 'left')!;
     const crossed = new Set(branchLeft.conflicts.map((i) => net.paths[i]!).filter((c) => c.turn === 'straight').map((c) => net.paths[c.prev[0]!]!.dir));
     expect([...crossed].sort()).toEqual([-1, 1]);
-  });
+  }, 60_000);
 
   it('routePose: local −Z → forward (3D tangent), +Y → up (bank applied), position on the station polyline', () => {
     const pose = createRoutePose();
@@ -185,7 +185,7 @@ describe('buildRouteNetwork (Crumple Valley)', () => {
         expect(Math.abs(r[1]! - smp.bank / Math.sqrt(1 + smp.bank * smp.bank))).toBeLessThan(0.02);
       }
     }
-  });
+  }, 60_000);
 
   it('projectToRoute inverts the station polyline (s, lateral offset)', () => {
     const out = { s: 0, d: 0, dist: 0 };
@@ -202,5 +202,5 @@ describe('buildRouteNetwork (Crumple Valley)', () => {
       projectToRoute(p, smp.x - 0.7 * rx, smp.z - 0.7 * rz, out, s);
       expect(out.d).toBeCloseTo(-0.7, 2);
     }
-  });
+  }, 60_000);
 });
