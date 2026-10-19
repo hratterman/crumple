@@ -131,6 +131,52 @@ export function resetGroundContactState(state: SimState, first: number, count: n
   cooldownsFor(state).fill(0, first, first + count);
 }
 
+// ------------------------------------------------------------ per-node query
+const queryNormal = new Float64Array(3);
+
+/**
+ * Normal force (N, ≥ 0) that applyGroundContacts would apply to node `i`
+ * for the CURRENT positions/velocities: same early-outs, stiffness clamp,
+ * two-sided damper and ≥ 0 clamp as the kernel (keep the two in sync). 0 for
+ * non-collidable, pinned or non-penetrating nodes. When `normalOut` is given
+ * and the node is in contact, the sampled unit normal is written there.
+ * Used by the vehicle pre-step (wheel load, parking clamp cap), which runs
+ * before the ground pass with unchanged positions, so the value equals this
+ * tick's contact force. Hot path: + - * / sqrt only, no allocation.
+ */
+export function groundNormalForce(
+  state: SimState,
+  i: number,
+  sampler: HeightSampler,
+  dt: number,
+  normalOut?: Float64Array,
+): number {
+  if ((state.flags[i]! & NODE_FLAG_COLLIDABLE) === 0) return 0;
+  const im = state.invMass[i]!;
+  if (im === 0) return 0;
+  const x = state.posX[i]!;
+  const y = state.posY[i]!;
+  const z = state.posZ[i]!;
+  const r = state.radius[i]!;
+  const h = sampler.heightAt(x, z);
+  if (y - h > SLOPE_SKIP * r) return 0;
+  const out = normalOut ?? queryNormal;
+  sampler.normalAt(x, z, out);
+  const nx = out[0]!;
+  const ny = out[1]!;
+  const nz = out[2]!;
+  const depth = (h - y) * ny + r;
+  if (!(depth > 0)) return 0;
+  const m = 1 / im;
+  const invDt = 1 / dt;
+  const kcm = KC_STABILITY * invDt * invDt * m;
+  const kc = kcm < KC_MAX ? kcm : KC_MAX;
+  const c = 2 * CONTACT_ZETA * Math.sqrt(kc * m);
+  const vn = state.velX[i]! * nx + state.velY[i]! * ny + state.velZ[i]! * nz;
+  const fn = kc * depth - c * vn;
+  return fn > 0 ? fn : 0;
+}
+
 // ------------------------------------------------------------ kernel
 export const applyGroundContacts: ApplyGroundContacts = (
   state: SimState,

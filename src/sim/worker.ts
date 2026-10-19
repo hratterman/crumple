@@ -139,6 +139,17 @@ export class WorkerHost {
         case 'input':
           engine.setInput(msg.objectId, msg.actions);
           return;
+        case 'spawnVehicle':
+          engine.spawnVehicle(msg.objectId, msg.vehicle, msg.transform, msg.transmission);
+          this.dirty = true;
+          return;
+        case 'setTransmission':
+          engine.setTransmission(msg.objectId, msg.mode);
+          return;
+        case 'recover':
+          engine.recover(msg.objectId, msg.pos);
+          this.dirty = true;
+          return;
         default:
           throw new SimCommandError(`unknown command ${String(type)}`);
       }
