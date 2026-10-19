@@ -11,7 +11,9 @@ import {
   cutPanel,
   loftSurface,
   outlineBand,
+  paramAt,
   stripMesh,
+  surfacePatch,
   uAtMetric,
   polyShape,
   roundedBoxMesh,
@@ -255,5 +257,43 @@ describe('loft core', () => {
     expect(windingAgreement(gr)).toBeGreaterThan(0.98);
     // The rim hugs the circle.
     for (let i = 0; i < rim.position.length; i += 3) expect(Math.abs(Math.hypot(rim.position[i + 2]!, rim.position[i + 1]! - 0.6) - 0.2)).toBeLessThan(0.02);
+  });
+
+  it('paramAt inverts a 2-D projection; surfacePatch builds an outward, gap-free conforming part', () => {
+    const loft = createLoft(shell(), { symmetric: true });
+    const sheet = createSheet(loftSurface(loft), { resolution: 0.1 });
+    const side = (q: V3): readonly [number, number] => [q[2], q[1]];
+    const q: V3 = [0, 0, 0];
+    for (const [z, y] of [
+      [0.2, 0.6],
+      [-0.7, 0.35],
+      [0.55, 0.85],
+    ] as const) {
+      const [u, v] = paramAt(sheet, side, [z, y]);
+      sheet.surface.point(u, v, q);
+      expect(Math.abs(q[2] - z)).toBeLessThan(1e-6);
+      expect(Math.abs(q[1] - y)).toBeLessThan(1e-6);
+    }
+    // A domed disc (collapsed centre ring) of radius 5 cm around (z, y) = (0.2, 0.6).
+    const R = 0.05;
+    const disc = surfacePatch(
+      sheet,
+      4,
+      16,
+      (i, j) => {
+        const r = (R * i) / 4;
+        const a = (j / 16) * Math.PI * 2;
+        const [u, v] = paramAt(sheet, side, [0.2 + r * Math.cos(a), 0.6 + r * Math.sin(a)]);
+        return { u, v, lift: 0.004 * (1 - (r / R) ** 2) };
+      },
+      { closedJ: true, smoothNormals: true },
+    );
+    const g = tessellateSurface('disc', { type: 'mesh', position: disc.position, index: disc.index, normal: disc.normal, uv: disc.uv });
+    checkGeometry(g);
+    expect(windingAgreement(g)).toBe(1);
+    // 16 centre fan triangles + 3 rings of quads; the collapsed centre leaves no zero-area triangle.
+    expect(g.index.length / 3).toBe(16 + 3 * 16 * 2);
+    // Outward: away from the shell's axis (x = 0, y = 0.3).
+    for (let i = 0; i < g.position.length; i += 3) expect(g.normal[i]! * g.position[i]! + g.normal[i + 1]! * (g.position[i + 1]! - 0.3)).toBeGreaterThan(0);
   });
 });

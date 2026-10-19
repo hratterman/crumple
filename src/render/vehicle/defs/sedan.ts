@@ -42,13 +42,14 @@ import {
   mergeMeshes,
   mirrorMesh,
   orientMesh,
-  outlineBand,
+  paramAt,
   polyShape,
   rotX,
   roundedBoxMesh,
   sideCut,
   smooth2,
   stripMesh,
+  surfacePatch,
   toMeshSurface,
   transformMesh,
   topCut,
@@ -260,9 +261,20 @@ const L = {
   ]),
 };
 
+/**
+ * Power-dome crease lines: outer (lower) and inner (upper) x of the step, and its lift. On the hood
+ * the two creases converge toward the grille and the step is taller and tighter (crisper); the
+ * trunk keeps the original parallel pair.
+ */
+const hoodW = (z: number): number => smoothstep(-0.98, -1.12, z);
+const creaseX = (z: number): number => lerp(0.375, 0.282, smoothstep(-1.05, -2.05, z));
+const creaseW = (z: number): number => lerp(0.03, 0.022, hoodW(z));
+const domeLift = (z: number): number => lerp(0.004, 0.0065, hoodW(z)) * L.dome(z);
+
 /** M1 top including the power-dome lift (≈ the evaluated M1 deck), for parts that sit on it. */
 function m1Top(x: number, z: number): number {
-  return topY(x, z) + 0.004 * L.dome(z) * (1 - smoothstep(0.345, 0.375, Math.abs(x)));
+  const xc = creaseX(z);
+  return topY(x, z) + domeLift(z) * (1 - smoothstep(xc - creaseW(z), xc, Math.abs(x)));
 }
 
 /** M1 top surface height (hood / tonneau / deck) at (x, z), consistent with CP9..11. */
@@ -284,6 +296,8 @@ const M1_STATIONS = [
   1.42, 1.55, 1.7, 1.83, 1.95, 2.04, 2.09, 2.11,
 ];
 
+const fenderW = (z: number): number => 1 - smoothstep(-0.95, -0.6, z);
+
 function m1Section(z: number): V3[] {
   const xs = L.xSide(z);
   const yb = L.yBot(z);
@@ -299,13 +313,15 @@ function m1Section(z: number): V3[] {
     [xs + 0.0115, ysh - 0.026],
     [xs + 0.0108, ysh],
     [xs + 0.0035, ysh + 0.016],
-    [xs - 0.024, lerp(ysh, yt, 0.55)],
+    // Front fenders: the upper side keeps leaning in up to the top corner (a vertical band there
+    // mirrors the dark horizon as a stripe along the fender top).
+    [lerp(xs - 0.024, lerp(xs + 0.0035, L.xTop(z), 0.5), fenderW(z)), lerp(ysh, yt, 0.55)],
     [L.xTop(z), yt],
     [L.xHood(z), L.yHood(z)],
-    // Power-dome crease: a 3 cm step that lifts the centre of the hood (and trunk) ~4 mm.
-    [0.375, topY(0.375, z)],
-    [0.345, topY(0.345, z) + 0.004 * L.dome(z)],
-    [0, L.yHood(z) + L.crown(z) + 0.004 * L.dome(z)],
+    // Power-dome crease: a step that lifts the centre of the hood (and trunk).
+    [creaseX(z), topY(creaseX(z), z)],
+    [creaseX(z) - creaseW(z), topY(creaseX(z) - creaseW(z), z) + domeLift(z)],
+    [0, L.yHood(z) + L.crown(z) + domeLift(z)],
   ];
   const wf = 1 - smoothstep(M1_FRONT, -1.78, z);
   const wr = smoothstep(1.83, M1_REAR, z);
@@ -546,22 +562,24 @@ export function buildSedanVisual(opts: SedanBuildOptions = { lod: 0 }): VehicleV
   const noseX0 = m1At(u1(4), 0)[0];
   const tailX0 = m1At(u1(4), 1)[0];
 
+  const NOSE_PLAN = smooth2(
+    [
+      [noseX0, -2.03],
+      [noseX0 - 0.004, -2.085],
+      [noseX0 - 0.022, -2.15],
+      [noseX0 - 0.062, -2.215],
+      [noseX0 - 0.14, -2.27],
+      [0.55, -2.312],
+      [0.3, -2.334],
+      [0, -2.341],
+    ],
+    10,
+  );
+  const NOSE_OUT = (dx: number, dz: number): P2 => [-dz, dx];
   const noseSecs = ribbonSections(
     {
-      plan: smooth2(
-        [
-          [noseX0, -2.03],
-          [noseX0 - 0.004, -2.085],
-          [noseX0 - 0.022, -2.15],
-          [noseX0 - 0.062, -2.215],
-          [noseX0 - 0.14, -2.27],
-          [0.55, -2.312],
-          [0.3, -2.334],
-          [0, -2.341],
-        ],
-        10,
-      ),
-      outward: (dx, dz) => [-dz, dx],
+      plan: NOSE_PLAN,
+      outward: NOSE_OUT,
       profile: [
         [0.25, -0.05],
         [0.265, -0.012],
@@ -845,50 +863,8 @@ export function buildSedanVisual(opts: SedanBuildOptions = { lod: 0 }): VehicleV
     add(`beltSeal${s}`, 'trim', 'rubber', perSide(seal, s), sideBind(['s5_cw_$', 's5_hp_$', 's6_bt_$', 's6_dm_$', 's6_rf_$', 's7_bt_$', 's7_dm_$', 's7_rf_$', 's8_bt_$', 's8_dm_$', 's8_rf_$', 's9_dk_$', 's9_qm_$'], s), { damageWeight: 0 });
   }
 
-  // ---------------------------------------------------------------- nose (M2)
-  // Front view (|x|, y): slim headlights under the hood edge, inner tips pointing at the grille's top
-  // corners; a hexagonal grille with a chrome surround that meets the lamp tips; a lower centre intake,
-  // tall corner intakes and a black splitter lip.
-  const lampLow = (x: number): number => 0.666 + 0.04 * (1 - smoothstep(0.44, 0.82, x));
-  const LAMP_F = fv((x, y) => Math.min(y - lampLow(x), x - (0.495 - 0.42 * (y - 0.706))));
-  const grilleX = (y: number): number => lerp(0.25, 0.355, smoothstep(0.5, 0.77, y));
-  const GRILLE = fv((x, y) => Math.min(grilleX(y) - x, y - 0.505));
-  const INTAKE = fv((x, y) => Math.min(0.4 + 0.06 * (0.44 - y) / 0.14 - x, y - 0.295, 0.44 - y));
-  const VENT = fv((x, y) => Math.min(x - (0.565 + 0.06 * (y - 0.32) / 0.2), 0.795 - x, y - 0.315, 0.52 - 0.035 * smoothstep(0.6, 0.79, x) - y));
-  const SPLITTER = fv((x, y) => Math.min(0.285 - y, 0.82 - x));
-  const bumperFBind = ['s0_*'];
-  const grow = (sh: Shape2, d: number): Shape2 => ({ sd: (a, b) => sh.sd(a, b) + d });
-  {
-    const m = cutC(
-      S2,
-      [uBelow(S2, 1), vAbove(S2, 0), frontCut(neg(LAMP_F), 'shut'), frontCut(neg(GRILLE), 'lip'), frontCut(neg(INTAKE), 'lip'), frontCut(neg(VENT), 'lip'), frontCut(neg(SPLITTER), 'hem')],
-      { corner: 0.022 },
-    );
-    add('bumperF', 'bumper', 'paint', m.mesh, bumperFBind, { detach: { attach: 'boundary', minBrokenFraction: 1, mode: 'follow' } });
-    add('bumperFSeal', 'trim', 'rubber', m.seal, bumperFBind, { damageWeight: 0, castShadow: false });
-    const g = cutC(S2, [frontCut(grow(GRILLE, 0.006), 'seam'), uBelow(S2, 1, 'seam')], { offset: -0.024, border: 'seam' });
-    const it = cutC(S2, [frontCut(grow(INTAKE, 0.012), 'seam')], { offset: -0.026, border: 'seam' });
-    add('grille', 'grille', 'grille', mergeMeshes([g.mesh, it.mesh]), bumperFBind, { damageWeight: 0.8 });
-    const opening = cut(S2, [frontCut(GRILLE, 'seam'), uBelow(S2, 1, 'seam')], { corner: 0.022, border: 'seam' });
-    const surround = outlineBand(opening.mesh, 0.014, 0.0, 0.004, { skipCentre: true });
-    add('grilleFrame', 'trim', 'chrome', mergeMeshes([surround, mirrorMesh(surround)]), bumperFBind, { damageWeight: 0.8 });
-    const vt = cutC(S2, [frontCut(grow(VENT, 0.012), 'seam')], { offset: -0.022, border: 'seam' });
-    const sp = cutC(S2, [frontCut(SPLITTER, 'hem')], { border: 'hem', corner: 0.01 });
-    add('vents', 'trim', 'trim', mergeMeshes([vt.mesh, sp.mesh]), bumperFBind, { damageWeight: 0.8 });
-    const lamp = cutC(S2f, [frontCut(LAMP_F, lens), uBelow(S2f, 1), vAbove(S2f, 0), frontCut(fv((x) => 0.815 - x), 'hem')], { corner: 0.012, where: (p) => p[1] > 0.6 && p[0] > 0.35 });
-    add('headlights', 'light', 'lightHead', lamp.mesh, ['s1_*', 's2_fd_*', 's2_rh_*', 's2_rl_*', 's2_rt'], { lights: ['head', 'highBeam'], damageWeight: 0.3 });
-  }
-
-  // ---------------------------------------------------------------- tail (M3)
-  // Slim L-shaped lamps (top band to the corner, leg down the corner onto the side) joined by a light bar.
-  const lampBand = (x: number, y: number): number => Math.min(y - (0.86 + 0.008 * smoothstep(0.42, 0.86, x)), 0.93 - y, x - 0.37);
-  const lampLeg = (x: number, y: number): number => Math.min(y - 0.772, 0.93 - y, x - 0.7);
-  const LAMP_R = fv((x, y) => Math.max(lampBand(x, y), lampLeg(x, y)));
-  const DIFFUSER = fv((x, y) => Math.min(0.74 - x, 0.4 - 0.02 * smoothstep(0.5, 0.74, x) - y));
-  const PIPE_X = 0.47;
-  const PIPE_Y = 0.335;
-  const PIPE = fv((x, y) => 0.05 - Math.hypot((x - PIPE_X) * 0.62, y - PIPE_Y));
-  /** u on the tail ribbon where the surface reaches height y at v (bisection). */
+  // ---------------------------------------------------------------- ribbon helpers
+  /** u on a ribbon where the surface reaches height y at v (bisection). */
   const uAtY = (sheet: Sheet, v: number, y: number): number => {
     let lo = 0;
     let hi = 1;
@@ -914,6 +890,313 @@ export function buildSedanVisual(opts: SedanBuildOptions = { lod: 0 }): VehicleV
     }
     return (lo + hi) / 2;
   };
+  /** v on the nose ribbon where the point at height y reaches z = z0 (z decreases with v). */
+  const vAtZy = (sheet: Sheet, y: number, z0: number): number => {
+    let lo = 0;
+    let hi = 1;
+    const q: V3 = [0, 0, 0];
+    for (let it = 0; it < 40; it++) {
+      const mid = (lo + hi) / 2;
+      sheet.surface.point(uAtY(sheet, mid, y), mid, q);
+      if (q[2] > z0) lo = mid;
+      else hi = mid;
+    }
+    return (lo + hi) / 2;
+  };
+  const frontProj = (p: V3): P2 => [Math.abs(p[0]), p[1]];
+  /**
+   * (u, v) on a nose sheet at front-view (|x|, y): Newton warm-started from the previous solution
+   * (callers walk small parts point by point), bisection guess when that does not converge.
+   */
+  const lastUV = new Map<Sheet, [number, number]>();
+  const onFront = (sheet: Sheet, x: number, y: number): [number, number] => {
+    const q: V3 = [0, 0, 0];
+    const hit = (uv: [number, number]): boolean => {
+      sheet.surface.point(uv[0], uv[1], q);
+      return Math.hypot(Math.abs(q[0]) - x, q[1] - y) < 1e-6;
+    };
+    const last = lastUV.get(sheet);
+    let uv = last ? paramAt(sheet, frontProj, [x, y], last) : null;
+    if (!uv || !hit(uv)) {
+      const v0 = vAtX(sheet, y, x);
+      uv = paramAt(sheet, frontProj, [x, y], [uAtY(sheet, v0, y), v0]);
+    }
+    lastUV.set(sheet, uv);
+    return uv;
+  };
+  /** Smooth (rounded) minimum of signed distances, the same rounding cutPanel applies between cuts. */
+  const rmin = (r: number, ...a: number[]): number => {
+    let g = a[0]!;
+    for (let k = 1; k < a.length; k++) {
+      const b = a[k]!;
+      g = b < r && g < r ? r - Math.hypot(r - b, r - g) : Math.min(b, g);
+    }
+    return g;
+  };
+
+  /**
+   * A strip conforming to a nose sheet along a front-view path (|x|, y)(t), t ∈ [0, 1]: `lifts` is the
+   * cross profile (normal offsets at evenly spaced stations from −half to +half across the path).
+   */
+  const frontStrip = (sheet: Sheet, path: (t: number) => P2, half: number, n: number, lifts: readonly number[]): PanelMesh => {
+    const nI = lifts.length - 1;
+    return surfacePatch(
+      sheet,
+      nI,
+      n,
+      (i, j) => {
+        const t = j / n;
+        const c = path(t);
+        const a = path(Math.max(0, t - 1e-3));
+        const b = path(Math.min(1, t + 1e-3));
+        const l = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+        const off = lerp(-half, half, i / nI);
+        const [u, v] = onFront(sheet, c[0] - ((b[1] - a[1]) / l) * off, c[1] + ((b[0] - a[0]) / l) * off);
+        return { u, v, lift: lifts[i]! };
+      },
+      { smoothNormals: true },
+    );
+  };
+
+  // ---------------------------------------------------------------- nose (M2)
+  // Front view (|x|, y). Slim, raked headlamps tucked under the hood edge (dark housing, two
+  // projectors, an LED light guide along the bottom that hooks up the outer corner, a bright brow
+  // line; the tail wraps onto the fender to a point) and a slim upper grille between them form one
+  // dark band under the hood edge, split only by shut gaps on the rake lines. Below: one wide, low
+  // mouth (honeycomb) split by raked body-colour fins into a centre intake and two vertical corner
+  // intakes with LED indicator strips; air-curtain slots on the corners; a black chin with a
+  // protruding splitter blade.
+  const bumperFBind = ['s0_*'];
+  const lampBind = ['s1_*', 's2_fd_*', 's2_rh_*', 's2_rl_*', 's2_rt'];
+  const LAMP_Y0 = 0.672;
+  const RAKE: [P2, P2] = [
+    [0.468, LAMP_Y0],
+    [0.384, 0.786],
+  ];
+  /** Signed distance to the lamp's inner rake line, outboard positive. */
+  const rake = (x: number, y: number): number => {
+    const [[x0, y0], [x1, y1]] = RAKE;
+    const dx = x1 - x0;
+    const dy = y1 - y0;
+    return ((x - x0) * dy - (y - y0) * dx) / Math.hypot(dx, dy);
+  };
+  /** x of the rake line at height y. */
+  const rakeX = (y: number): number => RAKE[0][0] + ((y - RAKE[0][1]) * (RAKE[1][0] - RAKE[0][0])) / (RAKE[1][1] - RAKE[0][1]);
+  /** Side view: the lamp's top edge falls to a point as it wraps onto the fender. */
+  const TAIL_SLOPE = 1.6;
+  const tailTop = (z: number): number => LAMP_Y0 + 0.012 + TAIL_SLOPE * (-2.035 - z);
+  /** The lamp opening as one region (> 0 inside), open toward the hood and fender edges. */
+  const lampShape = (p: V3): number => rmin(0.01, p[1] - LAMP_Y0, rake(Math.abs(p[0]), p[1]), (tailTop(p[2]) - p[1]) / Math.hypot(1, TAIL_SLOPE));
+  /** Upper grille bottom: dips toward the centre, meets the lamp bottom at the rake. */
+  const ugBot = (x: number): number => LAMP_Y0 - 0.018 * (1 - smoothstep(0.05, 0.46, x));
+  /** Upper grille: between the lamps (beyond a shut gap on the rake line), up to the hood edge. */
+  const UPPER_GRILLE = fv((x, y) => rmin(0.01, y - ugBot(x), -rake(x, y)));
+  /** Lamps + grille as one dark band: the bumper's top edge. */
+  const band = (p: V3): number => Math.max(lampShape(p), Math.min(p[1] - ugBot(Math.abs(p[0])), 0.03 - rake(Math.abs(p[0]), p[1])));
+  // The mouth: gull-wing top (rising toward the lamps), outer ends raked parallel to the fins.
+  const MOUTH_BOT = 0.302;
+  const MOUTH_RAKE = 0.36;
+  const mouthTop = (x: number): number => 0.512 + 0.075 * smoothstep(0.28, 0.66, x);
+  const mouthOuter = (y: number): number => 0.742 - MOUTH_RAKE * (y - MOUTH_BOT);
+  const finX = (y: number): number => 0.452 - MOUTH_RAKE * (y - MOUTH_BOT);
+  const MOUTH = fv((x, y) => rmin(0.02, (mouthOuter(y) - x) * 0.94, y - MOUTH_BOT, mouthTop(x) - y));
+  const CURTAIN = fv((x, y) => rmin(0.004, x - 0.807, 0.823 - x, y - 0.4, 0.57 - y));
+  const CHIN = fv((x, y) => Math.min(0.287 - y, 0.83 - x));
+  const grow = (sh: Shape2, d: number): Shape2 => ({ sd: (a, b) => sh.sd(a, b) + d });
+  {
+    const m = cutC(
+      S2,
+      [
+        uBelow(S2, 1),
+        vAbove(S2, 0),
+        { fn: (p) => -band(p), edge: 'shut' },
+        frontCut(neg(MOUTH), 'lip'),
+        frontCut(neg(CURTAIN), 'lip'),
+        frontCut(neg(CHIN), 'hem'),
+      ],
+      { corner: 0.015 },
+    );
+    add('bumperF', 'bumper', 'paint', m.mesh, bumperFBind, { detach: { attach: 'boundary', minBrokenFraction: 1, mode: 'follow' } });
+    add('bumperFSeal', 'trim', 'rubber', m.seal, bumperFBind, { damageWeight: 0, castShadow: false });
+    // Honeycomb inserts recessed behind the openings.
+    const ug = cutC(S2, [frontCut(grow(UPPER_GRILLE, -0.006), 'lip'), frontCut(fv((x, y) => y - ugBot(x) + 0.008), 'seam')], { offset: -0.022, border: 'seam' });
+    const mo = cutC(S2, [frontCut(grow(MOUTH, 0.012), 'seam')], { offset: -0.03, border: 'seam' });
+    add('grille', 'grille', 'grille', mergeMeshes([ug.mesh, mo.mesh]), bumperFBind, { damageWeight: 0.8 });
+    // Body-colour fins in the mouth (thinner than a sheet cell: conforming strips whose sides fall
+    // back to the honeycomb).
+    const finY = (t: number): number => lerp(MOUTH_BOT - 0.012, mouthTop(0.4) + 0.012, t);
+    const fin = frontStrip(S2, (t) => [finX(finY(t)), finY(t)], 0.024, opts.lod === 0 ? 8 : 4, [-0.027, -0.007, -0.001, 0, -0.001, -0.007, -0.027]);
+    add('intakeFins', 'bumper', 'paint', mergeMeshes([fin, mirrorMesh(fin)]), bumperFBind, { damageWeight: 1 });
+    // Two gloss slats across the upper grille, stopping short of the lamp rake.
+    const slats: PanelMesh[] = [];
+    for (const ys of [0.695, 0.728]) {
+      const xEnd = rakeX(ys) - 0.022;
+      slats.push(frontStrip(S2, (t) => [xEnd * (1 - t), ys], 0.0055, opts.lod === 0 ? 12 : 6, [-0.02, -0.011, -0.01, -0.011, -0.02]));
+    }
+    const sl = mergeMeshes(slats);
+    add('grilleSlats', 'trim', 'trim', mergeMeshes([sl, mirrorMesh(sl)]), bumperFBind, { damageWeight: 0.8 });
+    // Black chin, air-curtain ducts and the splitter blade.
+    const chin = cutC(S2, [frontCut(CHIN, 'hem')], { border: 'hem', corner: 0.01 });
+    const duct = cutC(S2, [frontCut(grow(CURTAIN, 0.008), 'seam')], { offset: -0.022, border: 'seam' });
+    const blade: V3[][] = [];
+    const nBlade = opts.lod === 0 ? 16 : 10;
+    const bladeT = Array.from({ length: nBlade + 1 }, (_, k) => lerp(0.2, 1, k / nBlade));
+    for (const smp of sampleCurve(NOSE_PLAN, bladeT, NOSE_OUT)) {
+      const x = Math.abs(smp.p[0]);
+      const taper = 1 - smoothstep(0.62, 0.76, x);
+      const out = 0.014 + 0.038 * taper;
+      const y0 = 0.247;
+      const y1 = 0.272 - 0.008 * (1 - taper);
+      const ring: [number, number][] = [
+        [-0.05, y0],
+        [out - 0.006, y0],
+        [out, y0 + 0.004],
+        [out, y1 - 0.003],
+        [out - 0.005, y1],
+        [-0.05, y1],
+      ];
+      blade.push(ring.map(([r, y]) => [smp.p[0] + smp.n[0] * r, y, smp.p[1] + smp.n[1] * r] as V3));
+    }
+    const bladeM = gridLoftMesh(createLoft(blade, { closedU: true }), opts.lod === 0 ? 9 : 6, nBlade, { capStart: true });
+    add('splitter', 'trim', 'trim', mergeMeshes([chin.mesh, duct.mesh, bladeM, mirrorMesh(bladeM)]), bumperFBind, { damageWeight: 0.8 });
+
+    // Headlamps: housing (dark), light guide + projectors + brow (the lit lens, A3 lamp shader), chrome bezels.
+    const housing = cutC(S2, [{ fn: (p) => lampShape(p), edge: lens }, uBelow(S2, 1), vAbove(S2, 0)], { corner: 0.01, offset: -0.004, where: (p) => p[1] > 0.6 && p[0] > 0.3 });
+    add('headlampHousing', 'light', 'trim', housing.mesh, lampBind, { damageWeight: 0.3 });
+    const Y0 = LAMP_Y0 + 0.006;
+    const HB = 0.078;
+    const hs = 0.2 * HB;
+    const yMid = Y0 + hs / 2;
+    const xIn = rakeX(yMid) + 0.012;
+    const vIn = vAtX(S2f, yMid, xIn);
+    const zTail = -2.035 - (Y0 + hs + 0.007 - LAMP_Y0 - 0.012) / TAIL_SLOPE;
+    const vTail = vAtZy(S2f, yMid, zTail);
+    const nGuide = opts.lod === 0 ? 40 : 18;
+    const guide = surfacePatch(
+      S2f,
+      2,
+      nGuide,
+      (i, j) => {
+        const v = lerp(vTail, vIn, j / nGuide);
+        return { u: uAtY(S2f, v, Y0 + (hs * i) / 2), v, lift: i === 1 ? 0.0005 : -0.0015 };
+      },
+      { smoothNormals: true },
+    );
+    // Brow: a thin bright line under the hood edge (the top of the lamp box).
+    const browX0 = rakeX(Y0 + HB - 0.003) + 0.012;
+    const browX1 = 0.745;
+    const vb0 = vAtX(S2f, Y0 + HB, browX1);
+    const vb1 = vAtX(S2f, Y0 + HB, browX0);
+    const nBrow = opts.lod === 0 ? 24 : 10;
+    const brow = surfacePatch(
+      S2f,
+      1,
+      nBrow,
+      (i, j) => {
+        const v = lerp(vb0, vb1, j / nBrow);
+        return { u: uAtY(S2f, v, Y0 + HB - 0.0045 * (1 - i)), v, lift: -0.0015 };
+      },
+      { smoothNormals: true },
+    );
+    // The lamp shader lays its DRL bands and projector "eyes" out in the (|x|, y) box of every
+    // lightHead part: measure it from the parts that span it (guide + brow); leg and projectors sit inside.
+    let X0 = Infinity;
+    let X1 = -Infinity;
+    let YB0 = Infinity;
+    let YB1 = -Infinity;
+    for (const m of [guide, brow])
+      for (let k = 0; k < m.position.length; k += 3) {
+        X0 = Math.min(X0, Math.abs(m.position[k]!));
+        X1 = Math.max(X1, Math.abs(m.position[k]!));
+        YB0 = Math.min(YB0, m.position[k + 1]!);
+        YB1 = Math.max(YB1, m.position[k + 1]!);
+      }
+    const W = X1 - X0;
+    const HM = YB1 - YB0;
+    // Hook: the light guide turns up the outer corner (the lamp shader's vertical DRL band).
+    const legX = [X0 + 0.897 * W, X0 + 0.933 * W];
+    const legUV = onFront(S2f, (legX[0]! + legX[1]!) / 2, yMid);
+    const legP = S2f.surface.point(legUV[0], legUV[1], [0, 0, 0]);
+    const legTop = Math.min(YB0 + 0.72 * HM, tailTop(legP[2]) - 0.012);
+    const nLeg = 6;
+    const leg = surfacePatch(
+      S2f,
+      2,
+      nLeg,
+      (i, j) => {
+        const [u, v] = onFront(S2f, lerp(legX[0]!, legX[1]!, i / 2), lerp(yMid, legTop, j / nLeg));
+        return { u, v, lift: i === 1 ? 0.0005 : -0.0015 };
+      },
+      { smoothNormals: true },
+    );
+    // Projectors at the lamp shader's two "eyes" (centres 34 % / 66 % across, 58 % up; lens + ring = 0.30 HB).
+    const rd = 0.3 * HM;
+    const eyeY = YB0 + 0.58 * HM;
+    const nR = opts.lod === 0 ? 4 : 2;
+    const nA = opts.lod === 0 ? 20 : 12;
+    const discs: PanelMesh[] = [];
+    const bezels: PanelMesh[] = [];
+    for (const f of [0.34, 0.66]) {
+      const ex = X0 + f * W;
+      const polar = (r: number, j: number): [number, number] => onFront(S2f, ex + r * Math.cos((j / nA) * Math.PI * 2), eyeY + r * Math.sin((j / nA) * Math.PI * 2));
+      discs.push(
+        surfacePatch(
+          S2f,
+          nR,
+          nA,
+          (i, j) => {
+            const r = (rd * i) / nR;
+            const [u, v] = i === 0 ? onFront(S2f, ex, eyeY) : polar(r, j);
+            return { u, v, lift: -0.0035 + 0.004 * (1 - (r / rd) ** 2) };
+          },
+          { closedJ: true, smoothNormals: true },
+        ),
+      );
+      const br = [rd, rd + 0.0022, rd + 0.0048];
+      const bl = [-0.0032, -0.0005, -0.0038];
+      bezels.push(
+        surfacePatch(
+          S2f,
+          2,
+          nA,
+          (i, j) => {
+            const [u, v] = polar(br[i]!, j);
+            return { u, v, lift: bl[i]! };
+          },
+          { closedJ: true, smoothNormals: true },
+        ),
+      );
+    }
+    const lit = mergeMeshes([guide, leg, ...discs, brow]);
+    add('headlights', 'light', 'lightHead', mergeMeshes([lit, mirrorMesh(lit)]), lampBind, { lights: ['head', 'highBeam'], damageWeight: 0.3 });
+    const bz = mergeMeshes(bezels);
+    add('projectorBezels', 'trim', 'chrome', mergeMeshes([bz, mirrorMesh(bz)]), lampBind, { damageWeight: 0.3 });
+
+    // LED indicator strips down the outer wall of the corner intakes.
+    const nInd = opts.lod === 0 ? 10 : 5;
+    const ind = surfacePatch(
+      S2,
+      1,
+      nInd,
+      (i, j) => {
+        const y = lerp(MOUTH_BOT + 0.03, mouthTop(0.7) - 0.035, j / nInd);
+        const [u, v] = onFront(S2, mouthOuter(y) - 0.018 - 0.007 * i, y);
+        return { u, v, lift: -0.014 };
+      },
+      { smoothNormals: true },
+    );
+    for (const s of SIDES) add(`indicatorF${s}`, 'light', 'lightIndicator', perSide(ind, s), bumperFBind, { lights: [s === 'R' ? 'indicatorR' : 'indicatorL'], damageWeight: 0.3 });
+  }
+
+  // ---------------------------------------------------------------- tail (M3)
+  // Slim L-shaped lamps (top band to the corner, leg down the corner onto the side) joined by a light bar.
+  const lampBand = (x: number, y: number): number => Math.min(y - (0.86 + 0.008 * smoothstep(0.42, 0.86, x)), 0.93 - y, x - 0.37);
+  const lampLeg = (x: number, y: number): number => Math.min(y - 0.772, 0.93 - y, x - 0.7);
+  const LAMP_R = fv((x, y) => Math.max(lampBand(x, y), lampLeg(x, y)));
+  const DIFFUSER = fv((x, y) => Math.min(0.74 - x, 0.4 - 0.02 * smoothstep(0.5, 0.74, x) - y));
+  const PIPE_X = 0.47;
+  const PIPE_Y = 0.335;
+  const PIPE = fv((x, y) => 0.05 - Math.hypot((x - PIPE_X) * 0.62, y - PIPE_Y));
   {
     const bumpTop = 0.6;
     const bandCut = (keepAbove: boolean, edge: Cut['edge']): Cut => frontCut({ sd: (_x, y) => (keepAbove ? y - bumpTop : bumpTop - y) }, edge);
@@ -966,12 +1249,10 @@ export function buildSedanVisual(opts: SedanBuildOptions = { lod: 0 }): VehicleV
     add('exhaustBore', 'trim', 'underbody', mergeMeshes(bores), ['s13_*'], { damageWeight: 0 });
   }
 
-  // ---------------------------------------------------------------- lamps: indicators
+  // ---------------------------------------------------------------- lamps: rear indicators
   {
-    const ind = cut(S2f, [frontCut(LAMP_F, lens), uBelow(S2f, 1), vAbove(S2f, 0), frontCut(fv((x) => x - 0.815), 'hem')], { corner: 0.008, where: (p) => p[0] > 0.7 && p[1] > 0.6 });
     const indR = cut(S3f, [frontCut(LAMP_R, lens), vAbove(S3f, 0), frontCut(fv((x, y) => Math.min(x - 0.7, 0.81 - y)), 'hem')], { corner: 0.006, where: (p) => p[0] > 0.6 && p[1] > 0.7 });
     for (const s of SIDES) {
-      add(`indicatorF${s}`, 'light', 'lightIndicator', perSide(ind.mesh, s), sideBind(['s1_fd_$', 's1_rh_$', 's1_rl_$', 's2_fd_$', 's2_rh_$'], s), { lights: [s === 'R' ? 'indicatorR' : 'indicatorL'], damageWeight: 0.3 });
       add(`indicatorR${s}`, 'light', 'lightIndicator', perSide(indR.mesh, s), sideBind(['s12_qt_$', 's12_rh_$', 's12_ld_$', 's11_qt_$', 's11_rh_$'], s), { lights: [s === 'R' ? 'indicatorR' : 'indicatorL'], damageWeight: 0.3 });
     }
   }
@@ -1043,7 +1324,7 @@ export function buildSedanVisual(opts: SedanBuildOptions = { lod: 0 }): VehicleV
     // Flush door handles just under the shoulder crease.
     const handle = (z: number): PanelMesh => {
       const y = L.ySh(z) - 0.038;
-      return roundedBoxMesh([sideX(z, y) + 0.004, y, z], [0.008, 0.0135, 0.082], 0.007, { segs: SB });
+      return roundedBoxMesh([sideX(z, y) + 0.004, y, z], [0.008, 0.0135, 0.082], 0.007, { segs: SS });
     };
     const hf = handle(-0.06);
     const hr = handle(0.86);

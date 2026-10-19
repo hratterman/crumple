@@ -4,6 +4,7 @@ import { compileVehicle } from '../../../sim/vehicle/builder';
 import { SEDAN } from '../../../sim/vehicle/defs/sedan';
 import { bindPanels } from '../binder';
 import { tessellateVehicle } from '../loft';
+import { slotBox } from '../materials';
 import type { PanelGeometry, VehicleVisualDef } from '../types';
 import { VISUAL_DEFAULTS } from '../types';
 import { buildSedanVisual, SEDAN_DIMS, SEDAN_VISUAL } from './sedan';
@@ -147,7 +148,7 @@ describe('SEDAN_VISUAL', { timeout: 60_000 }, () => {
       ['doorRR', 'quarterR'],
       ['trunk', 'quarterL'],
       ['bumperF', 'fenderL'],
-      ['bumperF', 'headlights'],
+      ['bumperF', 'headlampHousing'],
       ['bumperR', 'rearPanel'],
     ];
     for (const [a, b] of pairsToCheck) {
@@ -189,5 +190,46 @@ describe('SEDAN_VISUAL', { timeout: 60_000 }, () => {
     expect(def.panels.find((p) => p.id === 'hood')!.bind).toEqual(['hood_*']);
     expect(def.panels.find((p) => p.id === 'bumperF')!.detach?.mode).toBe('follow');
     expect(def.panels.find((p) => p.id === 'bumperR')!.bind).toEqual(['s13_*']);
+  });
+
+  it('headlamp parts line up with the lamp shader layout (projector "eyes" on the discs, DRL band on the guide)', () => {
+    // A3's head-lamp shader places two eyes at 34 % / 66 % across and 58 % up the (|x|, y) box of
+    // every lightHead part (lens radius 0.8 · 0.27 · height) and a DRL band 8–15 % up: the sedan's
+    // projector discs and light guide are built inside that box.
+    const box = slotBox(SEDAN_VISUAL, 'lightHead')!;
+    const W = box.max.x - box.min.x;
+    const H = box.max.y - box.min.y;
+    expect(H).toBeGreaterThan(0.06);
+    expect(H).toBeLessThan(0.1);
+    const g = byId.get('headlights')!;
+    for (const f of [0.34, 0.66]) {
+      const cx = box.min.x + f * W;
+      const cy = box.min.y + 0.58 * H;
+      // Every vertex within the eye's lens radius belongs to a disc centred on it.
+      let n = 0;
+      let sx = 0;
+      let sy = 0;
+      for (let i = 0; i < g.position.length; i += 3) {
+        const x = Math.abs(g.position[i]!);
+        const y = g.position[i + 1]!;
+        if (Math.hypot(x - cx, y - cy) < 0.8 * 0.27 * H) {
+          n++;
+          sx += x;
+          sy += y;
+        }
+      }
+      expect(n, `eye ${f}`).toBeGreaterThan(10);
+      expect(Math.abs(sx / n - cx), `eye ${f} x`).toBeLessThan(0.002);
+      expect(Math.abs(sy / n - cy), `eye ${f} y`).toBeLessThan(0.002);
+    }
+    // The light guide covers the DRL band along the bottom.
+    let guide = 0;
+    for (let i = 0; i < g.position.length; i += 3) {
+      const ty = (g.position[i + 1]! - box.min.y) / H;
+      if (ty > 0.08 && ty < 0.15) guide++;
+    }
+    expect(guide).toBeGreaterThan(40);
+    // Front lamp / grille / intake parts exist and bind to their own nodes.
+    for (const id of ['headlampHousing', 'projectorBezels', 'grille', 'grilleSlats', 'intakeFins', 'splitter', 'indicatorFL', 'indicatorFR']) expect(byId.has(id), id).toBe(true);
   });
 });

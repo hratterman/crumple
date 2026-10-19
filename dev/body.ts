@@ -235,6 +235,10 @@ const VIEWS: View[] = [
   { name: 'detail', pos: [-1.95, 0.95, -3.1], target: [-0.55, 0.62, -2.0], fov: 26 },
   { name: 'shut', pos: [-2.2, 1.25, -1.25], target: [-0.8, 0.85, -0.8], fov: 24 },
   { name: 'low34', pos: [-4.0, 0.55, -4.4], target: [0, 0.55, -0.4], fov: 32 },
+  { name: 'hero', pos: [-3.3, 0.42, -4.6], target: [0.1, 0.62, -0.9], fov: 34 },
+  { name: 'lamp', pos: [-1.55, 0.98, -2.75], target: [-0.76, 0.7, -2.08], fov: 24 },
+  { name: 'nose', pos: [-1.2, 0.7, -4.4], target: [-0.1, 0.52, -2.2], fov: 30 },
+  { name: 'chase', pos: [0, 1.62, 6.3], target: [0, 0.9, -1.0], fov: 50 },
   { name: 'interior', pos: [-1.7, 1.45, -0.2], target: [0, 0.9, -0.2], fov: 45 },
 ];
 let viewIndex = Math.max(
@@ -321,6 +325,10 @@ const hooks = {
     wire = on;
     for (const m of meshes) (m.material as MeshStandardMaterial).wireframe = on;
   },
+  setCastShadow(ids: string[], on: boolean) {
+    for (const m of meshes) if (ids.includes(m.name)) m.castShadow = on;
+  },
+  debug: { meshes, scene, camera, post, lighting },
   setVisible(ids: string[], on: boolean) {
     for (const m of meshes) if (ids.includes(m.name)) m.visible = on;
   },

@@ -1370,6 +1370,121 @@ export function stripMesh(
   return toPanelMesh(b);
 }
 
+/**
+ * (u, v) on `sheet` whose surface point has the 2-D projection `target`
+ * (proj picks two coordinates, e.g. front view (|x|, y)). Damped Newton
+ * with finite-difference Jacobian from `guess`, clamped to the unit square.
+ * The projection must be locally invertible (e.g. a ribbon whose u runs
+ * up and whose v runs across in that view).
+ */
+export function paramAt(sheet: Sheet, proj: (p: V3) => P2, target: P2, guess: P2 = [0.5, 0.5]): [number, number] {
+  const surf = sheet.surface;
+  const q: V3 = [0, 0, 0];
+  const at = (u: number, v: number): P2 => proj(surf.point(u, v, q));
+  let u = guess[0];
+  let v = guess[1];
+  const h = 1e-5;
+  for (let it = 0; it < 40; it++) {
+    const f = at(u, v);
+    const ex = f[0] - target[0];
+    const ey = f[1] - target[1];
+    if (Math.hypot(ex, ey) < 1e-7) break;
+    const uu = u + h <= 1 ? h : -h;
+    const vv = v + h <= 1 ? h : -h;
+    const fu = at(u + uu, v);
+    const fv = at(u, v + vv);
+    const a = (fu[0] - f[0]) / uu;
+    const c = (fu[1] - f[1]) / uu;
+    const b = (fv[0] - f[0]) / vv;
+    const d = (fv[1] - f[1]) / vv;
+    const det = a * d - b * c;
+    if (!(Math.abs(det) > 1e-12)) break;
+    let du = (d * ex - b * ey) / det;
+    let dv = (-c * ex + a * ey) / det;
+    const step = Math.hypot(du, dv);
+    if (step > 0.1) {
+      du *= 0.1 / step;
+      dv *= 0.1 / step;
+    }
+    u = Math.min(1, Math.max(0, u - du));
+    v = Math.min(1, Math.max(0, v - dv));
+  }
+  return [u, v];
+}
+
+/**
+ * A small part conforming to a sheet: an (nI + 1) × (nJ + 1) grid (nJ
+ * columns when closedJ) whose node (i, j) sits at surface (u, v) lifted
+ * `lift` metres along the normal. Faces are wound outward (agreeing with
+ * the surface normal); smoothNormals recomputes vertex normals from the
+ * lifted geometry (domes, beads). Rings collapsed to one point (a disc
+ * centre) are allowed: zero-area triangles are dropped.
+ */
+export function surfacePatch(
+  sheet: Sheet,
+  nI: number,
+  nJ: number,
+  at: (i: number, j: number) => { u: number; v: number; lift: number },
+  opts: { closedJ?: boolean; smoothNormals?: boolean } = {},
+): PanelMesh {
+  const surf = sheet.surface;
+  const b = newBuilder();
+  const cols = opts.closedJ ? nJ : nJ + 1;
+  const p: V3 = [0, 0, 0];
+  const n: V3 = [0, 0, 0];
+  const pu: V3 = [0, 0, 0];
+  const pv: V3 = [0, 0, 0];
+  const t: V3 = [0, 0, 0];
+  const sn: number[] = [];
+  for (let i = 0; i <= nI; i++) {
+    for (let j = 0; j < cols; j++) {
+      const s = at(i, j);
+      surf.point(s.u, s.v, p);
+      surf.frame(s.u, s.v, n, pu, pv);
+      tangentFrom(n, pu, pv, t);
+      sn.push(n[0], n[1], n[2]);
+      pushVert(b, [p[0] + s.lift * n[0], p[1] + s.lift * n[1], p[2] + s.lift * n[2]], n, t, handedness(n, t, pv), sheet.metricU(s.u, s.v), sheet.metricV(s.u, s.v));
+    }
+  }
+  const P = b.pos;
+  const same = (x: number, y: number): boolean => P[x * 3] === P[y * 3] && P[x * 3 + 1] === P[y * 3 + 1] && P[x * 3 + 2] === P[y * 3 + 2];
+  const tri = (x: number, y: number, z: number): void => {
+    if (same(x, y) || same(y, z) || same(x, z)) return;
+    const f = cross([P[y * 3]! - P[x * 3]!, P[y * 3 + 1]! - P[x * 3 + 1]!, P[y * 3 + 2]! - P[x * 3 + 2]!], [P[z * 3]! - P[x * 3]!, P[z * 3 + 1]! - P[x * 3 + 1]!, P[z * 3 + 2]! - P[x * 3 + 2]!], [0, 0, 0]);
+    if (!(Math.hypot(f[0], f[1], f[2]) > 1e-12)) return;
+    const d = f[0] * (sn[x * 3]! + sn[y * 3]! + sn[z * 3]!) + f[1] * (sn[x * 3 + 1]! + sn[y * 3 + 1]! + sn[z * 3 + 1]!) + f[2] * (sn[x * 3 + 2]! + sn[y * 3 + 2]! + sn[z * 3 + 2]!);
+    if (d >= 0) b.idx.push(x, y, z);
+    else b.idx.push(x, z, y);
+  };
+  for (let i = 0; i < nI; i++)
+    for (let j = 0; j < nJ; j++) {
+      const j2 = opts.closedJ ? (j + 1) % nJ : j + 1;
+      const a = i * cols + j;
+      const c = i * cols + j2;
+      const d = (i + 1) * cols + j2;
+      const e = (i + 1) * cols + j;
+      tri(a, c, d);
+      tri(a, d, e);
+    }
+  if (opts.smoothNormals) {
+    const nn = computeNormals(b.pos, b.idx);
+    for (let k = 0; k < nn.length; k += 3) {
+      const s = nn[k]! * sn[k]! + nn[k + 1]! * sn[k + 1]! + nn[k + 2]! * sn[k + 2]! < 0 ? -1 : 1;
+      b.nrm[k] = nn[k]! * s;
+      b.nrm[k + 1] = nn[k + 1]! * s;
+      b.nrm[k + 2] = nn[k + 2]! * s;
+      // Keep the tangent ⟂ the new normal.
+      const ti = (k / 3) * 4;
+      const dd = b.tan[ti]! * b.nrm[k]! + b.tan[ti + 1]! * b.nrm[k + 1]! + b.tan[ti + 2]! * b.nrm[k + 2]!;
+      const tt = norm3([b.tan[ti]! - dd * b.nrm[k]!, b.tan[ti + 1]! - dd * b.nrm[k + 1]!, b.tan[ti + 2]! - dd * b.nrm[k + 2]!]);
+      b.tan[ti] = tt[0];
+      b.tan[ti + 1] = tt[1];
+      b.tan[ti + 2] = tt[2];
+    }
+  }
+  return toPanelMesh(b);
+}
+
 /** Boundary loops of a mesh (vertex indices, each loop with the mesh on its left seen from outside). */
 export function boundaryLoops(m: PanelMesh): number[][] {
   const nV = m.position.length / 3;
