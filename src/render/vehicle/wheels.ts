@@ -35,22 +35,30 @@
 import {
   BufferAttribute,
   BufferGeometry,
+  Color,
   CylinderGeometry,
   DoubleSide,
+  DynamicDrawUsage,
   Group,
+  InstancedBufferAttribute,
+  InstancedMesh,
   Matrix4,
   Mesh,
+  MeshBasicMaterial,
   MeshPhysicalMaterial,
   MeshStandardMaterial,
+  Sphere,
   Vector3,
   type Material,
   type WebGLProgramParametersWithUniforms,
+  type WebGLRenderer,
 } from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 
 import type { CompiledVehicle, CompiledWheel } from '../../sim/vehicle/types';
 import type { LightingStack, PatchMaterial, PatchTarget, ShaderPatch } from '../types';
 import { RIM_FINISHES } from './materials';
+import { attachShadowLod, shadowLodAvailable, type ShadowLodClient } from './shadowlod';
 import { vehicleTextures, type TreadPattern } from './textures';
 import type { CreateWheelVisuals, FlexSkin, VehicleMaterialSet, WheelVisualDef, WheelVisuals } from './types';
 
@@ -417,15 +425,99 @@ vec3 transformed = vec3( position );
 }
 `;
 
-/** Applies the wheel1 GLSL edit (exported for tests). */
-export function applyTyreGlsl(shader: { vertexShader: string }): void {
+/**
+ * Instanced variant (one draw for every wheel of a geometry variant): the
+ * per-wheel uniforms become arrays indexed by gl_InstanceID; uTyreD packs
+ * per wheel 4 vec4 of inner-row deflections then 4 of outer-row ones.
+ */
+function tyreInstancedPars(n: number): string {
+  return /* glsl */ `
+uniform vec4 uTyreD[ ${8 * n} ];
+uniform vec4 uTyreRingI[ ${n} ];
+uniform vec4 uTyrePlaneI[ ${n} ];
+uniform vec4 uTyreDimsI[ ${n} ];
+float tyreSlotI( int base, int n, int j, float wO ) {
+	int k = ( j + n ) % n;
+	int c = k & 3;
+	return mix( uTyreD[ base + ( k >> 2 ) ][ c ], uTyreD[ base + 4 + ( k >> 2 ) ][ c ], wO );
+}
+`;
+}
+const TYRE_INSTANCE_SELECT = /* glsl */ `
+#ifdef USE_INSTANCING
+	int tyI = gl_InstanceID;
+#else
+	int tyI = 0;
+#endif
+	vec4 uTyreRing = uTyreRingI[ tyI ];
+	vec4 uTyrePlane = uTyrePlaneI[ tyI ];
+	vec4 uTyreDims = uTyreDimsI[ tyI ];
+#define tyreSlot( j, wO ) tyreSlotI( tyI * 8, int( uTyreRing.x + 0.5 ), j, wO )
+`;
+
+/** Applies the wheel1 GLSL edit (exported for tests); `instances` > 0 = the instanced variant. */
+export function applyTyreGlsl(shader: { vertexShader: string }, instances = 0): void {
   const vs = shader.vertexShader;
   for (const chunk of ['#include <common>', '#include <begin_vertex>']) {
     if (!vs.includes(chunk)) throw new Error(`wheel1: vertex shader lacks ${chunk}`);
   }
-  shader.vertexShader = vs
-    .replace('#include <common>', `#include <common>\n${TYRE_VERTEX_PARS}`)
-    .replace('#include <begin_vertex>', TYRE_BEGIN_VERTEX);
+  shader.vertexShader =
+    instances > 0
+      ? vs
+          .replace('#include <common>', `#include <common>\n${tyreInstancedPars(instances)}`)
+          .replace('#include <begin_vertex>', `${TYRE_INSTANCE_SELECT}${TYRE_BEGIN_VERTEX}#undef tyreSlot\n`)
+      : vs.replace('#include <common>', `#include <common>\n${TYRE_VERTEX_PARS}`).replace('#include <begin_vertex>', TYRE_BEGIN_VERTEX);
+}
+
+/** Packed uniforms of an instanced tyre patch (one entry per wheel instance). */
+export interface TyreInstanceUniforms {
+  d: { value: Float32Array };
+  ring: { value: Float32Array };
+  plane: { value: Float32Array };
+  dims: { value: Float32Array };
+}
+
+export function createTyreInstanceUniforms(n: number): TyreInstanceUniforms {
+  return {
+    d: { value: new Float32Array(32 * n) },
+    ring: { value: new Float32Array(4 * n) },
+    plane: { value: new Float32Array(4 * n) },
+    dims: { value: new Float32Array(4 * n) },
+  };
+}
+
+/** Copies wheel `i`'s TyreUniforms into the packed arrays. */
+export function packTyreInstance(src: TyreUniforms, i: number, out: TyreInstanceUniforms): void {
+  const d = out.d.value;
+  const o = 32 * i;
+  for (let k = 0; k < TYRE_MAX_RAYS; k++) {
+    d[o + k] = src.di.value[k]!;
+    d[o + 16 + k] = src.do.value[k]!;
+  }
+  const v4 = (q: { x: number; y: number; z: number; w: number }, a: Float32Array): void => {
+    a[4 * i] = q.x;
+    a[4 * i + 1] = q.y;
+    a[4 * i + 2] = q.z;
+    a[4 * i + 3] = q.w;
+  };
+  v4(src.ring.value, out.ring.value);
+  v4(src.plane.value, out.plane.value);
+  v4(src.dims.value, out.dims.value);
+}
+
+/** Instanced tyre patch (key wheel1i<n>): every wheel of a variant in one draw, shadows deform too. */
+export function createTyreInstancedPatch(u: TyreInstanceUniforms, n: number): ShaderPatch {
+  return {
+    key: `${WHEEL_PATCH_KEY}i${n}`,
+    targets: ['color', 'depth', 'distance'],
+    apply(shader: WebGLProgramParametersWithUniforms, _target: PatchTarget): void {
+      shader.uniforms.uTyreD = u.d;
+      shader.uniforms.uTyreRingI = u.ring;
+      shader.uniforms.uTyrePlaneI = u.plane;
+      shader.uniforms.uTyreDimsI = u.dims;
+      applyTyreGlsl(shader, n);
+    },
+  };
 }
 
 /** One wheel's tyre patch (uniform objects shared by its tread + sidewall materials and their shadow twins). */
@@ -463,7 +555,7 @@ function toGeometry(b: GeoBuf): BufferGeometry {
   g.setAttribute('normal', new BufferAttribute(new Float32Array(b.nrm), 3));
   g.setAttribute('uv', new BufferAttribute(new Float32Array(b.uv), 2));
   g.setIndex(b.idx);
-  g.computeBoundingSphere();
+  if (b.pos.length) g.computeBoundingSphere();
   return g;
 }
 
@@ -559,64 +651,95 @@ const GROOVES: Readonly<Record<TreadPattern, readonly { x: number; w: number; de
   ],
 };
 
-export function buildTyreGeometry(dims: WheelDims, tire: WheelVisualDef['tire'], segs = 144): TyreGeometry {
+/** Tyre / rim geometry detail per wheel LOD: 0 full (≈ 32 k triangles per wheel), 1 (≤ 4 k), 2 (≈ 0.8 k). */
+export type WheelDetail = 0 | 1 | 2;
+const TYRE_DETAIL = [
+  { shoulder: 7, tread: 28, grooves: true, side: 16 },
+  { shoulder: 3, tread: 6, grooves: false, side: 6 },
+  { shoulder: 2, tread: 3, grooves: false, side: 3 },
+] as const;
+/** Lathe segments per wheel LOD (tyre, rim parts). */
+export const WHEEL_SEGS: readonly { tyre: number; rim: number }[] = [
+  { tyre: 144, rim: 96 },
+  { tyre: 32, rim: 24 },
+  { tyre: 16, rim: 12 },
+];
+
+export function buildTyreGeometry(dims: WheelDims, tire: WheelVisualDef['tire'], segs = 144, detail: WheelDetail = 0): TyreGeometry {
   const R = dims.radius;
   const halfW = dims.tyreHalfW;
   const shoulderR = Math.min(0.026, halfW * 0.28);
   const crown = 0.004;
   const xt = halfW - shoulderR;
   const treadR = (x: number): number => R - crown * Math.min(1, (x / xt) ** 2);
-  // ---- tread band (x −→ +), with grooves as hard-edged notches
-  const pts: P2[] = [];
-  const corners: number[] = [];
-  const shoulder = (sign: 1 | -1, from: number, to: number, steps: number): void => {
-    for (let k = 0; k <= steps; k++) {
-      const th = from + ((to - from) * k) / steps;
-      pts.push({ x: sign * (xt + shoulderR * Math.sin(th)), r: R - crown - shoulderR + shoulderR * Math.cos(th) });
-    }
-  };
-  shoulder(-1, Math.PI / 2, 0, 7);
   const grooves = [...GROOVES[tire.tread]].sort((a, b) => a.x - b.x);
-  const TREAD_STEPS = 28;
-  let gi = 0;
-  for (let k = 1; k < TREAD_STEPS; k++) {
-    const x = -xt + (2 * xt * k) / TREAD_STEPS;
-    while (gi < grooves.length && grooves[gi]!.x * xt - grooves[gi]!.w / 2 < x) {
-      const g = grooves[gi]!;
-      const gx = g.x * xt;
-      const x0 = gx - g.w / 2;
-      const x1 = gx + g.w / 2;
-      const r0 = treadR(x0);
-      const r1 = treadR(x1);
-      corners.push(pts.length);
-      pts.push({ x: x0, r: r0 });
-      corners.push(pts.length);
-      pts.push({ x: x0 + 0.0012, r: r0 - g.depth });
-      corners.push(pts.length);
-      pts.push({ x: x1 - 0.0012, r: r1 - g.depth });
-      corners.push(pts.length);
-      pts.push({ x: x1, r: r1 });
-      gi++;
+  // ---- tread band (x −→ +), with grooves as hard-edged notches (x is monotone along the band)
+  const band = (d: (typeof TYRE_DETAIL)[number]): { pts: P2[]; corners: number[] } => {
+    const pts: P2[] = [];
+    const corners: number[] = [];
+    const shoulder = (sign: 1 | -1, from: number, to: number, steps: number): void => {
+      for (let k = 0; k <= steps; k++) {
+        const th = from + ((to - from) * k) / steps;
+        pts.push({ x: sign * (xt + shoulderR * Math.sin(th)), r: R - crown - shoulderR + shoulderR * Math.cos(th) });
+      }
+    };
+    shoulder(-1, Math.PI / 2, 0, d.shoulder);
+    let gi = 0;
+    for (let k = 1; k < d.tread; k++) {
+      const x = -xt + (2 * xt * k) / d.tread;
+      while (d.grooves && gi < grooves.length && grooves[gi]!.x * xt - grooves[gi]!.w / 2 < x) {
+        const g = grooves[gi]!;
+        const gx = g.x * xt;
+        const x0 = gx - g.w / 2;
+        const x1 = gx + g.w / 2;
+        const r0 = treadR(x0);
+        const r1 = treadR(x1);
+        corners.push(pts.length);
+        pts.push({ x: x0, r: r0 });
+        corners.push(pts.length);
+        pts.push({ x: x0 + 0.0012, r: r0 - g.depth });
+        corners.push(pts.length);
+        pts.push({ x: x1 - 0.0012, r: r1 - g.depth });
+        corners.push(pts.length);
+        pts.push({ x: x1, r: r1 });
+        gi++;
+      }
+      if (pts.length && x <= pts[pts.length - 1]!.x + 1e-4) continue;
+      pts.push({ x, r: treadR(x) });
     }
-    if (pts.length && x <= pts[pts.length - 1]!.x + 1e-4) continue;
-    pts.push({ x, r: treadR(x) });
-  }
-  shoulder(1, 0, Math.PI / 2, 7);
-  // arc-length v over the whole band
+    shoulder(1, 0, Math.PI / 2, d.shoulder);
+    return { pts, corners };
+  };
+  // arc-length v over the FULL band (the tread texture is laid out on it at every LOD)
+  const full = band(TYRE_DETAIL[0]);
+  const fpts = full.pts;
+  const corners0 = full.corners;
   const arc: number[] = [0];
-  for (let i = 1; i < pts.length; i++) arc.push(arc[i - 1]! + Math.hypot(pts[i]!.x - pts[i - 1]!.x, pts[i]!.r - pts[i - 1]!.r));
+  for (let i = 1; i < fpts.length; i++) arc.push(arc[i - 1]! + Math.hypot(fpts[i]!.x - fpts[i - 1]!.x, fpts[i]!.r - fpts[i - 1]!.r));
   const total = arc[arc.length - 1]!;
+  /** v of a band point: the full band's arc length at the same x (identity at detail 0). */
+  const vAtX = (x: number): number => {
+    if (x <= fpts[0]!.x) return 0;
+    for (let i = 1; i < fpts.length; i++) {
+      if (x <= fpts[i]!.x) {
+        const t = (x - fpts[i - 1]!.x) / Math.max(1e-9, fpts[i]!.x - fpts[i - 1]!.x);
+        return (arc[i - 1]! + t * (arc[i]! - arc[i - 1]!)) / total;
+      }
+    }
+    return 1;
+  };
+  const { pts, corners } = detail === 0 ? full : band(TYRE_DETAIL[detail]);
   const vOf = new Map<P2, number>();
-  pts.forEach((p, i) => vOf.set(p, arc[i]! / total));
+  pts.forEach((p, i) => vOf.set(p, detail === 0 ? arc[i]! / total : vAtX(p.x)));
   const pitchLen = 0.032;
   const circumference = 2 * Math.PI * R;
   const tiles = Math.max(4, Math.round(circumference / (pitchLen * 4)));
   const tread = newBuf();
   for (const st of stripsAt(pts, corners)) lathe(tread, st, segs, { v: (_i, p) => vOf.get(p)!, uScale: tiles });
   const grooveV: { v: number; w: number }[] = [];
-  for (let c = 0; c + 3 < corners.length; c += 4) {
-    const a = arc[corners[c]!]!;
-    const b = arc[corners[c + 3]!]!;
+  for (let c = 0; c + 3 < corners0.length; c += 4) {
+    const a = arc[corners0[c]!]!;
+    const b = arc[corners0[c + 3]!]!;
     grooveV.push({ v: (a + b) / 2 / total, w: (b - a) / total });
   }
   // ---- sidewalls: cubic from the shoulder end down to the bead, plus the bead tuck under the flange
@@ -627,7 +750,7 @@ export function buildTyreGeometry(dims: WheelDims, tire: WheelVisualDef['tire'],
   const c1: P2 = { x: top.x + h * bulge * 0.55, r: top.r - h * 0.38 };
   const c2: P2 = { x: bead.x + 0.012 + h * bulge * 0.2, r: bead.r + h * 0.32 };
   const side: P2[] = [];
-  const SIDE = 16;
+  const SIDE = TYRE_DETAIL[detail].side;
   for (let k = 0; k <= SIDE; k++) {
     const t = k / SIDE;
     const m = 1 - t;
@@ -687,8 +810,7 @@ export function rimLayout(dims: WheelDims, rim: WheelVisualDef['rim'], brake: Wh
 }
 
 /** Spoke sweep: chamfered, crowned bar from hub to lip with dish, width taper, flare and twist. */
-function spoke(b: GeoBuf, L: RimLayout, theta0: number, twist: number, wHub: number, wRim: number, flare: number): void {
-  const S = 16;
+function spoke(b: GeoBuf, L: RimLayout, theta0: number, twist: number, wHub: number, wRim: number, flare: number, S = 16): void {
   const r0 = L.rHub - 0.008;
   const r1 = L.rEnd + 0.006;
   const sections: Vector3[][] = [];
@@ -808,7 +930,14 @@ export interface RimGeometry {
   layout: RimLayout;
 }
 
-export function buildRimGeometry(dims: WheelDims, def: WheelVisualDef, rimDef: WheelVisualDef['rim'] = def.rim, segs = 96): RimGeometry {
+export function buildRimGeometry(
+  dims: WheelDims,
+  def: WheelVisualDef,
+  rimDef: WheelVisualDef['rim'] = def.rim,
+  segs = 96,
+  detail: WheelDetail = 0,
+): RimGeometry {
+  const SS = detail === 0 ? 16 : detail === 1 ? 4 : 2;
   const L = rimLayout(dims, rimDef, def.brake);
   const rB = dims.bead;
   const lip = Math.min(0.03, Math.max(0.006, rimDef.lip));
@@ -842,21 +971,29 @@ export function buildRimGeometry(dims: WheelDims, def: WheelVisualDef, rimDef: W
   if (style === 'mesh') {
     for (let k = 0; k < 2 * N; k++) {
       const th = (k * Math.PI) / N;
-      spoke(face, L, th - 0.18 * (k % 2 ? 1 : -1), 0.36 * (k % 2 ? 1 : -1), 0.014, Math.max(0.012, sw * pitch1 * 0.35), 0.01);
+      spoke(face, L, th - 0.18 * (k % 2 ? 1 : -1), 0.36 * (k % 2 ? 1 : -1), 0.014, Math.max(0.012, sw * pitch1 * 0.35), 0.01, SS);
     }
   } else if (style === 'turbine') {
-    for (let k = 0; k < N; k++) spoke(face, L, (2 * Math.PI * k) / N, 0.55, Math.max(0.012, sw * pitch0), Math.max(0.016, sw * pitch1 * 0.8), 0.006);
+    for (let k = 0; k < N; k++) spoke(face, L, (2 * Math.PI * k) / N, 0.55, Math.max(0.012, sw * pitch0), Math.max(0.016, sw * pitch1 * 0.8), 0.006, SS);
   } else if (style === 'steel') {
-    for (let k = 0; k < N; k++) spoke(face, L, (2 * Math.PI * k) / N, 0, Math.max(0.02, pitch0 * 0.85), pitch1 * Math.max(0.55, sw), 0.02);
+    for (let k = 0; k < N; k++) spoke(face, L, (2 * Math.PI * k) / N, 0, Math.max(0.02, pitch0 * 0.85), pitch1 * Math.max(0.55, sw), 0.02, SS);
   } else {
     for (let k = 0; k < N; k++) {
-      spoke(face, L, (2 * Math.PI * k) / N, 0, Math.max(0.026, Math.min(pitch0 * 0.8, sw * pitch0 * 1.5)), sw * pitch1, 0.03);
+      spoke(face, L, (2 * Math.PI * k) / N, 0, Math.max(0.026, Math.min(pitch0 * 0.8, sw * pitch0 * 1.5)), sw * pitch1, 0.03, SS);
     }
   }
   // ---------------- barrel interior (seen through the spokes), inner flange
   const barrel = newBuf();
   const xIn = -dims.rimHalfW;
-  lathe(barrel, [
+  if (detail > 0) {
+    lathe(barrel, [
+      { x: L.xEnd, r: L.rEnd },
+      { x: L.xEnd - 0.012, r: rB - 0.012 },
+      { x: xIn, r: rB - 0.012 },
+      { x: xIn - 0.004, r: rB },
+      { x: xIn - 0.004, r: L.rFlange },
+    ], segs);
+  } else lathe(barrel, [
     { x: L.xEnd, r: L.rEnd },
     { x: L.xEnd - 0.012, r: rB - 0.012 },
     { x: xIn + 0.05, r: rB - 0.012 },
@@ -865,7 +1002,7 @@ export function buildRimGeometry(dims: WheelDims, def: WheelVisualDef, rimDef: W
     { x: xIn + 0.008, r: rB - 0.012 },
     { x: xIn, r: rB - 0.012 },
   ], segs);
-  lathe(barrel, [
+  if (detail === 0) lathe(barrel, [
     { x: xIn, r: rB - 0.012 },
     { x: xIn - 0.004, r: rB },
     { x: xIn - 0.004, r: L.rFlange },
@@ -873,7 +1010,7 @@ export function buildRimGeometry(dims: WheelDims, def: WheelVisualDef, rimDef: W
   ], segs);
   // ---------------- centre cap
   const cap = newBuf();
-  lathe(cap, [
+  if (detail === 0) lathe(cap, [
     { x: L.xHub - 0.002, r: 0.036 },
     { x: L.xHub + 0.004, r: 0.034 },
     { x: L.xHub + 0.008, r: 0.028 },
@@ -882,9 +1019,10 @@ export function buildRimGeometry(dims: WheelDims, def: WheelVisualDef, rimDef: W
   ], 48);
   // ---------------- lug nuts (hex, conical tip) on the PCD
   const nutParts: BufferGeometry[] = [];
+  const nutCount = detail === 0 ? Math.max(3, Math.round(def.rim.boltCount)) : 0;
   const pcd = Math.min(0.057, L.rHub - 0.018);
-  const nb = Math.max(3, Math.round(def.rim.boltCount));
-  for (let k = 0; k < nb; k++) {
+  const nb = Math.max(3, nutCount);
+  for (let k = 0; k < nutCount; k++) {
     const th = (2 * Math.PI * (k + 0.5)) / nb;
     const hex = new CylinderGeometry(0.0105, 0.0105, 0.014, 6);
     hex.rotateZ(-Math.PI / 2);
@@ -903,7 +1041,7 @@ export function buildRimGeometry(dims: WheelDims, def: WheelVisualDef, rimDef: W
       g.dispose();
     }
   }
-  const nuts = mergeGeometries(nutParts)!;
+  const nuts = nutParts.length ? mergeGeometries(nutParts)! : toGeometry(newBuf());
   // ---------------- brake disc (rotates): faces with polar UV, vented edge
   const disc = newBuf();
   const rIn = 0.09;
@@ -942,7 +1080,7 @@ export function buildRimGeometry(dims: WheelDims, def: WheelVisualDef, rimDef: W
   const span = 0.42; // radians
   const cr0 = L.rDisc - 0.044;
   const cr1 = Math.min(L.rDisc + 0.024, rB - 0.03);
-  sweepClosed(cal, roundedRect(L.xDisc - 0.034, L.xDisc + 0.032, cr0, cr1, 0.008), -span / 2, span / 2, 20);
+  sweepClosed(cal, roundedRect(L.xDisc - 0.034, L.xDisc + 0.032, cr0, cr1, 0.008, detail === 0 ? 3 : 1), -span / 2, span / 2, detail === 0 ? 20 : detail === 1 ? 6 : 3);
   // ---------------- dust shield (non-rotating)
   const shield = newBuf();
   lathe(shield, [
@@ -966,13 +1104,140 @@ export function buildRimGeometry(dims: WheelDims, def: WheelVisualDef, rimDef: W
 }
 
 // ============================================================ assembly
+/**
+ * DRAWS (U6 perf pass): wheels sharing a geometry variant (dims + rim + tyre
+ * def; the sedan has one) are InstancedMeshes — one draw per part for all of
+ * them. Per LOD level (the skin's colour LOD: WHEEL_SEGS / WheelDetail):
+ *   rim      face + barrel + centre cap + lug nuts + disc hat, merged with
+ *            per-vertex colour + (metalness, roughness, clearcoat) (wheelPbrHook)
+ *   disc     brake disc (textured)
+ *   upright  caliper + dust shield, merged per-vertex PBR, double-sided
+ *   tread, sidewall  the instanced tyre patch (per-wheel ring uniforms by gl_InstanceID)
+ * Spin parts share one instance-matrix attribute (rim frame per wheel), the
+ * upright parts another (steer/bump frame × the caliper angle).
+ * Shadows: one caster InstancedMesh per shadow LOD (tread + sidewall + rim
+ * face + disc, positions only, tyre patch so the squash shadows too) — LOD1
+ * into cascade 0, LOD2 into cascades ≥ 1 (shadowlod.ts). Without a renderer
+ * hook ("direct" mode: tests, dev harnesses) the colour meshes cast.
+ */
 interface WheelInstance {
   rest: WheelRest;
   dims: WheelDims;
   frame: WheelFrame;
   tyre: TyreUniforms;
-  spin: Group;
-  upright: Group;
+  /** Instance slot in its variant group. */
+  slot: number;
+  /** Caliper rotation about the axle, baked into the upright instance matrix. */
+  calRot: Matrix4;
+}
+
+interface VariantGroup {
+  wheels: WheelInstance[];
+  spinM: InstancedBufferAttribute;
+  uprightM: InstancedBufferAttribute;
+  tyreU: TyreInstanceUniforms;
+  /** Colour draws per LOD level. */
+  levels: InstancedMesh[][];
+  /** [cascade 0 (LOD1), cascades ≥ 1 (LOD2)]. */
+  casters: InstancedMesh[];
+  sphere: Sphere;
+}
+
+export interface WheelVisualOptions {
+  materials: VehicleMaterialSet;
+  lighting: LightingStack;
+  patchMaterial: PatchMaterial;
+  /** Renderer for the shadow-pass caster switch; absent = colour meshes cast directly. */
+  renderer?: WebGLRenderer | null;
+}
+
+export interface WheelVisualsImpl extends WheelVisuals {
+  /** Colour draws per LOD level (all variants). */
+  readonly levels: readonly (readonly Mesh[])[];
+  /** Shadow casters (empty in direct mode). */
+  readonly casters: readonly Mesh[];
+  /** LOD level drawn this frame. */
+  readonly lod: number;
+}
+
+/** Per-vertex PBR for merged rigid wheel parts: color attribute + crPbr = (metalness, roughness, clearcoat scale, 0). */
+export function wheelPbrHook(shader: { vertexShader: string; fragmentShader: string }): void {
+  const vs = shader.vertexShader;
+  const fs = shader.fragmentShader;
+  for (const [src, chunk] of [
+    [vs, '#include <common>'],
+    [vs, 'void main() {'],
+    [fs, '#include <common>'],
+    [fs, '#include <roughnessmap_fragment>'],
+    [fs, '#include <metalnessmap_fragment>'],
+    [fs, '#include <lights_physical_fragment>'],
+  ] as const) {
+    if (!src.includes(chunk)) throw new Error(`wheel pbr: shader lacks ${chunk}`);
+  }
+  shader.vertexShader = vs
+    .replace('#include <common>', '#include <common>\nattribute vec4 crPbr;\nvarying vec4 vCrPbr;')
+    .replace('void main() {', 'void main() {\n\tvCrPbr = crPbr;');
+  shader.fragmentShader = fs
+    .replace('#include <common>', '#include <common>\nvarying vec4 vCrPbr;')
+    .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\n\troughnessFactor = vCrPbr.y;')
+    .replace('#include <metalnessmap_fragment>', '#include <metalnessmap_fragment>\n\tmetalnessFactor = vCrPbr.x;')
+    .replace('#include <lights_physical_fragment>', '#include <lights_physical_fragment>\n#ifdef USE_CLEARCOAT\n\tmaterial.clearcoat *= vCrPbr.z;\n#endif');
+}
+
+interface PbrPart {
+  geo: BufferGeometry;
+  color: Color;
+  /** metalness, roughness, clearcoat */
+  pbr: readonly [number, number, number];
+}
+
+/** Indexed copy with the given attributes only (sequential index for non-indexed input). */
+function indexedCopy(g: BufferGeometry, names: readonly string[]): BufferGeometry {
+  const out = new BufferGeometry();
+  for (const n of names) {
+    const a = g.getAttribute(n);
+    if (a) out.setAttribute(n, a.clone());
+  }
+  const count = g.getAttribute('position').count;
+  const idx = g.getIndex();
+  out.setIndex(idx ? Array.from(idx.array as ArrayLike<number>) : Array.from({ length: count }, (_, i) => i));
+  return out;
+}
+
+/** Rigid parts merged into one geometry with per-vertex colour + crPbr (empty parts skipped). */
+export function mergePbrParts(parts: readonly PbrPart[]): BufferGeometry | null {
+  const list: BufferGeometry[] = [];
+  for (const p of parts) {
+    const n = p.geo.getAttribute('position')?.count ?? 0;
+    if (n === 0) continue;
+    const g = indexedCopy(p.geo, ['position', 'normal', 'uv']);
+    const col = new Float32Array(3 * n);
+    const pbr = new Float32Array(4 * n);
+    for (let i = 0; i < n; i++) {
+      col[3 * i] = p.color.r;
+      col[3 * i + 1] = p.color.g;
+      col[3 * i + 2] = p.color.b;
+      pbr[4 * i] = p.pbr[0];
+      pbr[4 * i + 1] = p.pbr[1];
+      pbr[4 * i + 2] = p.pbr[2];
+    }
+    g.setAttribute('color', new BufferAttribute(col, 3));
+    g.setAttribute('crPbr', new BufferAttribute(pbr, 4));
+    list.push(g);
+  }
+  if (!list.length) return null;
+  const m = mergeGeometries(list)!;
+  for (const g of list) g.dispose();
+  return m;
+}
+
+/** Positions-only merge (shadow casters). */
+function mergePositions(parts: readonly BufferGeometry[]): BufferGeometry | null {
+  const list = parts.filter((g) => (g.getAttribute('position')?.count ?? 0) > 0).map((g) => indexedCopy(g, ['position']));
+  if (!list.length) return null;
+  const m = mergeGeometries(list)!;
+  for (const g of list) g.dispose();
+  return m;
 }
 
 type PhysMat = MeshPhysicalMaterial | MeshStandardMaterial;
@@ -984,132 +1249,115 @@ function clonePhys<M extends PhysMat>(m: M): M {
 const _m = new Matrix4();
 const _z = new Vector3();
 
-export const createWheelVisuals: CreateWheelVisuals = (
-  compiled: CompiledVehicle,
-  def: WheelVisualDef,
-  opts: { materials: VehicleMaterialSet; lighting: LightingStack; patchMaterial: PatchMaterial },
-): WheelVisuals => {
+export const createWheelVisuals = (compiled: CompiledVehicle, def: WheelVisualDef, opts: WheelVisualOptions): WheelVisualsImpl => {
   const object = new Group();
   object.name = `wheels:${compiled.name}`;
   const owned = new Set<Material>();
   const geoms = new Set<BufferGeometry>();
   const csm = opts.lighting.csm;
-  const patchRigid = <M extends Material>(m: M): M => {
-    const set = opts.patchMaterial(m, { csm });
-    owned.add(set.color);
-    return set.color;
-  };
-
-  // ---- shared rigid materials (per finish)
+  const direct = !shadowLodAvailable(opts.renderer);
   const M = opts.materials;
-  const rimFace = new Map<string, Material>();
-  const rimBarrel = new Map<string, Material>();
-  const finishMats = (finish: WheelVisualDef['rim']['finish']): { face: Material; barrel: Material } => {
-    let face = rimFace.get(finish);
-    let barrel = rimBarrel.get(finish);
-    if (!face || !barrel) {
-      const f = clonePhys(M.base('rim') as MeshPhysicalMaterial);
-      const spec = RIM_FINISHES[finish] ?? RIM_FINISHES.silver;
-      f.color.setHex(spec.color);
-      f.metalness = spec.metalness;
-      f.roughness = spec.roughness;
-      f.clearcoat = spec.clearcoat;
-      f.name = `crRim-${finish}`;
-      face = patchRigid(f);
-      const b = clonePhys(M.base('rim') as MeshPhysicalMaterial);
-      b.color.setHex(spec.color).multiplyScalar(0.55);
-      b.metalness = Math.min(1, spec.metalness);
-      b.roughness = 0.5;
-      b.clearcoat = 0;
-      b.name = `crRimBarrel-${finish}`;
-      barrel = patchRigid(b);
-      rimFace.set(finish, face);
-      rimBarrel.set(finish, barrel);
-    }
-    return { face, barrel };
+  const own = <T extends { color: Material; depth: Material | null; distance: Material | null }>(set: T): T => {
+    owned.add(set.color);
+    if (set.depth) owned.add(set.depth);
+    if (set.distance) owned.add(set.distance);
+    return set;
   };
-  const capMat = (() => {
+  /** A per-vertex-PBR material (rigid wheel parts). */
+  const pbrMaterial = (name: string, doubleSide: boolean, ccRoughness: number): Material => {
     const m = clonePhys(M.base('rim') as MeshPhysicalMaterial);
-    m.color.setHex(0x0b0c0e);
-    m.metalness = 0.4;
-    m.roughness = 0.18;
+    m.name = name;
+    m.color.setRGB(1, 1, 1);
+    m.vertexColors = true;
+    m.metalness = 1;
+    m.roughness = 1;
     m.clearcoat = 1;
-    m.name = 'crRimCap';
-    return patchRigid(m);
-  })();
-  const nutMat = patchRigid(clonePhys(M.base('chrome')));
-  const discMat = patchRigid(clonePhys(M.base('brakeDisc')));
-  const hatMat = (() => {
-    const m = clonePhys(M.base('brakeDisc') as MeshPhysicalMaterial);
+    m.clearcoatRoughness = ccRoughness;
     m.map = null;
     m.normalMap = null;
-    m.anisotropy = 0;
-    m.color.setHex(0x2a2b2d);
-    m.roughness = 0.6;
-    m.metalness = 0.6;
-    m.name = 'crDiscHat';
-    return patchRigid(m);
-  })();
-  const caliperMat = patchRigid(clonePhys(M.base('caliper')));
-  const shieldMat = (() => {
-    const m = clonePhys(M.base('underbody'));
-    m.side = DoubleSide; // the backing plate also closes the wheel when seen from inboard
-    return patchRigid(m);
-  })();
+    if (doubleSide) m.side = DoubleSide;
+    const prior = m.onBeforeCompile;
+    m.onBeforeCompile = function (this: Material, shader: WebGLProgramParametersWithUniforms, r: WebGLRenderer) {
+      prior.call(this, shader, r);
+      wheelPbrHook(shader);
+    } as typeof m.onBeforeCompile;
+    const key = `${m.customProgramCacheKey()}|wpbr1`;
+    m.customProgramCacheKey = () => key;
+    return own(opts.patchMaterial(m, { csm })).color;
+  };
+  const rimMat = pbrMaterial('crWheelRim', false, 0.04);
+  const uprightMat = pbrMaterial('crWheelUpright', true, 0.05);
+  const discMat = own(opts.patchMaterial(clonePhys(M.base('brakeDisc')), { csm })).color;
+  const colorOf = (slot: 'chrome' | 'caliper' | 'underbody'): Color => (M.base(slot) as PhysMat).color.clone();
 
-  // ---- geometry cache per (rim, tire) variant
-  const geoCache = new Map<string, { rim: RimGeometry; tyre: TyreGeometry }>();
-  const geometryFor = (dims: WheelDims, rimDef: WheelVisualDef['rim'], tireDef: WheelVisualDef['tire']): { rim: RimGeometry; tyre: TyreGeometry } => {
-    const key = JSON.stringify([dims, rimDef, tireDef]);
-    let g = geoCache.get(key);
-    if (!g) {
-      g = { rim: buildRimGeometry(dims, def, rimDef), tyre: buildTyreGeometry(dims, tireDef) };
-      for (const x of Object.values(g.rim)) if (x instanceof BufferGeometry) geoms.add(x);
-      geoms.add(g.tyre.tread);
-      geoms.add(g.tyre.sidewall);
-      geoCache.set(key, g);
-    }
+  // ---- geometry per (variant, LOD level)
+  interface LevelGeo {
+    rim: BufferGeometry | null;
+    disc: BufferGeometry;
+    upright: BufferGeometry | null;
+    tread: BufferGeometry;
+    sidewall: BufferGeometry;
+    caster: BufferGeometry | null;
+  }
+  const keep = <G extends BufferGeometry | null>(g: G): G => {
+    if (g) geoms.add(g);
     return g;
   };
+  const buildLevel = (dims: WheelDims, rimDef: WheelVisualDef['rim'], tireDef: WheelVisualDef['tire'], detail: WheelDetail): LevelGeo => {
+    const segs = WHEEL_SEGS[detail]!;
+    const rim = buildRimGeometry(dims, def, rimDef, segs.rim, detail);
+    const tyre = buildTyreGeometry(dims, tireDef, segs.tyre, detail);
+    const spec = RIM_FINISHES[rimDef.finish] ?? RIM_FINISHES.silver;
+    const face = new Color().setHex(spec.color);
+    const rimGeo = mergePbrParts([
+      { geo: rim.face, color: face, pbr: [spec.metalness, spec.roughness, spec.clearcoat] },
+      { geo: rim.barrel, color: face.clone().multiplyScalar(0.55), pbr: [Math.min(1, spec.metalness), 0.5, 0] },
+      { geo: rim.cap, color: new Color().setHex(0x0b0c0e), pbr: [0.4, 0.18, 1] },
+      { geo: rim.nuts, color: colorOf('chrome'), pbr: [1, 0.045, 0] },
+      { geo: rim.hat, color: new Color().setHex(0x2a2b2d), pbr: [0.6, 0.6, 0] },
+    ]);
+    const calGeo = rim.caliper.clone();
+    const uprightGeo = mergePbrParts([
+      { geo: calGeo, color: colorOf('caliper'), pbr: [0.05, 0.32, 1] },
+      { geo: rim.shield, color: colorOf('underbody'), pbr: [0.1, 0.88, 0] },
+    ]);
+    calGeo.dispose();
+    const caster = detail > 0 ? mergePositions([tyre.tread, tyre.sidewall, rim.face, rim.disc]) : null;
+    for (const g of [rim.face, rim.barrel, rim.cap, rim.nuts, rim.hat, rim.caliper, rim.shield]) g.dispose();
+    return { rim: keep(rimGeo), disc: keep(rim.disc), upright: keep(uprightGeo), tread: keep(tyre.tread), sidewall: keep(tyre.sidewall), caster: keep(caster) };
+  };
 
-  const wheels: WheelInstance[] = [];
+  // ---- variant groups
+  const groups: VariantGroup[] = [];
+  const levelMeshes: Mesh[][] = [[], [], []];
+  const allCasters: Mesh[] = [];
+  const variants = new Map<string, { dims: WheelDims; rimDef: WheelVisualDef['rim']; tireDef: WheelVisualDef['tire']; wheels: CompiledWheel[] }>();
   for (const w of compiled.wheels) {
     const rear = w.axle === 'rear' && def.rear;
     const rimDef = rear && def.rear?.rim ? { ...def.rim, ...def.rear.rim } : def.rim;
     const tireDef = rear && def.rear?.tire ? { ...def.tire, ...def.rear.tire } : def.tire;
     const dims = wheelDims(compiled, w);
-    const rest = wheelRest(compiled, w);
-    const g = geometryFor(dims, rimDef, tireDef);
-    const fm = finishMats(rimDef.finish);
-
-    const spin = new Group();
-    spin.name = `wheel:${w.id}`;
-    spin.matrixAutoUpdate = false;
-    const upright = new Group();
-    upright.name = `upright:${w.id}`;
-    upright.matrixAutoUpdate = false;
-    const add = (parent: Group, geo: BufferGeometry, mat: Material, cast = true): Mesh => {
-      const mesh = new Mesh(geo, mat);
-      mesh.castShadow = cast;
-      mesh.receiveShadow = true;
-      parent.add(mesh);
-      return mesh;
-    };
-    add(spin, g.rim.face, fm.face);
-    add(spin, g.rim.barrel, fm.barrel);
-    add(spin, g.rim.cap, capMat);
-    add(spin, g.rim.nuts, nutMat, false);
-    add(spin, g.rim.disc, discMat);
-    add(spin, g.rim.hat, hatMat, false);
-    const cal = add(upright, g.rim.caliper, caliperMat);
-    cal.rotation.x = rest.caliperAngle;
-    add(upright, g.rim.shield, shieldMat, false);
-
-    // tyre: per-wheel patch (its own ring uniforms) on tread + sidewall
-    const tyreU = createTyreUniforms(dims, rest);
-    const patch = createTyrePatch(tyreU);
-    const treadTex = vehicleTextures.tread(tireDef.tread, g.tyre.grooves, 4);
-    const sideTex = vehicleTextures.sidewall(tireDef.sidewallText);
+    const key = JSON.stringify([dims, rimDef, tireDef]);
+    let v = variants.get(key);
+    if (!v) variants.set(key, (v = { dims, rimDef, tireDef, wheels: [] }));
+    v.wheels.push(w);
+  }
+  const wheels: WheelInstance[] = [];
+  for (const v of variants.values()) {
+    const n = v.wheels.length;
+    const spinM = new InstancedBufferAttribute(new Float32Array(16 * n), 16);
+    const uprightM = new InstancedBufferAttribute(new Float32Array(16 * n), 16);
+    spinM.setUsage(DynamicDrawUsage);
+    uprightM.setUsage(DynamicDrawUsage);
+    const tyreU = createTyreInstanceUniforms(n);
+    const patch = createTyreInstancedPatch(tyreU, n);
+    // per-variant tyre materials (textures follow the tread / sidewall text)
+    // groove layout of the full-detail band (the tread texture is laid out on it at every LOD)
+    const probe = buildTyreGeometry(v.dims, v.tireDef, 3, 2);
+    probe.tread.dispose();
+    probe.sidewall.dispose();
+    const treadTex = vehicleTextures.tread(v.tireDef.tread, probe.grooves, 4);
+    const sideTex = vehicleTextures.sidewall(v.tireDef.sidewallText);
     const treadM = clonePhys(M.base('tire') as MeshPhysicalMaterial);
     treadM.map = treadTex.color;
     treadM.normalMap = treadTex.normal;
@@ -1122,55 +1370,148 @@ export const createWheelVisuals: CreateWheelVisuals = (
     sideM.roughness = 0.72;
     sideM.color.multiplyScalar(1 / 0.62); // the lettering map's base level is 0.62
     sideM.name = 'crSidewall';
-    for (const [geo, mat] of [
-      [g.tyre.tread, treadM],
-      [g.tyre.sidewall, sideM],
-    ] as const) {
-      const set = opts.patchMaterial(mat, { csm, flexbody: patch });
-      owned.add(set.color);
-      if (set.depth) owned.add(set.depth);
-      if (set.distance) owned.add(set.distance);
-      const mesh = add(spin, geo, set.color);
-      if (set.depth) mesh.customDepthMaterial = set.depth;
-      if (set.distance) mesh.customDistanceMaterial = set.distance;
+    const treadSet = own(opts.patchMaterial(treadM, { csm, flexbody: patch }));
+    const sideSet = own(opts.patchMaterial(sideM, { csm, flexbody: patch }));
+    const casterSet = direct ? null : own(opts.patchMaterial(new MeshBasicMaterial({ name: 'wheelCasterColor', colorWrite: false, depthWrite: false }), { flexbody: patch }));
+
+    const sphere = new Sphere();
+    const group: VariantGroup = { wheels: [], spinM, uprightM, tyreU, levels: [], casters: [], sphere };
+    const inst = (geo: BufferGeometry, mat: Material, matrices: InstancedBufferAttribute, name: string, cast: boolean, set?: { depth: Material | null; distance: Material | null }): InstancedMesh => {
+      const mesh = new InstancedMesh(geo, mat, n);
+      mesh.instanceMatrix = matrices;
+      mesh.boundingSphere = sphere;
+      mesh.castShadow = cast;
+      mesh.receiveShadow = true;
+      mesh.name = name;
+      if (set?.depth) mesh.customDepthMaterial = set.depth;
+      if (set?.distance) mesh.customDistanceMaterial = set.distance;
+      object.add(mesh);
+      return mesh;
+    };
+    for (let level = 0; level < 3; level++) {
+      const g = buildLevel(v.dims, v.rimDef, v.tireDef, level as WheelDetail);
+      const list: InstancedMesh[] = [];
+      if (g.rim) list.push(inst(g.rim, rimMat, spinM, `wheelRim${level}`, direct));
+      list.push(inst(g.disc, discMat, spinM, `wheelDisc${level}`, direct));
+      if (g.upright) list.push(inst(g.upright, uprightMat, uprightM, `wheelUpright${level}`, direct));
+      list.push(inst(g.tread, treadSet.color, spinM, `wheelTread${level}`, direct, treadSet));
+      list.push(inst(g.sidewall, sideSet.color, spinM, `wheelSidewall${level}`, direct, sideSet));
+      for (const m of list) m.visible = level === 0;
+      group.levels.push(list);
+      levelMeshes[level]!.push(...list);
+      if (casterSet && level > 0 && g.caster) {
+        const c = inst(g.caster, casterSet.color, spinM, `wheelCaster${level}`, true, casterSet);
+        c.receiveShadow = false;
+        c.visible = false;
+        group.casters.push(c);
+        allCasters.push(c);
+      } else if (g.caster) {
+        geoms.delete(g.caster);
+        g.caster.dispose();
+      }
     }
-    object.add(spin, upright);
-    // rest pose until the first update
-    const frame = createWheelFrame();
-    solveWheelFrame(rest, compiled.rig.nodePos, 3, frame);
-    const inst: WheelInstance = { rest, dims, frame, tyre: tyreU, spin, upright };
-    place(inst);
-    wheels.push(inst);
+    v.wheels.forEach((w, slot) => {
+      const dims = wheelDims(compiled, w);
+      const rest = wheelRest(compiled, w);
+      const frame = createWheelFrame();
+      solveWheelFrame(rest, compiled.rig.nodePos, 3, frame);
+      const wi: WheelInstance = { rest, dims, frame, tyre: createTyreUniforms(dims, rest), slot, calRot: new Matrix4().makeRotationX(rest.caliperAngle) };
+      packTyreInstance(wi.tyre, slot, tyreU);
+      place(group, wi);
+      group.wheels.push(wi);
+      wheels.push(wi);
+    });
+    updateSphere(group);
+    groups.push(group);
   }
 
-  function place(w: WheelInstance): void {
+  function place(g: VariantGroup, w: WheelInstance): void {
     const f = w.frame;
     _m.makeBasis(f.s, f.u, f.v).setPosition(f.centre);
-    w.spin.matrix.copy(_m);
-    w.spin.matrixWorldNeedsUpdate = true;
+    _m.toArray(g.spinM.array as Float32Array, 16 * w.slot);
     _z.crossVectors(f.s, f.up);
-    _m.makeBasis(f.s, f.up, _z).setPosition(f.centre);
-    w.upright.matrix.copy(_m);
-    w.upright.matrixWorldNeedsUpdate = true;
+    _m.makeBasis(f.s, f.up, _z).setPosition(f.centre).multiply(w.calRot);
+    _m.toArray(g.uprightM.array as Float32Array, 16 * w.slot);
+    g.spinM.needsUpdate = true;
+    g.uprightM.needsUpdate = true;
   }
+
+  function updateSphere(g: VariantGroup): void {
+    let cx = 0, cy = 0, cz = 0;
+    for (const w of g.wheels) {
+      cx += w.frame.centre.x;
+      cy += w.frame.centre.y;
+      cz += w.frame.centre.z;
+    }
+    const inv = g.wheels.length ? 1 / g.wheels.length : 0;
+    cx *= inv;
+    cy *= inv;
+    cz *= inv;
+    let r = 0;
+    for (const w of g.wheels) {
+      const d = Math.hypot(w.frame.centre.x - cx, w.frame.centre.y - cy, w.frame.centre.z - cz) + w.dims.radius + 0.1;
+      if (d > r) r = d;
+    }
+    g.sphere.center.set(cx, cy, cz);
+    g.sphere.radius = r;
+  }
+
+  let lod = 0;
+  const showLevel = (level: number): void => {
+    for (const g of groups) g.levels.forEach((list, l) => list.forEach((m) => (m.visible = l === level)));
+  };
+
+  const shadowClient: ShadowLodClient = {
+    shadowBegin(): void {
+      for (const g of groups) g.casters.forEach((c, i) => (c.visible = i === 0));
+    },
+    shadowCascade(index: number): void {
+      for (const g of groups) {
+        const want = Math.min(index === 0 ? 0 : 1, g.casters.length - 1);
+        g.casters.forEach((c, i) => (c.visible = i === want));
+      }
+    },
+    shadowEnd(): void {
+      for (const c of allCasters) c.visible = false;
+    },
+  };
+  const detach = direct ? () => {} : attachShadowLod(opts.renderer, opts.lighting, shadowClient);
 
   return {
     object,
+    levels: levelMeshes,
+    casters: allCasters,
+    get lod(): number {
+      return lod;
+    },
     update(skin: FlexSkin, _dtS: number): void {
       // Wheel transforms are in skin space: sit where the skin root sits (sibling) or at its origin (child).
       if (object.parent !== skin.object) object.position.copy(skin.object.position);
       else object.position.set(0, 0, 0);
+      const want = Math.min(2, Math.max(0, (skin as { lod?: number }).lod ?? 0));
+      if (want !== lod) {
+        lod = want;
+        showLevel(lod);
+      }
       const data = skin.nodeData;
-      for (const w of wheels) {
-        if (!solveWheelFrame(w.rest, data, 4, w.frame)) continue;
-        updateTyreUniforms(w.rest, w.dims, w.frame, data, 4, w.tyre);
-        place(w);
+      for (const g of groups) {
+        for (const w of g.wheels) {
+          if (!solveWheelFrame(w.rest, data, 4, w.frame)) continue;
+          updateTyreUniforms(w.rest, w.dims, w.frame, data, 4, w.tyre);
+          packTyreInstance(w.tyre, w.slot, g.tyreU);
+          place(g, w);
+        }
+        updateSphere(g);
       }
     },
     dispose(): void {
+      detach();
       object.removeFromParent();
       for (const g of geoms) g.dispose();
       for (const m of owned) m.dispose();
     },
   };
 };
+
+/** Contract check: the extended factory still satisfies CreateWheelVisuals. */
+export const createWheelVisualsContract: CreateWheelVisuals = createWheelVisuals;

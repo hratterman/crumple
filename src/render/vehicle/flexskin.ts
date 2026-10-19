@@ -1,12 +1,32 @@
 /**
- * Flexbody skin (A2): node texture + the `flex2` vertex patch + one Mesh per
- * BindingPanel. Contract: ./types.ts "NODE TEXTURE" and "FLEXBODY SHADER
- * PATCH"; the CPU mirror of the GLSL below is binder.ts evalFlexFrame —
+ * Flexbody skin (A2, U6 perf pass): node texture + the `flex2` vertex patch
+ * + MERGED draws. Contract: ./types.ts "NODE TEXTURE" and "FLEXBODY SHADER
+ * PATCH", docs/CONTRACTS.md "Vehicle perf amendments". The CPU mirror of
+ * the GLSL below is binder.ts evalFlexFrame / evalFlexVertexSingle —
  * change both together (flexskin.test.ts checks the constants match).
+ *
+ * DRAWS: panels sharing (material slot, damage variant) are merged into one
+ * Mesh per LOD level; every vertex carries its panel index (flexFrameU.w,
+ * an exact float) and a hidden-panel mask texture (one R8 texel per panel,
+ * 64 wide like the node texture) collapses hidden panels (detached 'hide'
+ * trim, shattered tempered glass) to a point in the vertex stage. Detached
+ * 'follow' panels stay in their merged draw and keep skinning to their own
+ * flying nodes. Glass panes merge into one draw too (the damage patch reads
+ * per-pane crack uniforms by panel index).
+ *
+ * LOD (lods.ts): level 0 = the full binding with the 3-triad blend in the
+ * colour pass; levels 1, 2 = coarser bindings (same panels by id) evaluated
+ * with ONE triad (the strongest-weight slot 0: 3 + 3 texel fetches instead
+ * of 9 + 9). Shadows never draw the colour meshes: one merged CASTER mesh
+ * per shadow LOD (every castShadow panel, single triad, lean attributes) —
+ * LOD1 into cascade 0, LOD2 into cascades ≥ 1 (shadowlod.ts switches them
+ * around the shadow pass). Without a renderer hook (tests, dev harnesses)
+ * the colour meshes cast their own shadows ("direct" mode).
  *
  * The patch goes through patchMaterial's flexbody slot, so the color,
  * depth (CSM cascades) and distance materials all reconstruct the same
- * deformed surface: shadows are cast by the DEFORMED body.
+ * deformed surface: shadows are cast by the DEFORMED body. Depth and
+ * distance targets always use the single-triad evaluation.
  */
 import {
   BufferAttribute,
@@ -17,14 +37,21 @@ import {
   Group,
   Material,
   Mesh,
+  MeshBasicMaterial,
   NearestFilter,
+  RedFormat,
   RGBAFormat,
   Sphere,
+  UnsignedByteType,
+  type Camera,
   type WebGLProgramParametersWithUniforms,
+  type WebGLRenderer,
 } from 'three';
 
 import type { PatchTarget, ShaderPatch } from '../types';
 import { FLEX_FAR, FLEX_NORMAL_EPS } from './binder';
+import { lodDistance, selectVehicleLod } from './lods';
+import { attachShadowLod, shadowLodAvailable, type ShadowLodClient } from './shadowlod';
 import {
   FLEX_AGREE_FLOOR,
   FLEX_CONSENSUS,
@@ -50,6 +77,8 @@ import {
 } from './types';
 
 const K = FLEX_TRIADS;
+/** Patch key of the all-single-triad variant (LOD ≥ 1 colour + every caster). */
+export const FLEXBODY_SINGLE_PATCH_KEY = 'flex2s';
 
 /** GLSL float literal. */
 function f(x: number): string {
@@ -97,28 +126,38 @@ float flexCrumple( vec3 p ) {
 
 /**
  * Declarations + the per-vertex evaluation (vertex stage, after <common>).
- * FLEXBODY_COLOR = color target only (tangents + damage varyings). Mirrors
- * binder.ts evalTriadSlot / evalFlexFrame (types.ts "FLEXBODY
- * RECONSTRUCTION v2"); flexEvaluate() runs first thing in main() and the
- * replaced chunks read its results.
+ * FLEXBODY_COLOR = color target only (tangents + damage varyings);
+ * FLEXBODY_SINGLE = triad slot 0 only (weight 1, no consensus): depth and
+ * distance always, colour at LOD ≥ 1. Mirrors binder.ts evalTriadSlot /
+ * evalFlexFrame / evalFlexVertexSingle (types.ts "FLEXBODY RECONSTRUCTION
+ * v2"); flexEvaluate() runs first thing in main() and the replaced chunks
+ * read its results. flexFrameU.w = the vertex's panel index: hidden panels
+ * (uFlexHidden texel > 0.5) collapse to the skin origin (degenerate).
+ * Single-triad geometry packs flexFrameU = (ft0.y, ft0.z, damageWeight, panel).
  */
 export const FLEX_VERTEX_PARS = /* glsl */ `
 uniform highp sampler2D uFlexNodes;
 uniform int uFlexRows;
+uniform highp sampler2D uFlexHidden;
 attribute vec4 flexTriad0;
+attribute vec4 flexCoef0;
+attribute vec4 flexFrame0;
+#ifndef FLEXBODY_SINGLE
 attribute vec4 flexTriad1;
 attribute vec4 flexTriad2;
-attribute vec4 flexCoef0;
 attribute vec4 flexCoef1;
 attribute vec4 flexCoef2;
-attribute vec4 flexFrame0;
 attribute vec4 flexFrame1;
 attribute vec4 flexFrame2;
+#endif
 attribute vec4 flexFrameU;
 #ifdef FLEXBODY_COLOR
+#ifndef FLEXBODY_SINGLE
 attribute vec4 flexFrameT;
+#endif
 varying vec3 vFlexRest;
 varying vec4 vFlexDamage;
+flat varying float vFlexPanel;
 #endif
 vec3 flexP;
 vec3 flexN;
@@ -130,6 +169,10 @@ vec4 flexNode( int i, int block ) {
 vec3 flexSafeNormalize( vec3 v ) {
 	float l = length( v );
 	return l > ${f(FLEX_NORMAL_EPS)} ? v / l : vec3( 0.0, 1.0, 0.0 );
+}
+bool flexHidden() {
+	int p = int( flexFrameU.w + 0.5 );
+	return texelFetch( uFlexHidden, ivec2( p & ${NODE_TEX_WIDTH - 1}, p >> 6 ), 0 ).r > 0.5;
 }
 void flexTriad( vec4 tri, vec4 coef, vec3 fn, vec3 ft, out vec3 P, out float W, out vec3 N, out vec3 T, inout vec4 accD ) {
 	ivec3 idx = ivec3( tri.xyz + 0.5 );
@@ -175,7 +218,31 @@ float flexAgree( float C, vec3 N, vec3 Nm ) {
 	return C * ( ${f(FLEX_AGREE_FLOOR)} + smoothstep( -0.2, 0.8, dot( N, Nm ) ) );
 }
 void flexEvaluate() {
+#ifdef FLEXBODY_COLOR
+	vFlexRest = position;
+	vFlexPanel = flexFrameU.w;
+	vFlexDamage = vec4( 0.0 );
+#endif
+	if ( flexHidden() ) {
+		flexP = vec3( 0.0 );
+		flexN = vec3( 0.0, 1.0, 0.0 );
+		flexT = vec3( 1.0, 0.0, 0.0 );
+		return;
+	}
 	vec4 accD = vec4( 0.0 );
+#ifdef FLEXBODY_SINGLE
+	vec3 P0, N0, T0;
+	float W0;
+#ifdef FLEXBODY_COLOR
+	vec3 ft0 = vec3( flexFrame0.w, flexFrameU.xy );
+#else
+	vec3 ft0 = vec3( 0.0 );
+#endif
+	flexTriad( vec4( flexTriad0.xyz, 1.0 ), flexCoef0, flexFrame0.xyz, ft0, P0, W0, N0, T0, accD );
+	flexP = P0;
+	flexN = flexSafeNormalize( N0 );
+	flexT = flexSafeNormalize( T0 - dot( T0, flexN ) * flexN );
+#else
 	vec3 P0, P1, P2, N0, N1, N2, T0, T1, T2;
 	float W0, W1, W2;
 #ifdef FLEXBODY_COLOR
@@ -197,9 +264,9 @@ ${triadCall(0)}${triadCall(1)}${triadCall(2)}	vec3 Pm = ( W0 * P0 + W1 * P1 + W2
 	flexN = flexSafeNormalize( A0 * N0 + A1 * N1 + A2 * N2 );
 	vec3 Tb = A0 * T0 + A1 * T1 + A2 * T2;
 	flexT = flexSafeNormalize( Tb - dot( Tb, flexN ) * flexN );
+#endif
 	flexP += flexN * ( ${f(FLEX_CRUMPLE_AMP)} * accD.x * flexFrameU.z * flexCrumple( position ) );
 #ifdef FLEXBODY_COLOR
-	vFlexRest = position;
 	vFlexDamage = vec4( accD.xyz * flexFrameU.z, accD.w );
 #endif
 }
@@ -228,15 +295,21 @@ const FRAGMENT_PARS = /* glsl */ `
 #define FLEXBODY
 varying vec3 vFlexRest;
 varying vec4 vFlexDamage;
+flat varying float vFlexPanel;
 `;
 
-/** Applies the flex2 edit to a program's sources (exported for tests / the e2e compile check). */
-export function applyFlexGlsl(shader: { vertexShader: string; fragmentShader: string }, target: PatchTarget): void {
+/**
+ * Applies the flex2 edit to a program's sources (exported for tests / the
+ * e2e compile check). Depth / distance targets are always single-triad;
+ * `single` makes the colour target single-triad too (LOD ≥ 1).
+ */
+export function applyFlexGlsl(shader: { vertexShader: string; fragmentShader: string }, target: PatchTarget, single = false): void {
   const vs = shader.vertexShader;
   for (const chunk of ['#include <common>', '#include <begin_vertex>', 'void main() {']) {
     if (!vs.includes(chunk)) throw new Error(`flexbody: vertex shader lacks ${chunk}`);
   }
-  const defines = target === 'color' ? '#define FLEXBODY\n#define FLEXBODY_COLOR\n' : '#define FLEXBODY\n';
+  let defines = target === 'color' ? '#define FLEXBODY\n#define FLEXBODY_COLOR\n' : '#define FLEXBODY\n';
+  if (single || target !== 'color') defines += '#define FLEXBODY_SINGLE\n';
   shader.vertexShader =
     defines +
     vs
@@ -247,17 +320,36 @@ export function applyFlexGlsl(shader: { vertexShader: string; fragmentShader: st
   if (target === 'color') shader.fragmentShader = FRAGMENT_PARS + shader.fragmentShader;
 }
 
-/** The flex2 ShaderPatch bound to one node texture (uniform objects shared by every material of the skin). */
-export function createFlexPatch(texture: DataTexture, rows: number): ShaderPatch {
+/** Hidden-panel mask: one R8 texel per panel (64 wide, rows = ⌈panels / 64⌉); > 0.5 = hidden. */
+export function createHiddenMask(panelCount: number): DataTexture {
+  const rows = Math.max(1, Math.ceil(panelCount / NODE_TEX_WIDTH));
+  const t = new DataTexture(new Uint8Array(NODE_TEX_WIDTH * rows), NODE_TEX_WIDTH, rows, RedFormat, UnsignedByteType);
+  t.magFilter = NearestFilter;
+  t.minFilter = NearestFilter;
+  t.generateMipmaps = false;
+  t.flipY = false;
+  t.unpackAlignment = 1;
+  t.needsUpdate = true;
+  return t;
+}
+
+/**
+ * The flex2 ShaderPatch bound to one node texture (uniform objects shared
+ * by every material of the skin). `single` = the all-single-triad variant
+ * (key flex2s). `hidden` defaults to an all-visible mask.
+ */
+export function createFlexPatch(texture: DataTexture, rows: number, hidden: DataTexture = createHiddenMask(1), single = false): ShaderPatch {
   const uNodes = { value: texture };
   const uRows = { value: rows };
+  const uHidden = { value: hidden };
   return {
-    key: FLEXBODY_PATCH_KEY,
+    key: single ? FLEXBODY_SINGLE_PATCH_KEY : FLEXBODY_PATCH_KEY,
     targets: ['color', 'depth', 'distance'],
     apply(shader: WebGLProgramParametersWithUniforms, target: PatchTarget): void {
       shader.uniforms.uFlexNodes = uNodes;
       shader.uniforms.uFlexRows = uRows;
-      applyFlexGlsl(shader, target);
+      shader.uniforms.uFlexHidden = uHidden;
+      applyFlexGlsl(shader, target, single);
     },
   };
 }
@@ -267,47 +359,109 @@ export function nodeTextureRows(nodeCount: number): number {
   return Math.max(1, Math.ceil(nodeCount / NODE_TEX_WIDTH));
 }
 
-/** Panel geometry: rest attributes + the packed flex2 attributes (types.ts "FLEXBODY SHADER PATCH v2"). */
+/**
+ * Attribute layout of a skin geometry:
+ *   full    3 triads (LOD0 colour): position, normal, uv, [tangent], flexTriad/Coef/Frame 0..2, flexFrameT, flexFrameU
+ *   single  slot 0 only (LOD ≥ 1 colour): position, uv, [tangent], flexTriad0 (w = 1), flexCoef0, flexFrame0, flexFrameU = (ft0.y, ft0.z, dmgW, panel)
+ *   caster  slot 0 only, depth programs: position, flexTriad0, flexCoef0, flexFrame0, flexFrameU = (0, 0, dmgW, panel)
+ */
+export type SkinGeometryLayout = 'full' | 'single' | 'caster';
+
+export interface MergedPanel {
+  panel: BindingPanel<string>;
+  /** Index written to flexFrameU.w (the hidden-mask texel). */
+  maskIndex: number;
+}
+
+/** Panel geometry (one panel, full layout, mask index = panelIndex): dev parity harness, tests. */
 export function buildPanelGeometry(p: BindingPanel<string>): BufferGeometry {
-  const g = new BufferGeometry();
-  const n = p.vertexCount;
-  g.setAttribute('position', new BufferAttribute(p.restPosition, 3));
-  g.setAttribute('normal', new BufferAttribute(p.restNormal, 3));
-  g.setAttribute('uv', new BufferAttribute(p.uv, 2));
-  const ft = p.frameTangent;
-  const T = new Float32Array(n * 4);
-  const U = new Float32Array(n * 4);
-  for (let k = 0; k < K; k++) {
-    const tri = new Float32Array(n * 4);
-    const coef = new Float32Array(n * 4);
-    const frame = new Float32Array(n * 4);
-    for (let v = 0; v < n; v++) {
-      const s = K * v + k;
-      tri[4 * v] = p.triad[3 * s]!;
-      tri[4 * v + 1] = p.triad[3 * s + 1]!;
-      tri[4 * v + 2] = p.triad[3 * s + 2]!;
-      tri[4 * v + 3] = p.weight[s]!;
-      for (let c = 0; c < 4; c++) coef[4 * v + c] = p.coef[4 * s + c]!;
-      frame[4 * v] = p.frameNormal[3 * s]!;
-      frame[4 * v + 1] = p.frameNormal[3 * s + 1]!;
-      frame[4 * v + 2] = p.frameNormal[3 * s + 2]!;
-      if (ft) {
-        frame[4 * v + 3] = ft[3 * s]!;
-        const dst = k === 2 ? U : T;
-        const o = k === 2 ? 4 * v : 4 * v + 2 * k;
-        dst[o] = ft[3 * s + 1]!;
-        dst[o + 1] = ft[3 * s + 2]!;
-      }
-    }
-    g.setAttribute(`flexTriad${k}`, new BufferAttribute(tri, 4));
-    g.setAttribute(`flexCoef${k}`, new BufferAttribute(coef, 4));
-    g.setAttribute(`flexFrame${k}`, new BufferAttribute(frame, 4));
+  return buildSkinGeometry([{ panel: p, maskIndex: p.panelIndex }], 'full');
+}
+
+/** Merged geometry of `parts` in order (vertex ranges consecutive, indices offset). */
+export function buildSkinGeometry(parts: readonly MergedPanel[], layout: SkinGeometryLayout): BufferGeometry {
+  let n = 0;
+  let ni = 0;
+  let tangents = layout !== 'caster';
+  for (const { panel: p } of parts) {
+    n += p.vertexCount;
+    ni += p.index.length;
+    if (!p.restTangent || !p.frameTangent) tangents = false;
   }
-  for (let v = 0; v < n; v++) U[4 * v + 2] = p.damageWeight[v]!;
-  g.setAttribute('flexFrameT', new BufferAttribute(T, 4));
+  const g = new BufferGeometry();
+  const pos = new Float32Array(n * 3);
+  const nrm = layout === 'full' ? new Float32Array(n * 3) : null;
+  const uv = layout !== 'caster' ? new Float32Array(n * 2) : null;
+  const tan = tangents ? new Float32Array(n * 4) : null;
+  const slots = layout === 'full' ? K : 1;
+  const tri: Float32Array[] = [];
+  const coef: Float32Array[] = [];
+  const frame: Float32Array[] = [];
+  for (let k = 0; k < slots; k++) {
+    tri.push(new Float32Array(n * 4));
+    coef.push(new Float32Array(n * 4));
+    frame.push(new Float32Array(n * 4));
+  }
+  const T = layout === 'full' ? new Float32Array(n * 4) : null;
+  const U = new Float32Array(n * 4);
+  const index = new Uint32Array(ni);
+  let vo = 0;
+  let io = 0;
+  for (const { panel: p, maskIndex } of parts) {
+    const pn = p.vertexCount;
+    pos.set(p.restPosition, 3 * vo);
+    nrm?.set(p.restNormal, 3 * vo);
+    uv?.set(p.uv, 2 * vo);
+    if (tan && p.restTangent) tan.set(p.restTangent, 4 * vo);
+    for (let i = 0; i < p.index.length; i++) index[io + i] = p.index[i]! + vo;
+    const ft = p.frameTangent;
+    for (let v = 0; v < pn; v++) {
+      const d = 4 * (vo + v);
+      for (let k = 0; k < slots; k++) {
+        const s = K * v + k;
+        const tk = tri[k]!;
+        tk[d] = p.triad[3 * s]!;
+        tk[d + 1] = p.triad[3 * s + 1]!;
+        tk[d + 2] = p.triad[3 * s + 2]!;
+        tk[d + 3] = slots === 1 ? 1 : p.weight[s]!;
+        const ck = coef[k]!;
+        for (let c = 0; c < 4; c++) ck[d + c] = p.coef[4 * s + c]!;
+        const fk = frame[k]!;
+        fk[d] = p.frameNormal[3 * s]!;
+        fk[d + 1] = p.frameNormal[3 * s + 1]!;
+        fk[d + 2] = p.frameNormal[3 * s + 2]!;
+        if (ft && layout !== 'caster') {
+          fk[d + 3] = ft[3 * s]!;
+          if (slots === 1) {
+            U[d] = ft[3 * s + 1]!;
+            U[d + 1] = ft[3 * s + 2]!;
+          } else if (k === 2) {
+            U[d] = ft[3 * s + 1]!;
+            U[d + 1] = ft[3 * s + 2]!;
+          } else {
+            T![d + 2 * k] = ft[3 * s + 1]!;
+            T![d + 2 * k + 1] = ft[3 * s + 2]!;
+          }
+        }
+      }
+      U[d + 2] = p.damageWeight[v]!;
+      U[d + 3] = maskIndex;
+    }
+    vo += pn;
+    io += p.index.length;
+  }
+  g.setAttribute('position', new BufferAttribute(pos, 3));
+  if (nrm) g.setAttribute('normal', new BufferAttribute(nrm, 3));
+  if (uv) g.setAttribute('uv', new BufferAttribute(uv, 2));
+  for (let k = 0; k < slots; k++) {
+    g.setAttribute(`flexTriad${k}`, new BufferAttribute(tri[k]!, 4));
+    g.setAttribute(`flexCoef${k}`, new BufferAttribute(coef[k]!, 4));
+    g.setAttribute(`flexFrame${k}`, new BufferAttribute(frame[k]!, 4));
+  }
+  if (T) g.setAttribute('flexFrameT', new BufferAttribute(T, 4));
   g.setAttribute('flexFrameU', new BufferAttribute(U, 4));
-  if (p.restTangent && ft) g.setAttribute('tangent', new BufferAttribute(p.restTangent, 4));
-  g.setIndex(new BufferAttribute(p.index, 1));
+  if (tan) g.setAttribute('tangent', new BufferAttribute(tan, 4));
+  g.setIndex(new BufferAttribute(index, 1));
   g.boundingSphere = new Sphere();
   return g;
 }
@@ -325,6 +479,10 @@ export interface FlexSkinExtraOptions {
   anchorNode?: number;
   /** Static-sag calibration (see SettleCalibration); null/absent = off. */
   settle?: SettleOptions | null;
+  /** Coarser bindings for LOD1, LOD2 (same rig; panels matched to the LOD0 binding by panelId). */
+  lods?: readonly BindingSet[];
+  /** Renderer for the shadow-pass caster switch (shadowlod.ts); absent = colour meshes cast directly. */
+  renderer?: WebGLRenderer | null;
 }
 
 export interface SettleOptions {
@@ -579,16 +737,61 @@ function basis(fx: number, fy: number, fz: number, tx: number, ty: number, tz: n
   return true;
 }
 
-/** Per-panel bounds bookkeeping. */
-interface PanelBounds {
+
+/** One merged draw: its mesh, the union of its panels' nodes and the bounds margin. */
+interface DrawEntry {
+  mesh: Mesh;
   nodes: Uint16Array;
   margin: number;
   sphere: Sphere;
+  /** LOD0 panel indices drawn by this mesh. */
+  panels: Int32Array;
 }
 
 export interface FlexSkinImpl extends FlexSkin {
   /** Static-sag calibration, or null when not configured. */
   readonly settle: SettleCalibration | null;
+  /** LOD0 panel index → index into `meshes` (its merged draw), −1 = none. */
+  readonly panelDraw: Int32Array;
+  /** Colour draws per LOD level (levels[0] === meshes). */
+  readonly levels: readonly (readonly Mesh[])[];
+  /** Shadow caster meshes [cascade 0 (LOD1), cascades ≥ 1 (LOD2)] (empty in direct mode). */
+  readonly casters: readonly Mesh[];
+  /** The all-single-triad patch (key flex2s) of LOD ≥ 1 and the casters. */
+  readonly patchSingle: ShaderPatch;
+  /** Hidden-panel mask (R8, one texel per LOD0 panel). */
+  readonly hiddenMask: DataTexture;
+  /** Current colour LOD level. */
+  readonly lod: number;
+  /** Pins the colour LOD (debug / screenshots); null = by camera distance. */
+  setForcedLod(level: number | null): void;
+  /** Panel visibility as last set (true = drawn). */
+  panelVisible(panelIndex: number): boolean;
+}
+
+/** Union of the panels' triad nodes. */
+function unionNodes(panels: readonly BindingPanel<string>[], nodeCount: number): Uint16Array {
+  const used = new Uint8Array(nodeCount);
+  let n = 0;
+  for (const p of panels) {
+    for (let k = 0; k < p.nodes.length; k++) {
+      const i = p.nodes[k]!;
+      if (i < nodeCount && !used[i]) {
+        used[i] = 1;
+        n++;
+      }
+    }
+  }
+  const out = new Uint16Array(n);
+  for (let i = 0, k = 0; i < nodeCount; i++) if (used[i]) out[k++] = i;
+  return out;
+}
+
+/** A vertex is a blend of points within the clamp (FLEX_MAX_STRETCH·d0 + slack) of triad R nodes, plus the crumple folds. */
+function boundsMargin(panels: readonly BindingPanel<string>[]): number {
+  let maxD0 = 0;
+  for (const p of panels) for (let s = 0; s < p.vertexCount * K; s++) maxD0 = Math.max(maxD0, p.coef[4 * s + 3]!);
+  return FLEX_MAX_STRETCH * maxD0 + FLEX_MAX_SLACK + FLEX_CRUMPLE_AMP;
 }
 
 export function createFlexSkin(binding: BindingSet, opts: FlexSkinOptions & FlexSkinExtraOptions): FlexSkinImpl {
@@ -603,45 +806,173 @@ export function createFlexSkin(binding: BindingSet, opts: FlexSkinOptions & Flex
   texture.name = `flexNodes:${binding.vehicle}`;
   texture.needsUpdate = true;
   const nodeFlags = new Uint8Array(nodeCount);
-  const patch = createFlexPatch(texture, rows);
+  const P = binding.panels.length;
+  const hiddenMask = createHiddenMask(P);
+  hiddenMask.name = `flexHidden:${binding.vehicle}`;
+  const hiddenData = hiddenMask.image.data as Uint8Array;
+  const patch = createFlexPatch(texture, rows, hiddenMask, false);
+  const patchSingle = createFlexPatch(texture, rows, hiddenMask, true);
   const anchorNode = Math.min(Math.max(0, opts.anchorNode ?? 0), Math.max(0, nodeCount - 1));
+  const csm = opts.lighting.csm;
+  const direct = !shadowLodAvailable(opts.renderer);
 
   const object = new Group();
   object.name = `vehicle:${binding.vehicle}`;
-  const meshes: Mesh[] = [];
-  const bounds: PanelBounds[] = [];
   const owned: Material[] = [];
-  for (const p of binding.panels) {
-    const geometry = buildPanelGeometry(p);
-    const base = opts.materials.base(p.material);
-    const set = opts.patchMaterial(cloneBaseMaterial(base), {
-      csm: opts.lighting.csm,
-      flexbody: patch,
-      damage: opts.damage?.patchFor(p.panelIndex) ?? undefined,
-    });
-    // Panels are open shells: both faces must reach the shadow map.
-    set.color.shadowSide = DoubleSide;
-    const mesh = new Mesh(geometry, set.color);
-    if (set.depth) mesh.customDepthMaterial = set.depth;
-    if (set.distance) mesh.customDistanceMaterial = set.distance;
-    mesh.castShadow = p.castShadow;
-    mesh.receiveShadow = true;
-    mesh.name = `panel:${p.panelId}`;
-    owned.push(set.color);
-    if (set.depth) owned.push(set.depth);
-    if (set.distance) owned.push(set.distance);
-    object.add(mesh);
-    meshes.push(mesh);
-    let maxD0 = 0;
-    for (let s = 0; s < p.vertexCount * K; s++) maxD0 = Math.max(maxD0, p.coef[4 * s + 3]!);
-    // A vertex is a blend of points within the clamp (FLEX_MAX_STRETCH·d0 + slack) of triad R nodes, plus the crumple folds.
-    const b: PanelBounds = { nodes: p.nodes, margin: FLEX_MAX_STRETCH * maxD0 + FLEX_MAX_SLACK + FLEX_CRUMPLE_AMP, sphere: geometry.boundingSphere! };
-    bounds.push(b);
-    restBounds(p, b.sphere);
+  const geometries: BufferGeometry[] = [];
+
+  // ---- panel alignment: every level's panels → LOD0 panel index (by id)
+  const lod0Index = new Map<string, number>();
+  for (const p of binding.panels) lod0Index.set(p.panelId, p.panelIndex);
+  const levelPanels: MergedPanel[][] = [binding.panels.map((p) => ({ panel: p, maskIndex: p.panelIndex }))];
+  for (const lb of opts.lods ?? []) {
+    if (lb.nodeCount !== nodeCount) throw new Error(`flexskin: LOD binding has ${lb.nodeCount} nodes, LOD0 ${nodeCount}`);
+    const list: MergedPanel[] = [];
+    for (const p of lb.panels) {
+      const i = lod0Index.get(p.panelId);
+      if (i !== undefined) list.push({ panel: p, maskIndex: i });
+    }
+    levelPanels.push(list);
+  }
+
+  /** Damage patch of a merged group (null = undamageable; undefined = cannot merge glass). */
+  const dmg = opts.damage as (FlexSkinOptions['damage'] & { glassGroupPatch?: (panels: readonly number[]) => ShaderPatch | null }) | null;
+  const variantKey = (i: number): string => dmg?.patchFor(i)?.key ?? '-';
+
+  const entries: DrawEntry[] = [];
+  const entryOf = new Map<Mesh, DrawEntry>();
+  const addEntry = (mesh: Mesh, panels: readonly MergedPanel[]): DrawEntry => {
+    const list = panels.map((m) => m.panel);
+    const e: DrawEntry = {
+      mesh,
+      nodes: unionNodes(list, nodeCount),
+      margin: boundsMargin(list),
+      sphere: mesh.geometry.boundingSphere!,
+      panels: Int32Array.from(panels, (m) => m.maskIndex),
+    };
+    restBounds(list, e.sphere);
+    entries.push(e);
+    entryOf.set(mesh, e);
+    return e;
+  };
+
+  const levels: Mesh[][] = [];
+  for (let level = 0; level < levelPanels.length; level++) {
+    const single = level > 0;
+    // group by (slot, damage variant[, castShadow in direct mode][, tangents]) in first-seen panel order
+    const groups = new Map<string, MergedPanel[]>();
+    for (const mp of levelPanels[level]!) {
+      const p = mp.panel;
+      const vk = variantKey(mp.maskIndex);
+      const glass = vk.endsWith(':glass');
+      const separateGlass = glass && !dmg?.glassGroupPatch;
+      const key = [
+        p.material,
+        vk,
+        direct ? (p.castShadow ? 'cs' : 'nc') : '',
+        p.restTangent && p.frameTangent ? 't' : 'n',
+        separateGlass ? `pane${mp.maskIndex}` : '',
+      ].join('|');
+      let g = groups.get(key);
+      if (!g) groups.set(key, (g = []));
+      g.push(mp);
+    }
+    const meshes: Mesh[] = [];
+    for (const [key, parts] of groups) {
+      const first = parts[0]!;
+      const vk = variantKey(first.maskIndex);
+      let damagePatch: ShaderPatch | null = null;
+      if (vk.endsWith(':glass')) {
+        damagePatch =
+          parts.length === 1 || !dmg?.glassGroupPatch
+            ? (dmg?.patchFor(first.maskIndex) ?? null)
+            : dmg.glassGroupPatch(parts.map((m) => m.maskIndex));
+      } else if (vk !== '-') damagePatch = dmg?.patchFor(first.maskIndex) ?? null;
+      const geometry = buildSkinGeometry(parts, single ? 'single' : 'full');
+      geometries.push(geometry);
+      const base = opts.materials.base(first.panel.material as Parameters<typeof opts.materials.base>[0]);
+      const set = opts.patchMaterial(cloneBaseMaterial(base), {
+        csm,
+        flexbody: single ? patchSingle : patch,
+        damage: damagePatch ?? undefined,
+      });
+      // Panels are open shells: both faces must reach the shadow map.
+      set.color.shadowSide = DoubleSide;
+      const mesh = new Mesh(geometry, set.color);
+      if (set.depth) mesh.customDepthMaterial = set.depth;
+      if (set.distance) mesh.customDistanceMaterial = set.distance;
+      mesh.castShadow = direct && first.panel.castShadow;
+      mesh.receiveShadow = true;
+      mesh.visible = level === 0;
+      mesh.name = `skin${level}:${key.split('|').slice(0, 2).join(':')}${parts.length === 1 ? `:${first.panel.panelId}` : ''}`;
+      owned.push(set.color);
+      if (set.depth) owned.push(set.depth);
+      if (set.distance) owned.push(set.distance);
+      object.add(mesh);
+      meshes.push(mesh);
+      addEntry(mesh, parts);
+    }
+    levels.push(meshes);
+  }
+  const meshes = levels[0]!;
+  const panelDraw = new Int32Array(P).fill(-1);
+  meshes.forEach((m, di) => {
+    for (const i of entryOf.get(m)!.panels) panelDraw[i] = di;
+  });
+
+  // ---- shadow casters (single triad, every castShadow panel of the level, one draw each)
+  const casters: Mesh[] = [];
+  const casterEntries: DrawEntry[] = [];
+  if (!direct) {
+    const n = levelPanels.length;
+    const sources = [Math.min(1, n - 1), Math.min(2, n - 1)];
+    const built = new Map<number, Mesh>();
+    for (const src of sources) {
+      let mesh = built.get(src);
+      if (!mesh) {
+        const parts = levelPanels[src]!.filter((m) => m.panel.castShadow);
+        const geometry = buildSkinGeometry(parts, 'caster');
+        geometries.push(geometry);
+        const color = new MeshBasicMaterial({ name: 'skinCasterColor', colorWrite: false, depthWrite: false });
+        const set = opts.patchMaterial(color, { flexbody: patchSingle });
+        set.color.shadowSide = DoubleSide;
+        mesh = new Mesh(geometry, set.color);
+        if (set.depth) mesh.customDepthMaterial = set.depth;
+        if (set.distance) mesh.customDistanceMaterial = set.distance;
+        mesh.castShadow = true;
+        mesh.receiveShadow = false;
+        mesh.visible = false;
+        mesh.name = `skinCaster:lod${src}`;
+        owned.push(set.color);
+        if (set.depth) owned.push(set.depth);
+        if (set.distance) owned.push(set.distance);
+        object.add(mesh);
+        built.set(src, mesh);
+        casterEntries.push(addEntry(mesh, parts));
+      }
+      casters.push(mesh);
+    }
   }
 
   const anchor: [number, number, number] = [0, 0, 0];
   const settle = opts.settle ? new SettleCalibration(opts.settle, nodeCount) : null;
+  let lod = 0;
+  let forced: number | null = null;
+  const maxLevel = levels.length - 1;
+
+  function showLevel(level: number): void {
+    for (let l = 0; l < levels.length; l++) for (const m of levels[l]!) m.visible = l === level;
+  }
+
+  function cameraLod(camera: Camera): number {
+    const e = camera.matrixWorld.elements;
+    const dx = e[12]! - anchor[0];
+    const dy = e[13]! - anchor[1];
+    const dz = e[14]! - anchor[2];
+    const cam = camera as Camera & { fov?: number; zoom?: number };
+    const zoom = cam.zoom && cam.zoom > 0 ? cam.zoom : 1;
+    return selectVehicleLod(lod, lodDistance(Math.sqrt(dx * dx + dy * dy + dz * dz), cam.fov) / zoom, maxLevel);
+  }
 
   function update(frame: VehicleFrameInput): void {
     const src = frame.nodes;
@@ -668,9 +999,31 @@ export function createFlexSkin(binding: BindingSet, opts: FlexSkinOptions & Flex
     anchor[1] = ay;
     anchor[2] = az;
     object.position.set(ax, ay, az);
-    for (const b of bounds) nodeBounds(nodeData, b);
+    const next = forced !== null ? Math.min(Math.max(0, forced), maxLevel) : frame.camera && maxLevel > 0 ? cameraLod(frame.camera) : 0;
+    if (next !== lod) {
+      lod = next;
+      showLevel(lod);
+    }
+    for (const m of levels[lod]!) nodeBounds(nodeData, entryOf.get(m)!);
+    for (const e of casterEntries) nodeBounds(nodeData, e);
     texture.needsUpdate = true;
   }
+
+  const shadowClient: ShadowLodClient = {
+    shadowBegin(): void {
+      for (let i = 0; i < casters.length; i++) casters[i]!.visible = i === 0;
+    },
+    shadowCascade(index: number): void {
+      const want = index === 0 ? 0 : 1;
+      for (let i = 0; i < casters.length; i++) casters[i]!.visible = false;
+      const c = casters[want] ?? casters[0];
+      if (c) c.visible = true;
+    },
+    shadowEnd(): void {
+      for (const c of casters) c.visible = false;
+    },
+  };
+  const detach = direct ? () => {} : attachShadowLod(opts.renderer, opts.lighting, shadowClient);
 
   const skin: FlexSkinImpl = {
     object,
@@ -681,17 +1034,36 @@ export function createFlexSkin(binding: BindingSet, opts: FlexSkinOptions & Flex
     nodeFlags,
     anchor: anchor as unknown as Vec3T,
     patch,
+    patchSingle,
+    hiddenMask,
     settle,
+    panelDraw,
+    levels,
+    casters,
+    get lod(): number {
+      return lod;
+    },
     update,
+    setForcedLod(level: number | null): void {
+      forced = level;
+    },
     setPanelVisible(panelIndex: number, visible: boolean): void {
-      const m = meshes[panelIndex];
-      if (m) m.visible = visible;
+      if (!(panelIndex >= 0 && panelIndex < P)) return;
+      const v = visible ? 0 : 255;
+      if (hiddenData[panelIndex] === v) return;
+      hiddenData[panelIndex] = v;
+      hiddenMask.needsUpdate = true;
+    },
+    panelVisible(panelIndex: number): boolean {
+      return hiddenData[panelIndex] === 0;
     },
     dispose(): void {
+      detach();
       object.removeFromParent();
-      for (const m of meshes) m.geometry.dispose();
+      for (const g of geometries) g.dispose();
       for (const m of owned) m.dispose();
       texture.dispose();
+      hiddenMask.dispose();
       const i = SKIN_INSTANCES.indexOf(skin);
       if (i >= 0) SKIN_INSTANCES.splice(i, 1);
     },
@@ -704,13 +1076,29 @@ export function createFlexSkin(binding: BindingSet, opts: FlexSkinOptions & Flex
 export const SKIN_INSTANCES: FlexSkinImpl[] = [];
 if (typeof window !== 'undefined') (window as unknown as { __crumpleSkins: FlexSkinImpl[] }).__crumpleSkins = SKIN_INSTANCES;
 
-function restBounds(p: BindingPanel<string>, out: Sphere): void {
-  out.center.set(p.restCenter[0], p.restCenter[1], p.restCenter[2]);
-  out.radius = p.restRadius + 0.1;
+/** Rest bounds of a merged draw (until the first update): union AABB of the panels' rest spheres. */
+function restBounds(panels: readonly BindingPanel<string>[], out: Sphere): void {
+  let minX = Infinity, minY = Infinity, minZ = Infinity, maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (const p of panels) {
+    const r = p.restRadius + 0.1;
+    minX = Math.min(minX, p.restCenter[0] - r);
+    maxX = Math.max(maxX, p.restCenter[0] + r);
+    minY = Math.min(minY, p.restCenter[1] - r);
+    maxY = Math.max(maxY, p.restCenter[1] + r);
+    minZ = Math.min(minZ, p.restCenter[2] - r);
+    maxZ = Math.max(maxZ, p.restCenter[2] + r);
+  }
+  if (!(maxX >= minX)) {
+    out.center.set(0, 0, 0);
+    out.radius = 0;
+    return;
+  }
+  out.center.set((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2);
+  out.radius = 0.5 * Math.hypot(maxX - minX, maxY - minY, maxZ - minZ);
 }
 
-/** Bounding sphere of a panel's nodes (skin space, AABB centre) + margin. */
-function nodeBounds(data: Float32Array, b: PanelBounds): void {
+/** Bounding sphere of a draw's nodes (skin space, AABB centre) + margin. */
+function nodeBounds(data: Float32Array, b: DrawEntry): void {
   const n = b.nodes;
   if (n.length === 0) return;
   let minX = Infinity, minY = Infinity, minZ = Infinity, maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;

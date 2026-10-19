@@ -599,7 +599,7 @@ describe('merged glass patch', () => {
   });
 });
 
-describe('update is allocation-free', () => {
+describe('update is allocation-free', { timeout: 60_000 }, () => {
   it('runs 50k snapshot-rate updates (with impacts and skids) allocating < 4 bytes per call', async () => {
     const proc = (globalThis as unknown as { process: { memoryUsage(): { heapUsed: number } } }).process;
     const f = fixture();

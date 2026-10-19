@@ -1899,12 +1899,13 @@ export function gridLoftMesh(loft: Loft, nuSeg: number, nvSeg: number, opts: { f
  * points are pushed onto the inner box + r (exact normals). `rot` maps the
  * local frame (applied before translation).
  */
-export function roundedBoxMesh(c: Vec3T, h: Vec3T, r: number, opts: { segs?: number; flat?: number; rot?: (p: V3) => V3 } = {}): PanelMesh {
+/** `flat`: segments across each flat face, one count or per axis [x, y, z]. */
+export function roundedBoxMesh(c: Vec3T, h: Vec3T, r: number, opts: { segs?: number; flat?: number | Vec3T; rot?: (p: V3) => V3 } = {}): PanelMesh {
   const segs = opts.segs ?? 3;
-  const flatSegs = opts.flat ?? 1;
+  const flatOf = (axis: number): number => (typeof opts.flat === 'number' ? opts.flat : opts.flat ? opts.flat[axis]! : 1);
   const rr = Math.min(r, h[0] * 0.999, h[1] * 0.999, h[2] * 0.999);
   const rot = opts.rot ?? ((p: V3): V3 => p);
-  const axisSamples = (H: number): number[] => {
+  const axisSamples = (H: number, flatSegs: number): number[] => {
     const inner = H - rr;
     const out: number[] = [];
     for (let s = segs; s >= 1; s--) out.push(-(inner + rr * Math.tan(((Math.PI / 4) * s) / segs)));
@@ -1923,8 +1924,8 @@ export function roundedBoxMesh(c: Vec3T, h: Vec3T, r: number, opts: { segs?: num
     [2, -1, 1, 0],
   ];
   for (const [ax, sg, aa, ab] of faces) {
-    const sa = axisSamples(h[aa]!);
-    const sb = axisSamples(h[ab]!);
+    const sa = axisSamples(h[aa]!, flatOf(aa));
+    const sb = axisSamples(h[ab]!, flatOf(ab));
     const base = b.pos.length / 3;
     for (let j = 0; j < sb.length; j++) {
       for (let i = 0; i < sa.length; i++) {

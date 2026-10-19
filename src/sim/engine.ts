@@ -698,6 +698,8 @@ export class SimEngine {
     if (v) resetVehicleRuntime(v);
     const fl = this.floods.get(objectId);
     if (fl) fl.level = 0;
+    // A sleeping object stays asleep at the new pose: refresh its broadphase box.
+    if ((obj.flags & SIM_OBJECT_FLAG_SLEEPING) !== 0) this.setAsleep(obj, true);
     this.contactsDirty = true;
   }
 

@@ -68,6 +68,7 @@ import {
 } from '../loft';
 import type { BeamSelector, GlassSpec, MaterialSlot, PanelDef, PanelKind, VehicleVisualDef } from '../types';
 import { VISUAL_DEFAULTS } from '../types';
+import { once, setVisualExtras } from '../lods';
 
 // ====================================================================== rig-matched dimensions
 /** Asserted against compileVehicle(SEDAN) by sedan.test.ts. */
@@ -498,8 +499,8 @@ function ribbonSections(spec: RibbonSpec, endCp: readonly V3[], endCurve: (f: nu
 
 // ====================================================================== build
 export interface SedanBuildOptions {
-  /** 0 = full detail, 1 ≈ 40 % of the triangles. */
-  lod: 0 | 1;
+  /** 0 = full detail, 1 ≈ 40 % of the triangles (render LOD1 ≥ 25 m), 2 ≈ 20 % (LOD2 ≥ 80 m, far shadows). */
+  lod: 0 | 1 | 2;
 }
 
 /** Glass-class beams of the sedan rig (cw–rf, bt–rf, rf–dk across consecutive stations, pillars excluded). */
@@ -528,8 +529,11 @@ const GLASS_BEAMS = {
 const pairs = (p: readonly (readonly string[])[]): BeamSelector => ({ pairs: p.map((q) => [q[0]!, q[1]!] as const) });
 const sideBind = (ids: readonly string[], s: 'L' | 'R'): string[] => ids.map((id) => id.replace(/\$/g, s));
 
+/** Panels a LOD2 sedan leaves out (seals, handles, exhaust, small cabin parts behind the glass). */
+const LOD2_DROP = /Seal[LR]?$|^handle|^exhaust|^steering$|^console$|^parcelShelf$|^mirrorGlass|^reflectors$|^plateFrame$/;
+
 export function buildSedanVisual(opts: SedanBuildOptions = { lod: 0 }): VehicleVisualDef {
-  const rs = opts.lod === 0 ? 1 : 2.9;
+  const rs = opts.lod === 0 ? 1 : opts.lod === 1 ? 2.9 : 5.2;
   /** Rounded-box edge segments for explicit parts (big / small). */
   const SB = opts.lod === 0 ? 2 : 1;
   const SS = 1;
@@ -855,9 +859,11 @@ export function buildSedanVisual(opts: SedanBuildOptions = { lod: 0 }): VehicleV
       segV: Math.round(70 / rs),
       offset: 0.0006,
     });
-    const bp = cut(S4, [uAbove(S4, 0.002, 'seam'), uBelow(S4, dloTop, 'seam'), zAbove(B_FRONT, 'hem'), zBelow(B_REAR, 'hem')], { offset: 0.0005, border: 'seam', where: (p) => p[2] > 0 && p[2] < 0.3 });
+    // the B-pillar / quarter divider are narrow cuts: a coarse LOD sheet zigzags their edges, so they keep a finer one
+    const S4n = opts.lod === 0 ? S4 : createSheet(loftSurface(m4Loft), { resolution: 0.09 * Math.sqrt(rs), maxAngleDeg: 13 * Math.sqrt(rs) });
+    const bp = cut(S4n, [uAbove(S4n, 0.002, 'seam'), uBelow(S4n, dloTop, 'seam'), zAbove(B_FRONT, 'hem'), zBelow(B_REAR, 'hem')], { offset: 0.0005, border: 'seam', where: (p) => p[2] > 0 && p[2] < 0.3 });
     const sail = cut(S4, [uAbove(S4, 0.002, 'seam'), uBelow(S4, dloTop, 'seam'), zBelow(SAIL_Z, 'hem'), vAbove(S4, 0, 'seam')], { offset: 0.0005, border: 'seam', where: (p) => p[2] < -0.55 });
-    const qd = cut(S4, [uAbove(S4, 0.002, 'seam'), uBelow(S4, dloTop, 'seam'), zAbove(Q_FRONT, 'hem'), zBelow(Q_REAR, 'hem')], { offset: 0.0005, border: 'seam', where: (p) => p[2] > 0.9 && p[2] < 1.15 });
+    const qd = cut(S4n, [uAbove(S4n, 0.002, 'seam'), uBelow(S4n, dloTop, 'seam'), zAbove(Q_FRONT, 'hem'), zBelow(Q_REAR, 'hem')], { offset: 0.0005, border: 'seam', where: (p) => p[2] > 0.9 && p[2] < 1.15 });
     add(`dloTrim${s}`, 'trim', 'trim', perSide(mergeMeshes([band, bp.mesh, sail.mesh, qd.mesh]), s), sideBind(['s5_cw_$', 's6_rf_$', 's6_bt_$', 's7_rf_$', 's7_bt_$', 's8_rf_$', 's8_bt_$', 's9_dk_$', 's9_qm_$', 's10_qt_$'], s), { damageWeight: 0.5 });
     const seal = stripMesh(S4, { u0: () => 0, u1: (v) => uAtMetric(S4, v, 0.008), v0: vAtZ(S4, 0, -0.86), v1: vAtZ(S4, 0, 0.99), segV: Math.round(60 / rs), offset: 0.0015 });
     add(`beltSeal${s}`, 'trim', 'rubber', perSide(seal, s), sideBind(['s5_cw_$', 's5_hp_$', 's6_bt_$', 's6_dm_$', 's6_rf_$', 's7_bt_$', 's7_dm_$', 's7_rf_$', 's8_bt_$', 's8_dm_$', 's8_rf_$', 's9_dk_$', 's9_qm_$'], s), { damageWeight: 0 });
@@ -1460,7 +1466,9 @@ export function buildSedanVisual(opts: SedanBuildOptions = { lod: 0 }): VehicleV
     for (const s of SIDES) {
       const card = (z0: number, z1: number): PanelMesh =>
         mergeMeshes([
-          roundedBoxMesh([0.815, 0.66, (z0 + z1) / 2], [0.022, 0.3, (z1 - z0) / 2], 0.018, { segs: SS }),
+          // subdivided faces: a dented door skin is curved; a card of two big triangles stays a plane
+          // between its corners and the skin bulged in past it (the brown patch at 80 km/h)
+          roundedBoxMesh([0.815, 0.66, (z0 + z1) / 2], [0.022, 0.3, (z1 - z0) / 2], 0.018, { segs: SS, flat: opts.lod === 0 ? [1, 4, 6] : [1, 2, 3] }),
           roundedBoxMesh([0.775, 0.66, (z0 + z1) / 2 + 0.04], [0.035, 0.022, (z1 - z0) / 2 - 0.1], 0.015, { segs: SS }),
         ]);
       add(`doorCard${s}F`, 'interior', 'interiorTrim', perSide(card(-0.8, 0.09), s), doorFBind(s), { damageWeight: 0 });
@@ -1474,7 +1482,8 @@ export function buildSedanVisual(opts: SedanBuildOptions = { lod: 0 }): VehicleV
 
   return {
     vehicle: 'sedan',
-    panels,
+    // LOD2 (≥ 80 m, far shadows): small parts that are sub-pixel there are left out entirely
+    panels: opts.lod === 2 ? panels.filter((p) => !LOD2_DROP.test(p.id)) : panels,
     paint: { color: 0x1f4f9a, metallic: 0.7, roughness: 0.3, clearcoat: 1, clearcoatRoughness: 0.025, flake: { density: 0.7, scale: 0.6, intensity: 0.7 }, pearl: 0.12 },
     wheels: {
       rim: { style: 'spoke', spokes: 5, spokeWidth: 0.34, dish: 0.035, lip: 0.012, finish: 'gunmetal', boltCount: 5 },
@@ -1487,3 +1496,21 @@ export function buildSedanVisual(opts: SedanBuildOptions = { lod: 0 }): VehicleV
 
 /** The sedan's full-detail visual definition (LOD0). */
 export const SEDAN_VISUAL: VehicleVisualDef = buildSedanVisual({ lod: 0 });
+
+/**
+ * Interior door cards follow their door skins (binder.ts bindFollower): the
+ * cards bound to the same door nodes with their own triads (built from sill
+ * and belt nodes) stayed put while a dented skin folded inward through them
+ * (the brown patch of an 80 km/h side hit).
+ */
+export const SEDAN_FOLLOW: Readonly<Record<string, string>> = {
+  doorCardRF: 'doorRF',
+  doorCardRR: 'doorRR',
+  doorCardLF: 'doorLF',
+  doorCardLR: 'doorLR',
+};
+
+setVisualExtras(SEDAN_VISUAL, {
+  lods: [once(() => buildSedanVisual({ lod: 1 })), once(() => buildSedanVisual({ lod: 2 }))],
+  follow: SEDAN_FOLLOW,
+});

@@ -299,6 +299,44 @@ describe.skipIf(missing.length > 0)('SEDAN in the engine', () => {
     expect(brokenOrDeformed(sim)).toBe(0);
   });
 
+  it('P5 support rests: hood_2C sags ≤ 1 cm and the trunk-lid centre ≤ 1.5 cm after 2 s (vs the rigid frame)', () => {
+    const sim = spawn();
+    for (let t = 0; t < 4000; t++) sim.eng.step();
+    // Rigid body frame (VehicleDef.frame) at rest and now; sag = where the
+    // rest point would be under the rigid motion minus where it is (y).
+    const ids = cv.rig.nodeIds;
+    const rest = (id: string): number[] => {
+      const i = ids.indexOf(id);
+      return [cv.rig.nodePos[3 * i]!, cv.rig.nodePos[3 * i + 1]!, cv.rig.nodePos[3 * i + 2]!];
+    };
+    const now = (id: string): number[] => P(sim, ids.indexOf(id));
+    const basis = (p: (id: string) => number[]) => {
+      const o = p(SEDAN.frame.origin);
+      const a = p(SEDAN.frame.front);
+      const t = p(SEDAN.frame.top);
+      const unit = (v: number[]) => v.map((c) => c / Math.hypot(...v));
+      const f = unit([a[0]! - o[0]!, a[1]! - o[1]!, a[2]! - o[2]!]);
+      const u0 = [t[0]! - o[0]!, t[1]! - o[1]!, t[2]! - o[2]!];
+      const d = u0[0]! * f[0]! + u0[1]! * f[1]! + u0[2]! * f[2]!;
+      const u = unit([u0[0]! - d * f[0]!, u0[1]! - d * f[1]!, u0[2]! - d * f[2]!]);
+      const r = [f[1]! * u[2]! - f[2]! * u[1]!, f[2]! * u[0]! - f[0]! * u[2]!, f[0]! * u[1]! - f[1]! * u[0]!];
+      return { o, f, u, r };
+    };
+    const B0 = basis(rest);
+    const B1 = basis(now);
+    const sag = (id: string): number => {
+      const p = rest(id);
+      const d = [p[0]! - B0.o[0]!, p[1]! - B0.o[1]!, p[2]! - B0.o[2]!];
+      const dot = (v: number[]) => d[0]! * v[0]! + d[1]! * v[1]! + d[2]! * v[2]!;
+      const ey = B1.o[1]! + dot(B0.f) * B1.f[1]! + dot(B0.u) * B1.u[1]! + dot(B0.r) * B1.r[1]!;
+      return ey - now(id)[1]!;
+    };
+    expect(sag('hood_2C')).toBeLessThan(0.01);
+    expect(sag('s11_ld')).toBeLessThan(0.015);
+    for (const id of ['hood_1C', 'hood_3C', 'hood_2L', 'hood_2R']) expect(Math.abs(sag(id))).toBeLessThan(0.01);
+    expect(brokenOrDeformed(sim)).toBe(0);
+  });
+
   it('full drive torque for 1 s: every axle stays within 5° of its rest direction (body frame)', () => {
     const sim = spawn();
     for (let t = 0; t < 4000; t++) sim.eng.step();

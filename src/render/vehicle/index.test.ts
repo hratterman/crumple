@@ -18,7 +18,8 @@ describe('createVehicleVisual (synthetic subject)', () => {
 
   it('assembles binding, skin, wheels and damage', () => {
     expect(visual.binding.panels.length).toBe(2);
-    expect(visual.skin.meshes.length).toBe(2);
+    expect(visual.skin.meshes.length).toBe(1); // both synthetic panels are paint: one merged draw
+    expect(visual.lodBindings.length).toBe(0); // no registered LOD defs for the synthetic subject
     expect(visual.object.children).toContain(visual.skin.object);
     expect(visual.object.children).toContain(visual.wheels.object);
     expect(visual.timings.bindMs).toBeGreaterThanOrEqual(0);
