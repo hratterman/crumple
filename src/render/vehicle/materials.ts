@@ -459,6 +459,21 @@ const LAMP_MAIN = /* glsl */ `
 		diffuseColor.rgb = mix( diffuseColor.rgb, diffuseColor.rgb * 1.6 + 0.04, crGuide );
 		crE = uCrLampColor * ( uCrLamp.x * ( crGuide * ${LAMP_LEVELS.tail.toFixed(1)} + crFill * 0.35 )
 			+ uCrLamp.y * ( crFill * ${LAMP_LEVELS.brake.toFixed(1)} + crGuide * ${LAMP_LEVELS.brake.toFixed(1)} ) );
+	#elif CR_LAMP == 5
+		// classic (1990s) headlamp: a reflector bowl behind a ribbed lens, one hot spot per beam
+		vec2 crC = vec2( uCrLampMin.x + 0.62 * crSize.x, uCrLampMin.y + 0.52 * crSize.y );
+		vec2 crH = vec2( uCrLampMin.x + 0.34 * crSize.x, uCrLampMin.y + 0.52 * crSize.y );
+		float crR = 0.3 * crSize.y;
+		float crG1 = exp( -2.5 * dot( crQ.xy - crC, crQ.xy - crC ) / ( crR * crR ) );
+		float crG2 = exp( -2.5 * dot( crQ.xy - crH, crQ.xy - crH ) / ( crR * crR ) );
+		float crRib = 0.5 + 0.5 * sin( crQ.x * 260.0 );
+		diffuseColor.rgb *= 0.85 + 0.15 * crRib;
+		crE = uCrLampColor * ( uCrLamp.y * ( 0.25 + ${LAMP_LEVELS.lowBeam.toFixed(1)} * 0.5 * crG1 )
+			+ uCrLamp.z * ( 0.2 + ${LAMP_LEVELS.highBeam.toFixed(1)} * 0.5 * crG2 ) ) * ( 0.8 + 0.2 * crRib );
+	#elif CR_LAMP == 6
+		// classic tail lamp: the whole lens glows (tail) and brightens (brake), dimmer at the rim
+		float crFill6 = 0.55 + 0.45 * smoothstep( 0.003, 0.02, crEdge );
+		crE = uCrLampColor * crFill6 * ( uCrLamp.x * 1.4 + uCrLamp.y * ${LAMP_LEVELS.brake.toFixed(1)} * 1.4 );
 	#elif CR_LAMP == 3
 		crE = uCrLampColor * uCrLamp.x * ${LAMP_LEVELS.reverse.toFixed(1)} * ( 0.35 + 0.65 * smoothstep( 0.004, 0.02, crEdge ) );
 	#else
@@ -782,6 +797,8 @@ export const createVehicleMaterials: CreateVehicleMaterials = (ctx: RenderContex
   hooked(glassMat, transmissive ? 'crGlass1t' : 'crGlass1', glassHook(glassU), reg('glass'));
 
   // ---------------- lamps
+  const extras = finishExtras(def);
+  const classic = extras.lamps === 'classic';
   const lampU = new Map<MaterialSlot, LampUniforms>();
   const lamp = (
     slot: 'lightHead' | 'lightTail' | 'lightReverse' | 'lightIndicator',
@@ -799,7 +816,9 @@ export const createVehicleMaterials: CreateVehicleMaterials = (ctx: RenderContex
     };
     lampU.set(slot, u);
     const m = new MeshPhysicalMaterial({ name: `cr-${slot}`, clearcoat: 1, clearcoatRoughness: 0.02, specularIntensity: 1, ...params });
-    return hooked(m, `crLamp${LAMP_SLOT_ID[slot]}`, lampHook(LAMP_SLOT_ID[slot], u), reg(slot));
+    // classic (pre-LED) lamp optics for defs that ask for them (weathering.ts FinishExtras.lamps)
+    const id = classic && slot === 'lightHead' ? 5 : classic && slot === 'lightTail' ? 6 : LAMP_SLOT_ID[slot];
+    return hooked(m, `crLamp${id}`, lampHook(id, u), reg(slot));
   };
   const reflector = tiled(vehicleTextures.lens('reflector'), TEXTURE_DENSITY.reflector);
   const prism = tiled(vehicleTextures.lens('prism'), TEXTURE_DENSITY.prism);
@@ -907,7 +926,13 @@ export const createVehicleMaterials: CreateVehicleMaterials = (ctx: RenderContex
     clearcoat: fin.clearcoat,
     clearcoatRoughness: 0.04,
   });
-  const tire = std('tire', { color: srgb(0x262626), roughness: 0.84, metalness: 0, specularIntensity: 0.45 });
+  const tire = std('tire', { color: srgb(extras.worn ? 0x2e2d2b : 0x262626), roughness: extras.worn ? 0.92 : 0.84, metalness: 0, specularIntensity: 0.45 });
+  if (extras.worn) {
+    // weathered steel wheels: no lacquer shine, a little dust
+    rim.clearcoat = 0;
+    rim.roughness = Math.max(rim.roughness, 0.55);
+    rim.color.multiplyScalar(1.6).lerp(srgb(0x4a4238), 0.25);
+  }
   const disc = vehicleTextures.brakeDisc();
   const brakeDisc = std('brakeDisc', {
     color: srgb(0x8d9095),
@@ -952,7 +977,7 @@ export const createVehicleMaterials: CreateVehicleMaterials = (ctx: RenderContex
   const finish = buildFinishData(def);
   const finishTex = finish.finished > 0 ? createFinishTexture(finish) : null;
   if (finishTex) {
-    const wu = createWeatherUniforms(finishTex, finishExtras(def).arches ?? []);
+    const wu = createWeatherUniforms(finishTex, extras.arches ?? []);
     for (const slot of finish.slots) {
       const m = bases[slot];
       if (!m) continue;

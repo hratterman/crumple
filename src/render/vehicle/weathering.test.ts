@@ -1,4 +1,4 @@
-import { ShaderLib, type WebGLProgramParametersWithUniforms } from 'three';
+import { MeshPhysicalMaterial, ShaderLib, type WebGLProgramParametersWithUniforms } from 'three';
 import { describe, expect, it } from 'vitest';
 
 import { createRng } from '../../core/rng';
@@ -217,6 +217,26 @@ describe('panel finish: materials', () => {
     expect(arch[0]!.x).toBeCloseTo(-1.3);
     expect(arch[1]!.z).toBe(0);
     set.dispose();
+  });
+
+  it('classic lamp optics and worn wheels are opt-in per def (FinishExtras), defaults unchanged', () => {
+    const plain = createVehicleMaterials(ctx, SEDAN_VISUAL);
+    expect(plain.base('lightHead').customProgramCacheKey()).toContain('crLamp1');
+    expect(plain.base('lightTail').customProgramCacheKey()).toContain('crLamp2');
+    const def = defWith([door({ rust: 0.2 }), lens({ crack: 0.3 })]);
+    setFinishExtras(def, { lamps: 'classic', worn: true });
+    const set = createVehicleMaterials(ctx, def);
+    expect(set.base('lightHead').customProgramCacheKey()).toContain('crLamp5');
+    expect(set.base('lightTail').customProgramCacheKey()).toContain('crLamp6');
+    const sh = physical();
+    set.base('lightHead').onBeforeCompile(sh, null as never);
+    expect(sh.fragmentShader.startsWith('#define CR_LAMP 5')).toBe(true);
+    expect(sh.fragmentShader).toContain('#elif CR_LAMP == 5');
+    const rim = set.base('rim') as MeshPhysicalMaterial;
+    expect(rim.clearcoat).toBe(0);
+    expect((plain.base('rim') as MeshPhysicalMaterial).clearcoat).toBeGreaterThan(0);
+    set.dispose();
+    plain.dispose();
   });
 
   it('the hook applies to a bare physical program and throws on chunk drift', () => {

@@ -63,6 +63,10 @@ export interface FinishArch {
 }
 export interface FinishExtras {
   arches?: readonly FinishArch[];
+  /** Lamp optics of the materials: 'classic' = pre-LED reflector head lamps and evenly lit tail lenses (materials.ts CR_LAMP 5 / 6). */
+  lamps?: 'classic';
+  /** Weathered steel rims (no clearcoat, dusty) and old grey tyres. */
+  worn?: boolean;
 }
 const EXTRAS = new WeakMap<VehicleVisualDef, FinishExtras>();
 /** Max arches the shader reads. */
@@ -519,7 +523,7 @@ float crWxSolid = 0.0;
 	float peelRim = smoothstep( t2.y - 0.035, t2.y - 0.004, pf ) * ( 1.0 - peel );
 	lum = crWxLum( diffuseColor.rgb );
 	diffuseColor.rgb = mix( diffuseColor.rgb, mix( vec3( lum ), diffuseColor.rgb, 0.6 ) * 1.12 + 0.02, peel );
-	diffuseColor.rgb = mix( diffuseColor.rgb, diffuseColor.rgb * 0.6 + vec3( 0.32 ), peelRim * 0.7 );
+	diffuseColor.rgb = mix( diffuseColor.rgb, diffuseColor.rgb * 0.75 + vec3( 0.12 ), peelRim * 0.5 );
 	roughnessFactor = mix( roughnessFactor, 0.82, peel );
 	roughnessFactor = mix( roughnessFactor, 0.45, peelRim );
 	crWxCoat *= 1.0 - max( peel, peelRim * 0.5 );
@@ -529,7 +533,7 @@ float crWxSolid = 0.0;
 	float primer = smoothstep( t1.z - 0.006, t1.z + 0.006, prf );
 	float feather = smoothstep( t1.z - 0.06, t1.z - 0.006, prf ) * ( 1.0 - primer ) * step( t1.z, 1.5 );
 	float pn = crWxNoise( 37.0 * q );
-	vec3 primerCol = vec3( 0.2, 0.205, 0.21 ) * ( 0.88 + 0.24 * pn ) * ( 0.94 + 0.12 * crWxFbm( 3.0 * q + 4.0 ) );
+	vec3 primerCol = vec3( 0.135, 0.14, 0.145 ) * ( 0.88 + 0.24 * pn ) * ( 0.94 + 0.12 * crWxFbm( 3.0 * q + 4.0 ) );
 	diffuseColor.rgb = mix( diffuseColor.rgb, diffuseColor.rgb * 0.82 + 0.03, feather * 0.6 );
 	roughnessFactor = mix( roughnessFactor, 0.8, feather * 0.6 );
 	diffuseColor.rgb = mix( diffuseColor.rgb, primerCol, primer );

@@ -1,31 +1,33 @@
 /**
- * Catalog entry: derby beater (owner: F4). Stats = P6 targets until F4
- * lands (see coupe.ts). Palettes are the faded single-stage base colour;
- * the mismatched doors / primer / rust are per-panel `PanelFinish` in the
- * visual def and survive palette swaps.
+ * Catalog entry: derby beater (owner: F4). Stats are the BUILT car's
+ * (src/sim/vehicle/beater.test.ts report): 1050 kg, 90 kW / 150 N·m
+ * (docs/CONTRACTS.md "Beater as built"), 0–100 ≈ 11.5 s, v_max ≈ 163 km/h.
+ * Palettes are the faded single-stage base colour; the mismatched door,
+ * the primer fender, rust and the race numbers are per-panel `PanelFinish`
+ * in the visual def and survive palette swaps.
  */
-import { notYetBuilt, type VehicleCatalogEntry } from '../catalogTypes';
 import type { PaintDef } from '../../render/vehicle/types';
+import type { VehicleCatalogEntry } from '../catalogTypes';
 
 const faded = (color: number): PaintDef => ({ color, metallic: 0, roughness: 0.62, clearcoat: 0.12, clearcoatRoughness: 0.4, flake: null });
 
 export const BEATER_ENTRY: VehicleCatalogEntry = {
   id: 'beater',
-  available: false,
+  available: true,
   selectable: true,
   trafficEligible: false,
   stats: {
     name: 'Junker 1.6',
     class: 'Derby beater',
-    blurb: 'Thirty winters, four owners, one working wing mirror. Folds like paper.',
+    blurb: 'Thirty winters, four owners, one working wing mirror. Folds like paper, keeps on driving.',
     engine: '1.6 L inline-4',
     gearbox: '4-speed automatic',
     drivetrain: 'FWD',
-    powerKw: 75,
-    torqueNm: 140,
+    powerKw: 90,
+    torqueNm: 150,
     massKg: 1050,
-    topSpeedKmh: 165,
-    zeroTo100S: 12.5,
+    topSpeedKmh: 163,
+    zeroTo100S: 11.5,
     ratings: { speed: 1, handling: 2, toughness: 1 },
   },
   palettes: [
@@ -38,6 +40,9 @@ export const BEATER_ENTRY: VehicleCatalogEntry = {
   ],
   beamBudget: 2600,
   chase: { distance: 5.2, height: 1.8 },
-  extent: { min: [-0.9, 0, -2.1], max: [0.9, 1.45, 2.1] },
-  load: notYetBuilt('beater'),
+  extent: { min: [-1.01, 0, -2.15], max: [1.01, 1.42, 2.18] },
+  load: async () => {
+    const [{ BEATER }, { BEATER_VISUAL }] = await Promise.all([import('../../sim/vehicle/defs/beater'), import('../../render/vehicle/defs/beater')]);
+    return { sim: BEATER, visual: BEATER_VISUAL };
+  },
 };
