@@ -90,7 +90,7 @@ function vec(wheel: string, field: string, v: unknown): [number, number, number]
 
 /**
  * Generates one wheel: 2 + 4·rays nodes (hubI, hubO, rimI[], rimO[],
- * tireI[], tireO[]) and 2·attach.length + 1 + 20·rays beams in WHEEL BEAM
+ * tireI[], tireO[]) and 2·attach.length + 1 + 22·rays beams in WHEEL BEAM
  * ORDER. Geometry, masses and groups exactly as documented on WheelDef.
  */
 export const buildWheelRig: BuildWheelRig = (wheel, bodyNodeLookup) => {
@@ -226,11 +226,11 @@ export const buildWheelRig: BuildWheelRig = (wheel, bodyNodeLookup) => {
       beams.push({ a: hub, b: bodyId, type: 'normal', k: attachK, d: attachD, deform: WHEEL_DEFAULTS.rimDeform, breakF: attachBreakF });
     }
   }
-  const rim = (a: string, b: string): void => {
-    beams.push({ a, b, type: 'normal', k: rimK, d: rimD, deform: WHEEL_DEFAULTS.rimDeform, breakF: WHEEL_DEFAULTS.rimBreakF });
+  const rim = (a: string, b: string, f = 1): void => {
+    beams.push({ a, b, type: 'normal', k: rimK * f, d: rimD * f, deform: WHEEL_DEFAULTS.rimDeform, breakF: WHEEL_DEFAULTS.rimBreakF });
   };
-  const tread = (a: string, b: string): void => {
-    beams.push({ a, b, type: 'normal', k: treadK, d: treadD, deform: WHEEL_DEFAULTS.tireDeform, breakF: WHEEL_DEFAULTS.tireBreakF });
+  const tread = (a: string, b: string, f = 1): void => {
+    beams.push({ a, b, type: 'normal', k: treadK * f, d: treadD * f, deform: WHEEL_DEFAULTS.tireDeform, breakF: WHEEL_DEFAULTS.tireBreakF });
   };
   const side = (a: string, b: string): void => {
     beams.push({ a, b, type: 'normal', k: sideK, d: sideD, deform: WHEEL_DEFAULTS.tireDeform, breakF: WHEEL_DEFAULTS.tireBreakF });
@@ -250,11 +250,11 @@ export const buildWheelRig: BuildWheelRig = (wheel, bodyNodeLookup) => {
     rim(rI(k), rO(k));
     rim(rI(k), rI(k1));
     rim(rO(k), rO(k1));
-    rim(rI(k), rO(k1));
+    rim(rI(k), rO(k1), 0.5);
     tread(tI(k), tI(k1));
     tread(tO(k), tO(k1));
     tread(tI(k), tO(k));
-    tread(tI(k), tO(k1));
+    tread(tI(k), tO(k1), 0.5);
     side(rI(k), tI(k));
     side(rO(k), tO(k));
     side(rI(k), tI(k1));
@@ -263,6 +263,15 @@ export const buildWheelRig: BuildWheelRig = (wheel, bodyNodeLookup) => {
     side(rO(k1), tO(k));
     side(hubI, tO(k));
     side(hubO, tI(k));
+    // X-bracing: the mirrored diagonals (each diagonal at half stiffness).
+    // One-way diagonals make a wheel chiral: torsion couples into axial
+    // shear, and since left and right rings run in opposite rotational
+    // senses both wheels of an axle crabbed the SAME way under drive/brake
+    // torque (net side force: the sedan spun out on a straight launch).
+    // Zig-zag alternation is achiral but gives every other node two
+    // diagonals and its neighbour none (uneven ω·dt and radial stiffness).
+    rim(rO(k), rI(k1), 0.5);
+    tread(tO(k), tI(k1), 0.5);
     if (beams.length - before !== WHEEL_BEAMS_PER_RAY) fail(id, 'internal: per-ray beam count drifted from WHEEL_BEAMS_PER_RAY');
   }
   return { nodes, beams };

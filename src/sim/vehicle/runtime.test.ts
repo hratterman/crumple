@@ -181,14 +181,18 @@ describe.skipIf(missing.length > 0)('vehicle runtime', () => {
     const { eng, id } = engineWithCar();
     const v = eng.getVehicle(id)!;
     const obj = eng.arena.get(id)!;
-    for (let t = 0; t < 2000; t++) eng.step();
+    // Mean wheel load over the last 0.25 s of settling (the stiff test car
+    // still bounces a little at 1 s; an instantaneous sample is phase luck).
+    let load = 0;
+    for (let t = 0; t < 2000; t++) {
+      eng.step();
+      if (t >= 1500) for (const w of v.wheels) load += w.load / 500;
+    }
     expect(finite(eng.state, obj.nodeStart, obj.nodeCount)).toBe(true);
     let tel = RT.writeVehicleTelemetry(eng.state, v);
     expect(tel[VehicleTelemetry.airborne]).toBe(0);
     expect(tel[VehicleTelemetry.wheelContact]).toBe(15);
     expect(Math.abs(tel[VehicleTelemetry.speed]!)).toBeLessThan(0.2);
-    let load = 0;
-    for (const w of v.wheels) load += w.load;
     expect(load).toBeGreaterThan(0.6 * v.vehicle.totalMass * 9.81);
     expect(load).toBeLessThan(1.4 * v.vehicle.totalMass * 9.81);
 

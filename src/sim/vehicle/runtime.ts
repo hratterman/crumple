@@ -81,6 +81,7 @@ function makeWheel(vehicle: CompiledVehicle, index: number): WheelRuntime {
     load: 0,
     slipSpeed: 0,
     slipRatio: 0,
+    rollRadius: cw.radius,
     contact: 0,
     detached: 0,
     driveTorque: 0,
@@ -144,6 +145,7 @@ export function resetVehicleRuntime(vehicle: VehicleRuntime): void {
     w.load = 0;
     w.slipSpeed = 0;
     w.slipRatio = 0;
+    w.rollRadius = w.wheel.radius;
     w.contact = 0;
     w.detached = 0;
     w.driveTorque = 0;

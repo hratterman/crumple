@@ -135,6 +135,7 @@ function makeSim(defs: WheelDef[], opts: SimOpts = {}): Sim {
       load: 0,
       slipSpeed: 0,
       slipRatio: 0,
+      rollRadius: 0.3,
       contact: 0,
       detached: 0,
       driveTorque: 0,
@@ -394,13 +395,15 @@ describe('buildWheelRig', () => {
         `${tI(k)}-${tI(k1)}`, `${tO(k)}-${tO(k1)}`, `${tI(k)}-${tO(k)}`, `${tI(k)}-${tO(k1)}`,
         `${rI(k)}-${tI(k)}`, `${rO(k)}-${tO(k)}`, `${rI(k)}-${tI(k1)}`, `${rO(k)}-${tO(k1)}`,
         `${rI(k1)}-${tI(k)}`, `${rO(k1)}-${tO(k)}`, `${hI}-${tO(k)}`, `${hO}-${tI(k)}`,
+        `${rO(k)}-${rI(k1)}`, `${tO(k)}-${tI(k1)}`,
       );
     }
     expect(pairs).toEqual(expected);
     for (let k = 0; k < n; k++) {
       const o = 5 + WHEEL_BEAMS_PER_RAY * k;
-      for (let j = 0; j < 8; j++) expect([beams[o + j]!.k, beams[o + j]!.breakF]).toEqual([def.rimSpring, WHEEL_DEFAULTS.rimBreakF]);
-      for (let j = 8; j < 12; j++) expect([beams[o + j]!.k, beams[o + j]!.d]).toEqual([def.tireRingSpring, def.tireRingDamp]);
+      const half = (j: number): number => (j === 7 || j === 11 || j >= 20 ? 0.5 : 1);
+      for (const j of [0, 1, 2, 3, 4, 5, 6, 7, 20]) expect([beams[o + j]!.k, beams[o + j]!.d, beams[o + j]!.breakF]).toEqual([def.rimSpring * half(j), def.rimDamp * half(j), WHEEL_DEFAULTS.rimBreakF]);
+      for (const j of [8, 9, 10, 11, 21]) expect([beams[o + j]!.k, beams[o + j]!.d]).toEqual([def.tireRingSpring * half(j), def.tireRingDamp * half(j)]);
       for (let j = 12; j < 20; j++) expect([beams[o + j]!.k, beams[o + j]!.d]).toEqual([def.sidewallSpring, def.sidewallDamp]);
     }
     expect([beams[0]!.k, beams[0]!.breakF]).toEqual([def.rimSpring, WHEEL_DEFAULTS.attachBreakF]);
@@ -417,7 +420,7 @@ describe('buildWheelRig', () => {
     expect(() => buildWheelRig(wheelDef({ hubOuter: [0, 0, 0] }), lookup)).toThrow(/coincide/);
     for (const rays of [10, 14]) {
       const r = buildWheelRig(wheelDef({ rays }), lookup);
-      expect([r.nodes.length, r.beams.length]).toEqual([2 + 4 * rays, 1 + 20 * rays]);
+      expect([r.nodes.length, r.beams.length]).toEqual([2 + 4 * rays, 1 + 22 * rays]);
     }
   });
 
@@ -742,19 +745,18 @@ describe('rolling', () => {
     const c1 = cartCentre(sim);
     const dist = c0[2] - c1[2];
     expect(dist).toBeGreaterThan(0.5 * v0 * 3);
-    // Measured ≈ −0.028 rad over ~13 m: a mild steady pull from the frozen
-    // WHEEL BEAM ORDER's one-way cross bracing (see wheelrig.ts).
-    expect(Math.abs(cartYaw(sim) - yaw0)).toBeLessThan(0.05);
-    // Sideslip vs the heading: measured ≈ 0.026 (1.5°), same cause.
+    // X-braced (achiral) wheels: measured ≈ −0.008 rad over ~13 m (one-way
+    // diagonals pulled −0.028 rad and crabbed 1.5°).
+    expect(Math.abs(cartYaw(sim) - yaw0)).toBeLessThan(0.02);
     const crab = Math.abs((c1[0] - c0[0]) / dist + Math.tan((cartYaw(sim) + yaw0) / 2));
-    expect(crab).toBeLessThan(0.04);
+    expect(crab).toBeLessThan(0.02);
     for (const w of sim.wheels) {
       estimateWheelOmega(s, w);
       expect(w.omega).toBeGreaterThan(0);
-      // Free rolling: ω = v / r_loaded and the frozen slip ratio uses the unloaded
-      // radius, so it reads r/r_loaded − 1 ≈ +0.09 (≈ 25 mm deflection), not 0.
-      expect(w.slipRatio).toBeGreaterThan(0.03);
-      expect(w.slipRatio).toBeLessThan(0.15);
+      // Free rolling reads ≈ 0 against the effective rolling radius (the
+      // unloaded radius read +0.09).
+      expect(Math.abs(w.slipRatio)).toBeLessThan(0.08);
+      expect(w.rollRadius).toBeLessThan(R);
     }
   });
 

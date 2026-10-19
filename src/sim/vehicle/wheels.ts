@@ -267,6 +267,7 @@ export const estimateWheelOmega: EstimateWheelOmega = (state, w) => {
   let gnx = 0;
   let gny = 0;
   let gnz = 0;
+  let rollSum = 0;
   if (sampler !== null) {
     const t0 = w.tireStart;
     const t1 = t0 + n;
@@ -284,6 +285,8 @@ export const estimateWheelOmega: EstimateWheelOmega = (state, w) => {
       const ty = vy - vn * ny;
       const tz = vz - vn * nz;
       slipSum += Math.sqrt(tx * tx + ty * ty + tz * tz);
+      // Rolling radius sample: axle-to-node-centre distance along the normal.
+      rollSum += fn * ((cx - posX[i]!) * nx + (cy - posY[i]!) * ny + (cz - posZ[i]!) * nz);
       load += fn;
       gnx += fn * nx;
       gny += fn * ny;
@@ -318,7 +321,12 @@ export const estimateWheelOmega: EstimateWheelOmega = (state, w) => {
     vFwd = vcx * fx + vcy * fy + vcz * fz;
   }
   const den = vFwd < 0 ? -vFwd : vFwd;
-  w.slipRatio = (omega * w.wheel.radius - vFwd) / (den > SLIP_RATIO_MIN_SPEED ? den : SLIP_RATIO_MIN_SPEED);
+  // Effective rolling radius: load-weighted axle → contact-node-centre
+  // distance (contact nodes stick, so the hub advances ω·that per radian);
+  // the unloaded radius read +9 % slip on a free-rolling wheel.
+  const rEff = load > 0 ? rollSum / load : w.wheel.radius;
+  w.rollRadius = rEff;
+  w.slipRatio = (omega * rEff - vFwd) / (den > SLIP_RATIO_MIN_SPEED ? den : SLIP_RATIO_MIN_SPEED);
 };
 
 /**

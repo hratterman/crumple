@@ -140,18 +140,23 @@ export function wheelNodeId(wheelId: string, part: WheelNodePart, k?: number): s
 }
 
 /**
- * WHEEL BEAM ORDER — FROZEN. Per wheel (k1 = (k + 1) mod n):
+ * WHEEL BEAM ORDER — FROZEN (amended P2: 22 per ray, X-braced diagonals).
+ * Per wheel (k1 = (k + 1) mod n):
  *   1. attach: for each id in `attach`: hubI–id, hubO–id      (attachSpring/Damp/BreakF, type normal)
  *   2. axle:   hubI–hubO                                       (rim params)
- *   3. per ray k = 0..n−1, 20 beams in this order:
+ *   3. per ray k = 0..n−1, 22 beams in this order:
  *       rim  (rim params):      hubI–rimI{k}, hubO–rimO{k}, hubI–rimO{k}, hubO–rimI{k},
- *                               rimI{k}–rimO{k}, rimI{k}–rimI{k1}, rimO{k}–rimO{k1}, rimI{k}–rimO{k1}
- *       tread (tireRing):       tireI{k}–tireI{k1}, tireO{k}–tireO{k1}, tireI{k}–tireO{k}, tireI{k}–tireO{k1}
+ *                               rimI{k}–rimO{k}, rimI{k}–rimI{k1}, rimO{k}–rimO{k1}, rimI{k}–rimO{k1}½
+ *       tread (tireRing):       tireI{k}–tireI{k1}, tireO{k}–tireO{k1}, tireI{k}–tireO{k}, tireI{k}–tireO{k1}½
  *       sidewall (sidewall):    rimI{k}–tireI{k}, rimO{k}–tireO{k}, rimI{k}–tireI{k1}, rimO{k}–tireO{k1},
  *                               rimI{k1}–tireI{k}, rimO{k1}–tireO{k}, hubI–tireO{k}, hubO–tireI{k}
- * Beam count per wheel = 2·attach.length + 1 + 20·rays. All type 'normal'.
+ *       X-brace:                rimO{k}–rimI{k1}½ (rim params), tireO{k}–tireI{k1}½ (tireRing params)
+ *   ½ = half spring AND damping (each quad is X-braced with two half-stiffness
+ *   diagonals: per-node Σk is unchanged and the wheel is achiral — one-way
+ *   diagonals made left/right wheels crab the same way under torque).
+ * Beam count per wheel = 2·attach.length + 1 + 22·rays. All type 'normal'.
  */
-export const WHEEL_BEAMS_PER_RAY = 20;
+export const WHEEL_BEAMS_PER_RAY = 22;
 export const WHEEL_RAYS_MIN = 10;
 export const WHEEL_RAYS_MAX = 14;
 
@@ -425,8 +430,17 @@ export interface WheelRuntime {
   load: number;
   /** Mean |tangential ground velocity| of in-contact tire nodes, m/s. */
   slipSpeed: number;
-  /** (ω·radius − v_x) / max(|v_x|, 0.5), v_x = hub velocity along s × n (forward). */
+  /**
+   * (ω·r_roll − v_x) / max(|v_x|, 0.5), v_x = hub velocity along s × n
+   * (forward), r_roll = rollRadius (P2 amendment: was the unloaded radius).
+   */
   slipRatio: number;
+  /**
+   * Effective rolling radius, m: load-weighted distance from the axle to the
+   * in-contact tyre node centres along the ground normal (= radius when
+   * airborne). Additive P2 field.
+   */
+  rollRadius: number;
   /** 1 if any tire node is in ground contact. */
   contact: number;
   /** 1 once every hubLinkBeam is broken (sticky until reset). */

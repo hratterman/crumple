@@ -86,6 +86,7 @@ function makeVehicle(diff: DiffType = 'open', transmission: TransmissionMode = '
       load: 0,
       slipSpeed: 0,
       slipRatio: 0,
+      rollRadius: 0.3,
       contact: 1,
       detached: 0,
       driveTorque: 0,
