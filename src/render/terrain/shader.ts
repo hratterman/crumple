@@ -1,0 +1,476 @@
+/**
+ * Terrain shader patch (B) for MeshStandardMaterial (colour) and
+ * MeshDepthMaterial (shadow casters), applied through onBeforeCompile so
+ * three's lighting, fog, CSM and shadow code stay intact.
+ *
+ * Vertex: CDLOD geomorph (see chunks.ts) driven by the MAIN camera position
+ * (uTCam — the shadow pass must morph like the colour pass), normal read
+ * from the terrain normal texture.
+ *
+ * Fragment, per pixel:
+ *  1. terrain normal N from the RG16F normal texture (= the collision
+ *     sampler's smoothed normal), splat weights (grass implicit) with a
+ *     small noise warp that breaks the 1 m bilinear grid pattern;
+ *  2. projections: planar XZ everywhere, plus X/Z planes where the slope is
+ *     steep (smooth weights, so there is no seam at the switch);
+ *  3. every active layer is sampled with HEX TILING (Mikkelsen 2022): three
+ *     randomly rotated + offset taps on a world-space triangle grid,
+ *     blended by barycentric weight × height → no visible repeats;
+ *  4. height-based layer blend (weights gated so a zero-weight layer never
+ *     shows: colour stays inside the 5-weight blend);
+ *  5. macro colour variation (2 noise scales) + per-layer grading, far
+ *     detail (the same texture at 1/9 scale modulating colour beyond ~60 m),
+ *     distance fade of normal strength;
+ *  6. concrete tint on the paved layer, wet darkening near the water line.
+ */
+import type { IUniform, WebGLProgramParametersWithUniforms } from 'three';
+import { Vector2, Vector3, Vector4 } from 'three';
+
+export const TERRAIN_SHADER_KEY = 'terrain-b1';
+
+export interface TerrainUniforms {
+  [name: string]: IUniform;
+}
+
+const VERT_PARS = /* glsl */ `
+attribute vec2 aMorph;
+uniform vec3 uTCam;
+uniform vec2 uTMorph[4];
+uniform vec4 uTGrid;
+`;
+
+const VERT_NORMAL_PARS = /* glsl */ `
+uniform sampler2D tTNormal;
+varying vec3 vTPos;
+vec3 tTerrainNormal(vec2 xz) {
+  vec2 n = textureLod(tTNormal, (xz - uTGrid.xy) * uTGrid.zw, 0.0).xy;
+  return vec3(n.x, sqrt(max(1.0 - dot(n, n), 0.0)), n.y);
+}
+`;
+
+const VERT_MORPH = /* glsl */ `
+vec3 transformed = vec3(position);
+{
+  // Chunk meshes have an identity transform: object space == world space.
+  float tDist = distance(uTCam, position);
+  vec2 tMr = uTMorph[int(aMorph.y + 0.5)];
+  float tK = clamp((tDist - tMr.x) / (tMr.y - tMr.x), 0.0, 1.0);
+  transformed.y = mix(position.y, aMorph.x, tK);
+}
+`;
+
+const FRAG_PARS = /* glsl */ `
+varying vec3 vTPos;
+uniform vec4 uTGrid;
+uniform sampler2D tTNormal;
+uniform sampler2D tTSplat;
+uniform sampler2D tTConcrete;
+uniform sampler2D tTNoise;
+uniform highp sampler2DArray tTAlbedo;
+uniform highp sampler2DArray tTSurface;
+uniform float uTTileInv[5];
+uniform float uTNormalStr[5];
+uniform float uTSat[5];
+uniform float uTContrast[5];
+uniform vec3 uTTint[5];      // target mean albedo (linear) per layer
+uniform vec3 uTMacroA[5];
+uniform vec3 uTMacroB[5];
+uniform vec3 uTMean[5];
+uniform vec2 uTRough[5];    // roughness remap: mix(x, y, texture)
+uniform vec4 uTWater;      // level, wet band, underwater darkening, enabled
+uniform vec4 uTHex;        // lattice edge (m), rotation strength, blend sharpness, height influence
+uniform vec4 uTBlend;      // height-blend depth, height scale, far-detail start, far-detail end
+uniform vec3 uTConcrete;   // concrete colour (linear)
+uniform float uTSpec;      // specular intensity (F0 and F90 scale); rough ground under a bright dawn sky
+uniform float uTDebug;     // 0 off, 1 albedo, 2 normal, 3 roughness, 4 splat, 5 AO
+
+vec2 tHash22(vec2 p) {
+  vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.xx + p3.yz) * p3.zy);
+}
+
+// Triangle-grid (hex tiling) state for one projection plane.
+struct THex {
+  vec3 w;
+  vec2 c1; vec2 c2; vec2 c3;   // tap rotation centres (m)
+  mat2 r1; mat2 r2; mat2 r3;   // rotations (texture <- world plane)
+  vec2 o1; vec2 o2; vec2 o3;   // random offsets (m)
+};
+
+mat2 tRot(float a) { float c = cos(a), s = sin(a); return mat2(c, s, -s, c); }
+
+THex tHexGrid(vec2 p) {
+  float E = uTHex.x;
+  vec2 st = p / E;
+  vec2 sk = vec2(st.x - 0.57735027 * st.y, 1.15470054 * st.y);
+  vec2 base = floor(sk);
+  vec3 t = vec3(fract(sk), 0.0);
+  t.z = 1.0 - t.x - t.y;
+  float s = step(0.0, -t.z);
+  float s2 = 2.0 * s - 1.0;
+  THex g;
+  g.w = vec3(-t.z * s2, s - t.y * s2, s - t.x * s2);
+  vec2 v1 = base + vec2(s, s);
+  vec2 v2 = base + vec2(s, 1.0 - s);
+  vec2 v3 = base + vec2(1.0 - s, s);
+  g.c1 = vec2(v1.x + 0.5 * v1.y, 0.8660254 * v1.y) * E;
+  g.c2 = vec2(v2.x + 0.5 * v2.y, 0.8660254 * v2.y) * E;
+  g.c3 = vec2(v3.x + 0.5 * v3.y, 0.8660254 * v3.y) * E;
+  vec2 h1 = tHash22(v1), h2 = tHash22(v2), h3 = tHash22(v3);
+  float rs = 6.2831853 * uTHex.y;
+  g.r1 = tRot((h1.x - 0.5) * rs);
+  g.r2 = tRot((h2.x - 0.5) * rs);
+  g.r3 = tRot((h3.x - 0.5) * rs);
+  g.o1 = tHash22(v1 + 17.0) * 97.0;
+  g.o2 = tHash22(v2 + 17.0) * 97.0;
+  g.o3 = tHash22(v3 + 17.0) * 97.0;
+  return g;
+}
+
+// One layer on one plane with hex tiling. alb = rgb + height, srf = (n.xy in
+// plane frame, rough, ao). Gradients are explicit (called under branches).
+// hexK: 0 = full hex tiling, 1 = one plain tap. Far away the hex cells get
+// sub-pixel and their random taps alias into a regular dot pattern, while the
+// mipmapped texture is already uniform there — so fade to a single tap.
+void tSampleHex(in THex g, vec2 p, vec2 dpx, vec2 dpy, float layer, float tInv, float hexK, float footprint, out vec4 alb, out vec4 srf) {
+  // Once one texture repeat spans only a few pixels the mipmapped texture
+  // shows its period as a fine regular pattern (moiré). Fade to the layer's
+  // mean (1×1 mip) there; far detail + macro noise carry the variation.
+  float meanK = smoothstep(0.12, 0.35, footprint * tInv);
+  vec4 ma = vec4(0.0);
+  vec4 ms = vec4(0.0);
+  if (meanK > 0.0) {
+    ma = textureLod(tTAlbedo, vec3(0.5, 0.5, layer), 16.0);
+    ms = textureLod(tTSurface, vec3(0.5, 0.5, layer), 16.0);
+    ms.xy = vec2(0.0);
+    if (meanK >= 1.0) {
+      alb = ma;
+      srf = ms;
+      return;
+    }
+  }
+  vec4 pa = vec4(0.0);
+  vec4 ps = vec4(0.5, 0.5, 0.5, 1.0);
+  if (hexK > 0.0) {
+    vec2 up = p * tInv;
+    pa = textureGrad(tTAlbedo, vec3(up, layer), dpx * tInv, dpy * tInv);
+    ps = textureGrad(tTSurface, vec3(up, layer), dpx * tInv, dpy * tInv);
+    ps.xy = ps.xy * 2.0 - 1.0;
+    if (hexK >= 1.0) {
+      alb = mix(pa, ma, meanK);
+      srf = mix(ps, ms, meanK);
+      return;
+    }
+  }
+  vec2 u1 = (g.r1 * (p - g.c1) + g.c1 + g.o1) * tInv;
+  vec2 u2 = (g.r2 * (p - g.c2) + g.c2 + g.o2) * tInv;
+  vec2 u3 = (g.r3 * (p - g.c3) + g.c3 + g.o3) * tInv;
+  vec2 dx1 = g.r1 * dpx * tInv, dy1 = g.r1 * dpy * tInv;
+  vec2 dx2 = g.r2 * dpx * tInv, dy2 = g.r2 * dpy * tInv;
+  vec2 dx3 = g.r3 * dpx * tInv, dy3 = g.r3 * dpy * tInv;
+  vec4 a1 = textureGrad(tTAlbedo, vec3(u1, layer), dx1, dy1);
+  vec4 a2 = textureGrad(tTAlbedo, vec3(u2, layer), dx2, dy2);
+  vec4 a3 = textureGrad(tTAlbedo, vec3(u3, layer), dx3, dy3);
+  vec3 hh = vec3(a1.a, a2.a, a3.a);
+  vec3 W = g.w * mix(vec3(1.0), 0.35 + hh, uTHex.w);
+  W = pow(max(W, vec3(1e-4)), vec3(uTHex.z));
+  W /= (W.x + W.y + W.z);
+  vec4 s1 = textureGrad(tTSurface, vec3(u1, layer), dx1, dy1);
+  vec4 s2 = textureGrad(tTSurface, vec3(u2, layer), dx2, dy2);
+  vec4 s3 = textureGrad(tTSurface, vec3(u3, layer), dx3, dy3);
+  alb = a1 * W.x + a2 * W.y + a3 * W.z;
+  // Tangent normals back into the plane frame: R^T (texture <- world).
+  vec2 n1 = (s1.xy * 2.0 - 1.0) * g.r1;
+  vec2 n2 = (s2.xy * 2.0 - 1.0) * g.r2;
+  vec2 n3 = (s3.xy * 2.0 - 1.0) * g.r3;
+  srf = vec4(n1 * W.x + n2 * W.y + n3 * W.z, s1.z * W.x + s2.z * W.y + s3.z * W.z, s1.w * W.x + s2.w * W.y + s3.w * W.z);
+  if (hexK > 0.0) {
+    alb = mix(alb, pa, hexK);
+    srf = mix(srf, ps, hexK);
+  }
+  alb = mix(alb, ma, meanK);
+  srf = mix(srf, ms, meanK);
+}
+
+vec3 tGrade(vec3 c, int l, float macro) {
+  // Albedo levels: re-centre the texture on a target mean (the raw ambientCG
+  // sets range from near-black rock to near-white gravel), keeping its detail
+  // as a ratio with adjustable saturation and contrast.
+  vec3 ratio = c / max(uTMean[l], vec3(1e-4));
+  float rl = dot(ratio, vec3(0.2126, 0.7152, 0.0722));
+  ratio = mix(vec3(rl), ratio, uTSat[l]);
+  vec3 o = uTTint[l] * pow(max(ratio, vec3(0.0)), vec3(uTContrast[l]));
+  return o * mix(uTMacroA[l], uTMacroB[l], macro);
+}
+`;
+
+const FRAG_MAIN = /* glsl */ `
+vec3 tNormalW;
+float tRough;
+float tAO;
+float tSpec = uTSpec;
+{
+  vec3 P = vTPos;
+  vec3 dPdx = dFdx(P);
+  vec3 dPdy = dFdy(P);
+  float tDist = distance(P, cameraPosition);
+
+  vec2 gridUv = (P.xz - uTGrid.xy) * uTGrid.zw;
+  vec2 nT = texture(tTNormal, gridUv).xy;
+  vec3 N = vec3(nT.x, sqrt(max(1.0 - dot(nT, nT), 0.0)), nT.y);
+
+  vec4 nzA = texture(tTNoise, P.xz * (1.0 / 23.0));
+  vec4 nzB = texture(tTNoise, P.xz * (1.0 / 640.0));
+  vec4 nzC = texture(tTNoise, P.xz * (1.0 / 150.0) + 0.37);
+  // Splat lookup warped by ~±0.8 m so blend contours do not follow the grid.
+  vec2 warp = (nzA.ba - 0.5) * 1.6 * uTGrid.zw;
+  vec4 sp = texture(tTSplat, gridUv + warp);
+  float w[5];
+  w[0] = sp.r; w[1] = sp.g; w[2] = sp.b; w[3] = sp.a;
+  w[4] = max(1.0 - (sp.r + sp.g + sp.b + sp.a), 0.0);
+  float concrete = texture(tTConcrete, gridUv).r;
+  // Concrete cast slabs (6 m): per-slab tone + antialiased saw-cut joints
+  // (derivatives taken here, in uniform control flow).
+  vec2 slab = P.xz / 6.0 + 0.5;
+  float slabTone = 0.93 + 0.14 * tHash22(floor(slab)).x;
+  vec2 je = 3.0 - abs(fract(slab) - 0.5) * 6.0;   // m to the nearest joint
+  vec2 sfw = max(fwidth(P.xz), vec2(1e-4));
+  float slabJoint = max(1.0 - smoothstep(0.012, 0.012 + sfw.x, je.x), 1.0 - smoothstep(0.012, 0.012 + sfw.y, je.y));
+  slabJoint *= 1.0 - smoothstep(0.02, 0.08, max(sfw.x, sfw.y));
+
+  // Projection weights: XZ plane always; side planes fade in on steep slopes.
+  vec3 tw = pow(abs(N), vec3(4.0));
+  float steep = smoothstep(0.88, 0.62, N.y);
+  tw.xz *= steep;
+  tw /= (tw.x + tw.y + tw.z);
+  bool useX = tw.x > 0.02;
+  bool useZ = tw.z > 0.02;
+  vec3 sgn = vec3(N.x >= 0.0 ? 1.0 : -1.0, 1.0, N.z >= 0.0 ? 1.0 : -1.0);
+
+  vec2 pY = P.xz;
+  vec2 pX = vec2(P.z * sgn.x, P.y);
+  vec2 pZ = vec2(-P.x * sgn.z, P.y);
+  THex gY = tHexGrid(pY);
+  THex gX = gY;
+  THex gZ = gY;
+  if (useX) gX = tHexGrid(pX + 31.0);
+  if (useZ) gZ = tHexGrid(pZ + 57.0);
+
+  float macro = clamp(nzB.r * 0.65 + nzC.g * 0.35, 0.0, 1.0);
+  macro = smoothstep(0.2, 0.8, macro);
+  float detailFar = smoothstep(uTBlend.z, uTBlend.w, tDist);
+  // Pixel footprint (m) → hex tiling fades to a plain tap once cells are ~sub-pixel.
+  float footprint = sqrt(length(dPdx) * length(dPdy));
+  float hexK = smoothstep(0.22 * uTHex.x / 2.2, 0.5 * uTHex.x / 2.2, footprint);
+  float nFade = mix(1.0, 0.45, smoothstep(25.0, 260.0, tDist));
+
+  vec3 lAlb[5];
+  vec3 lN[5];
+  float lH[5];
+  float lR[5];
+  float lAO[5];
+  float hb[5];
+  float hmax = -1.0;
+  for (int l = 0; l < 5; l++) {
+    lAlb[l] = vec3(0.0); lN[l] = N; lH[l] = 0.0; lR[l] = 1.0; lAO[l] = 1.0; hb[l] = -1.0;
+    if (w[l] < 0.003) continue;
+    float layer = float(l);
+    float ti = uTTileInv[l];
+    vec4 alb; vec4 srf;
+    vec4 albAcc = vec4(0.0);
+    vec4 srfAcc = vec4(0.0);
+    vec3 nAcc = vec3(0.0);
+    float nStr = uTNormalStr[l] * nFade;
+    // Y (planar) projection
+    tSampleHex(gY, pY, dPdx.xz, dPdy.xz, layer, ti, hexK, footprint, alb, srf);
+    {
+      vec3 tn = vec3(srf.xy * nStr, 1.0);
+      tn = vec3(tn.xy + N.xz, tn.z * N.y);
+      nAcc += tn.xzy * tw.y;
+      // Far detail: the same texture at ~1/9 scale modulates colour.
+      if (detailFar > 0.0) {
+        // Two rotated, incommensurate scales (1/9 and 1/31): their product
+        // never visibly repeats, unlike either alone.
+        mat2 rf1 = mat2(0.8, 0.6, -0.6, 0.8);
+        mat2 rf2 = mat2(0.28, -0.96, 0.96, 0.28);
+        float k1 = ti * 0.11;
+        float k2 = ti * 0.0323;
+        vec3 f1 = textureGrad(tTAlbedo, vec3(rf1 * pY * k1, layer), rf1 * dPdx.xz * k1, rf1 * dPdy.xz * k1).rgb;
+        vec3 f2 = textureGrad(tTAlbedo, vec3(rf2 * pY * k2 + 0.37, layer), rf2 * dPdx.xz * k2, rf2 * dPdy.xz * k2).rgb;
+        vec3 im = 1.0 / max(uTMean[l], vec3(1e-3));
+        // The 1/9 scale itself repeats every ~30–55 m: fade it to neutral when that spans few pixels.
+        f1 = mix(f1, uTMean[l], smoothstep(0.12, 0.35, footprint * k1));
+        vec3 fr = sqrt(clamp(f1 * im, 0.3, 3.0) * clamp(f2 * im, 0.3, 3.0));
+        alb.rgb *= mix(vec3(1.0), fr, detailFar * 0.7);
+      }
+      albAcc += alb * tw.y;
+      srfAcc += srf * tw.y;
+    }
+    if (useX) {
+      tSampleHex(gX, pX, vec2(dPdx.z * sgn.x, dPdx.y), vec2(dPdy.z * sgn.x, dPdy.y), layer, ti, hexK, footprint, alb, srf);
+      vec3 tn = vec3(srf.xy * nStr, 1.0);
+      tn.x *= sgn.x;
+      tn = vec3(tn.xy + N.zy, tn.z * N.x);
+      nAcc += tn.zyx * tw.x;
+      albAcc += alb * tw.x;
+      srfAcc += srf * tw.x;
+    }
+    if (useZ) {
+      tSampleHex(gZ, pZ, vec2(-dPdx.x * sgn.z, dPdx.y), vec2(-dPdy.x * sgn.z, dPdy.y), layer, ti, hexK, footprint, alb, srf);
+      vec3 tn = vec3(srf.xy * nStr, 1.0);
+      tn.x *= -sgn.z;
+      tn = vec3(tn.xy + N.xy, tn.z * N.z);
+      nAcc += tn.xyz * tw.z;
+      albAcc += alb * tw.z;
+      srfAcc += srf * tw.z;
+    }
+    lAlb[l] = tGrade(albAcc.rgb, l, macro);
+    if (l == 0 && concrete > 0.0) {
+      // Concrete: the paved set re-levelled lighter/greyer, keeping its detail.
+      float rl = dot(albAcc.rgb / max(uTMean[0], vec3(1e-4)), vec3(0.2126, 0.7152, 0.0722));
+      vec3 conc = uTConcrete * pow(max(rl, 0.0), 0.6) * mix(0.9, 1.08, macro);
+      conc *= slabTone * (1.0 - 0.6 * slabJoint);
+      lAlb[0] = mix(lAlb[0], conc, concrete);
+    }
+    lH[l] = albAcc.a;
+    lN[l] = normalize(nAcc);
+    lR[l] = mix(uTRough[l].x, uTRough[l].y, srfAcc.z);
+    lAO[l] = srfAcc.w;
+    // Height blend input: weight + height, gated near zero weight.
+    hb[l] = w[l] + uTBlend.y * albAcc.a * min(w[l] * 4.0, 1.0);
+    hmax = max(hmax, hb[l]);
+  }
+
+  float depth = uTBlend.x;
+  float bsum = 0.0;
+  vec3 albedo = vec3(0.0);
+  vec3 nW = vec3(0.0);
+  tRough = 0.0;
+  tAO = 0.0;
+  float hgt = 0.0;
+  for (int l = 0; l < 5; l++) {
+    float b = max(hb[l] - (hmax - depth), 0.0);
+    b *= step(0.003, w[l]);
+    bsum += b;
+    albedo += lAlb[l] * b;
+    nW += lN[l] * b;
+    tRough += lR[l] * b;
+    tAO += lAO[l] * b;
+    hgt += lH[l] * b;
+  }
+  float ib = 1.0 / max(bsum, 1e-5);
+  albedo *= ib; tRough *= ib; tAO *= ib; hgt *= ib;
+  nW = normalize(nW);
+
+  // Mid-scale breakup (1–10 m) so no surface reads as a flat colour at 20–80 m.
+  albedo *= mix(0.84, 1.14, clamp(nzA.g * 0.65 + nzC.a * 0.35, 0.0, 1.0));
+
+  // Wet ground near the water line (and darker under it).
+  if (uTWater.w > 0.5) {
+    float above = P.y - uTWater.x;
+    float jitter = (nzA.r - 0.5) * 0.7 + (nzC.b - 0.5) * 0.6;
+    float wet = 1.0 - smoothstep(0.15, uTWater.y, above + jitter);
+    wet *= mix(1.0, 0.6, hgt * (1.0 - smoothstep(0.0, 0.5, -above)));
+    float under = smoothstep(0.0, -1.5, above);
+    float lum = dot(albedo, vec3(0.2126, 0.7152, 0.0722));
+    vec3 wetC = mix(vec3(lum), albedo, 1.25) * 0.42;
+    albedo = mix(albedo, wetC, wet);
+    albedo *= mix(1.0, uTWater.z, under);
+    tRough = mix(tRough, 0.14, wet * 0.85);
+    tSpec = mix(uTSpec, 1.0, wet);
+    nW = normalize(mix(nW, N, wet * 0.55));
+  }
+
+  // Cavity: a little AO on direct light too (AO also scales indirect below).
+  albedo *= mix(1.0, tAO, 0.35);
+  tRough = clamp(mix(tRough, max(tRough, 0.6), smoothstep(80.0, 600.0, tDist) * 0.6), 0.04, 1.0);
+  tNormalW = nW;
+  diffuseColor.rgb *= albedo;
+  if (uTDebug > 0.5) {
+    vec3 dbg = albedo;
+    if (uTDebug > 1.5) dbg = nW * 0.5 + 0.5;
+    if (uTDebug > 2.5) dbg = vec3(tRough);
+    if (uTDebug > 3.5) dbg = vec3(w[0] + w[3], w[4] + w[1] * 0.5, w[2] + w[3]);
+    if (uTDebug > 4.5) dbg = vec3(tAO);
+    totalEmissiveRadiance = dbg * (uTDebug > 1.5 ? 0.25 : 1.0);
+    diffuseColor.rgb = vec3(0.0);
+    tRough = 1.0;
+  }
+}
+`;
+
+/** Uniform values shared by the colour and depth materials (same IUniform objects). */
+export function createTerrainUniforms(): TerrainUniforms {
+  const v3 = (n: number): Vector3[] => Array.from({ length: n }, () => new Vector3(1, 1, 1));
+  return {
+    uTCam: { value: new Vector3() },
+    uTMorph: { value: [new Vector2(1e9, 2e9), new Vector2(1e9, 2e9), new Vector2(1e9, 2e9), new Vector2(1e9, 2e9)] },
+    uTGrid: { value: new Vector4() },
+    tTNormal: { value: null },
+    tTSplat: { value: null },
+    tTConcrete: { value: null },
+    tTNoise: { value: null },
+    tTAlbedo: { value: null },
+    tTSurface: { value: null },
+    uTTileInv: { value: [1, 1, 1, 1, 1] },
+    uTNormalStr: { value: [1, 1, 1, 1, 1] },
+    uTSat: { value: [1, 1, 1, 1, 1] },
+    uTContrast: { value: [1, 1, 1, 1, 1] },
+    uTTint: { value: v3(5) },
+    uTMacroA: { value: v3(5) },
+    uTMacroB: { value: v3(5) },
+    uTMean: { value: v3(5) },
+    uTRough: { value: Array.from({ length: 5 }, () => new Vector2(0, 1)) },
+    uTWater: { value: new Vector4(6, 1.6, 0.6, 1) },
+    uTHex: { value: new Vector4(2.2, 1, 6, 0.6) },
+    uTBlend: { value: new Vector4(0.12, 0.5, 18, 160) },
+    uTConcrete: { value: new Vector3(0.2, 0.195, 0.185) },
+    uTDebug: { value: 0 },
+    uTSpec: { value: 0.3 },
+  };
+}
+
+function replaceOnce(src: string, find: string, repl: string): string {
+  if (!src.includes(find)) throw new Error(`terrain shader patch: chunk ${find} not found`);
+  return src.replace(find, repl);
+}
+
+/** Colour (MeshStandardMaterial) patch. Runs after CSM's hook (composition order). */
+export function applyTerrainColorPatch(shader: WebGLProgramParametersWithUniforms, uniforms: TerrainUniforms): void {
+  Object.assign(shader.uniforms, uniforms);
+  let vs = shader.vertexShader;
+  vs = replaceOnce(vs, '#include <common>', `#include <common>\n${VERT_PARS}\n${VERT_NORMAL_PARS}`);
+  vs = replaceOnce(vs, '#include <beginnormal_vertex>', 'vec3 objectNormal = tTerrainNormal(position.xz);');
+  vs = replaceOnce(vs, '#include <begin_vertex>', `${VERT_MORPH}\nvTPos = transformed;`);
+  shader.vertexShader = vs;
+  let fs = shader.fragmentShader;
+  fs = replaceOnce(fs, '#include <common>', `#include <common>\n${FRAG_PARS}`);
+  fs = replaceOnce(fs, '#include <map_fragment>', `#include <map_fragment>\n${FRAG_MAIN}`);
+  fs = replaceOnce(fs, '#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\nroughnessFactor = tRough;');
+  fs = replaceOnce(
+    fs,
+    '#include <normal_fragment_maps>',
+    '#include <normal_fragment_maps>\nnormal = normalize((viewMatrix * vec4(tNormalW, 0.0)).xyz);',
+  );
+  fs = replaceOnce(
+    fs,
+    '#include <lights_physical_fragment>',
+    '#include <lights_physical_fragment>\nmaterial.specularColor *= tSpec;\nmaterial.specularColorBlended *= tSpec;\nmaterial.specularF90 *= tSpec;',
+  );
+  fs = replaceOnce(
+    fs,
+    '#include <aomap_fragment>',
+    '#include <aomap_fragment>\nreflectedLight.indirectDiffuse *= tAO;\nreflectedLight.indirectSpecular *= mix(1.0, tAO, 0.7);',
+  );
+  shader.fragmentShader = fs;
+}
+
+/** Depth (shadow caster) patch: geomorph only. */
+export function applyTerrainDepthPatch(shader: WebGLProgramParametersWithUniforms, uniforms: TerrainUniforms): void {
+  Object.assign(shader.uniforms, uniforms);
+  let vs = shader.vertexShader;
+  vs = replaceOnce(vs, '#include <common>', `#include <common>\n${VERT_PARS}`);
+  vs = replaceOnce(vs, '#include <begin_vertex>', VERT_MORPH);
+  shader.vertexShader = vs;
+}

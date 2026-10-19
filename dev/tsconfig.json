@@ -1,0 +1,4 @@
+{
+  "extends": "../tsconfig.json",
+  "include": ["terrain.ts", "synthetic.ts", "../src/vite-env.d.ts", "../src/render/terrain"]
+}
