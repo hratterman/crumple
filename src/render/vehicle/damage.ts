@@ -74,6 +74,14 @@ const SCUFF_SNAP = 0.9;
  * plastic part (conservative) and never fires on static / driving loads.
  */
 export const ELASTIC_ALLOWANCE = 0.6;
+/**
+ * Strain-scan budget (beams per snapshot) while the body is quiet: the
+ * strain beams are measured round-robin, so a 900-beam body is covered every
+ * 4 snapshots. Any sign of new damage (telemetry damage moved, a beam broke,
+ * a body impact) switches to full scans for STRAIN_ACTIVE_SNAPSHOTS.
+ */
+export const STRAIN_SLICE = 256;
+export const STRAIN_ACTIVE_SNAPSHOTS = 48;
 
 export type DamageVariant = 'paint' | 'plastic' | 'glass';
 
@@ -110,6 +118,14 @@ export interface VehicleDamageImpl extends VehicleDamage {
   setShadingAmount(v: number): void;
   /** Crack uniforms of a glass panel (debug / dev harness), else null. */
   crackUniforms(panelIndex: number): CrackUniforms | null;
+  /**
+   * One 'glass' patch for a MERGED draw of several panes (flexskin): per-pane
+   * crack uniforms become arrays selected by the vertex's panel index
+   * (vFlexPanel). Null when none of the panels is glass.
+   */
+  glassGroupPatch(panelIndices: readonly number[]): ShaderPatch | null;
+  /** Diagnostics: strain beams measured in the last snapshot step / snapshots in full-scan mode. */
+  readonly scan: { lastBeams: number; activeSnapshots: number };
 }
 
 export interface CrackUniforms {
@@ -326,14 +342,68 @@ function insertAfter(src: string, anchor: string, code: string): string {
   return src.includes(anchor) ? src.replace(anchor, `${anchor}\n${code}`) : src;
 }
 
-/** Fragment source transform for a variant (exported for headless GLSL tests). */
-export function applyDamageGlsl(fragmentShader: string, variant: DamageVariant): string {
+const CRACK_UNIFORM_DECLS = ['uniform vec4 uCrackA;', 'uniform vec4 uCrackB;', 'uniform vec3 uCrackU;', 'uniform vec3 uCrackV;', 'uniform float uCrackSeed;'];
+
+/**
+ * GLASS_CRACK_GLSL for a merged draw of `panes` panes: the five crack
+ * uniforms become plain globals filled by dmgSelectPane() from uniform
+ * arrays, by the fragment's panel index (vFlexPanel, flexskin) matched
+ * against uCrackPanels (no match = no crack).
+ */
+export function mergedCrackGlsl(panes: number): string {
+  let g = GLASS_CRACK_GLSL;
+  for (const d of CRACK_UNIFORM_DECLS) {
+    if (!g.includes(d)) throw new Error(`damage: GLASS_CRACK_GLSL lacks ${d}`);
+    g = g.replace(d, d.replace('uniform ', ''));
+  }
+  const n = Math.max(1, panes | 0);
+  return /* glsl */ `
+uniform vec4 uCrackAs[ ${n} ];
+uniform vec4 uCrackBs[ ${n} ];
+uniform vec3 uCrackUs[ ${n} ];
+uniform vec3 uCrackVs[ ${n} ];
+uniform float uCrackSeeds[ ${n} ];
+uniform float uCrackPanels[ ${n} ];
+${g}
+void dmgSelectPane() {
+  uCrackA = vec4(0.0);
+  uCrackB = vec4(0.0);
+  uCrackU = vec3(1.0, 0.0, 0.0);
+  uCrackV = vec3(0.0, 1.0, 0.0);
+  uCrackSeed = 0.0;
+#ifdef FLEXBODY
+  float pid = vFlexPanel;
+#else
+  float pid = -1.0;
+#endif
+  for (int i = 0; i < ${n}; i++) {
+    if (abs(uCrackPanels[i] - pid) < 0.5) {
+      uCrackA = uCrackAs[i];
+      uCrackB = uCrackBs[i];
+      uCrackU = uCrackUs[i];
+      uCrackV = uCrackVs[i];
+      uCrackSeed = uCrackSeeds[i];
+    }
+  }
+}
+`;
+}
+
+/**
+ * Fragment source transform for a variant (exported for headless GLSL
+ * tests). `panes` > 0 (glass only) = a merged draw of that many panes.
+ */
+export function applyDamageGlsl(fragmentShader: string, variant: DamageVariant, panes = 0): string {
   let fs = fragmentShader;
   if (!fs.includes(ANCHOR_SURFACE)) return fs; // not a standard/physical shader: leave untouched
-  const common = DMG_COMMON + FLEX_CRUMPLE_GLSL + (variant === 'glass' ? GLASS_CRACK_GLSL : '');
+  const merged = variant === 'glass' && panes > 0;
+  const crack = variant === 'glass' ? (merged ? mergedCrackGlsl(panes) : GLASS_CRACK_GLSL) : '';
+  const common = DMG_COMMON + FLEX_CRUMPLE_GLSL + crack;
   fs = insertAfter(fs, '#include <common>', common);
   const body =
-    variant === 'glass' ? DMG_INPUTS + DMG_GLASS : DMG_INPUTS + DMG_SURFACE + (variant === 'paint' ? DMG_PAINT : DMG_PLASTIC);
+    variant === 'glass'
+      ? DMG_INPUTS + (merged ? '  dmgSelectPane();\n' : '') + DMG_GLASS
+      : DMG_INPUTS + DMG_SURFACE + (variant === 'paint' ? DMG_PAINT : DMG_PLASTIC);
   fs = insertBefore(fs, ANCHOR_SURFACE, body);
   if (variant !== 'glass') {
     fs = insertAfter(
@@ -425,10 +495,19 @@ export function createVehicleDamage(
   const strain = new Float32Array(N);
   const scuff = new Float32Array(N);
   const crack = new Float32Array(N);
-  const raw = new Float32Array(N);
-  const hist = new Float32Array(K * N);
-  let histPos = 0;
-  let histCount = 0;
+  const S = strainBeams.length;
+  /** Per strain beam: the last K measurements (ring, slot = count % K) and the measurement count. */
+  const ehist = new Float32Array(K * S);
+  const ecount = new Int32Array(S);
+  let cursor = 0;
+  /** Full strain scans run while snapshots < activeUntil (new damage is developing). */
+  let activeUntil = 0;
+  let lastTelemetryDamage = NaN;
+  /** Block B / nodeFlags need rewriting (some damage channel changed, or a new skin / repair). */
+  let bDirty = true;
+  let flagsDirty = true;
+  let crackDirty = true;
+  const scan = { lastBeams: 0, activeSnapshots: 0 };
   const flags = new Uint8Array(N);
   const broken = new Uint8Array(B);
   const eventStamp = new Int32Array(B); // snapshot counter at the event (0 = none)
@@ -451,6 +530,19 @@ export function createVehicleDamage(
   let epoch = -1;
   let pendingShowAll = false;
   let lastSkin: FlexSkin | null = null;
+  /** The skin block B / flags were last written to (a new skin gets a full write). */
+  let writtenSkin: FlexSkin | null = null;
+  /** A beamBreak event set a broken flag since the last snapshot step. */
+  let brokenEvents = false;
+  /** Event stamps wait for bitset confirmation / expiry: merge every snapshot until resolved. */
+  let pendingStamps = false;
+  /** Last merged bitset (identity + copy, word views) for the unchanged fast path. */
+  let lastSrc: Uint8Array | null = null;
+  let lastSrcCopy = new Uint8Array(0);
+  let lastSrcWords: Uint32Array | null = null;
+  let lastCopyWords = new Uint32Array(0);
+  /** Detach state must be re-evaluated even without a broken-set change (after a repair). */
+  let detachPending = true;
 
   // ---- panels
   const P = binding.panels.length;
@@ -459,6 +551,8 @@ export function createVehicleDamage(
   const runtime: PanelRuntime[] = [];
   const glass: GlassState[] = [];
   const glassOf = new Int32Array(P).fill(-1);
+  /** Crack uniforms per panel (glass variants), else null. */
+  const paneUniforms: (CrackUniforms | null)[] = [];
   const amount = { value: 1 };
 
   for (let i = 0; i < P; i++) {
@@ -505,6 +599,7 @@ export function createVehicleDamage(
     } else if (variant === 'glass') {
       uniforms = makeCrackUniforms(p, i); // glass slot without a GlassSpec: never cracks, but the shader needs the uniforms
     }
+    paneUniforms.push(uniforms);
     patches.push(variant ? makePatch(variant, amount, uniforms) : null);
   }
 
@@ -577,6 +672,7 @@ export function createVehicleDamage(
       const s = scuff[i]! + amountAt * w;
       scuff[i] = s > 1 ? 1 : s;
     }
+    bDirty = true;
     return true;
   }
 
@@ -683,6 +779,7 @@ export function createVehicleDamage(
     const level = Math.max(A.w, Bv.w);
     if (level > rt.crack + 1e-6) {
       rt.crack = level;
+      crackDirty = true;
       rt.fxCrack.level = level;
       setV(rt.fxCrack.pos, x, y, z);
       emit(rt.fxCrack);
@@ -701,6 +798,7 @@ export function createVehicleDamage(
         u.uCrackA.value.set(tmpRest.x, tmpRest.y, tmpRest.z, 1);
       } else u.uCrackA.value.w = 1;
       rt.crack = 1;
+      crackDirty = true;
     } else {
       rt.hidden = true;
       if (lastSkin) lastSkin.setPanelVisible(gs.panel, false);
@@ -758,8 +856,11 @@ export function createVehicleDamage(
       const b = brkQ[q * 4]! | 0;
       if (b >= 0 && b < B) {
         if (eventStamp[b] === 0) eventStamp[b] = snapshots + 1;
+        pendingStamps = true;
+        if (!broken[b]) brokenEvents = true;
         broken[b] = 1;
       }
+      activeUntil = snapshots + STRAIN_ACTIVE_SNAPSHOTS;
       beamFx.beamIndex = b;
       setV(beamFx.pos, brkQ[q * 4 + 1]!, brkQ[q * 4 + 2]!, brkQ[q * 4 + 3]!);
       emit(beamFx);
@@ -773,7 +874,11 @@ export function createVehicleDamage(
       const imp = impQ[q * 4 + 3]!;
       stats.impacts++;
       if (nearWheel(impQ, q * 4)) stats.tyre++;
-      else if (!depositScuff(impQ, q * 4, true)) stats.missed++;
+      else {
+        // a body hit: plastic strain may be developing (impacts repeat while in contact)
+        activeUntil = snapshots + STRAIN_ACTIVE_SNAPSHOTS;
+        if (!depositScuff(impQ, q * 4, true)) stats.missed++;
+      }
       for (let g = 0; g < glass.length; g++) {
         const gs = glass[g]!;
         const dx = x - gs.cx;
@@ -811,44 +916,20 @@ export function createVehicleDamage(
     }
   }
 
-  function snapshotStep(frame: VehicleFrameInput): void {
-    snapshots++;
-    // ---- broken: bitset ∪ fresh events
-    const src = frame.broken;
-    const nb = Math.min(B, src.length);
-    let any = false;
-    for (let b = 0; b < nb; b++) {
-      if (src[b]) {
-        any = true;
-        broken[b] = 1;
-        eventStamp[b] = 0;
-      } else if (eventStamp[b] !== 0) {
-        // unconfirmed event: trust it for a few snapshots, forever if the sim never writes the bitset
-        if (bitsetSeen && snapshots - eventStamp[b]! > EVENT_CONFIRM_SNAPSHOTS) {
-          eventStamp[b] = 0;
-          broken[b] = 0;
-        } else broken[b] = 1;
-      } else broken[b] = 0;
-    }
-    if (any) bitsetSeen = true;
-
-    // ---- node flags
-    flags.fill(0);
-    for (let b = 0; b < B; b++) {
-      if (!broken[b]) continue;
-      const a = bA[b]!;
-      const c = bB[b]!;
-      flags[a] = flags[a]! | NODE_TEX_FLAG_BROKEN;
-      flags[c] = flags[c]! | NODE_TEX_FLAG_BROKEN;
-    }
-
-    // ---- plastic strain (ratchet)
-    raw.fill(0);
-    for (let k = 0; k < strainBeams.length; k++) {
+  /** Measures n strain beams from the round-robin cursor; ratchets node strain (persistence per beam). */
+  function scanStrain(n: number): number {
+    const dz0 = T.strainDeadzone;
+    const span = Math.max(1e-6, T.strainFull - dz0);
+    let measured = 0;
+    let grew = 0;
+    let k = cursor;
+    for (let j = 0; j < n; j++, k++) {
+      if (k >= S) k = 0;
       const b = strainBeams[k]!;
       if (broken[b]) continue;
       const a = bA[b]!;
       const c = bB[b]!;
+      if (strain[a]! >= 1 && strain[c]! >= 1) continue; // saturated: nothing left to show
       const oa = off + a * 3;
       const oc = off + c * 3;
       const dx = nodes[oc]! - nodes[oa]!;
@@ -859,27 +940,121 @@ export function createVehicleDamage(
       if (e < 0) e = -e;
       e -= strainSlack[k]!;
       if (!(e < 10)) e = 10; // NaN-safe
-      if (e > raw[a]!) raw[a] = e;
-      if (e > raw[c]!) raw[c] = e;
-    }
-    hist.set(raw, histPos * N);
-    histPos = (histPos + 1) % K;
-    if (histCount < K) histCount++;
-    if (histCount >= K) {
-      const dz0 = T.strainDeadzone;
-      const span = Math.max(1e-6, T.strainFull - dz0);
-      for (let i = 0; i < N; i++) {
-        let m = hist[i]!;
-        for (let h = 1; h < K; h++) {
-          const v = hist[h * N + i]!;
-          if (v < m) m = v;
-        }
-        let s = (m - dz0) / span;
-        if (s <= 0) continue;
-        if (s > 1) s = 1;
-        if (s > strain[i]!) strain[i] = s;
+      measured++;
+      const cnt = ecount[k]!;
+      ehist[k * K + (cnt % K)] = e;
+      ecount[k] = cnt < 0x3fffffff ? cnt + 1 : K; // capped: only "≥ K measured" matters past K
+      if (cnt + 1 < K) continue;
+      // persistence: the beam's minimum over its last K measurements (drops elastic transients)
+      let m = ehist[k * K]!;
+      for (let h = 1; h < K; h++) {
+        const v = ehist[k * K + h]!;
+        if (v < m) m = v;
+      }
+      let st = (m - dz0) / span;
+      if (st <= 0) continue;
+      if (st > 1) st = 1;
+      if (st > strain[a]!) {
+        strain[a] = st;
+        grew = 1;
+      }
+      if (st > strain[c]!) {
+        strain[c] = st;
+        grew = 1;
       }
     }
+    cursor = k >= S ? 0 : k;
+    if (grew) bDirty = true;
+    return measured;
+  }
+
+  /** True when frame.broken differs from the copy of the last merged one (word compare: ~B/4 loads). */
+  function bitsetMoved(src: Uint8Array): boolean {
+    if (src !== lastSrc || src.length !== lastSrcCopy.length) {
+      lastSrc = src;
+      lastSrcCopy = new Uint8Array(src.length);
+      lastSrcWords = src.byteOffset % 4 === 0 ? new Uint32Array(src.buffer, src.byteOffset, src.length >> 2) : null;
+      lastCopyWords = new Uint32Array(lastSrcCopy.buffer, 0, src.length >> 2);
+      return true;
+    }
+    const w = lastSrcWords;
+    let from = 0;
+    if (w) {
+      const c = lastCopyWords;
+      for (let i = 0; i < w.length; i++) if (w[i] !== c[i]) return true;
+      from = w.length << 2;
+    }
+    for (let b = from; b < src.length; b++) if (src[b] !== lastSrcCopy[b]) return true;
+    return false;
+  }
+
+  function snapshotStep(frame: VehicleFrameInput): void {
+    snapshots++;
+    // ---- broken: bitset ∪ fresh events (skipped while the bitset is unchanged and no event is pending)
+    const src = frame.broken;
+    const nb = Math.min(B, src.length);
+    let any = false;
+    let changed = false;
+    const merge = pendingStamps || bitsetMoved(src);
+    if (merge) {
+      lastSrcCopy.set(src);
+      pendingStamps = false;
+    }
+    for (let b = 0; b < nb && merge; b++) {
+      const was = broken[b]!;
+      let now: number;
+      if (src[b]) {
+        any = true;
+        now = 1;
+        eventStamp[b] = 0;
+      } else if (eventStamp[b] !== 0) {
+        // unconfirmed event: trust it for a few snapshots, forever if the sim never writes the bitset
+        if (bitsetSeen && snapshots - eventStamp[b]! > EVENT_CONFIRM_SNAPSHOTS) {
+          eventStamp[b] = 0;
+          now = 0;
+        } else {
+          now = 1;
+          if (bitsetSeen) pendingStamps = true; // re-check until confirmed or expired
+        }
+      } else now = 0;
+      if (now !== was) {
+        broken[b] = now;
+        changed = true;
+      }
+    }
+    if (merge && any) bitsetSeen = true;
+    if (brokenEvents) {
+      changed = true;
+      brokenEvents = false;
+    }
+
+    // ---- activity: new damage developing → full strain scans for a while
+    const td = frame.telemetry ? frame.telemetry.damage : NaN;
+    if (td === td && td !== lastTelemetryDamage) {
+      if (lastTelemetryDamage === lastTelemetryDamage) activeUntil = snapshots + STRAIN_ACTIVE_SNAPSHOTS;
+      lastTelemetryDamage = td;
+    }
+    if (changed) activeUntil = snapshots + STRAIN_ACTIVE_SNAPSHOTS;
+
+    // ---- node flags (only when the broken set changed)
+    if (changed) {
+      flags.fill(0);
+      for (let b = 0; b < B; b++) {
+        if (!broken[b]) continue;
+        const a = bA[b]!;
+        const c = bB[b]!;
+        flags[a] = flags[a]! | NODE_TEX_FLAG_BROKEN;
+        flags[c] = flags[c]! | NODE_TEX_FLAG_BROKEN;
+      }
+      flagsDirty = true;
+    }
+
+    // ---- plastic strain (ratchet): round-robin slice while quiet, everything while active
+    const active = snapshots < activeUntil;
+    if (active) scan.activeSnapshots++;
+    const n = active || S <= STRAIN_SLICE ? S : STRAIN_SLICE;
+    const measured = scanStrain(n);
+    scan.lastBeams = measured;
 
     // ---- body centroid + velocity
     let cx = 0;
@@ -906,8 +1081,8 @@ export function createVehicleDamage(
     com[2] = cz;
     comTick = frame.tick;
 
-    // ---- panels: detach (sticky) + glass
-    for (let i = 0; i < P; i++) {
+    // ---- panels: detach (sticky; depends on the broken set only) + glass
+    for (let i = 0; i < P && (changed || detachPending); i++) {
       const p = binding.panels[i]!;
       const rt = runtime[i]!;
       const d = p.detach;
@@ -929,12 +1104,14 @@ export function createVehicleDamage(
       }
       if (rt.detached && d && d.mode === 'follow') {
         const bn = p.bindNodes;
-        for (let k = 0; k < bn.length; k++) {
-          const ni = bn[k]!;
+        for (let q = 0; q < bn.length; q++) {
+          const ni = bn[q]!;
           flags[ni] = flags[ni]! | NODE_TEX_FLAG_DETACHED;
         }
+        flagsDirty = true;
       }
     }
+    detachPending = false;
     for (let g = 0; g < glass.length; g++) {
       const gs = glass[g]!;
       const rt = runtime[gs.panel]!;
@@ -997,9 +1174,16 @@ export function createVehicleDamage(
     strain.fill(0);
     scuff.fill(0);
     crack.fill(0);
-    hist.fill(0);
-    histPos = 0;
-    histCount = 0;
+    ehist.fill(0);
+    ecount.fill(0);
+    cursor = 0;
+    activeUntil = 0;
+    lastTelemetryDamage = NaN;
+    bDirty = flagsDirty = crackDirty = true;
+    brokenEvents = false;
+    detachPending = true;
+    pendingStamps = false;
+    lastSrc = null;
     flags.fill(0);
     broken.fill(0);
     eventStamp.fill(0);
@@ -1055,6 +1239,19 @@ export function createVehicleDamage(
       return g >= 0 ? glass[g]!.uniforms : null;
     },
 
+    glassGroupPatch(panelIndices: readonly number[]): ShaderPatch | null {
+      const panes: { panel: number; u: CrackUniforms }[] = [];
+      for (const i of panelIndices) {
+        if (variants[i] !== 'glass') continue;
+        // a glass-slot panel without a GlassSpec never cracks: its (static) uniforms still select
+        const u = paneUniforms[i];
+        if (u) panes.push({ panel: i, u });
+      }
+      return panes.length ? makeGlassGroupPatch(panes, amount) : null;
+    },
+
+    scan,
+
     setShadingAmount(v: number): void {
       amount.value = v;
     },
@@ -1086,27 +1283,39 @@ export function createVehicleDamage(
       }
       processEvents();
 
-      // ---- glass crack per node
-      crack.fill(0);
-      for (let g = 0; g < glass.length; g++) {
-        const gs = glass[g]!;
-        const c = runtime[gs.panel]!.crack;
-        if (c <= 0) continue;
-        const pn = binding.panels[gs.panel]!.nodes;
-        for (let k = 0; k < pn.length; k++) if (c > crack[pn[k]!]!) crack[pn[k]!] = c;
+      // ---- glass crack per node (only when a pane's crack level changed)
+      if (crackDirty) {
+        crackDirty = false;
+        crack.fill(0);
+        for (let g = 0; g < glass.length; g++) {
+          const gs = glass[g]!;
+          const c = runtime[gs.panel]!.crack;
+          if (c <= 0) continue;
+          const pn = binding.panels[gs.panel]!.nodes;
+          for (let k = 0; k < pn.length; k++) if (c > crack[pn[k]!]!) crack[pn[k]!] = c;
+        }
+        bDirty = true;
       }
 
-      // ---- skin: block B + flags
-      const data = skin.nodeData;
-      const baseB = skin.rows * NODE_TEX_WIDTH * 4;
+      // ---- skin: block B + flags, only when something changed (or a different skin)
+      const fresh = writtenSkin !== skin;
+      writtenSkin = skin;
       const nn = Math.min(N, skin.nodeFlags.length);
-      for (let i = 0; i < nn; i++) {
-        const o = baseB + i * 4;
-        data[o] = strain[i]!;
-        data[o + 1] = scuff[i]!;
-        data[o + 2] = crack[i]!;
-        data[o + 3] = 0;
-        skin.nodeFlags[i] = flags[i]!;
+      if (bDirty || fresh) {
+        bDirty = false;
+        const data = skin.nodeData;
+        const baseB = skin.rows * NODE_TEX_WIDTH * 4;
+        for (let i = 0; i < nn; i++) {
+          const o = baseB + i * 4;
+          data[o] = strain[i]!;
+          data[o + 1] = scuff[i]!;
+          data[o + 2] = crack[i]!;
+          data[o + 3] = 0;
+        }
+      }
+      if (flagsDirty || fresh) {
+        flagsDirty = false;
+        for (let i = 0; i < nn; i++) skin.nodeFlags[i] = flags[i]!;
       }
     },
 
@@ -1236,6 +1445,36 @@ function makeCrackUniforms(p: BindingPanel, panelIndex: number): CrackUniforms {
     uCrackU: { value: u },
     uCrackV: { value: w },
     uCrackSeed: { value: 1.7 + panelIndex * 3.31 },
+  };
+}
+
+/**
+ * The merged-glass patch (key dmg1:glassN): uniform arrays reference the
+ * panes' own Vector4/Vector3 objects, so crackPane()'s in-place writes
+ * reach the merged draw without any copying.
+ */
+function makeGlassGroupPatch(panes: readonly { panel: number; u: CrackUniforms }[], amount: { value: number }): ShaderPatch {
+  const n = panes.length;
+  const uA = { value: panes.map((p) => p.u.uCrackA.value) };
+  const uB = { value: panes.map((p) => p.u.uCrackB.value) };
+  const uU = { value: panes.map((p) => p.u.uCrackU.value) };
+  const uV = { value: panes.map((p) => p.u.uCrackV.value) };
+  const seeds = { value: Float32Array.from(panes, (p) => p.u.uCrackSeed.value) };
+  const ids = { value: Float32Array.from(panes, (p) => p.panel) };
+  return {
+    key: `${DAMAGE_PATCH_KEY}:glass${n}`,
+    targets: ['color'],
+    apply(shader: WebGLProgramParametersWithUniforms, target: PatchTarget): void {
+      if (target !== 'color') return;
+      shader.uniforms.uDmgAmount = amount;
+      shader.uniforms.uCrackAs = uA;
+      shader.uniforms.uCrackBs = uB;
+      shader.uniforms.uCrackUs = uU;
+      shader.uniforms.uCrackVs = uV;
+      shader.uniforms.uCrackSeeds = seeds;
+      shader.uniforms.uCrackPanels = ids;
+      shader.fragmentShader = applyDamageGlsl(shader.fragmentShader, 'glass', n);
+    },
   };
 }
 
