@@ -12,6 +12,7 @@
 import {
   NODE_FLAG_COLLIDABLE,
   NODE_FLAG_IN_CONTACT,
+  NODE_FLAG_TREAD,
   type ApplyGroundContacts,
   type EventSink,
   type HeightSampler,
@@ -46,14 +47,49 @@ const KC_STABILITY = 0.2;
  */
 const CONTACT_ZETA = 0.65;
 /**
- * Viscous cap on friction, as a fraction of m/dt: |Ft| ≤ KT_FRACTION·(m/dt)·|vt|
- * means one step removes at most that fraction of the tangential velocity, so
- * friction can never overshoot and reverse the slip direction (explicit
- * stability of the stiff regularized-Coulomb branch under impact loads).
+ * SOFT-LAYER contact law (nodes with contactK > 0: tyre tread). The penalty
+ * stiffness is the node's contactK (stability-capped like the rigid law)
+ * and the damper is scaled by penetration, c·min(1, depth/radius)
+ * (Hunt–Crossley style: zero damper force at touchdown).
+ *
+ * WHY: a 12-ray tread ring is a chain of point masses with no belt bending
+ * stiffness, so a tread node runs on its circle until it touches down at
+ * ~0.4·v (sedan at 25 m/s: 9.7 m/s) and the rigid law stopped it within
+ * ~3 steps; every damper on that path (contact ζ 0.65, sidewalls) then ate
+ * the node's normal kinetic energy each pass: ~55 kW of "rolling
+ * resistance" at 90 km/h (coastdown 1.8 m/s², ≈ 5× real). The pass rate
+ * (rays·ω ≈ 1000 rad/s at 25 m/s) is above any tread-node frequency the
+ * explicit budget allows (ω·dt ≤ 0.5 → 1000 rad/s), so the node cannot
+ * follow the flattened patch quasi-statically. A soft layer lets it keep
+ * its circular path into the rubber and get the stored energy back on the
+ * way out (the loss left is real-ish hysteresis). It also makes the
+ * polygon "flat spots" shallow, which removed a fore/aft rocking mode of a
+ * parked car (stuck contact nodes, 0.6 Hz, ±5 cm).
  */
-const KT_FRACTION = 0.5;
-/** Slip-velocity regularization scale (m/s) of the μ·tanh(v/V) friction law. */
-const SLIP_REG_INV = 1 / 0.3;
+const SOFT_LAYER_ZETA = 0.08;
+/**
+ * FRICTION LAW — implicit (backward-Euler) Coulomb, evaluated per node AFTER
+ * every other force of this tick has been accumulated (beams, wheel torque,
+ * parking clamp, aero; the ground pass is the last force pass before
+ * integration). With F_t the tangential part of (accumulated force + m·g)
+ * and v_t the tangential velocity, the force that brings v_t to exactly 0
+ * at the end of the step is
+ *   F_req = −(m·v_t/dt + F_t)
+ * and the applied friction is F_req clamped to the cone |F| ≤ μ·N. Inside
+ * the cone the node STICKS (the tread holds; longitudinal/lateral tyre
+ * stiffness then comes from the soft-body carcass, as in a real tyre);
+ * outside it slides with |F| = μN along F_req, which is the exact implicit
+ * Coulomb direction (friction opposes the END-of-step slip velocity).
+ *
+ * WHY not μ·tanh(v/0.3) with a viscous cap (the P1 law): its effective
+ * tangential "spring" is a damper KT·m/dt ≈ 667 N per m/s on a 0.67 kg
+ * tread node, so carrying 2 kN at a contact node needed ~3–4 m/s of
+ * SLIDING (measured: sedan launch, rear contact nodes at 4.4 m/s, ~2/3 of
+ * μN) — the car wheelspun and spun out on throttle, and the slide added a
+ * large rolling loss. The projection never overshoots (it targets v_t = 0
+ * exactly, so no sign flip or 2 kHz chatter) and a node pinned
+ * tangentially does not raise any neighbour's ω·dt.
+ */
 /**
  * Minimum touchdown impulse (N·s) that emits an impact event. The reported
  * impulse is the approach momentum m·max(0, -vn) the contact must arrest:
@@ -137,7 +173,8 @@ const queryNormal = new Float64Array(3);
 /**
  * Normal force (N, ≥ 0) that applyGroundContacts would apply to node `i`
  * for the CURRENT positions/velocities: same early-outs, stiffness clamp,
- * two-sided damper and ≥ 0 clamp as the kernel (keep the two in sync). 0 for
+ * two-sided damper (rigid or soft-layer law) and ≥ 0 clamp as the kernel
+ * (keep the two in sync). 0 for
  * non-collidable, pinned or non-penetrating nodes. When `normalOut` is given
  * and the node is in contact, the sampled unit normal is written there.
  * Used by the vehicle pre-step (wheel load, parking clamp cap), which runs
@@ -170,8 +207,16 @@ export function groundNormalForce(
   const m = 1 / im;
   const invDt = 1 / dt;
   const kcm = KC_STABILITY * invDt * invDt * m;
-  const kc = kcm < KC_MAX ? kcm : KC_MAX;
-  const c = 2 * CONTACT_ZETA * Math.sqrt(kc * m);
+  const soft = state.contactK[i]!;
+  let kc: number;
+  let c: number;
+  if (soft > 0) {
+    kc = soft < kcm ? soft : kcm;
+    c = 2 * SOFT_LAYER_ZETA * Math.sqrt(kc * m) * (depth < r ? depth / r : 1);
+  } else {
+    kc = kcm < KC_MAX ? kcm : KC_MAX;
+    c = 2 * CONTACT_ZETA * Math.sqrt(kc * m);
+  }
   const vn = state.velX[i]! * nx + state.velY[i]! * ny + state.velZ[i]! * nz;
   const fn = kc * depth - c * vn;
   return fn > 0 ? fn : 0;
@@ -187,9 +232,13 @@ export const applyGroundContacts: ApplyGroundContacts = (
   dt: number,
   objectId: number,
   events: EventSink,
+  gx = 0,
+  gy = 0,
+  gz = 0,
 ): void => {
-  const { posX, posY, posZ, velX, velY, velZ, frcX, frcY, frcZ, invMass, radius, friction, flags } =
+  const { posX, posY, posZ, velX, velY, velZ, frcX, frcY, frcZ, invMass, radius, friction, contactK, flags } =
     state;
+  const treadF = state.treadF;
   const matFriction = materials.friction;
   const cooldown = cooldownsFor(state);
   const invDt = 1 / dt;
@@ -233,8 +282,17 @@ export const applyGroundContacts: ApplyGroundContacts = (
 
     const m = 1 / im;
     const kcm = kcStab * m;
-    const kc = kcm < KC_MAX ? kcm : KC_MAX;
-    const c = 2 * CONTACT_ZETA * Math.sqrt(kc * m);
+    const soft = contactK[i]!;
+    let kc: number;
+    let c: number;
+    if (soft > 0) {
+      kc = soft < kcm ? soft : kcm;
+      const ramp = depth < r ? depth / r : 1;
+      c = 2 * SOFT_LAYER_ZETA * Math.sqrt(kc * m) * ramp;
+    } else {
+      kc = kcm < KC_MAX ? kcm : KC_MAX;
+      c = 2 * CONTACT_ZETA * Math.sqrt(kc * m);
+    }
 
     const vx = velX[i]!;
     const vy = velY[i]!;
@@ -248,23 +306,40 @@ export const applyGroundContacts: ApplyGroundContacts = (
     let fy = fn * ny;
     let fz = fn * nz;
 
-    // Tangential slip and regularized Coulomb friction.
+    // Implicit Coulomb friction (see FRICTION LAW); tread nodes get none
+    // here (NODE_FLAG_TREAD: the vehicle's tread brush supplies it).
     const tx = vx - vn * nx;
     const ty = vy - vn * ny;
     const tz = vz - vn * nz;
-    const vt2 = tx * tx + ty * ty + tz * tz;
+    const vt = Math.sqrt(tx * tx + ty * ty + tz * tz);
     const mat = sampler.materialAt(x, z);
-    let vt = 0;
-    if (vt2 > 1e-24) {
-      vt = Math.sqrt(vt2);
-      const mu = friction[i]! * matFriction[mat]!;
-      const coulomb = mu * fn * tanhR(vt * SLIP_REG_INV);
-      const viscous = KT_FRACTION * m * invDt * vt;
-      const ft = coulomb < viscous ? coulomb : viscous;
-      const s = ft / vt;
-      fx -= s * tx;
-      fy -= s * ty;
-      fz -= s * tz;
+    const ax = frcX[i]! + m * gx;
+    const ay = frcY[i]! + m * gy;
+    const az = frcZ[i]! + m * gz;
+    const an = ax * nx + ay * ny + az * nz;
+    const mdt = m * invDt;
+    const rx = -(mdt * tx + ax - an * nx);
+    const ry = -(mdt * ty + ay - an * ny);
+    const rz = -(mdt * tz + az - an * nz);
+    let cone = friction[i]! * matFriction[mat]! * fn;
+    if ((f & NODE_FLAG_TREAD) !== 0) {
+      // The tread brush's lateral force on this node shares the circle.
+      const fb = treadF[i]!;
+      const rem = cone * cone - fb * fb;
+      cone = rem > 0 ? Math.sqrt(rem) : 0;
+    }
+    const r2 = rx * rx + ry * ry + rz * rz;
+    if (r2 > 0) {
+      if (r2 <= cone * cone) {
+        fx += rx;
+        fy += ry;
+        fz += rz;
+      } else {
+        const sc = cone / Math.sqrt(r2);
+        fx += sc * rx;
+        fy += sc * ry;
+        fz += sc * rz;
+      }
     }
 
     frcX[i] = frcX[i]! + fx;

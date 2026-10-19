@@ -29,6 +29,11 @@ export function createSimState(nodeCapacity: number, beamCapacity: number): SimS
     invMass: new Float64Array(nodeCapacity),
     radius: new Float64Array(nodeCapacity),
     friction: new Float64Array(nodeCapacity),
+    contactK: new Float64Array(nodeCapacity),
+    treadAxX: new Float64Array(nodeCapacity),
+    treadAxY: new Float64Array(nodeCapacity),
+    treadAxZ: new Float64Array(nodeCapacity),
+    treadF: new Float64Array(nodeCapacity),
     flags: new Uint8Array(nodeCapacity),
     aIdx: new Int32Array(beamCapacity),
     bIdx: new Int32Array(beamCapacity),
@@ -54,7 +59,7 @@ type BeamArray = Float64Array | Float32Array | Int32Array | Uint8Array;
 function nodeArrays(s: SimState): NodeArray[] {
   return [
     s.posX, s.posY, s.posZ, s.velX, s.velY, s.velZ, s.frcX, s.frcY, s.frcZ,
-    s.invMass, s.radius, s.friction, s.flags,
+    s.invMass, s.radius, s.friction, s.contactK, s.treadAxX, s.treadAxY, s.treadAxZ, s.treadF, s.flags,
   ];
 }
 
@@ -133,6 +138,11 @@ export function loadRigNodes(state: SimState, obj: SimObject, rig: CompiledRig, 
     state.invMass[g] = rig.nodeInvMass[i]!;
     state.radius[g] = rig.nodeRadius[i]!;
     state.friction[g] = rig.nodeFriction[i]!;
+    state.contactK[g] = rig.nodeContactK[i]!;
+    state.treadAxX[g] = 0;
+    state.treadAxY[g] = 0;
+    state.treadAxZ[g] = 0;
+    state.treadF[g] = 0;
     state.flags[g] = rig.nodeFlags[i]! & ~NODE_FLAG_IN_CONTACT;
   }
 }

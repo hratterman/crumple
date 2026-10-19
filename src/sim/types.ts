@@ -68,6 +68,12 @@ export type BeamType = (typeof BeamType)[keyof typeof BeamType];
 export const NODE_FLAG_COLLIDABLE = 1 << 0;
 /** Set by applyGroundContacts when the node touched ground this step; cleared otherwise. */
 export const NODE_FLAG_IN_CONTACT = 1 << 1;
+/**
+ * Tyre tread node (RigNodeDef.tread, additive P2): applyGroundContacts adds
+ * only the normal force; the vehicle pre-step's tread brush supplies the
+ * tangential force (vehicle/wheels.ts applyTreadBrush).
+ */
+export const NODE_FLAG_TREAD = 1 << 2;
 
 /** SimObject.flags bits (same value as protocol OBJECT_FLAG_SLEEPING). */
 export const SIM_OBJECT_FLAG_SLEEPING = 1 << 0;
@@ -101,6 +107,19 @@ export interface SimState {
   radius: Float64Array;
   /** Node μ. f64: used in contact math. */
   friction: Float64Array;
+  /** Soft-layer ground stiffness N/m, 0 = rigid-contact law (additive P2; CompiledRig.nodeContactK). */
+  contactK: Float64Array;
+  /**
+   * Tread nodes (NODE_FLAG_TREAD), additive P2, written each tick by the
+   * vehicle tread brush before the ground pass: unit lateral (axle,
+   * ground-tangent) direction the brush owns — the ground kernel's stick
+   * drops that component — and the brush force magnitude on the node (N),
+   * which the ground kernel's friction cone leaves to the brush. 0 = none.
+   */
+  treadAxX: Float64Array;
+  treadAxY: Float64Array;
+  treadAxZ: Float64Array;
+  treadF: Float64Array;
   /** NODE_FLAG_* bits (u8: dense, bit tests only). */
   flags: Uint8Array;
 
@@ -238,4 +257,11 @@ export type ApplyGroundContacts = (
   dt: number,
   objectId: number,
   events: EventSink,
+  /**
+   * Gravity (m/s²), additive P2 amendment: the implicit friction law needs
+   * the tangential part of m·g (slopes). Omitted = 0 (P1 callers).
+   */
+  gx?: number,
+  gy?: number,
+  gz?: number,
 ) => void;

@@ -29,13 +29,14 @@ import {
 } from './drivetrain';
 import type {
   CompiledVehicle,
+  CompiledWheel,
   ComputeDamage,
   RebaseVehicle,
   TransmissionMode,
   VehicleRuntime,
   WheelRuntime,
 } from './types';
-import { applyParkingClamp, applyWheelTorques, estimateWheelOmega } from './wheels';
+import { applyParkingClamp, applyTreadBrush, applyWheelTorques, estimateWheelOmega } from './wheels';
 
 /** Air density, kg/m³ (AeroDef contract). */
 export const AIR_DENSITY = 1.225;
@@ -67,6 +68,17 @@ export interface VehicleRuntimeEx extends VehicleRuntime {
 }
 
 // ------------------------------------------------------------ create / rebase
+/**
+ * Effective rolling radius of a soft-body wheel: the perimeter of the tread
+ * polygon over 2π, r_ring·n·sin(π/n)/π. Contact tread nodes stick, so one
+ * revolution advances the hub by n tread chords (measured free rolling:
+ * 0.272 m vs 0.272 predicted for the 205/55R16 tuning; the unloaded radius
+ * read +9 % slip, the loaded radius +4 %).
+ */
+export function rollingRadius(w: CompiledWheel): number {
+  return (w.tireRingRadius * w.rays * Math.sin(Math.PI / w.rays)) / Math.PI;
+}
+
 function makeWheel(vehicle: CompiledVehicle, index: number): WheelRuntime {
   const cw = vehicle.wheels[index]!;
   return {
@@ -77,11 +89,15 @@ function makeWheel(vehicle: CompiledVehicle, index: number): WheelRuntime {
     tireStart: cw.tireStart,
     ringCount: 2 * cw.rays,
     hubLinkBeams: new Int32Array(cw.hubLinkBeams.length),
+    attachNodes: new Int32Array(cw.attachNodes.length),
     omega: 0,
     load: 0,
     slipSpeed: 0,
     slipRatio: 0,
-    rollRadius: cw.radius,
+    rollRadius: rollingRadius(cw),
+    treadLoad: new Float64Array(2 * cw.rays),
+    treadNormal: new Float64Array(6 * cw.rays),
+    treadBrush: new Float64Array(6 * cw.rays),
     contact: 0,
     detached: 0,
     driveTorque: 0,
@@ -135,6 +151,7 @@ export const rebaseVehicle: RebaseVehicle = (vehicle, nodeStart, beamStart) => {
     w.rimStart = nodeStart + cw.rimStart;
     w.tireStart = nodeStart + cw.tireStart;
     for (let j = 0; j < cw.hubLinkBeams.length; j++) w.hubLinkBeams[j] = beamStart + cw.hubLinkBeams[j]!;
+    for (let j = 0; j < cw.attachNodes.length; j++) w.attachNodes[j] = nodeStart + cw.attachNodes[j]!;
   }
 };
 
@@ -145,11 +162,12 @@ export function resetVehicleRuntime(vehicle: VehicleRuntime): void {
     w.load = 0;
     w.slipSpeed = 0;
     w.slipRatio = 0;
-    w.rollRadius = w.wheel.radius;
     w.contact = 0;
     w.detached = 0;
     w.driveTorque = 0;
     w.brakeTorque = 0;
+    w.treadLoad.fill(0);
+    w.treadBrush.fill(0);
   }
   resetDrivetrainState(vehicle.drivetrain as DrivetrainStateEx, vehicle.vehicle.drivetrain);
   vehicle.telemetry.fill(0);
@@ -243,6 +261,7 @@ export function vehiclePreStep(state: SimState, vehicle: VehicleRuntime, actions
   for (let w = 0; w < wheels.length; w++) {
     const wr = wheels[w]!;
     applyWheelTorques(state, wr, wr.driveTorque, wr.brakeTorque);
+    applyTreadBrush(state, wr, dt);
   }
   applyParkingClamp(state, vehicle, actions, dt);
   applyAero(state, vehicle);
@@ -500,5 +519,7 @@ export function recoverVehicle(
     w.contact = 0;
     w.load = 0;
     w.slipSpeed = 0;
+    w.treadLoad.fill(0);
+    w.treadBrush.fill(0);
   }
 }

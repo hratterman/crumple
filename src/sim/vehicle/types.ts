@@ -101,6 +101,27 @@ export interface WheelDef {
   attach: string[];
   /** Optional overrides (defaults in WHEEL_DEFAULTS). */
   tireNodeRadius?: number;
+  /**
+   * Tread contact layer stiffness per tyre node, N/m (RigNodeDef.contactSpring
+   * of the generated tire nodes; 0 = rigid-contact law). Additive P2 field.
+   */
+  tireContactSpring?: number;
+  /**
+   * Rolling resistance coefficient C_rr (additive P2 field, default 0):
+   * a torque −C_rr·load·rollRadius·clamp(ω/ROLL_RES_OMEGA_EPS, −1, 1)
+   * about the axle (tyre hysteresis the viscous carcass lacks at low speed).
+   */
+  rollingResistance?: number;
+  /**
+   * Tread BRUSH model (additive P2 field): > 0 marks the tyre nodes `tread`
+   * (ground kernel: normal force only) and gives each in-contact tread node
+   * a brush deflection driven by the RIGID-wheel slip velocity at its
+   * contact point, force −k·δ − c·u capped at μN (see wheels.ts
+   * applyTreadBrush). N/m per tread node; 0 = node-level implicit friction.
+   */
+  treadBrushStiffness?: number;
+  /** Brush damping on the rigid-wheel slip velocity, N·s/m per tread node. */
+  treadBrushDamping?: number;
   attachSpring?: number;
   attachDamp?: number;
   attachBreakF?: number;
@@ -110,6 +131,13 @@ export interface WheelDef {
 export const WHEEL_DEFAULTS = {
   /** Contact sphere radius of tire nodes, m. */
   tireNodeRadius: 0.03,
+  /** Tread contact layer stiffness (0 = rigid-contact law). */
+  tireContactSpring: 0,
+  /** Rolling resistance coefficient (0 = none). */
+  rollingResistance: 0,
+  /** Tread brush (0 = node-level implicit ground friction). */
+  treadBrushStiffness: 0,
+  treadBrushDamping: 0,
   /** Contact radius / μ of rim nodes (scrape on a flat or detached tyre). */
   rimNodeRadius: 0.02,
   rimFriction: 0.5,
@@ -206,6 +234,12 @@ export interface DrivetrainDef {
   clutchMaxTorque: number;
   /** Initial transmission mode. Default 'auto'. */
   transmission?: TransmissionMode;
+  /**
+   * Traction control (additive P2): target driven-wheel slip ratio (e.g.
+   * 0.1). Throttle is cut while the fastest driven wheel's rolling speed
+   * exceeds the undriven wheels' by more than that ratio. 0/absent = off.
+   */
+  tractionControl?: number;
 }
 
 export type TransmissionMode = 'auto' | 'manual';
@@ -314,6 +348,8 @@ export interface CompiledWheel {
    * wheel is DETACHED when all of them are broken (torque cut, telemetry).
    */
   hubLinkBeams: Int32Array;
+  /** RIG-LOCAL indices of WheelDef.attach nodes (the upright top), additive P2. */
+  attachNodes: Int32Array;
   steered: boolean;
   driven: boolean;
   braked: boolean;
@@ -322,6 +358,11 @@ export interface CompiledWheel {
   brakeTorque: number;
   /** BrakesDef.handbrakeTorqueMax if handbrake, else 0. */
   handbrakeTorque: number;
+  /** WheelDef.rollingResistance ?? 0 (additive P2). */
+  rollingResistance: number;
+  /** WheelDef.treadBrushStiffness / treadBrushDamping ?? 0 (additive P2). */
+  brushK: number;
+  brushC: number;
   friction: number;
 }
 
@@ -345,6 +386,8 @@ export interface CompiledDrivetrain {
   diff: number;
   diffLockTorque: number;
   clutchMaxTorque: number;
+  /** DrivetrainDef.tractionControl (0 = off). Additive P2. */
+  tcSlip: number;
   /** Wheel indices with driven = true, declaration order. */
   drivenWheels: Int32Array;
   transmission: TransmissionMode;
@@ -424,6 +467,8 @@ export interface WheelRuntime {
   ringCount: number;
   /** Global hub-link beam indices (parallel to wheel.hubLinkBeams). */
   hubLinkBeams: Int32Array;
+  /** Global indices of wheel.attachNodes (rebased), additive P2. */
+  attachNodes: Int32Array;
   /** rad/s about the spin axis, + = rolling forward. Estimated each tick (estimateWheelOmega). */
   omega: number;
   /** Σ ground normal force on tire nodes this tick, N. */
@@ -436,11 +481,19 @@ export interface WheelRuntime {
    */
   slipRatio: number;
   /**
-   * Effective rolling radius, m: load-weighted distance from the axle to the
-   * in-contact tyre node centres along the ground normal (= radius when
-   * airborne). Additive P2 field.
+   * Effective rolling radius, m: current tread-ring perimeter / 2π (mean of
+   * the two rows; stuck contact nodes advance the hub one tread chord per
+   * ray), updated by estimateWheelOmega. Additive P2 field.
    */
   rollRadius: number;
+  /**
+   * Per tread node (ring index j = node − tireStart), additive P2 runtime
+   * scratch written by estimateWheelOmega / applyTreadBrush: ground normal
+   * force (N), contact normal (xyz), brush deflection (xyz, m).
+   */
+  treadLoad: Float64Array;
+  treadNormal: Float64Array;
+  treadBrush: Float64Array;
   /** 1 if any tire node is in ground contact. */
   contact: number;
   /** 1 once every hubLinkBeam is broken (sticky until reset). */
@@ -531,6 +584,8 @@ export type ApplyWheelTorques = (
   brakeTorque: number,
 ) => void;
 export const BRAKE_OMEGA_EPS = 1;
+/** Rolling-resistance torque ramp (rad/s): linear below, constant above. */
+export const ROLL_RES_OMEGA_EPS = 0.5;
 
 /**
  * PARKING CLAMP (fights creep from the regularized μ·tanh(v/0.3) friction).

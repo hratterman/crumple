@@ -92,7 +92,7 @@ describe('SEDAN handling harness', () => {
     expect(st.jitter).toBeLessThan(0.15);
   });
 
-  it.fails('a) static: no creep > 1 mm/s at rest (neutral, no brake)', () => {
+  it('a) static: no creep > 1 mm/s at rest (neutral, no brake)', () => {
     expect(st.creep).toBeLessThan(1e-3);
   });
 
@@ -105,22 +105,22 @@ describe('SEDAN handling harness', () => {
     expect(launch.t100).toBeLessThanOrEqual(9);
   });
 
-  it.fails('b) launch: rear slip ratio settles < 0.25 after 1.5 s', () => {
+  it('b) launch: rear slip ratio settles < 0.25 after 1.5 s', () => {
     expect(settledRearSlip(launch)).toBeLessThan(0.25);
   });
 
-  it.fails('c) coastdown from 100 km/h in neutral: 0.25–0.6 m/s² over 5 s', () => {
+  it('c) coastdown from 100 km/h in neutral: 0.25–0.6 m/s² over 5 s', () => {
     expect(coast.decel5).toBeGreaterThan(0.25);
     expect(coast.decel5).toBeLessThan(0.6);
   });
 
-  it.fails('d) braking from 100 km/h: 35–50 m, heading within 5°', () => {
+  it('d) braking from 100 km/h: 35–50 m, heading within 5°', () => {
     expect(brake.distance).toBeGreaterThan(35);
     expect(brake.distance).toBeLessThan(50);
     expect(brake.headingDrift).toBeLessThan(5);
   });
 
-  it.fails('e) steady-state circle R40: 0.75–1.05 g before breakaway', () => {
+  it('e) steady-state circle R40: 0.75–1.05 g before breakaway', () => {
     expect(circle.maxLatG).toBeGreaterThan(0.75);
     expect(circle.maxLatG).toBeLessThan(1.05);
   });

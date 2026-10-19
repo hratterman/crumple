@@ -25,46 +25,43 @@ import {
  * radius, 16" rim), 12 rays. Spread it into a WheelDef and add the
  * placement/role fields (id, hubInner/hubOuter, axle, flags, attach).
  *
- * Every generated node passes the per-node structure limit with the
- * declared masses (no MINIMASS raise), checked by wheels.test.ts with
- * computeStabilityReport at dt = 1/2000 (wheel alone; attach + suspension
- * beams load the hubs further and MINIMASS covers them):
- *   tyre node  m 0.667 kg  Σk 3.18e5  ω·dt 0.345  (Σd/m)·dt 0.48
- *   rim node   m 1.000 kg  Σk 4.83e5  ω·dt 0.347  (Σd/m)·dt 0.39
- *   hub node   m 5.0 kg    Σk 1.99e6  ω·dt 0.315  (Σd/m)·dt 0.32
- * (10 rays passes too; 14 rays has lighter nodes and needs MINIMASS.)
+ * Per-node stability with the declared masses at dt = 1/2000 (wheel alone,
+ * wheels.test.ts): tread node m 0.333 kg Σk 3.18e5 ω·dt 0.488 (tread nodes
+ * may run to TREAD_OMEGA_DT_LIMIT 0.49, builder.ts), rim node m 1.0 kg Σk
+ * 4.83e5 ω·dt 0.347, hub node 5 kg ω·dt 0.315; (Σd/m)·dt ≤ 0.06.
  *
- * Static load (hubs held, flat asphalt, wheels.test.ts): 3.5 kN deflects
- * the tyre 25.6 mm at the hub, ≈ 7 mm of it the ground kernel's penalty
- * depth (KC_MAX = 2.5e5 N/m on the 2 contact nodes), monotone (no sidewall
- * collapse) past 3.5 kN.
- *
- * WHY not 1–2 cm: the ω·dt ≤ 0.35 rule caps every node at
- * Σk ≤ 4.9e5·m (N/m per kg). At 12 rays only the bottom tyre node pair
- * carries the load (the next ray sits 3.9 cm higher), so the carcass
- * stiffness is bounded by ~0.6 of two tyre nodes' Σk, and the rim nodes
- * (6 rim + 3 sidewall beams each) bound the rim path the same way. A grid
- * search over masses/allocations measured ≈ 30 mm at a realistic 38 kg
- * wheel and ≈ 22 mm at 60 kg; this tuning (50 kg incl. hubs, I ≈ 2.3 kg·m²,
- * about 2× a real wheel) is the compromise. Sidewall/tread/rim stiffness
- * are each set near their nodes' budgets (tread ≈ ½ sidewall resists
- * sidewall splay); damping ≈ 0.25–0.35 of 2·sqrt(k·μ_reduced).
+ * Contact model (handling harness, src/sim/vehicle/handling.test.ts):
+ *  - tread contact layer (tireContactSpring 1e5 N/m per node, soft-layer
+ *    law in ground.ts): tread nodes run into the "rubber" instead of being
+ *    stopped dead at touchdown; 3.5 kN deflects the tyre ≈ 35 mm at the hub;
+ *  - light tread (8 kg) and light carcass damping: rolling loss is the
+ *    tread nodes' touchdown impact (∝ tread mass), not hysteresis;
+ *  - lateral tread brush (treadBrushStiffness 7e4 N/m per node): lateral
+ *    grip without carcass stiffness (wheels.ts applyTreadBrush);
+ *    longitudinal grip is the node-level stick through the carcass
+ *    (κ ≈ 0.03 at 500 N·m);
+ *  - friction 1.1 (performance road tyre on dry asphalt, μ literal: the
+ *    ground law is implicit Coulomb, not RoR's regularized 2.0).
  */
 export const WHEEL_TUNING_205_55R16 = {
   radius: 0.32,
   rimRadius: 0.2,
   width: 0.15,
   rays: 12,
+  tireNodeRadius: 0.045,
+  tireContactSpring: 1e5,
+  treadBrushStiffness: 7e4,
+  treadBrushDamping: 30,
   tireRingSpring: 2.65e4,
-  tireRingDamp: 60,
+  tireRingDamp: 4,
   rimSpring: 5.4e4,
-  rimDamp: 80,
+  rimDamp: 6,
   sidewallSpring: 5.3e4,
-  sidewallDamp: 100,
+  sidewallDamp: 6,
   hubMass: 10,
   rimMass: 24,
-  tireMass: 16,
-  friction: 2.0,
+  tireMass: 8,
+  friction: 1.1,
 } as const satisfies Partial<WheelDef>;
 
 function fail(wheel: string, msg: string): never {
@@ -106,6 +103,9 @@ export const buildWheelRig: BuildWheelRig = (wheel, bodyNodeLookup) => {
   const rimRadius = positive(id, 'rimRadius', wheel.rimRadius);
   const width = positive(id, 'width', wheel.width);
   const tireNodeRadius = positive(id, 'tireNodeRadius', wheel.tireNodeRadius ?? WHEEL_DEFAULTS.tireNodeRadius);
+  const tireContactSpring = nonNeg(id, 'tireContactSpring', wheel.tireContactSpring ?? WHEEL_DEFAULTS.tireContactSpring);
+  const brush = nonNeg(id, 'treadBrushStiffness', wheel.treadBrushStiffness ?? WHEEL_DEFAULTS.treadBrushStiffness) > 0;
+  nonNeg(id, 'treadBrushDamping', wheel.treadBrushDamping ?? WHEEL_DEFAULTS.treadBrushDamping);
   const tireRingRadius = radius - tireNodeRadius;
   if (!(rimRadius < tireRingRadius)) {
     fail(id, `rimRadius ${rimRadius} must be < radius - tireNodeRadius = ${tireRingRadius}`);
@@ -211,6 +211,8 @@ export const buildWheelRig: BuildWheelRig = (wheel, bodyNodeLookup) => {
         radius: tireNodeRadius,
         group: WHEEL_DEFAULTS.tireGroup,
         collidable: true,
+        ...(tireContactSpring > 0 ? { contactSpring: tireContactSpring } : {}),
+        ...(brush ? { tread: true } : {}),
       });
     }
   }

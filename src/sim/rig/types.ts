@@ -34,6 +34,20 @@ export interface RigNodeDef {
   group?: string;
   /** Participates in collisions. Default true. */
   collidable?: boolean;
+  /**
+   * Ground contact stiffness, N/m (additive P2 field). > 0 selects the
+   * SOFT-LAYER contact law for this node (tyre tread rubber): penalty
+   * stiffness = min(contactSpring, stability cap), damping scaled by
+   * depth/radius (see collision/ground.ts). Default: group → 0 = the
+   * rigid-contact law (auto stiffness).
+   */
+  contactSpring?: number;
+  /**
+   * Tyre TREAD node (additive P2 field): the ground kernel applies only the
+   * normal force; the vehicle's tread brush model supplies the tangential
+   * (friction) force. Default false.
+   */
+  tread?: boolean;
 }
 
 export interface RigBeamDef {
@@ -72,6 +86,7 @@ export interface RigBeamDef {
 export interface RigGroupDefaults {
   friction?: number;
   radius?: number;
+  contactSpring?: number;
 }
 
 export interface RigDef {
@@ -106,6 +121,8 @@ export const RIG_BEAM_TYPE_ID: Readonly<Record<RigBeamType, number>> = {
 
 /** Compiled node flag bits (same values as sim NODE_FLAG_*). */
 export const RIG_NODE_FLAG_COLLIDABLE = 1 << 0;
+/** Tread node (RigNodeDef.tread); same bit as sim NODE_FLAG_TREAD. Bit 1 is the sim's IN_CONTACT. */
+export const RIG_NODE_FLAG_TREAD = 1 << 2;
 
 /**
  * Output of compileRig: defaults resolved, ids resolved to indices, all
@@ -125,6 +142,8 @@ export interface CompiledRig {
   nodeInvMass: Float64Array;
   nodeFriction: Float64Array;
   nodeRadius: Float64Array;
+  /** Per-node soft-layer ground stiffness N/m, 0 = rigid-contact law (additive P2). */
+  nodeContactK: Float64Array;
   /** RIG_NODE_FLAG_* bits. */
   nodeFlags: Uint8Array;
   /** Group names in first-seen order; nodeGroup indexes into it (-1 = none). */

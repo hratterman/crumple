@@ -16,6 +16,7 @@ import { DEFAULT_MATERIALS } from '../collision/materials';
 import type { HeightSampler, MaterialTable, SimState } from '../types';
 import {
   BRAKE_OMEGA_EPS,
+  ROLL_RES_OMEGA_EPS,
   PARK_GAIN,
   PARK_SPEED,
   type ApplyParkingClamp,
@@ -75,6 +76,10 @@ const SLIP_REG_INV = 1 / 0.3;
  * Both are capped forces/torques, never position constraints.
  */
 const PARK_ANCHOR_K = 0.05;
+const INV_4PI = 1 / (4 * Math.PI);
+const INV_2PI = 1 / (2 * Math.PI);
+/** Rolling-radius low-pass per tick: dt/(τ + dt), τ = 50 ms at dt = 1/2000. */
+const ROLL_RADIUS_ALPHA = (1 / 2000) / (0.05 + 1 / 2000);
 const PARK_HOLD_K = 0.02;
 /** Squared anchor distance (m²) treated as stale (re-armed in place), 5 cm. */
 const PARK_ANCHOR_STALE2 = 0.05 * 0.05;
@@ -248,6 +253,40 @@ export const estimateWheelOmega: EstimateWheelOmega = (state, w) => {
   const omega = iSum > 0 ? lSum / iSum : 0;
   w.omega = omega;
 
+  // ---- rolling radius from the tread chords: contact tread nodes stick,
+  // so per ray the hub advances one chord between consecutive CONTACT nodes
+  // (r = chord·rays/2π). The free ring (stretched by centrifugal load) is
+  // not what rolls. Uses last tick's contact loads; without a contact pair
+  // the whole-ring perimeter stands in. Low-passed (ROLL_RADIUS_ALPHA):
+  // the patch alternates between 1 and 2 rays in contact.
+  {
+    const half = n >> 1;
+    const ts = w.tireStart;
+    const tl = w.treadLoad;
+    let cSum = 0;
+    let cN = 0;
+    let per = 0;
+    for (let row = 0; row < 2; row++) {
+      const b0 = ts + row * half;
+      for (let q = 0; q < half; q++) {
+        const q1 = q + 1 === half ? 0 : q + 1;
+        const a = b0 + q;
+        const b = b0 + q1;
+        const ex = posX[b]! - posX[a]!;
+        const ey = posY[b]! - posY[a]!;
+        const ez = posZ[b]! - posZ[a]!;
+        const len = Math.sqrt(ex * ex + ey * ey + ez * ez);
+        per += len;
+        if (tl[row * half + q]! > 0 && tl[row * half + q1]! > 0) {
+          cSum += len;
+          cN++;
+        }
+      }
+    }
+    const target = cN > 0 ? (cSum / cN) * half * INV_2PI : per * INV_4PI;
+    w.rollRadius += (target - w.rollRadius) * ROLL_RADIUS_ALPHA;
+  }
+
   // ---- detached: every hub link broken (sticky until reset)
   if (w.detached === 0) {
     const links = w.hubLinkBeams;
@@ -268,15 +307,30 @@ export const estimateWheelOmega: EstimateWheelOmega = (state, w) => {
   let gny = 0;
   let gnz = 0;
   let rollSum = 0;
+  const tLoad = w.treadLoad;
+  const tNrm = w.treadNormal;
   if (sampler !== null) {
     const t0 = w.tireStart;
     const t1 = t0 + n;
     for (let i = t0; i < t1; i++) {
+      const j = i - t0;
       const fn = groundNormalForce(state, i, sampler, groundDt, nrm);
-      if (!(fn > 0)) continue;
+      if (!(fn > 0)) {
+        tLoad[j] = 0;
+        continue;
+      }
       const nx = nrm[0]!;
       const ny = nrm[1]!;
       const nz = nrm[2]!;
+      tLoad[j] = fn;
+      tNrm[3 * j] = nx;
+      tNrm[3 * j + 1] = ny;
+      tNrm[3 * j + 2] = nz;
+      // Axle height above the ground under this node, along the normal.
+      const px = posX[i]!;
+      const py = posY[i]!;
+      const pz = posZ[i]!;
+      rollSum += fn * ((cx - px) * nx + (cy - py) * ny + (cz - pz) * nz + (py - sampler.heightAt(px, pz)) * ny);
       const vx = velX[i]!;
       const vy = velY[i]!;
       const vz = velZ[i]!;
@@ -285,8 +339,6 @@ export const estimateWheelOmega: EstimateWheelOmega = (state, w) => {
       const ty = vy - vn * ny;
       const tz = vz - vn * nz;
       slipSum += Math.sqrt(tx * tx + ty * ty + tz * tz);
-      // Rolling radius sample: axle-to-node-centre distance along the normal.
-      rollSum += fn * ((cx - posX[i]!) * nx + (cy - posY[i]!) * ny + (cz - posZ[i]!) * nz);
       load += fn;
       gnx += fn * nx;
       gny += fn * ny;
@@ -294,6 +346,7 @@ export const estimateWheelOmega: EstimateWheelOmega = (state, w) => {
       contacts++;
     }
   }
+  if (sampler === null) tLoad.fill(0);
   w.load = load;
   w.contact = contacts > 0 ? 1 : 0;
   w.slipSpeed = contacts > 0 ? slipSum / contacts : 0;
@@ -321,12 +374,7 @@ export const estimateWheelOmega: EstimateWheelOmega = (state, w) => {
     vFwd = vcx * fx + vcy * fy + vcz * fz;
   }
   const den = vFwd < 0 ? -vFwd : vFwd;
-  // Effective rolling radius: load-weighted axle → contact-node-centre
-  // distance (contact nodes stick, so the hub advances ω·that per radian);
-  // the unloaded radius read +9 % slip on a free-rolling wheel.
-  const rEff = load > 0 ? rollSum / load : w.wheel.radius;
-  w.rollRadius = rEff;
-  w.slipRatio = (omega * rEff - vFwd) / (den > SLIP_RATIO_MIN_SPEED ? den : SLIP_RATIO_MIN_SPEED);
+  w.slipRatio = (omega * w.rollRadius - vFwd) / (den > SLIP_RATIO_MIN_SPEED ? den : SLIP_RATIO_MIN_SPEED);
 };
 
 /**
@@ -341,8 +389,315 @@ export const applyWheelTorques: ApplyWheelTorques = (state, w, driveTorque, brak
   const brake = brakeTorque > 0 ? -brakeTorque * ramp : 0;
   w.driveTorque = drive;
   w.brakeTorque = brake;
-  applyAxleTorque(state, w, drive + brake);
+  // Rolling resistance (tyre hysteresis): Coulomb-like, ramped through 0.
+  const crr = w.wheel.rollingResistance;
+  let roll = 0;
+  if (crr > 0 && w.load > 0) {
+    let rr = w.omega / ROLL_RES_OMEGA_EPS;
+    if (rr > 1) rr = 1;
+    else if (rr < -1) rr = -1;
+    roll = -crr * w.load * w.rollRadius * rr;
+  }
+  applyAxleTorque(state, w, drive + brake + roll);
 };
+
+/**
+ * TREAD BRUSH — LATERAL (wheels with brushK > 0; their tyre nodes carry
+ * NODE_FLAG_TREAD). Per in-contact tread node j (load N_j and normal n from
+ * estimateWheelOmega this tick), â = the axle direction s projected onto the
+ * ground tangent plane, q_j = the ground point under the node:
+ *   u   = v_c·â   (rigid-wheel lateral slip speed; spin adds nothing along s)
+ *   δ_j += u·dt   (reset to 0 when the node leaves the ground)
+ *   F_j = −k·δ_j − c·u,  |F_j| ≤ share·μ·N_j (δ_j clipped at the cap:
+ *         sliding), share = (|u| + V0)/(|u_slip| + V0): the lateral part
+ *         of the rigid-wheel slip velocity (combined slip; V0 = 0.5 m/s)
+ * The lateral contact forces F_j·â at the q_j are applied as a wrench on the
+ * RIGID wheel they were measured on (see the wrench split at the end). The node-level ground stick keeps the
+ * longitudinal direction (drops the â component, cone √((μN)² − F_j²)):
+ * state.treadAxX/Y/Z and treadF hand it â and |F_j|. Each tread node also gets a
+ * lateral damper −c_n·((v_j − v_c)·â)·â, c_n = TREAD_NODE_DAMP·m_j/dt.
+ *
+ * WHY lateral brush: with node stick alone the only lateral compliance
+ * between road and rim is the carcass, ~2e4 N/m per tread node (bench: hubs
+ * held, 5 mm push; every sidewall topology tried lands at 2–2.5e4 because
+ * the rim's own lateral support is in series), and the explicit budget
+ * (ω·dt ≤ 0.5 on a 0.33 kg node → Σk ≤ 3.2e5) cannot reach the ~2e5 a real
+ * belt + tread gives: cornering stiffness was ~130 N/deg (real ≈ 1000–1500)
+ * and the car spun out at 0.5 g. The brush force depends on the wheel's
+ * kinematics, not on any node position, so it adds no node stiffness.
+ * WHY on the rigid wheel: applied to the tread nodes the loop is
+ * non-collocated across the soft carcass and fluttered (m/s node speeds on
+ * a parked car). WHY lateral only: a longitudinal brush is ~1.2e5 N per unit
+ * slip stiff and fought the stuck tread polygon over sub-percent rolling-
+ * radius mismatch (0.8–2.4 kN of drag on a free-rolling wheel); the
+ * carcass already gives a realistic longitudinal stiffness (κ ≈ 0.03 at
+ * 500 N·m on the bench).
+ */
+const TREAD_NODE_DAMP = 0.1;
+/** Minimum attach-node height above the wheel centre (m) for the ball-joint load path. */
+const ATTACH_MIN_HEIGHT = 0.05;
+/** Combined-slip blend speed, m/s (see applyTreadBrush). */
+const BRUSH_SHARE_V0 = 0.5;
+
+export function applyTreadBrush(state: SimState, w: WheelRuntime, dt: number): void {
+  const k = w.wheel.brushK;
+  if (!(k > 0)) return;
+  const sampler = groundSampler;
+  const tLoad = w.treadLoad;
+  const tNrm = w.treadNormal;
+  const brush = w.treadBrush;
+  const n = w.ringCount;
+  const { posX, posY, posZ, velX, velY, velZ, frcX, frcY, frcZ, invMass, friction, treadAxX, treadAxY, treadAxZ, treadF } =
+    state;
+  const t0 = w.tireStart;
+  if (sampler === null || !axleFrame(state, w)) {
+    brush.fill(0);
+    for (let j = 0; j < n; j++) treadF[t0 + j] = 0;
+    return;
+  }
+  const matFriction = groundMaterials.friction;
+  const cx = frame[0]!;
+  const cy = frame[1]!;
+  const cz = frame[2]!;
+  const sx = frame[3]!;
+  const sy = frame[4]!;
+  const sz = frame[5]!;
+  const hi = w.hubI;
+  const ho = w.hubO;
+  const vcx = (velX[hi]! + velX[ho]!) * 0.5;
+  const vcy = (velY[hi]! + velY[ho]!) * 0.5;
+  const vcz = (velZ[hi]! + velZ[ho]!) * 0.5;
+  const c = w.wheel.brushC;
+  const invDt = 1 / dt;
+  // Longitudinal slip speed of the rigid wheel (forward = s × up): the
+  // lateral share of the friction circle follows the slip direction.
+  const fwx = sy * 0 - sz * 1;
+  const fwz = sx * 1 - sy * 0;
+  const fl = Math.sqrt(fwx * fwx + fwz * fwz);
+  const uxLong = fl > 1e-6 ? (vcx * fwx + vcz * fwz) / fl - w.omega * w.rollRadius : 0;
+  // Contact wrench about the wheel centre.
+  let Fx = 0;
+  let Fy = 0;
+  let Fz = 0;
+  let Mx = 0;
+  let My = 0;
+  let Mz = 0;
+  for (let j = 0; j < n; j++) {
+    const i = t0 + j;
+    const fn = tLoad[j]!;
+    if (!(fn > 0)) {
+      brush[3 * j] = 0;
+      treadAxX[i] = 0;
+      treadAxY[i] = 0;
+      treadAxZ[i] = 0;
+      treadF[i] = 0;
+      continue;
+    }
+    const j3 = 3 * j;
+    const nx = tNrm[j3]!;
+    const ny = tNrm[j3 + 1]!;
+    const nz = tNrm[j3 + 2]!;
+    // Lateral direction â: s in the ground tangent plane.
+    const sn = sx * nx + sy * ny + sz * nz;
+    let ax = sx - sn * nx;
+    let ay = sy - sn * ny;
+    let az = sz - sn * nz;
+    const al = Math.sqrt(ax * ax + ay * ay + az * az);
+    if (!(al > 1e-6)) {
+      brush[j3] = 0;
+      treadF[i] = 0;
+      continue;
+    }
+    ax /= al;
+    ay /= al;
+    az /= al;
+    const u = vcx * ax + vcy * ay + vcz * az;
+    let d = brush[j3]! + u * dt;
+    let f = -k * d - c * u;
+    // Combined slip: the brush gets the lateral share of the slip velocity,
+    // (|u_y| + V0)/(|u| + V0) — ≈ 1 when cornering or rolling, small on a
+    // locked or spinning wheel (the stick takes the longitudinal rest).
+    const ua = u < 0 ? -u : u;
+    const share = (ua + BRUSH_SHARE_V0) / (Math.sqrt(u * u + uxLong * uxLong) + BRUSH_SHARE_V0);
+    const cap = share * friction[i]! * matFriction[sampler.materialAt(posX[i]!, posZ[i]!)]! * fn;
+    if (f > cap || f < -cap) {
+      f = f > 0 ? cap : -cap;
+      const dMax = cap / k;
+      if (d > dMax) d = dMax;
+      else if (d < -dMax) d = -dMax;
+    }
+    brush[j3] = d;
+    treadAxX[i] = ax;
+    treadAxY[i] = ay;
+    treadAxZ[i] = az;
+    treadF[i] = f < 0 ? -f : f;
+    // Ground point under the node centre, relative to the wheel centre.
+    const px = posX[i]!;
+    const py = posY[i]!;
+    const pz = posZ[i]!;
+    const hgt = (py - sampler.heightAt(px, pz)) * ny;
+    const rx = px - nx * hgt - cx;
+    const ry = py - ny * hgt - cy;
+    const rz = pz - nz * hgt - cz;
+    const fx = f * ax;
+    const fy = f * ay;
+    const fz = f * az;
+    Fx += fx;
+    Fy += fy;
+    Fz += fz;
+    Mx += ry * fz - rz * fy;
+    My += rz * fx - rx * fz;
+    Mz += rx * fy - ry * fx;
+    // Lateral tread vibration damper relative to the rigid wheel.
+    const cn = (TREAD_NODE_DAMP * invDt) / invMass[i]!;
+    const wl = (velX[i]! - vcx) * ax + (velY[i]! - vcy) * ay + (velZ[i]! - vcz) * az;
+    frcX[i] = frcX[i]! - cn * wl * ax;
+    frcY[i] = frcY[i]! - cn * wl * ay;
+    frcZ[i] = frcZ[i]! - cn * wl * az;
+  }
+  // Net force: half on each hub. Moment about the centre: the spin part
+  // (≈ 0 for lateral forces) to the rim ring; the overturning part (about
+  // forward f = s × n) as a lateral force pair between the upright top
+  // (WheelDef.attach nodes, height h above the centre) and the hubs, F =
+  // M_f/h — the ball-joint load path; the hub pair (0.24 m apart, held
+  // vertically only by the upright's own beams) progressively cambered the
+  // loaded front wheel 20° under it. The rest (aligning) as a hub couple
+  // F = (M × l)/|l|² on hubO, −F on hubI (l = hubO − hubI).
+  const ms = Mx * sx + My * sy + Mz * sz;
+  let mpx = Mx - ms * sx;
+  let mpy = My - ms * sy;
+  let mpz = Mz - ms * sz;
+  let hx = 0.5 * Fx;
+  let hy = 0.5 * Fy;
+  let hz = 0.5 * Fz;
+  const att = w.attachNodes;
+  const na = att.length;
+  if (na > 0) {
+    // Ground normal (load-weighted) and forward axis f = s × n.
+    let gnx = 0;
+    let gny = 0;
+    let gnz = 0;
+    for (let j = 0; j < n; j++) {
+      const fnj = tLoad[j]!;
+      gnx += fnj * tNrm[3 * j]!;
+      gny += fnj * tNrm[3 * j + 1]!;
+      gnz += fnj * tNrm[3 * j + 2]!;
+    }
+    const gl = Math.sqrt(gnx * gnx + gny * gny + gnz * gnz);
+    let ax = 0;
+    let ay = 0;
+    let az = 0;
+    for (let q = 0; q < na; q++) {
+      const a = att[q]!;
+      ax += posX[a]!;
+      ay += posY[a]!;
+      az += posZ[a]!;
+    }
+    ax = ax / na - cx;
+    ay = ay / na - cy;
+    az = az / na - cz;
+    if (gl > 0) {
+      gnx /= gl;
+      gny /= gl;
+      gnz /= gl;
+      const h = ax * gnx + ay * gny + az * gnz;
+      let fwx = sy * gnz - sz * gny;
+      let fwy = sz * gnx - sx * gnz;
+      let fwz = sx * gny - sy * gnx;
+      const fwl = Math.sqrt(fwx * fwx + fwy * fwy + fwz * fwz);
+      if (h > ATTACH_MIN_HEIGHT && fwl > 1e-6) {
+        fwx /= fwl;
+        fwy /= fwl;
+        fwz /= fwl;
+        const mf = mpx * fwx + mpy * fwy + mpz * fwz;
+        mpx -= mf * fwx;
+        mpy -= mf * fwy;
+        mpz -= mf * fwz;
+        // v = f × n (lateral), force +mf/h·v on the attach nodes, −mf/h·v on the hubs.
+        const g = mf / h;
+        const vx = (fwy * gnz - fwz * gny) * g;
+        const vy = (fwz * gnx - fwx * gnz) * g;
+        const vz = (fwx * gny - fwy * gnx) * g;
+        const per = 1 / na;
+        for (let q = 0; q < na; q++) {
+          const a = att[q]!;
+          frcX[a] = frcX[a]! + vx * per;
+          frcY[a] = frcY[a]! + vy * per;
+          frcZ[a] = frcZ[a]! + vz * per;
+        }
+        hx -= 0.5 * vx;
+        hy -= 0.5 * vy;
+        hz -= 0.5 * vz;
+      }
+    }
+  }
+  const lx = posX[ho]! - posX[hi]!;
+  const ly = posY[ho]! - posY[hi]!;
+  const lz = posZ[ho]! - posZ[hi]!;
+  const l2 = lx * lx + ly * ly + lz * lz;
+  const qx = (mpy * lz - mpz * ly) / l2;
+  const qy = (mpz * lx - mpx * lz) / l2;
+  const qz = (mpx * ly - mpy * lx) / l2;
+  frcX[ho] = frcX[ho]! + hx + qx;
+  frcY[ho] = frcY[ho]! + hy + qy;
+  frcZ[ho] = frcZ[ho]! + hz + qz;
+  frcX[hi] = frcX[hi]! + hx - qx;
+  frcY[hi] = frcY[hi]! + hy - qy;
+  frcZ[hi] = frcZ[hi]! + hz - qz;
+  applyRimTorque(state, w, ms);
+}
+
+/**
+ * Torque τ about s (+ = forward) as tangential forces on the RIM ring
+ * nodes, τ/(N·r_i)·t̂_i, with −ΣF/2 on each hub (zero net force).
+ */
+function applyRimTorque(state: SimState, w: WheelRuntime, tau: number): void {
+  if (tau === 0) return;
+  const { posX, posY, posZ, frcX, frcY, frcZ } = state;
+  const cx = frame[0]!;
+  const cy = frame[1]!;
+  const cz = frame[2]!;
+  const sx = frame[3]!;
+  const sy = frame[4]!;
+  const sz = frame[5]!;
+  const n = w.ringCount;
+  const per = tau / n;
+  let sumX = 0;
+  let sumY = 0;
+  let sumZ = 0;
+  const r0 = w.rimStart;
+  const r1 = r0 + n;
+  for (let i = r0; i < r1; i++) {
+    const rx = posX[i]! - cx;
+    const ry = posY[i]! - cy;
+    const rz = posZ[i]! - cz;
+    const ax = rx * sx + ry * sy + rz * sz;
+    const px = rx - ax * sx;
+    const py = ry - ax * sy;
+    const pz = rz - ax * sz;
+    const p2 = px * px + py * py + pz * pz;
+    if (!(p2 > 1e-12)) continue;
+    // |s × ρ| = |ρ|; force τ_i/|ρ| along t̂ = (s × ρ)/|ρ| → (s × ρ)·τ_i/|ρ|².
+    const g = per / p2;
+    const fx = g * (sy * pz - sz * py);
+    const fy = g * (sz * px - sx * pz);
+    const fz = g * (sx * py - sy * px);
+    frcX[i] = frcX[i]! + fx;
+    frcY[i] = frcY[i]! + fy;
+    frcZ[i] = frcZ[i]! + fz;
+    sumX += fx;
+    sumY += fy;
+    sumZ += fz;
+  }
+  const hi = w.hubI;
+  const ho = w.hubO;
+  frcX[hi] = frcX[hi]! - 0.5 * sumX;
+  frcY[hi] = frcY[hi]! - 0.5 * sumY;
+  frcZ[hi] = frcZ[hi]! - 0.5 * sumZ;
+  frcX[ho] = frcX[ho]! - 0.5 * sumX;
+  frcY[ho] = frcY[ho]! - 0.5 * sumY;
+  frcZ[ho] = frcZ[ho]! - 0.5 * sumZ;
+}
 
 /**
  * PARKING CLAMP. Engaged below PARK_SPEED (horizontal speed of the object's
@@ -410,7 +765,8 @@ export const applyParkingClamp: ApplyParkingClamp = (state, vehicle, actions, dt
     applyAxleTorque(state, w, hold);
 
     // ---- contact nodes: viscous + anchor, capped at μN(1 − tanhR(|v_t|/0.3))
-    if (sampler === null) continue;
+    // (brush wheels: the tread brush already anchors the contact).
+    if (sampler === null || cw.brushK > 0) continue;
     const anchor = ps.anchor;
     const armed = ps.armed;
     const n = w.ringCount;

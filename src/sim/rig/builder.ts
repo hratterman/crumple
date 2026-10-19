@@ -9,6 +9,7 @@ import {
   RIG_BEAM_TYPE_ID,
   RIG_DEFAULTS,
   RIG_NODE_FLAG_COLLIDABLE,
+  RIG_NODE_FLAG_TREAD,
   type CompiledRig,
   type RigBeamType,
   type RigDef,
@@ -89,6 +90,7 @@ export function compileRig(def: RigDef): CompiledRig {
     if (gd === undefined || gd === null || typeof gd !== 'object') fail(rig, `groupDefaults["${g}"] must be an object`);
     if (gd.friction !== undefined) checkNonNeg(rig, `groupDefaults["${g}"]`, 'friction', gd.friction);
     if (gd.radius !== undefined) checkNonNeg(rig, `groupDefaults["${g}"]`, 'radius', gd.radius);
+    if (gd.contactSpring !== undefined) checkNonNeg(rig, `groupDefaults["${g}"]`, 'contactSpring', gd.contactSpring);
   }
 
   const nodeCount = def.nodes.length;
@@ -99,6 +101,7 @@ export function compileRig(def: RigDef): CompiledRig {
   const nodeInvMass = new Float64Array(nodeCount);
   const nodeFriction = new Float64Array(nodeCount);
   const nodeRadius = new Float64Array(nodeCount);
+  const nodeContactK = new Float64Array(nodeCount);
   const nodeFlags = new Uint8Array(nodeCount);
   const nodeGroup = new Int32Array(nodeCount);
   const groups: string[] = [];
@@ -126,7 +129,7 @@ export function compileRig(def: RigDef): CompiledRig {
       nodeInvMass[i] = 1 / mass;
     }
 
-    let gd: { friction?: number; radius?: number } | undefined;
+    let gd: { friction?: number; radius?: number; contactSpring?: number } | undefined;
     if (n.group !== undefined) {
       if (typeof n.group !== 'string') fail(rig, `${where} group must be a string`);
       let gi = groupIndex.get(n.group);
@@ -142,8 +145,10 @@ export function compileRig(def: RigDef): CompiledRig {
     }
     nodeFriction[i] = opt(rig, where, 'friction', n.friction, gd?.friction ?? RIG_DEFAULTS.friction, true);
     nodeRadius[i] = opt(rig, where, 'radius', n.radius, gd?.radius ?? RIG_DEFAULTS.radius, true);
+    nodeContactK[i] = opt(rig, where, 'contactSpring', n.contactSpring, gd?.contactSpring ?? 0, true);
     if (n.collidable !== undefined && typeof n.collidable !== 'boolean') fail(rig, `${where} collidable must be a boolean`);
-    nodeFlags[i] = n.collidable === false ? 0 : RIG_NODE_FLAG_COLLIDABLE;
+    if (n.tread !== undefined && typeof n.tread !== 'boolean') fail(rig, `${where} tread must be a boolean`);
+    nodeFlags[i] = (n.collidable === false ? 0 : RIG_NODE_FLAG_COLLIDABLE) | (n.tread === true ? RIG_NODE_FLAG_TREAD : 0);
   }
 
   const beamA = new Int32Array(beamCount);
@@ -201,6 +206,7 @@ export function compileRig(def: RigDef): CompiledRig {
     nodeMass,
     nodeInvMass,
     nodeFriction,
+    nodeContactK,
     nodeRadius,
     nodeFlags,
     groups,

@@ -18,7 +18,6 @@ import {
   RIG_DT,
   RigCompileError,
   STRUCTURE_OMEGA_DT_LIMIT,
-  suggestMinimumMasses,
   withMasses,
 } from '../rig/builder';
 import type { CompiledRig, RigBeamDef, RigDef, RigNodeDef, RigStats, StabilityReport } from '../rig/types';
@@ -181,6 +180,7 @@ function checkDefinition(def: VehicleDef): string[] {
     if (!(d.diff in DIFF_TYPE_ID)) errors.push(`drivetrain.diff "${String(d.diff)}" unknown`);
     if (d.diffLockTorque !== undefined && (!isNum(d.diffLockTorque) || d.diffLockTorque < 0)) errors.push('drivetrain.diffLockTorque must be >= 0');
     if (d.transmission !== undefined && d.transmission !== 'auto' && d.transmission !== 'manual') errors.push('drivetrain.transmission must be auto|manual');
+    if (d.tractionControl !== undefined && (!isNum(d.tractionControl) || d.tractionControl < 0)) errors.push('drivetrain.tractionControl must be >= 0');
   }
 
   const b = def.brakes;
@@ -263,12 +263,16 @@ function compileWheels(def: VehicleDef, rig: CompiledRig, bodyNodeCount: number,
       beamStart,
       beamCount,
       hubLinkBeams: Int32Array.from(links),
+      attachNodes: Int32Array.from(wd.attach.map((id) => rig.nodeIds.indexOf(id))),
       steered: wd.steered,
       driven: wd.driven,
       braked: wd.braked,
       handbrake: wd.handbrake,
       brakeTorque: wd.braked ? wd.brakeTorqueMax * brakeAxleFactor(def.brakes.frontBias, wd.axle) : 0,
       handbrakeTorque: wd.handbrake ? def.brakes.handbrakeTorqueMax : 0,
+      rollingResistance: wd.rollingResistance ?? 0,
+      brushK: wd.treadBrushStiffness ?? 0,
+      brushC: wd.treadBrushDamping ?? 0,
       friction: wd.friction,
     });
     nodeStart += nodeCount;
@@ -305,6 +309,7 @@ function compileDrivetrain(def: VehicleDef): CompiledDrivetrain {
     diff: DIFF_TYPE_ID[d.diff],
     diffLockTorque: d.diffLockTorque ?? 0,
     clutchMaxTorque: d.clutchMaxTorque,
+    tcSlip: d.tractionControl ?? 0,
     drivenWheels: Int32Array.from(driven),
     transmission: d.transmission ?? 'auto',
   };
@@ -320,7 +325,29 @@ function compileMerged(name: string, merged: RigDef): CompiledRig {
 }
 
 /**
- * buildVehicleRig → MINIMASS at STRUCTURE_OMEGA_DT_LIMIT (raises masses
+ * Per-node ω·dt target of the vehicle MINIMASS: STRUCTURE_OMEGA_DT_LIMIT,
+ * except tyre TREAD nodes (group WHEEL_DEFAULTS.tireGroup), which may run up
+ * to TREAD_OMEGA_DT_LIMIT. WHY: tread nodes are not structure (they never
+ * deform plastically or carry crash loads) and the tread mass is what
+ * smacks into the ground every pass: rolling loss ∝ tread mass / carcass
+ * stiffness, so holding them at 0.35 forced a 2× heavy tyre (16 kg) and
+ * ~2× the rolling resistance. 0.49 leaves headroom under the 0.5 general
+ * limit; the soft-layer contact spring adds ≈ 0.2 in quadrature.
+ */
+export const TREAD_OMEGA_DT_LIMIT = 0.49;
+
+export function minimumMasses(merged: RigDef): number[] {
+  const structure = computeStabilityReport(merged, { limit: STRUCTURE_OMEGA_DT_LIMIT });
+  const tread = computeStabilityReport(merged, { limit: TREAD_OMEGA_DT_LIMIT });
+  return merged.nodes.map((n, i) => {
+    if (!(n.mass > 0)) return n.mass;
+    const rep = n.group === WHEEL_DEFAULTS.tireGroup ? tread : structure;
+    return Math.max(n.mass, rep.suggestedMinMass[i]!);
+  });
+}
+
+/**
+ * buildVehicleRig → MINIMASS at STRUCTURE_OMEGA_DT_LIMIT (tread nodes: TREAD_OMEGA_DT_LIMIT) (raises masses
  * only, never softens k) → compileRig → wheel/drivetrain tables.
  * Throws VehicleCompileError on malformed definitions.
  */
@@ -330,7 +357,7 @@ export const compileVehicle: CompileVehicle = (def) => {
   const defErrors = checkDefinition(def);
   if (defErrors.length > 0) fail(name, defErrors.join('; '));
   compileMerged(name, merged); // reports malformed rigs before MINIMASS (which compiles too)
-  const { masses } = suggestMinimumMasses(merged, STRUCTURE_OMEGA_DT_LIMIT);
+  const masses = minimumMasses(merged);
   const rig = compileMerged(name, withMasses(merged, masses));
 
   let declared = 0;
@@ -540,10 +567,28 @@ export function validateVehicle(
 
   // Stability: declared masses, then after MINIMASS.
   const declaredStability = computeStabilityReport(rig, { limit: STRUCTURE_OMEGA_DT_LIMIT });
-  const { masses, driftPct } = suggestMinimumMasses(merged, STRUCTURE_OMEGA_DT_LIMIT);
+  const masses = minimumMasses(merged);
+  let declaredFree = 0;
+  let raisedFree = 0;
+  for (let i = 0; i < merged.nodes.length; i++) {
+    const m = merged.nodes[i]!.mass;
+    if (m > 0) {
+      declaredFree += m;
+      raisedFree += masses[i]!;
+    }
+  }
+  const driftPct = declaredFree > 0 ? ((raisedFree - declaredFree) / declaredFree) * 100 : 0;
   const raised = compileRig(withMasses(merged, masses));
-  const stability = computeStabilityReport(raised, { limit: STRUCTURE_OMEGA_DT_LIMIT });
-  if (!stability.ok) errors.push(`internal: ${stability.violations} node(s) still unstable after MINIMASS`);
+  const isTread = (i: number): boolean => merged.nodes[i]!.group === WHEEL_DEFAULTS.tireGroup;
+  // Post-MINIMASS report judged per node group (tread: TREAD_OMEGA_DT_LIMIT).
+  const raisedReport = computeStabilityReport(raised, { limit: STRUCTURE_OMEGA_DT_LIMIT });
+  let unstable = 0;
+  for (let i = 0; i < raised.nodeCount; i++) {
+    const lim = isTread(i) ? TREAD_OMEGA_DT_LIMIT : STRUCTURE_OMEGA_DT_LIMIT;
+    if (raisedReport.omegaDt[i]! > lim * (1 + 1e-9) || raisedReport.dampDt[i]! > DAMP_DT_LIMIT * (1 + 1e-9)) unstable++;
+  }
+  const stability: StabilityReport = { ...raisedReport, violations: unstable, ok: unstable === 0 };
+  if (unstable > 0) errors.push(`internal: ${unstable} node(s) still unstable after MINIMASS`);
 
   if (opts.autoRaiseMasses) {
     if (driftPct > 0) {
@@ -562,13 +607,13 @@ export function validateVehicle(
       if (w > GENERAL_OMEGA_DT_LIMIT * (1 + 1e-9) || z > DAMP_DT_LIMIT * (1 + 1e-9)) {
         hardN++;
         if (hard.length < MAX_LISTED) hard.push(`${rig.nodeIds[i]} (ω·dt ${w.toFixed(3)}, Σd/m·dt ${z.toFixed(3)})`);
-      } else if (w > STRUCTURE_OMEGA_DT_LIMIT * (1 + 1e-9)) {
+      } else if (w > (isTread(i) ? TREAD_OMEGA_DT_LIMIT : STRUCTURE_OMEGA_DT_LIMIT) * (1 + 1e-9)) {
         softN++;
         if (soft.length < MAX_LISTED) soft.push(`${rig.nodeIds[i]} (${w.toFixed(3)})`);
       }
     }
     if (hardN > 0) errors.push(`${hardN} node(s) exceed ω·dt ${GENERAL_OMEGA_DT_LIMIT} or (Σd/m)·dt ${DAMP_DT_LIMIT}: ${hard.join(', ')}`);
-    if (softN > 0) warnings.push(`${softN} node(s) exceed structure ω·dt ${STRUCTURE_OMEGA_DT_LIMIT} (MINIMASS raises them): ${soft.join(', ')}`);
+    if (softN > 0) warnings.push(`${softN} node(s) exceed structure ω·dt ${STRUCTURE_OMEGA_DT_LIMIT} (tread ${TREAD_OMEGA_DT_LIMIT}; MINIMASS raises them): ${soft.join(', ')}`);
     if (driftPct > MASS_DRIFT_WARN_PCT) warnings.push(`MINIMASS would raise node masses by ${driftPct.toFixed(2)} % > ${MASS_DRIFT_WARN_PCT} %`);
   }
 

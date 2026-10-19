@@ -11,6 +11,7 @@ import { applyGroundContacts, groundNormalForce, PlaneSampler } from '../collisi
 import { DEFAULT_MATERIALS } from '../collision/materials';
 import { integrateNodes } from '../integrator';
 import { compileRig, computeStabilityReport } from '../rig/builder';
+import { TREAD_OMEGA_DT_LIMIT } from './builder';
 import type { CompiledRig, RigBeamDef, RigNodeDef } from '../rig/types';
 import { SimArena } from '../state';
 import type { EventSink, HeightSampler, MaterialTable, SimObject, SimState } from '../types';
@@ -114,12 +115,16 @@ function makeSim(defs: WheelDef[], opts: SimOpts = {}): Sim {
       beamStart: ranges[k]!.b0,
       beamCount: ranges[k]!.bc,
       hubLinkBeams: new Int32Array(0),
+      attachNodes: new Int32Array(0),
       steered: d.steered,
       driven: d.driven,
       braked: d.braked,
       handbrake: d.handbrake,
       brakeTorque: d.braked ? d.brakeTorqueMax : 0,
       handbrakeTorque: d.handbrake ? d.brakeTorqueMax : 0,
+      rollingResistance: 0,
+      brushK: 0,
+      brushC: 0,
       friction: d.friction,
     };
     const b = obj.nodeStart;
@@ -131,11 +136,15 @@ function makeSim(defs: WheelDef[], opts: SimOpts = {}): Sim {
       tireStart: b + cw.tireStart,
       ringCount: 2 * n,
       hubLinkBeams: new Int32Array(0),
+      attachNodes: new Int32Array(0),
       omega: 0,
       load: 0,
       slipSpeed: 0,
       slipRatio: 0,
       rollRadius: 0.3,
+      treadLoad: new Float64Array(2 * n),
+      treadNormal: new Float64Array(6 * n),
+      treadBrush: new Float64Array(6 * n),
       contact: 0,
       detached: 0,
       driveTorque: 0,
@@ -363,9 +372,10 @@ describe('buildWheelRig', () => {
     expect(r0[2]).toBeCloseTo(def.rimRadius, 12);
     const t3 = byId.get('FL.tireO3')!.pos; // θ = 90° → +Y
     expect(t3[0]).toBeCloseTo(-W, 12);
-    expect(t3[1]).toBeCloseTo(def.radius - WHEEL_DEFAULTS.tireNodeRadius, 12);
+    const tnr = def.tireNodeRadius ?? WHEEL_DEFAULTS.tireNodeRadius;
+    expect(t3[1]).toBeCloseTo(def.radius - tnr, 12);
     const t9 = byId.get('FL.tireI9')!.pos; // θ = 270° → bottom; contact surface at −radius
-    expect(t9[1] - WHEEL_DEFAULTS.tireNodeRadius).toBeCloseTo(-def.radius, 12);
+    expect(t9[1] - tnr).toBeCloseTo(-def.radius, 12);
     const sum = (p: string) => nodes.filter((x) => x.id.includes(p)).reduce((a, x) => a + x.mass, 0);
     expect(sum('.hub')).toBeCloseTo(def.hubMass, 9);
     expect(sum('.rim')).toBeCloseTo(def.rimMass, 9);
@@ -373,7 +383,10 @@ describe('buildWheelRig', () => {
     for (const x of nodes) {
       if (x.id.includes('.hub')) expect([x.collidable, x.group]).toEqual([false, WHEEL_DEFAULTS.hubGroup]);
       if (x.id.includes('.rim')) expect([x.collidable, x.group, x.friction]).toEqual([true, WHEEL_DEFAULTS.rimGroup, WHEEL_DEFAULTS.rimFriction]);
-      if (x.id.includes('.tire')) expect([x.collidable, x.group, x.friction, x.radius]).toEqual([true, WHEEL_DEFAULTS.tireGroup, def.friction, WHEEL_DEFAULTS.tireNodeRadius]);
+      if (x.id.includes('.tire')) {
+        expect([x.collidable, x.group, x.friction, x.radius]).toEqual([true, WHEEL_DEFAULTS.tireGroup, def.friction, def.tireNodeRadius ?? WHEEL_DEFAULTS.tireNodeRadius]);
+        expect([x.contactSpring, x.tread]).toEqual([def.tireContactSpring, true]);
+      }
     }
   });
 
@@ -424,22 +437,25 @@ describe('buildWheelRig', () => {
     }
   });
 
-  it('default tuning passes per-node ω·dt ≤ 0.35 and (Σd/m)·dt ≤ 1 at dt = 1/2000 with declared masses', () => {
+  it('default tuning: tread ω·dt ≤ TREAD_OMEGA_DT_LIMIT, rim/hub ≤ 0.35, (Σd/m)·dt ≤ 1 at dt = 1/2000 with declared masses', () => {
     // Tuned for 12 rays (10 has heavier nodes and passes too; 14 needs MINIMASS).
     for (const rays of [10, 12]) {
       const r = buildWheelRig(wheelDef({ rays }), lookup);
       const rep = computeStabilityReport({ name: 'w', nodes: r.nodes, beams: r.beams }, { dt: DT, limit: 0.35 });
-      expect(rep.violations, JSON.stringify(rep.worst.slice(0, 3))).toBe(0);
-      expect(rep.massDriftPct).toBe(0);
+      r.nodes.forEach((x, i) => {
+        const lim = x.id.includes('.tire') ? TREAD_OMEGA_DT_LIMIT : 0.35;
+        expect(rep.omegaDt[i]!, x.id).toBeLessThanOrEqual(lim * (1 + 1e-9));
+        expect(rep.dampDt[i]!, x.id).toBeLessThanOrEqual(1);
+      });
       if (rays === 12) {
         // Numbers quoted in wheelrig.ts.
         const max = (p: string, a: Float64Array) => Math.max(...r.nodes.map((x, i) => (x.id.includes(p) ? a[i]! : 0)));
-        expect(max('.tire', rep.omegaDt)).toBeCloseTo(0.345, 3);
+        expect(max('.tire', rep.omegaDt)).toBeCloseTo(0.488, 3);
         expect(max('.rim', rep.omegaDt)).toBeCloseTo(0.347, 3);
         expect(max('.hub', rep.omegaDt)).toBeCloseTo(0.315, 3);
-        expect(max('.tire', rep.dampDt)).toBeCloseTo(0.48, 2);
-        expect(max('.rim', rep.dampDt)).toBeCloseTo(0.39, 2);
-        expect(max('.hub', rep.dampDt)).toBeCloseTo(0.32, 2);
+        expect(max('.tire', rep.dampDt)).toBeCloseTo(0.06, 2);
+        expect(max('.rim', rep.dampDt)).toBeCloseTo(0.027, 3);
+        expect(max('.hub', rep.dampDt)).toBeCloseTo(0.022, 3);
       }
     }
     // Beam damping below 2·sqrt(k·μ_reduced) for every generated beam (attach beams excluded).
@@ -477,7 +493,7 @@ describe('groundNormalForce', () => {
 });
 
 describe('static load', () => {
-  it('3.5 kN deflects the default tyre 15–30 mm (hub drop incl. ground penalty depth), monotone', () => {
+  it('3.5 kN deflects the default tyre 25–40 mm (hub drop incl. the tread contact layer), monotone', () => {
     let prevD = 0;
     let prevF = 0;
     let defl = Infinity;
@@ -491,10 +507,10 @@ describe('static load', () => {
       prevD = d;
       prevF = f;
     }
-    // Measured ≈ 25 mm, of which ≈ 7 mm is the ground kernel's penalty depth
-    // (KC_MAX on the 2 contact nodes); see wheelrig.ts for why 1–2 cm needs far heavier nodes.
-    expect(defl).toBeGreaterThan(0.015);
-    expect(defl).toBeLessThan(0.03);
+    // Measured ≈ 35 mm, ≈ 15 mm of it the soft tread contact layer
+    // (tireContactSpring 1e5 per node; see wheelrig.ts and ground.ts).
+    expect(defl).toBeGreaterThan(0.025);
+    expect(defl).toBeLessThan(0.04);
   });
 });
 

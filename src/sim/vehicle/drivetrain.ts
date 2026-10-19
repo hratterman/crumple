@@ -82,6 +82,18 @@ export const AUTO_CLUTCH_LAUNCH_LO = 0.8;
 export const AUTO_CLUTCH_LAUNCH = 1.6;
 /** Auto-clutch engagement low-pass time constant, s. */
 export const AUTO_CLUTCH_TAU = 0.05;
+/**
+ * Traction control: reference speeds below this (m/s) use it as the slip
+ * denominator, so a launch may spin the driven wheels by tcSlip·this.
+ */
+export const TC_MIN_REF_SPEED = 5;
+/** TC never cuts below this × idle rpm (clutch slip handles the launch; cutting there bogged the engine). */
+export const TC_RPM_FLOOR = 2.5;
+/** Throttle cut per m/s of excess driven-wheel speed. */
+export const TC_GAIN = 0.5;
+/** Cut attack / release time constants, s. */
+export const TC_ATTACK = 0.02;
+export const TC_RELEASE = 0.15;
 /** Minimum time between automatic shifts, s (anti-hunting). */
 export const AUTO_SHIFT_COOLDOWN = 0.6;
 /**
@@ -151,6 +163,8 @@ export function sampleTorqueLut(lut: Float64Array, stepRpm: number, rpm: number)
 export interface DrivetrainStateEx extends DrivetrainState {
   /** Filtered auto-clutch engagement 0..1. */
   autoEngage: number;
+  /** Traction-control throttle cut 0..1 (low-passed). */
+  tcCut: number;
   /** Clutch spring windup, rad (engine side). */
   clutchWind: number;
   /** Clutch torque this tick, N·m (+ drives the wheels forward in a forward gear). */
@@ -189,6 +203,7 @@ export function createDrivetrainState(
     engineTorque: 0,
     driveTorque: 0,
     autoEngage: 0,
+    tcCut: 0,
     clutchWind: 0,
     clutchTorque: 0,
     gearboxOmega: 0,
@@ -212,6 +227,7 @@ export function resetDrivetrainState(s: DrivetrainStateEx, dt: CompiledDrivetrai
   s.engineTorque = 0;
   s.driveTorque = 0;
   s.autoEngage = 0;
+  s.tcCut = 0;
   s.clutchWind = 0;
   s.clutchTorque = 0;
   s.gearboxOmega = 0;
@@ -424,6 +440,36 @@ export const stepDrivetrain: StepDrivetrain = (
     const wTarget = table[s.targetGear + 1]! * fd * omegaMean;
     const blip = clamp01((wTarget - s.engineOmega) * REV_MATCH_GAIN);
     if (blip > throttle) throttle = blip;
+  }
+  // Traction control: compare the fastest driven wheel's rolling speed with
+  // the undriven (reference) wheels' mean, cut throttle on the excess.
+  if (d.tcSlip > 0) {
+    let target = 0;
+    if (s.gear > 0 && throttle > 0 && rpm > idle * TC_RPM_FLOOR) {
+      let vRef = 0;
+      let nRef = 0;
+      let vDrv = -Infinity;
+      for (let w = 0; w < wheels.length; w++) {
+        const wr = wheels[w]!;
+        if (wr.detached !== 0) continue;
+        const v = wr.omega * wr.rollRadius;
+        if (wr.wheel.driven) {
+          if (v > vDrv) vDrv = v;
+        } else if (wr.contact !== 0) {
+          vRef += v;
+          nRef++;
+        }
+      }
+      if (nRef > 0 && vDrv > -Infinity) {
+        vRef /= nRef;
+        const den = vRef > TC_MIN_REF_SPEED ? vRef : TC_MIN_REF_SPEED;
+        const excess = vDrv - vRef - d.tcSlip * den;
+        if (excess > 0) target = excess * TC_GAIN > 1 ? 1 : excess * TC_GAIN;
+      }
+    }
+    const tau = target > s.tcCut ? TC_ATTACK : TC_RELEASE;
+    s.tcCut += (target - s.tcCut) * (dt / (tau + dt));
+    throttle *= 1 - s.tcCut;
   }
   if (s.revLimiterActive) throttle = 0;
   const gov = clamp01((idle - rpm) / IDLE_GOVERNOR_BAND_RPM);

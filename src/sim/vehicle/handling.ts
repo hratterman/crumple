@@ -143,12 +143,12 @@ export function headingOf(k: Kin): number {
 /**
  * Gives the whole vehicle a rigid forward velocity `speed` (m/s, along its
  * current horizontal heading) with every wheel's rim/tyre/hub nodes spinning
- * at the matching rolling ω = speed / rollRadius. In auto/manual mode the
+ * at the matching rolling ω = speed / WheelRuntime.rollRadius. The
  * gearbox is put in `gear` (default: the gear auto would pick) with the
  * engine speed matched, clutch closed. Harness-only shortcut to start
  * coastdown / braking / cornering runs at speed without a long launch.
  */
-export function setMotion(sim: HandlingSim, speed: number, gear?: number, rollRadius = 0.3): void {
+export function setMotion(sim: HandlingSim, speed: number, gear?: number): void {
   const s = sim.eng.state;
   const k = kinematics(sim);
   const start = sim.obj.nodeStart;
@@ -159,8 +159,9 @@ export function setMotion(sim: HandlingSim, speed: number, gear?: number, rollRa
     s.velY[i] = 0;
     s.velZ[i] = vz;
   }
-  const w = speed / rollRadius;
+  const w = speed / sim.veh.wheels[0]!.rollRadius;
   for (const wr of sim.veh.wheels) {
+    const ww = speed / wr.rollRadius;
     const hi = wr.hubI;
     const ho = wr.hubO;
     const cx = (s.posX[hi]! + s.posX[ho]!) / 2;
@@ -179,9 +180,9 @@ export function setMotion(sim: HandlingSim, speed: number, gear?: number, rollRa
       const ry = s.posY[i]! - cy;
       const rz = s.posZ[i]! - cz;
       // v = ω s × r
-      s.velX[i] = vx + w * (ay * rz - az * ry);
-      s.velY[i] = w * (az * rx - ax * rz);
-      s.velZ[i] = vz + w * (ax * ry - ay * rx);
+      s.velX[i] = vx + ww * (ay * rz - az * ry);
+      s.velY[i] = ww * (az * rx - ax * rz);
+      s.velZ[i] = vz + ww * (ax * ry - ay * rx);
     }
   }
   const dt = sim.veh.drivetrain as DrivetrainStateEx;
@@ -206,7 +207,7 @@ export function setMotion(sim: HandlingSim, speed: number, gear?: number, rollRa
   dt.engineOmega = Math.max(eo, d.idleRpm / RPM_PER_RAD_S);
   dt.autoEngage = 1;
   dt.clutchWind = 0;
-  for (const wr of sim.veh.wheels) wr.omega = w;
+  for (const wr of sim.veh.wheels) wr.omega = speed / wr.rollRadius;
 }
 
 // ------------------------------------------------------------ scenario

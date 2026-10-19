@@ -429,7 +429,7 @@ export class SimEngine {
       }
       applyBeamForces(s, obj.beamStart, obj.beamCount, sink, dbg);
       if (sampler !== null) {
-        applyGroundContacts(s, obj.nodeStart, obj.nodeCount, sampler, this.materials, SIM_DT, obj.objectId, sink);
+        applyGroundContacts(s, obj.nodeStart, obj.nodeCount, sampler, this.materials, SIM_DT, obj.objectId, sink, gx, gy, gz);
       }
       integrateNodes(s, obj.nodeStart, obj.nodeCount, SIM_DT, gx, gy, gz);
     }

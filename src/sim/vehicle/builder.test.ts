@@ -7,11 +7,12 @@ import {
   PLAYER_BEAM_BUDGET,
   sampleTorqueCurve,
   TRAFFIC_BEAM_BUDGET,
+  TREAD_OMEGA_DT_LIMIT,
   validateVehicle,
   VehicleCompileError,
 } from './builder';
 import { buildTorqueLut } from './drivetrain';
-import { DIFF_TYPE_ID, WHEEL_BEAMS_PER_RAY, WHEEL_CORNER, wheelNodeId, type VehicleDef, type WheelDef } from './types';
+import { DIFF_TYPE_ID, WHEEL_BEAMS_PER_RAY, WHEEL_CORNER, WHEEL_DEFAULTS, wheelNodeId, type VehicleDef, type WheelDef } from './types';
 import { WHEEL_TUNING_205_55R16 } from './wheelrig';
 
 /** 8-node box chassis (heavy nodes, soft beams: stable) + 4 wheels bolted to its bottom corners. */
@@ -161,7 +162,7 @@ describe('compileVehicle', () => {
       expect(cv.rig.nodeIds[w.tireStart + n + 5]).toBe(`${w.id}.tireO5`);
       expect(w.beamStart).toBe(beamStart);
       expect(w.beamCount).toBe(2 * 2 + 1 + WHEEL_BEAMS_PER_RAY * n);
-      expect(w.tireRingRadius).toBeCloseTo(0.32 - 0.03, 12);
+      expect(w.tireRingRadius).toBeCloseTo(0.32 - WHEEL_TUNING_205_55R16.tireNodeRadius, 12);
       // Hub links: the 4 attach beams, ascending.
       expect(Array.from(w.hubLinkBeams)).toEqual([beamStart, beamStart + 1, beamStart + 2, beamStart + 3]);
       nodeStart += w.nodeCount;
@@ -213,7 +214,11 @@ describe('compileVehicle', () => {
     expect(cv.rig.nodeMass[0]).toBeGreaterThan(0.5);
     expect(cv.massDriftPct).toBeGreaterThan(0);
     const rep = computeStabilityReport(cv.rig, { limit: STRUCTURE_OMEGA_DT_LIMIT });
-    expect(rep.ok).toBe(true);
+    // Tread nodes may run up to TREAD_OMEGA_DT_LIMIT, everything else 0.35.
+    for (let i = 0; i < cv.rig.nodeCount; i++) {
+      const tread = cv.rig.groups[cv.rig.nodeGroup[i]!] === WHEEL_DEFAULTS.tireGroup;
+      expect(rep.omegaDt[i]).toBeLessThanOrEqual((tread ? TREAD_OMEGA_DT_LIMIT : STRUCTURE_OMEGA_DT_LIMIT) * (1 + 1e-9));
+    }
     let total = 0;
     for (let i = 0; i < cv.rig.nodeCount; i++) total += cv.rig.nodeMass[i]!;
     expect(cv.totalMass).toBeCloseTo(total, 9);

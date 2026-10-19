@@ -47,7 +47,7 @@ export const SEDAN_TARGETS = {
    * the weight is preload. Small because the soft-body tyre already squishes
    * ~3.5 cm (wheelrig.ts) and the chassis should settle only 2–6 cm.
    */
-  staticSuspensionSag: 0.003,
+  staticSuspensionSag: 0.001,
   maxWheelAngleRad: 0.55,
 } as const;
 
@@ -274,7 +274,7 @@ const ARB_FRACTION_REAR = 0.25;
  * linearly with shock d), so damper rates carry this calibration to land
  * at ζ ≈ 0.3.
  */
-const DAMPER_CALIBRATION = 1.8;
+const DAMPER_CALIBRATION = 1.9;
 
 /** Wheel: 205/55R16-class tuning (wheelrig.ts) with a heavy hub carrier (upright + brakes): 15 kg per hub node. */
 const WHEEL_HUB_MASS = 30;
@@ -314,6 +314,7 @@ const DRIVETRAIN: DrivetrainDef = {
   diffLockTorque: 400,
   clutchMaxTorque: 550,
   transmission: 'auto',
+  tractionControl: 0.08,
 };
 
 // ====================================================================== generator
