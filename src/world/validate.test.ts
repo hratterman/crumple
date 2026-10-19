@@ -80,6 +80,7 @@ describe('validateLayout', () => {
       ],
       junctions: [{ id: 'j', pos: [0, 0], roads: ['a', 'b'] }],
       spawnPoints: [],
+      props: [],
     };
     expect(() => generateTerrain(small)).toThrow(/junction 'j': road 'b' passes 6\.00 m/);
     small.junctions = [{ id: 'j', pos: [0, 6], roads: ['b', 'a'] }];

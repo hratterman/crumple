@@ -508,6 +508,8 @@ let hold = false;
 let renderOnce: (() => void) | null = null;
 /** Seconds of camera motion to simulate (30 Hz) on the next frame, after the sim pose is read (screenshots). */
 let settleNext = 0;
+/** Screenshot hook: a fixed world-space camera (pos, look-at target) instead of the director, or null. */
+let pinnedCamera: { pos: [number, number, number]; target: [number, number, number] } | null = null;
 const crumple = {
   get tick(): number {
     return client.latestTick;
@@ -594,6 +596,14 @@ const crumple = {
   renderOnce(settleSeconds = 0): void {
     settleNext = settleSeconds;
     renderOnce?.();
+  },
+  /** Pin the camera at `pos` looking at `target` (world m; screenshots of the world, e.g. the arena props); null releases it to the director. */
+  pinCamera(pos: [number, number, number] | null, target?: [number, number, number]): void {
+    pinnedCamera = pos ? { pos: [pos[0], pos[1], pos[2]], target: target ? [target[0], target[1], target[2]] : [pos[0], pos[1], pos[2] - 1] } : null;
+  },
+  /** Prop renderer stats (instances, visible, awake sim objects, draws). */
+  get props(): { instances: number; visibleInstances: number; awake: number; drawCalls: number } | null {
+    return props ? { ...props.stats } : null;
   },
   /** Advance only the camera rig by `seconds` at 30 Hz (screenshots under software GL, where frames take seconds). */
   settleCamera(seconds: number): void {
@@ -897,7 +907,11 @@ async function boot(): Promise<void> {
       for (let t = 0; t < settleNext; t += 1 / 30) director.update(1 / 30, poseValid ? pose : null);
       settleNext = 0;
     }
-    director.update(dt, poseValid ? pose : null);
+    if (pinnedCamera) {
+      camera.position.fromArray(pinnedCamera.pos);
+      camera.lookAt(pinnedCamera.target[0], pinnedCamera.target[1], pinnedCamera.target[2]);
+      camera.updateMatrixWorld();
+    } else director.update(dt, poseValid ? pose : null);
     prof.lap('camera');
     lighting.update(camera);
     updateNearCasters(lighting);

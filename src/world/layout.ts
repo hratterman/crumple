@@ -48,7 +48,75 @@
  * three R16 hairpins.
  */
 import { MaterialId } from '../protocol/messages';
-import type { WorldLayout } from './types';
+import type { PropPlacement, WorldLayout } from './types';
+
+// ------------------------------------------------------------ props (P5)
+// Soft-body props (catalog keys in src/sim/props/types.ts). Pitches leave a
+// 1–2 cm gap between proxies (cone 0.38, barrel 0.585, tyre 0.65, box 0.6,
+// crate 0.8 wide), stacks use the catalog stack pitch. `facing` = where the
+// prop's front looks: a sign's face, a street light's arm.
+const DIAG = Math.SQRT1_2;
+/** Valley Loop Highway centreline z along the south straight (spline samples, x 200..360). */
+function highwaySouthZ(x: number): number {
+  const xs = [200, 240, 280, 320, 360];
+  const zs = [601.5, 603.91, 606.34, 607.79, 606.91];
+  let k = 0;
+  while (k < xs.length - 2 && x > xs[k + 1]!) k++;
+  const t = (x - xs[k]!) / (xs[k + 1]! - xs[k]!);
+  return Math.round((zs[k]! + (zs[k + 1]! - zs[k]!) * t) * 100) / 100;
+}
+const BOX_PYRAMID = [1, 2, 3, 4, 3, 2, 1];
+
+const ARENA_PROPS: PropPlacement[] = [
+  // Runway slalom: 7 cones on the centreline every 15 m + entry / exit gates.
+  { id: 'slalom', prop: 'cone', pos: [560, null, 330], row: { count: 7, step: [-15, 0] } },
+  { id: 'slalomGateIn', prop: 'cone', pos: [575, null, 324.5], row: { count: 2, step: [0, 11] } },
+  { id: 'slalomGateOut', prop: 'cone', pos: [455, null, 324.5], row: { count: 2, step: [0, 11] } },
+  // Barrel wall across the runway mouth (two staggered rows of 200 L drums).
+  { id: 'barrelWallA', prop: 'barrel', pos: [446, null, 324.8], row: { count: 11, step: [0, 0.6] } },
+  { id: 'barrelWallB', prop: 'barrel', pos: [446.6, null, 325.1], row: { count: 10, step: [0, 0.6] } },
+  // Tyre walls around the side-pole row: three stacks of 3 on the approach (east) side, one behind.
+  ...[276, 288, 300, 312, 324].flatMap((z, k): PropPlacement[] => [
+    { id: `tyreWall${k + 1}`, prop: 'tire', pos: [300.9, null, z - 0.66], stack: 3, row: { count: 3, step: [0, 0.66] } },
+    { id: `tyreBack${k + 1}`, prop: 'tire', pos: [299.1, null, z], stack: 3 },
+  ]),
+  // Cardboard pyramid to smash: 7 columns (1-2-3-4-3-2-1 high), two deep.
+  ...BOX_PYRAMID.map((n, k): PropPlacement => ({ id: `pyramid${k + 1}`, prop: 'boxCardboard', pos: [332.2 + 0.62 * k, null, 345], stack: n, row: { count: 2, step: [0, 0.62] } })),
+  // Ramp jump landing zone: cone-lined strip, a cardboard wall and crates to land in.
+  { id: 'landingConesW', prop: 'cone', pos: [406.5, null, 281], row: { count: 5, step: [0, -8] } },
+  { id: 'landingConesE', prop: 'cone', pos: [413.5, null, 281], row: { count: 5, step: [0, -8] } },
+  { id: 'landingCrates', prop: 'boxWood', pos: [409, null, 264.5], row: { count: 2, step: [2, 0] } },
+  { id: 'landingWall', prop: 'boxCardboard', pos: [408.45, null, 258], stack: 2, row: { count: 6, step: [0.62, 0] } },
+  { id: 'landingCrateStack', prop: 'boxWood', pos: [410, null, 251.5], stack: 2 },
+  // Precast block wall (2 high, 1 t each) in the south-east quarter.
+  { id: 'blockWall', prop: 'concreteBlock', pos: [384.2, null, 372], stack: 2, row: { count: 4, step: [1.22, 0] } },
+  // Street lights: runway (staggered, arms over the lane), arena corners (arms inward), Main St.
+  { id: 'runwayLightS', prop: 'lightPole', pos: [470, null, 336.3], row: { count: 2, step: [60, 0] } },
+  { id: 'runwayLightN', prop: 'lightPole', pos: [500, null, 323.7], facing: [0, 1], row: { count: 2, step: [60, 0] } },
+  { id: 'arenaLightNW', prop: 'lightPole', pos: [274, null, 244], facing: [DIAG, DIAG] },
+  { id: 'arenaLightNE', prop: 'lightPole', pos: [446, null, 244], facing: [-DIAG, DIAG] },
+  { id: 'arenaLightSW', prop: 'lightPole', pos: [274, null, 416], facing: [DIAG, -DIAG] },
+  { id: 'arenaLightSE', prop: 'lightPole', pos: [446, null, 416], facing: [-DIAG, -DIAG] },
+  { id: 'mainLightE', prop: 'lightPole', pos: [155.5, null, 280], facing: [-1, 0], row: { count: 2, step: [0, 90] } },
+  { id: 'mainLightW', prop: 'lightPole', pos: [144.5, null, 300], facing: [1, 0], row: { count: 2, step: [0, 90] } },
+  // Warning signs facing the traffic they warn.
+  { id: 'runwaySign', prop: 'signPost', pos: [485, null, 336.6], facing: [1, 0] },
+  { id: 'crashWallSign', prop: 'signPost', pos: [347.5, null, 267], facing: [0, 1] },
+  { id: 'townSignN', prop: 'signPost', pos: [156.5, null, 243.5] },
+  { id: 'townSignS', prop: 'signPost', pos: [143.5, null, 416.5], facing: [0, 1] },
+  { id: 'townSignW', prop: 'signPost', pos: [95.5, null, 337], facing: [-1, 0] },
+  // Highway work zone (south straight): signs, a cone taper closing the outer lane, a cone line, drums in the closed lane.
+  { id: 'worksSign', prop: 'signPost', pos: [195, null, highwaySouthZ(195) + 11.3], facing: [-1, 0], row: { count: 2, step: [15, 0] } },
+  ...[0, 1, 2, 3, 4, 5, 6, 7, 8].map((k): PropPlacement => {
+    const x = 225 + 5 * k;
+    return { id: `worksTaper${k + 1}`, prop: 'cone', pos: [x, null, highwaySouthZ(x) + 7.3 - (3.7 * k) / 8] };
+  }),
+  ...[0, 1, 2, 3, 4, 5, 6, 7, 8].map((k): PropPlacement => {
+    const x = 272.5 + 7.5 * k;
+    return { id: `worksLine${k + 1}`, prop: 'cone', pos: [x, null, highwaySouthZ(x) + 3.6] };
+  }),
+  ...[280, 300, 320].map((x, k): PropPlacement => ({ id: `worksDrum${k + 1}`, prop: 'barrel', pos: [x, null, highwaySouthZ(x) + 5.4] })),
+];
 
 export const DEFAULT_LAYOUT: WorldLayout = {
   id: 'crumple-valley',
@@ -495,7 +563,7 @@ export const DEFAULT_LAYOUT: WorldLayout = {
       visual: 'jersey' as const,
     })),
   ],
-  props: [],
+  props: ARENA_PROPS,
 };
 
 /** Registry by id (saves, replays and the protocol name layouts by id). */

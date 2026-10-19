@@ -231,7 +231,8 @@ describe('engine + worker integration', () => {
       hashTerrain: () => 1,
     });
     host.handle({ type: 'init', seed: 1, gravity: [0, -9.81, 0], snapshotHz: 120, debugStrains: false, capacity: { maxObjects: 4, nodeCapacity: 1024, beamCapacity: 4096 } });
-    host.handle({ type: 'groundHeightfield', layout: DEFAULT_LAYOUT, terrainHash: 0 });
+    // Without props: the layout's P5 props would not fit this capacity (tested in props/props.test.ts).
+    host.handle({ type: 'groundHeightfield', layout: { ...DEFAULT_LAYOUT, props: [] }, terrainHash: 0 });
     const eng = host.engine!;
     expect(eng.colliderWorld!.colliders.ids).toEqual(DEFAULT_LAYOUT.colliders.map((c) => c.id));
     // Wall rests on the terrain (height 1 everywhere in the stub): centre y = 1 + 1.
