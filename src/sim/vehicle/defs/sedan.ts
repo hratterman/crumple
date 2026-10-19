@@ -67,11 +67,11 @@ const BUDGET_PER_KG = (OMEGA_DT_TARGET / DT) ** 2; // Σk/m allowed, (N/m)/kg
  * ~250–400 kN crush force; at 0.33 its section stiffnesses were ~3 MN/m,
  * so a section reached its yield force only after ~10 cm of ELASTIC
  * closure per section: a 30 km/h frontal compressed the nose ~90 cm and
- * gave most of it back (spring-back, rebound). (0.46/0.33)² ≈ 1.94× the
+ * gave most of it back (spring-back, rebound). (0.485/0.33)² ≈ 2.2× the
  * stiffness. With ground/collider contact (≤ sqrt(0.2) in quadrature) a
- * shell node stays ≤ 0.65, far inside the explicit-Euler bound of 2.
+ * shell node stays ≤ 0.68, far inside the explicit-Euler bound of 2.
  */
-const SHELL_OMEGA_DT_TARGET = 0.46;
+const SHELL_OMEGA_DT_TARGET = 0.485;
 const SHELL_BUDGET_PER_KG = (SHELL_OMEGA_DT_TARGET / DT) ** 2;
 
 // ====================================================================== beam classes
@@ -89,23 +89,40 @@ const SHELL_BUDGET_PER_KG = (SHELL_OMEGA_DT_TARGET / DT) ** 2;
  * locked-wheel braking, full-lock cornering, 0.5 m drop: ≤ 3 kN in body
  * beams, ≤ 4.7 kN in mounts/subframe), so normal driving stays elastic;
  * the cage floor is ~4× the crumple zones', so crashes fold the ends first.
- * P4 crash tuning (crash.ts harness): low yield strains in the crumple
- * zones (a member that distorts yields, so crush is permanent instead of
- * springing back), ζ 0.4 there (crush energy also goes into damping),
- * cage links force-based (CRASH SECTIONS) so the cell never yields in a
- * frontal; subframe anchors and suspension arms yield at modest loads
- * (ARM_SCALE) so the front wheel is pushed back instead of acting as a
- * rigid block that springs the nose back out.
+ * P4 crash tuning (crash.ts harness, peak/final/spring-back measured):
+ * LOW yield strains in the crumple zones (1.5–2.5 %): the elastic travel
+ * before yield is what springs back, so members that distort must yield
+ * early; ζ 0.4 there; the rear bay stronger (REAR_BAY_FACTOR) so the zone
+ * folds front to back; cage links force-based (CRASH SECTIONS) so the cell
+ * never yields in a frontal. Spring-back sources found and removed: the
+ * plastic ratchet's symmetric reverse yield (beams.ts
+ * PLASTIC_REVERSE_FACTOR), a 25 kg-node engine block on budget-starved
+ * mounts (ENGINE_NODE_MASS), soft subframe anchors (class weight 3), an
+ * elastic firewall (FIREWALL_PANEL).
  */
+/**
+ * The rear bay (gaps s3→s4→s5, s4's own members and the firewall panel)
+ * yields at this multiple of the bay class strain: the front zone (bumper,
+ * crash cans, s2→s3) folds first and the rear bay + firewall stop the
+ * engine/wheel stack. Without it a 50 km/h hit crushed the whole bay into
+ * the firewall (peak ~95 cm).
+ */
+const REAR_BAY_FACTOR = 10;
 const CLASSES = {
-  bumper: { w: 1.0, zeta: 0.4, yieldStrain: 0.03, minDeform: 1.5e3, breakRatio: 5 },
-  crash: { w: 1.0, zeta: 0.4, yieldStrain: 0.052, minDeform: 4e3, breakRatio: 6 },
-  bay: { w: 1.0, zeta: 0.4, yieldStrain: 0.05, minDeform: 6e3, breakRatio: 6 },
+  bumper: { w: 1.0, zeta: 0.4, yieldStrain: 0.025, minDeform: 1.5e3, breakRatio: 5 },
+  crash: { w: 1.0, zeta: 0.4, yieldStrain: 0.018, minDeform: 3e3, breakRatio: 6 },
+  bay: { w: 1.0, zeta: 0.4, yieldStrain: 0.015, minDeform: 4e3, breakRatio: 6 },
   cage: { w: 1.3, zeta: 0.3, yieldStrain: 0.1, minDeform: 1.6e4, breakRatio: 5 },
   /** Brittle: elastic, shatters at GLASS_BREAK_STRAIN (yieldStrain/breakRatio unused). */
   glass: { w: 0.4, zeta: 0.25, yieldStrain: 0.06, minDeform: 0, breakRatio: 1.7 },
-  subframe: { w: 1.5, zeta: 0.25, yieldStrain: 0.04, minDeform: 8e3, breakRatio: 5 },
-  mount: { w: 1.0, zeta: 0.3, yieldStrain: 0.2, minDeform: 1.2e4, breakRatio: 5 },
+  /**
+   * Weight 3 (P4): stiff anchors; at 1.5 the heavy subframe compressed its
+   * anchors ~10 cm elastically in a frontal and pushed the nose back out.
+   * Floor 2e4 N ≥ 1.25× the measured hard-driving anchor load (16 kN).
+   */
+  subframe: { w: 3, zeta: 0.25, yieldStrain: 0.04, minDeform: 2e4, breakRatio: 5 },
+  /** Low yield strain (P4): the block sets back plastically instead of bouncing on its mounts. */
+  mount: { w: 1.0, zeta: 0.3, yieldStrain: 0.04, minDeform: 6e3, breakRatio: 5 },
   /** Engine block: never yields or breaks. */
   engine: { w: 2.0, zeta: 0.2, yieldStrain: 0, minDeform: 0, breakRatio: 0 },
 } as const;
@@ -150,6 +167,8 @@ const LINKS_PER_NODE = 3;
  * qm quarter mid · dk rear deck (C-pillar base) · tf trunk floor ·
  * qt quarter top · ld trunk lid.
  */
+/** Base mass of the bay rail nodes (s3, s4 rl/rh), kg: they carry the engine's share of the mass (see ENGINE_NODE_MASS). */
+const RAIL_BASE = 50;
 const STATIONS: readonly Station[] = [
   // 0 front bumper face
   { z: -2.3, closed: true, bulkhead: true, cls: 'bumper', mass: { bl: 10, bo: 6, bu: 10 },
@@ -158,13 +177,13 @@ const STATIONS: readonly Station[] = [
   { z: -2.04, closed: false, bulkhead: false, cls: 'crash', mass: { rl: 20, rh: 20, fd: 6 },
     ring: [['rl', 0.42, 0.28], ['rh', 0.42, 0.5], ['fd', 0.74, 0.64]] },
   // 2 radiator support (bulkhead)
-  { z: -1.72, closed: true, bulkhead: true, cls: 'crash', mass: { rs: 8, rl: 20, rh: 20, fd: 6, rt: 8 },
+  { z: -1.72, closed: true, bulkhead: true, cls: 'crash', mass: { rs: 8, rl: 30, rh: 30, fd: 6, rt: 8 },
     ring: [['rs', 0, 0.26], ['rl', 0.42, 0.28], ['rh', 0.42, 0.52], ['fd', 0.79, 0.74], ['rt', 0, 0.76]] },
   // 3 front axle: shock towers
-  { z: Z_F, closed: false, bulkhead: false, cls: 'bay', mass: { rl: 14, rh: 14, tw: 8, fd: 5 },
+  { z: Z_F, closed: false, bulkhead: false, cls: 'bay', mass: { rl: RAIL_BASE, rh: RAIL_BASE, tw: 8, fd: 5 },
     ring: [['rl', 0.42, 0.28], ['rh', 0.42, 0.54], ['tw', 0.56, 0.88], ['fd', 0.82, 0.82]] },
   // 4 engine bay rear
-  { z: -1.06, closed: false, bulkhead: false, cls: 'bay', mass: { rl: 14, rh: 14, fd: 5 },
+  { z: -1.06, closed: false, bulkhead: false, cls: 'bay', mass: { rl: RAIL_BASE, rh: RAIL_BASE, fd: 5 },
     ring: [['rl', 0.43, 0.26], ['rh', 0.44, 0.54], ['fd', 0.84, 0.88]] },
   // 5 firewall / cowl / A-pillar base (bulkhead)
   { z: -0.8, closed: true, bulkhead: true, cls: 'cage', mass: { tn: 8, fl: 9, sl: 9, hp: 7, cw: 7, fw: 6 },
@@ -225,6 +244,13 @@ const GLASS_BREAK_STRAIN = 0.03;
 /** Door skins/frames (nodes s6/s8 dm, bt): yield strain, so a side impact dents them plastically. */
 const DOOR_YIELD_STRAIN = 0.05;
 const DOOR_MIN_DEFORM = 4e3;
+/**
+ * Firewall panel node (s5_fw_*, the engine side of the bulkhead): its
+ * links yield like the bay. As part of the never-yielding cell bulkhead it
+ * acted as a trampoline: the engine/gearbox block pushed it ~34 cm back
+ * elastically and it threw the whole front forward again (springback).
+ */
+const FIREWALL_PANEL = /^s5_fw_/;
 const DOOR_NODES = /^s[68]_(dm|bt|sl|fl)_/;
 const isDoor = (a: string, b: string): boolean => DOOR_NODES.test(a) || DOOR_NODES.test(b);
 /**
@@ -330,6 +356,14 @@ const CROSS_CABIN: readonly (readonly [number, string, string])[] = [
  */
 const HUB_SPACING = 0.24;
 /**
+ * Engine block / gearbox node mass, kg. P4: the block is light (the I6's
+ * mass lives in the bay rails' base masses instead, same location) so the
+ * rails get the stiffness budget a crash needs; a 25 kg-node block hung on
+ * budget-starved mounts slid ~40 cm into the firewall elastically and threw
+ * the nose back out.
+ */
+const ENGINE_NODE_MASS = 5;
+/**
  * Fore-aft reach of the tie rod (front, pivot behind the wheel) and toe
  * link (rear, pivot ahead), m. The link pivot is the third corner of the
  * subframe triangle with the two lower-arm pivots (0.56 m inboard, ±0.3 m
@@ -387,15 +421,8 @@ const KNUCKLE_NODE_MASS = 7.5;
  */
 const K_SUBFRAME = 1e6;
 const SUBFRAME_BUDGET_SHARE = 0.7;
-/**
- * Yield/break scale of the subframe and suspension arms (P4 crash tuning):
- * 0.3 × the P2 values (deform 2.7e4 / 2.1e4 N, ≥ 4× the measured driving
- * loads), so a frontal pushes the wheel back instead of loading the shell
- * through a rigid wheel/subframe block.
- */
-const ARM_SCALE = 0.3;
-const SUBFRAME_DEFORM = 9e4 * ARM_SCALE;
-const SUBFRAME_BREAK = 1.8e5 * ARM_SCALE;
+const SUBFRAME_DEFORM = 9e4;
+const SUBFRAME_BREAK = 1.8e5;
 const subframePivotMass = (fixedK: number): number => round(fixedK / (BUDGET_PER_KG * SUBFRAME_BUDGET_SHARE), 2);
 /** Base mass of the upper-arm pivot nodes, kg (before the mass solve). */
 const PIVOT_NODE_MASS = 7;
@@ -435,9 +462,10 @@ const ARB_FRACTION_REAR = 0.25;
  * link compliance) shows ≈ 0.55× the damping ratio of the rigid-link
  * estimate in the heave decay test (sedan.test.ts; measured ζ scales
  * linearly with shock d), so damper rates carry this calibration to land
- * at ζ ≈ 0.3.
+ * at ζ ≈ 0.3. 1.9 → 1.6 in P4: the crash-tuned shell (ζ 0.4 crumple zones,
+ * heavier bay rails) adds its own heave damping (decay ratio fell to 0.21).
  */
-const DAMPER_CALIBRATION = 1.9;
+const DAMPER_CALIBRATION = 1.6;
 
 /** Wheel: 205/55R16-class tuning (wheelrig.ts) with a heavy hub carrier (upright + brakes): 15 kg per hub node. */
 const WHEEL_HUB_MASS = 30;
@@ -473,6 +501,8 @@ const HOOD = {
   hingeDeform: 1.2e4,
   hingeBreak: 3e4,
   latchBreak: 4e3,
+  /** Rests are elastic (driving puts up to ~5 kN through them) and snap off in a crash. */
+  restBreak: 1.5e4,
 } as const;
 
 // ====================================================================== drivetrain
@@ -650,8 +680,8 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
   const engine: string[] = [];
   for (const z of [-1.62, -1.02])
     for (const y of [0.35, 0.75])
-      for (const s of ['R', 'L'] as const) engine.push(addNode(`eng_${z < -1.3 ? 'f' : 'r'}${y < 0.5 ? 'lo' : 'hi'}_${s}`, [0.2 * sideSign(s), y, z], 25, 'engine', true, false));
-  const gearbox = (['R', 'L'] as const).map((s) => addNode(`gbx_${s}`, [0.12 * sideSign(s), 0.42, -0.6], 25, 'engine', true, false));
+      for (const s of ['R', 'L'] as const) engine.push(addNode(`eng_${z < -1.3 ? 'f' : 'r'}${y < 0.5 ? 'lo' : 'hi'}_${s}`, [0.2 * sideSign(s), y, z], ENGINE_NODE_MASS, 'engine', true, false));
+  const gearbox = (['R', 'L'] as const).map((s) => addNode(`gbx_${s}`, [0.12 * sideSign(s), 0.42, -0.6], ENGINE_NODE_MASS, 'engine', true, false));
 
   // ---- suspension body nodes + upright tops (hub nodes come from the wheels)
   type CornerIds = { kU: string; hubI: string; hubO: string; lower: string[]; upper: string[]; link: string; tower: string };
@@ -1048,8 +1078,8 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
       // Axle stub: the generated hubI–hubO beam has the (soft) rim rate; this one makes the upright triangle rigid.
       const lf = linkFactor(front);
       fix({ a: ids.hubI, b: ids.hubO, type: 'normal', k: K_AXLE_STUB * lf, d: D_ARM, deform: 0, breakF: 0 });
-      for (const p of ids.lower) fix({ a: ids.hubI, b: p, type: 'normal', k: K_LOWER_ARM * lf, d: D_ARM, deform: 9e4 * ARM_SCALE, breakF: 1.8e5 * ARM_SCALE });
-      for (const p of ids.upper) fix({ a: ids.kU, b: p, type: 'normal', k: K_UPPER_ARM, d: D_ARM, deform: 7e4 * ARM_SCALE, breakF: 1.4e5 * ARM_SCALE });
+      for (const p of ids.lower) fix({ a: ids.hubI, b: p, type: 'normal', k: K_LOWER_ARM * lf, d: D_ARM, deform: 9e4, breakF: 1.8e5 });
+      for (const p of ids.upper) fix({ a: ids.kU, b: p, type: 'normal', k: K_UPPER_ARM, d: D_ARM, deform: 7e4, breakF: 1.4e5 });
       fix({
         a: ids.hubI,
         b: ids.tower,
@@ -1155,7 +1185,7 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
       } else if (kind === 'latch') {
         hoodBeams.push({ a, b, type: 'normal', k, d, deform: 0, breakF: HOOD.latchBreak });
       } else {
-        hoodBeams.push({ a, b, type: 'support', k, d, deform: HOOD.minDeform, breakF: 0 });
+        hoodBeams.push({ a, b, type: 'support', k, d, deform: 0, breakF: HOOD.restBreak });
       }
     }
   }
@@ -1237,6 +1267,11 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
       // Brittle: elastic up to its break strain, then shatters (never yields).
       return { a, b, type: 'normal', k, d, deform: 0, breakF: sig3(GLASS_BREAK_STRAIN * k * dist(a, b)) };
     }
+    if ((FIREWALL_PANEL.test(a) || FIREWALL_PANEL.test(b)) && stationOf.has(a) && stationOf.has(b)) {
+      // Firewall panel: dents plastically where the engine hits it.
+      const deform = sig3(Math.max(REAR_BAY_FACTOR * CLASSES.bay.yieldStrain * k * dist(a, b), CLASSES.bay.minDeform));
+      return { a, b, type: 'normal', k, d, deform, breakF: sig3(CLASSES.bay.breakRatio * deform) };
+    }
     if (isDoor(a, b)) {
       const deform = sig3(Math.max(DOOR_YIELD_STRAIN * k * dist(a, b), DOOR_MIN_DEFORM));
       return { a, b, type: 'normal', k, d, deform, breakF: sig3(spec.breakRatio * deform) };
@@ -1258,7 +1293,9 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
       }
     }
     if (section === 0 && isCabinSpan(a, b)) section = CABIN_SPAN_YIELD_STRAIN * k * dist(a, b);
-    const deform = sig3(Math.max(section > 0 ? section : spec.yieldStrain * k * dist(a, b), spec.minDeform));
+    const rearBay = (g === 3 || g === 4 || (g < 0 && (stationOf.get(a) === 4 || stationOf.get(b) === 4) && stationOf.get(a) === stationOf.get(b))) && cls !== 'cage';
+    const base = section > 0 ? section : spec.yieldStrain * k * dist(a, b);
+    const deform = sig3(Math.max(rearBay ? base * REAR_BAY_FACTOR : base, spec.minDeform));
     const mount = isBumperMount(a, b);
     return { a, b, type: 'normal', k, d, deform, breakF: sig3((mount ? BUMPER_MOUNT_BREAK_RATIO : spec.breakRatio) * deform) };
   });

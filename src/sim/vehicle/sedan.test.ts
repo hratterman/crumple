@@ -86,8 +86,12 @@ describe('SEDAN definition', () => {
 
   it('has a heavy engine cluster, softer crumple zones than the cage, and brittle glass', () => {
     const body = SEDAN.body;
-    const engineMass = body.nodes.filter((n) => n.group === 'engine').reduce((a, n) => a + n.mass, 0);
-    expect(engineMass).toBeGreaterThanOrEqual(200);
+    // P4: the engine block is light and the I6's mass sits in the bay rails
+    // (same place; the rails get the stiffness budget a crash needs).
+    const engineBay = body.nodes
+      .filter((n) => n.group === 'engine' || /^s[34]_(rl|rh)_/.test(n.id))
+      .reduce((a, n) => a + n.mass, 0);
+    expect(engineBay).toBeGreaterThanOrEqual(200);
     const deformOf = (pred: (a: string, b: string) => boolean): number[] =>
       body.beams.filter((b) => b.type === 'normal' && pred(b.a, b.b)).map((b) => b.deform ?? 0);
     const st = (id: string): number => Number(/^s(\d+)_/.exec(id)?.[1] ?? -1);
@@ -99,7 +103,8 @@ describe('SEDAN definition', () => {
     const cage = deformOf(
       (a, b) =>
         st(a) >= 5 && st(a) <= 9 && st(b) >= 5 && st(b) <= 9 && !/_(bt|rf|cw|dk)/.test(a + b) && !door.test(a) && !door.test(b) &&
-        !(/_hp/.test(a + b) && st(a) !== st(b)), // door-frame diagonals bend in side impacts
+        !(/_hp/.test(a + b) && st(a) !== st(b)) && // door-frame diagonals bend in side impacts
+        !/s5_fw_/.test(a + b), // firewall panel dents where the engine hits it
     );
     expect(front.length).toBeGreaterThan(10);
     // The ends yield before any safety-cell member (crashes fold the ends first).

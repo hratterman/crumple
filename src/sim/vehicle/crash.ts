@@ -10,7 +10,7 @@
  * first contact. Measures use node ids (the vehicle frame):
  *   crush       rest − final distance between the crash-can tips (mean of
  *               s1_rl_*, s1_rh_*) and the B-pillar floor (s7_fl_*, s7_sl_*),
- *               along the car's long axis (B-pillar refs → firewall ring).
+ *               along the safety cell's long axis (s9 ring → s5 ring).
  *   intrusion   same for the firewall ring (s5_fl_*, s5_sl_*, s5_hp_*, s5_cw_*).
  *   doorIntrusion (side pole) rest − final width s6_dm_R ↔ s6_dm_L.
  *   rebound     peak COM speed away from the barrier after contact ends.
@@ -48,6 +48,8 @@ export interface CrashResult {
   doorIntrusion: number;
   doorIntrusionMax: number;
   sillIntrusion: number;
+  /** (crushMax − crush) / crushMax: how much of the peak crush springs back (0 = fully plastic). */
+  springback: number;
   /** Peak COM speed away from the barrier, m/s. */
   rebound: number;
   /** Max penetration of any node into the barrier, m. */
@@ -154,7 +156,8 @@ export function runCrash(spec: CrashSpec): CrashResult {
   };
   /**
    * Crush is measured ALONG the vehicle's long axis, taken from the safety
-   * cell (B-pillar refs → firewall ring, which stays rigid): crash-can tips
+   * cell (s9 rear-bulkhead ring → s5 firewall ring, which stays rigid; a
+   * long baseline, insensitive to the cell's small pitch): crash-can tips
    * splayed sideways or folded down do not count as length kept.
    */
   const axial = (a: number[], b: number[], fw: number[]): number => {
@@ -164,8 +167,22 @@ export function runCrash(spec: CrashSpec): CrashResult {
     const l = Math.hypot(ux, uy, uz);
     return ((a[0]! - b[0]!) * ux + (a[1]! - b[1]!) * uy + (a[2]! - b[2]!) * uz) / l;
   };
-  const crushNow = (): number => crushRest - axial(mean(tips), mean(bpillar), mean(firewall));
-  const crushRest = axial(restMean(tips), restMean(bpillar), restMean(firewall));
+  const cellRear = nodesMatching(cv, ['s9_*']);
+  const cellFront = nodesMatching(cv, ['s5_*']);
+  const axisNow = (): number[] => {
+    const f = mean(cellFront);
+    const r = mean(cellRear);
+    const b = mean(bpillar);
+    return [b[0]! + f[0]! - r[0]!, b[1]! + f[1]! - r[1]!, b[2]! + f[2]! - r[2]!];
+  };
+  const restAxis = (): number[] => {
+    const f = restMean(cellFront);
+    const r = restMean(cellRear);
+    const b = restMean(bpillar);
+    return [b[0]! + f[0]! - r[0]!, b[1]! + f[1]! - r[1]!, b[2]! + f[2]! - r[2]!];
+  };
+  const crushNow = (): number => crushRest - axial(mean(tips), mean(bpillar), axisNow());
+  const crushRest = axial(restMean(tips), restMean(bpillar), restAxis());
   const intrRest = dist(restMean(firewall), restMean(bpillar));
   const doorRest = dist(restP(dmR!), restP(dmL!));
   const sillRest = dist(restP(slR!), restP(slL!));
@@ -359,6 +376,7 @@ export function runCrash(spec: CrashSpec): CrashResult {
   return {
     spec,
     crush: crushNow(),
+    springback: crushMax > 0 ? (crushMax - crushNow()) / crushMax : 0,
     crushMax,
     intrusion: intrRest - dist(mean(firewall), mean(bpillar)),
     intrusionMax: intrMax,
@@ -393,7 +411,7 @@ export function formatCrash(r: CrashResult): string {
   const main =
     r.spec.kind === 'pole'
       ? `door ${cm(r.doorIntrusion)} cm (max ${cm(r.doorIntrusionMax)}), sill ${cm(r.sillIntrusion)} cm, poleSide ${r.poleSideKept}`
-      : `crush ${cm(r.crush)} cm (max ${cm(r.crushMax)}), intrusion ${cm(r.intrusion)} cm (max ${cm(r.intrusionMax)})`;
+      : `crush ${cm(r.crush)} cm (max ${cm(r.crushMax)}, springback ${f(r.springback * 100, 0)} %), intrusion ${cm(r.intrusion)} cm (max ${cm(r.intrusionMax)})`;
   return (
     `${head}: ${main}, rebound ${f(r.rebound, 2)} m/s, pen ${cm(r.maxPenetration)} cm, ` +
     `broken ${r.brokenBeams}, plastic ${f(r.plasticFraction * 100)} %, wheels ${r.wheelsDetached}, ` +

@@ -45,6 +45,19 @@ export const PLASTIC_COMPRESS_FLOOR = 0.3;
  * frontal: permanent crush 31 → 22 cm, rebound 3.6 → 4.4 m/s).
  */
 export const PLASTIC_WEAKEN = 1;
+/**
+ * Reverse-yield hysteresis: a member already plastically shortened (rest <
+ * rest0) yields in TENSION only at this multiple of `deform`, and one
+ * already stretched yields in compression only at this multiple.
+ * WHY: crashes store elastic energy all around the crushed zone (safety
+ * cell, suspension, engine mounts). With symmetric yield that energy
+ * pulled the folded rails straight again in tension while the car
+ * rebounded (a 50 km/h frontal: peak ~96 cm of crush, final 37 cm).
+ * Folded sheet metal does not unfold under those loads. 2 rather than
+ * higher: members that reverse during the crush itself (diagonals) stay
+ * elastic longer and store energy that springs back (4 measured worse).
+ */
+export const PLASTIC_REVERSE_FACTOR = 2;
 /** Plastic weakening never takes k below this fraction of k0. */
 export const PLASTIC_K_FLOOR = 0.25;
 /** Below this length a beam has no defined direction and exerts no force. */
@@ -134,19 +147,25 @@ export const applyBeamForces: ApplyBeamForces = (state, first, count, events, de
 
     const df = deform[b]!;
     if (fAbs > df) {
-      // Ratchet rest length toward the current length by PLASTIC_RATCHET of
-      // the excess (beyond-threshold) elastic stretch, then weaken k.
-      const excess = (fAbs - df) / kb;
-      if (fs > 0) {
-        restLen[b] = rest + PLASTIC_RATCHET * excess;
-      } else {
-        const floor = PLASTIC_COMPRESS_FLOOR * restLen0[b]!;
-        const r = rest - PLASTIC_RATCHET * excess;
-        restLen[b] = r > floor ? r : floor < rest ? floor : rest;
+      // Reverse yield (pulling a crushed member back out, or pushing a
+      // stretched one back in) needs PLASTIC_REVERSE_FACTOR × the threshold.
+      const r0 = restLen0[b]!;
+      const dfe = (fs > 0 ? rest < r0 : rest > r0) ? df * PLASTIC_REVERSE_FACTOR : df;
+      if (fAbs > dfe) {
+        // Ratchet rest length toward the current length by PLASTIC_RATCHET of
+        // the excess (beyond-threshold) elastic stretch, then weaken k.
+        const excess = (fAbs - dfe) / kb;
+        if (fs > 0) {
+          restLen[b] = rest + PLASTIC_RATCHET * excess;
+        } else {
+          const floor = PLASTIC_COMPRESS_FLOOR * r0;
+          const r = rest - PLASTIC_RATCHET * excess;
+          restLen[b] = r > floor ? r : floor < rest ? floor : rest;
+        }
+        const kFloor = PLASTIC_K_FLOOR * k0Arr[b]!;
+        const kNew = kb * PLASTIC_WEAKEN;
+        kArr[b] = kNew > kFloor ? kNew : kFloor;
       }
-      const kFloor = PLASTIC_K_FLOOR * k0Arr[b]!;
-      const kNew = kb * PLASTIC_WEAKEN;
-      kArr[b] = kNew > kFloor ? kNew : kFloor;
     }
 
     const vrel = ((velX[ib]! - velX[ia]!) * dx + (velY[ib]! - velY[ia]!) * dy + (velZ[ib]! - velZ[ia]!) * dz) * inv;

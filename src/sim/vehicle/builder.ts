@@ -342,11 +342,12 @@ export const TREAD_OMEGA_DT_LIMIT = 0.49;
  * (P4 crash amendment, docs/CONTRACTS.md). WHY: a crash is
  * stiffness-limited. The shell must carry a 250–400 kN crush force, and
  * at 0.35 its sections were so soft that a 30 km/h frontal compressed the
- * nose elastically by ~60 cm and gave it back. (0.47/0.35)² = 1.8× the
- * stiffness at the same mass. Ground / collider contact adds ≤ sqrt(0.2) in
- * quadrature (≤ 0.66 per node), far inside the explicit-Euler bound of 2.
+ * nose elastically by ~60 cm and gave it back. (0.495/0.35)² = 2× the
+ * stiffness at the same mass; still under the 0.5 general limit. Ground /
+ * collider contact adds ≤ sqrt(0.2) in quadrature (≤ 0.68 per node), far
+ * inside the explicit-Euler bound of 2.
  */
-export const SHELL_OMEGA_DT_LIMIT = 0.47;
+export const SHELL_OMEGA_DT_LIMIT = 0.495;
 export const SHELL_GROUP = 'body';
 
 /** Per-node ω·dt limit of the vehicle MINIMASS / validation by node group. */
