@@ -1,14 +1,14 @@
 /**
- * Catalog entry: sports coupe (owner: F1). Stats are the P6 TARGETS until
- * F1 lands its defs and replaces them with the measured values (tests
- * assert them against the def + harness). F1 flips `available` and writes
- * `load` (dynamic imports of its sim + visual def modules, like sedan.ts).
+ * Catalog entry: the "Vortex RS" sports coupe (owner: F1). Card numbers are
+ * the BUILT vehicle's: mass / power / torque from the defs, 0–100 from the
+ * handling harness (src/sim/vehicle/coupe.test.ts prints it) and top speed
+ * from a long full-throttle run (it settles at ≈ 285 km/h).
  */
-import { metallicPaint, notYetBuilt, solidPaint, type VehicleCatalogEntry } from '../catalogTypes';
+import { metallicPaint, solidPaint, type VehicleCatalogEntry } from '../catalogTypes';
 
 export const COUPE_ENTRY: VehicleCatalogEntry = {
   id: 'coupe',
-  available: false,
+  available: true,
   selectable: true,
   trafficEligible: false,
   stats: {
@@ -21,8 +21,8 @@ export const COUPE_ENTRY: VehicleCatalogEntry = {
     powerKw: 300,
     torqueNm: 520,
     massKg: 1300,
-    topSpeedKmh: 270,
-    zeroTo100S: 4.2,
+    topSpeedKmh: 285,
+    zeroTo100S: 4.5,
     ratings: { speed: 5, handling: 5, toughness: 2 },
   },
   palettes: [
@@ -35,6 +35,9 @@ export const COUPE_ENTRY: VehicleCatalogEntry = {
   ],
   beamBudget: 3000,
   chase: { distance: 5.3, height: 1.7 },
-  extent: { min: [-1.0, 0, -2.25], max: [1.0, 1.3, 2.25] },
-  load: notYetBuilt('coupe'),
+  extent: { min: [-1.0, 0, -2.21], max: [1.0, 1.26, 2.25] },
+  load: async () => {
+    const [{ COUPE }, { COUPE_VISUAL }] = await Promise.all([import('../../sim/vehicle/defs/coupe'), import('../../render/vehicle/defs/coupe')]);
+    return { sim: COUPE, visual: COUPE_VISUAL };
+  },
 };
