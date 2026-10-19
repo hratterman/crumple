@@ -53,3 +53,70 @@ export function placeOnGround(rest: RestPose, ground: Ground, x: number, z: numb
 export function yawOf(fx: number, fz: number): number {
   return Math.atan2(-fx, -fz);
 }
+
+/** World AABB (min xyz, max xyz), e.g. `PropInstance.aabb`. */
+export type Aabb = readonly [number, number, number, number, number, number];
+
+/** Gap kept between a repaired vehicle's footprint and a prop's spawn box, m. */
+export const REPAIR_CLEARANCE_M = 0.4;
+/** Back-off step and range when the repair spot overlaps a prop's spawn box, m. */
+export const REPAIR_BACKOFF_STEP_M = 0.5;
+export const REPAIR_BACKOFF_MAX_M = 40;
+
+/**
+ * Whether `rest` placed at (x, z) facing `yaw` stays `clearance` away (XZ) from
+ * every box whose height range overlaps the rig's ±3 m around `y`.
+ * Conservative: the rotated footprint's world AABB is tested.
+ */
+export function clearOfBoxes(rest: RestPose, x: number, y: number, z: number, yaw: number, boxes: readonly Aabb[], clearance = REPAIR_CLEARANCE_M): boolean {
+  const c = Math.cos(yaw);
+  const s = Math.sin(yaw);
+  let x0 = Infinity;
+  let x1 = -Infinity;
+  let z0 = Infinity;
+  let z1 = -Infinity;
+  for (let i = 0; i < rest.nodeCount; i++) {
+    const lx = rest.nodePos[3 * i]!;
+    const lz = rest.nodePos[3 * i + 2]!;
+    const wx = x + lx * c + lz * s;
+    const wz = z - lx * s + lz * c;
+    if (wx < x0) x0 = wx;
+    if (wx > x1) x1 = wx;
+    if (wz < z0) z0 = wz;
+    if (wz > z1) z1 = wz;
+  }
+  for (const b of boxes) {
+    if (b[1] > y + 3 || b[4] < y - 3) continue;
+    if (b[0] - clearance < x1 && b[3] + clearance > x0 && b[2] - clearance < z1 && b[5] + clearance > z0) return false;
+  }
+  return true;
+}
+
+/**
+ * Full-repair spot for F: the vehicle's own position when it is clear of
+ * every prop's SPAWN box (the props are re-placed at the same time; a car
+ * repaired inside a barrel wall it had pushed away would explode against
+ * the returning barrels), else the nearest clear point straight back along
+ * its heading, then forward; null when nothing within `maxM` is clear.
+ */
+export function repairSpot(
+  rest: RestPose,
+  ground: Ground,
+  x: number,
+  z: number,
+  yaw: number,
+  boxes: readonly Aabb[],
+  maxM = REPAIR_BACKOFF_MAX_M,
+): Transform | null {
+  const bx = Math.sin(yaw);
+  const bz = Math.cos(yaw);
+  for (let d = 0; d <= maxM + 1e-9; d += REPAIR_BACKOFF_STEP_M) {
+    for (const sign of d === 0 ? [1] : [1, -1]) {
+      const px = x + sign * bx * d;
+      const pz = z + sign * bz * d;
+      const t = placeOnGround(rest, ground, px, pz, yaw);
+      if (clearOfBoxes(rest, px, t.pos[1], pz, yaw, boxes)) return t;
+    }
+  }
+  return null;
+}

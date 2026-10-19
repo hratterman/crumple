@@ -21,7 +21,7 @@ import { MeshPhysicalMaterial, NoToneMapping, PerspectiveCamera, Scene, SRGBColo
 import { FrameProfiler, gpuSyncFn, PassCounter, perfGpuSync, perfRequested } from './app/perf';
 import { anisotropyFor, createQualityControllerWith, isQualityLevel, isSoftwareRenderer, loadQualityLevel, SOFTWARE_GL_PIXEL_RATIO } from './app/quality';
 import { SimClient, type ObjectRange } from './app/simClient';
-import { placeOnGround, yawOf } from './app/spawn';
+import { placeOnGround, repairSpot, yawOf, type Aabb } from './app/spawn';
 import { loadTerrain } from './app/world';
 import { loadAllTerrainSets } from './assets/loader';
 import { quatFromAxisAngle, quatRotateVec3, vec3Normalize, type Quat, type Vec3 } from './core/math';
@@ -304,6 +304,8 @@ function updateNearCasters(lighting: Parameters<typeof setNearCasters>[0]): void
 let fx: FxSystem | null = null;
 let props: PropRenderer | null = null;
 let layoutPropCount = 0;
+/** Spawn-pose AABBs of the layout props (F re-places them; see repairVehicle). */
+let propBoxes: readonly Aabb[] = [];
 
 /** Sim events → the sedan's damage, prop scuffs and world FX (allocation-free routing; every object's events reach FX). */
 const eventSink = {
@@ -393,13 +395,23 @@ function teleport(i: number): void {
   hud?.showToast(terrain.spawns[i]!.name.toUpperCase(), `SPAWN ${i + 1}`);
 }
 
+/** Full repair at world (x, z) facing `yaw` (rad, 0 = −Z), dropped onto the terrain (tests, screenshots). */
+function placeVehicle(x: number, z: number, yaw: number): void {
+  if (!sampler) return;
+  lastSpawn = placeOnGround(sedanRig, sampler, x, z, yaw);
+  client.reset(VEHICLE_ID, lastSpawn);
+  lastSent.gearSelect = NaN;
+  snapAfterTick = client.latestTick;
+}
+
 /** F: full repair in place (heading kept), dropped onto the terrain. */
 function repairVehicle(): void {
   let t = lastSpawn;
   if (poseValid && sampler) {
     const f = pose.forward;
     const yaw = Math.hypot(f.x, f.z) > 0.2 ? yawOf(f.x, f.z) : 0;
-    t = placeOnGround(sedanRig, sampler, pose.position.x, pose.position.z, yaw);
+    // Props return to their spawn poses at the same time: never repair the car inside one's spawn box.
+    t = propBoxes.length > 0 ? (repairSpot(sedanRig, sampler, pose.position.x, pose.position.z, yaw, propBoxes) ?? lastSpawn) : placeOnGround(sedanRig, sampler, pose.position.x, pose.position.z, yaw);
   }
   client.reset(VEHICLE_ID, t);
   lastSent.gearSelect = NaN;
@@ -586,6 +598,10 @@ const crumple = {
   spawn(i: number): void {
     teleport(i);
   },
+  /** Full repair at world (x, z) facing `yawDeg` (0 = −Z, 90 = −X), on the ground. */
+  place(x: number, z: number, yawDeg = 0): void {
+    placeVehicle(x, z, (yawDeg * Math.PI) / 180);
+  },
   /** Screenshot helpers: hold the render loop, draw single frames on demand. */
   set hold(v: boolean) {
     hold = v;
@@ -765,6 +781,7 @@ async function boot(): Promise<void> {
   const waterBodies = resolveWater(LAYOUT, world);
   const propInstances = resolvePropInstances(LAYOUT.props, heightAt);
   layoutPropCount = propInstances.length;
+  propBoxes = propInstances.map((p) => p.aabb);
   const propsR = createPropRenderer(ctx, propInstances, { lighting, patchMaterial });
   props = propsR;
   scene.add(propsR.object);
@@ -982,6 +999,9 @@ async function boot(): Promise<void> {
     const dt = Math.min(Math.max((now - last) / 1000, 0), 0.1);
     last = now;
     if (hold) {
+      // Held frames (screenshots / tests) still take commands: F, R, X … act as soon as they are pressed.
+      devices.poll();
+      handleCommands();
       requestAnimationFrame(loop);
       return;
     }
