@@ -898,6 +898,12 @@ function buildPickup(): { def: VehicleDef; design: PickupDesign } {
       link(a, b, 'cage', ta === tb ? LONGITUDINAL_W : 1);
     }
   }
+  // Windscreen: the nearest-3 links leave one glass beam (cowl centre → header centre); X it across
+  // both halves so the pane has a shear brace and a strain signal over its whole width.
+  for (const sd of ['R', 'L'] as const) {
+    link(sid('c0', 'ap', sd), sid('c1', 'rf'), 'glass');
+    link(sid('c0', 'cw'), sid('c1', 'rf', sd), 'glass');
+  }
   for (const [i, ta, tb] of CROSS_CABIN) {
     link(sid(`c${i}`, ta, 'R'), sid(`c${i}`, tb, 'L'), 'cage');
     link(sid(`c${i}`, ta, 'L'), sid(`c${i}`, tb, 'R'), 'cage');
