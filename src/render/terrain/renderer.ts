@@ -30,6 +30,7 @@ import {
   chunkSkirtDepth,
   lodTriangles,
   makeChunkGeometry,
+  mergeChunkGeometries,
   TERRAIN_LOD_COUNT,
 } from './chunks';
 import {
@@ -63,6 +64,12 @@ const MORPH_END = 0.96;
 /** Prefetch a finer LOD this far (fraction) beyond its switch distance. */
 const PREFETCH = 1.18;
 const EVICT_AFTER_S = 8;
+/**
+ * Far-field batching (P5 draw budget): blocks of SUPER_CHUNK × SUPER_CHUNK
+ * chunks whose members all draw LOD 3 draw as one pre-merged mesh (the
+ * summit / lakeshore views had 140–210 LOD-3 chunk draws).
+ */
+export const SUPER_CHUNK = 4;
 
 /**
  * Per-layer look. `mean` is the target mean albedo (linear) the texture is
@@ -231,6 +238,25 @@ export function createTerrainRenderer(
       });
     }
   }
+  // Far-field super-chunks: pre-merged LOD-3 geometry per SUPER_CHUNK² block (LOD 3 never evicts).
+  const coarsestLod = TERRAIN_LOD_COUNT - 1;
+  const supers: { mesh: Mesh; members: Chunk[] }[] = [];
+  for (let sz = 0; sz < chunksZ; sz += SUPER_CHUNK) {
+    for (let sx = 0; sx < chunksX; sx += SUPER_CHUNK) {
+      const members = chunks.filter((c) => c.cx >= sx && c.cx < sx + SUPER_CHUNK && c.cz >= sz && c.cz < sz + SUPER_CHUNK);
+      if (members.length < 2) continue;
+      const mesh = new Mesh(mergeChunkGeometries(members.map((c) => c.geoms[coarsestLod]!)), color);
+      mesh.name = `terrain-far-${sx}-${sz}`;
+      mesh.matrixAutoUpdate = false;
+      mesh.customDepthMaterial = depth;
+      if (patched.distance) mesh.customDistanceMaterial = patched.distance;
+      mesh.receiveShadow = true;
+      mesh.castShadow = false;
+      mesh.visible = false;
+      object.add(mesh);
+      supers.push({ mesh, members });
+    }
+  }
   object.updateMatrixWorld(true);
 
   // ------------------------------------------------------------ quality
@@ -275,6 +301,8 @@ export function createTerrainRenderer(
     textureMs: arrays.buildMs,
     planMs: 0,
     finishMs: 0,
+    /** Far-field super-chunks drawn (each replacing SUPER_CHUNK² LOD-3 chunk draws). */
+    superChunks: 0,
   };
 
   const lodFor = (dist: number, scale: number): number => {
@@ -385,6 +413,27 @@ export function createTerrainRenderer(
         }
       }
     }
+    // Far-field batching: a block whose members all draw LOD 3 draws as its merged mesh instead.
+    let superDrawn = 0;
+    for (const s of supers) {
+      let all = true;
+      let shown = false;
+      let casts = false;
+      for (const c of s.members) {
+        if (c.lod !== coarsestLod) {
+          all = false;
+          break;
+        }
+        if (c.mesh.visible) shown = true;
+        if (c.mesh.castShadow) casts = true;
+      }
+      s.mesh.visible = all && shown;
+      if (!s.mesh.visible) continue;
+      s.mesh.castShadow = casts;
+      for (const c of s.members) c.mesh.visible = false;
+      superDrawn++;
+    }
+    stats.superChunks = superDrawn;
     stats.visibleChunks = vis;
     stats.triangles = tris;
     stats.pending = queue.length;
@@ -421,6 +470,7 @@ export function createTerrainRenderer(
     dispose(): void {
       object.removeFromParent();
       for (const c of chunks) for (const g of c.geoms) g?.dispose();
+      for (const s of supers) s.mesh.geometry.dispose();
       color.dispose();
       depth.dispose();
       patched.depth?.dispose();

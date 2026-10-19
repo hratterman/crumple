@@ -37,6 +37,7 @@ import {
   type Object3D,
   type Texture,
 } from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { createRng } from '../../core/rng';
 import { colliderVisual } from '../../world/colliders';
 import type { ResolvedCollider } from '../../world/types';
@@ -529,6 +530,22 @@ function buildCollider(c: ResolvedCollider, M: Mats): Group {
   return g;
 }
 
+/** Every collider's visual group, placed in world space (one per collider, `collider:<id>`). */
+function placedGroups(resolved: readonly ResolvedCollider[], mats: Mats): Group[] {
+  return resolved.map((c) => {
+    const g = buildCollider(c, mats);
+    g.position.set(c.pos[0], c.pos[1], c.pos[2]);
+    g.quaternion.set(c.quat[0], c.quat[1], c.quat[2], c.quat[3]);
+    g.updateMatrixWorld(true);
+    return g;
+  });
+}
+
+/** The per-collider groups before batching (tests: visual == collision per collider). */
+export function colliderGroups(resolved: readonly ResolvedCollider[]): Group[] {
+  return placedGroups(resolved, createMaterials(4).mats);
+}
+
 /**
  * Builds the meshes for `resolved` colliders (call again with a new set; P5
  * breakables will swap meshes per id). Materials are patched with CSM.
@@ -546,13 +563,37 @@ export function createColliderRenderer(ctx: RenderContext, resolved: readonly Re
 
   const root = new Group();
   root.name = 'colliders';
-  for (const c of resolved) {
-    const g = buildCollider(c, mats);
-    g.position.set(c.pos[0], c.pos[1], c.pos[2]);
-    g.quaternion.set(c.quat[0], c.quat[1], c.quat[2], c.quat[3]);
-    g.updateMatrixWorld(true);
-    g.matrixAutoUpdate = false;
-    root.add(g);
+  // Built per collider, then baked to world space and merged per (material, casts shadow): a
+  // handful of draws instead of one per part (52 in every pass the arena was in, P5 draw budget).
+  const batches = new Map<string, { material: Material; casts: boolean; parts: BufferGeometry[] }>();
+  for (const g of placedGroups(resolved, mats)) {
+    g.traverse((o) => {
+      const m = o as Mesh;
+      if (!m.isMesh) return;
+      const material = m.material as Material;
+      const key = `${material.uuid}|${m.castShadow ? 1 : 0}`;
+      let b = batches.get(key);
+      if (!b) batches.set(key, (b = { material, casts: m.castShadow, parts: [] }));
+      const part = (m.geometry.index ? m.geometry.toNonIndexed() : m.geometry.clone()).applyMatrix4(m.matrixWorld);
+      for (const name of Object.keys(part.attributes)) if (name !== 'position' && name !== 'normal' && name !== 'uv') part.deleteAttribute(name);
+      if (!part.getAttribute('normal')) part.computeVertexNormals();
+      if (!part.getAttribute('uv')) part.setAttribute('uv', new BufferAttribute(new Float32Array(part.getAttribute('position').count * 2), 2));
+      part.clearGroups();
+      b.parts.push(part);
+      m.geometry.dispose();
+    });
+  }
+  for (const b of batches.values()) {
+    const merged = mergeGeometries(b.parts, false);
+    for (const p of b.parts) p.dispose();
+    if (!merged) continue;
+    merged.computeBoundingSphere();
+    merged.computeBoundingBox();
+    const me = mesh(merged, b.material, b.casts);
+    me.name = `colliders:${b.material.name}${b.casts ? '' : ':decal'}`;
+    me.matrixAutoUpdate = false;
+    me.updateMatrixWorld(true);
+    root.add(me);
   }
 
   return {

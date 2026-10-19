@@ -4,7 +4,7 @@ import { colliderWorldAabb, resolveColliders } from '../../world/colliders';
 import { DEFAULT_LAYOUT } from '../../world/layout';
 import { patchMaterial } from '../material';
 import type { LightingStack, RenderContext } from '../types';
-import { createColliderRenderer, jerseyGeometry, rampGeometry } from './colliders';
+import { colliderGroups, createColliderRenderer, jerseyGeometry, rampGeometry } from './colliders';
 
 const ctx = { renderer: { capabilities: { getMaxAnisotropy: () => 4 } } } as unknown as RenderContext;
 const lighting = { csm: null } as unknown as LightingStack;
@@ -14,10 +14,11 @@ describe('createColliderRenderer', () => {
   const r = createColliderRenderer(ctx, resolved, { lighting, patchMaterial });
 
   it('draws every arena collider inside its collision AABB (visual == collision)', () => {
-    expect(r.object.children.length).toBe(resolved.length);
+    const groups = colliderGroups(resolved);
+    expect(groups.length).toBe(resolved.length);
     for (let i = 0; i < resolved.length; i++) {
       const c = resolved[i]!;
-      const g = r.object.children[i]!;
+      const g = groups[i]!;
       expect(g.name).toBe(`collider:${c.id}`);
       const bb = new Box3().setFromObject(g);
       const ref = colliderWorldAabb(c, 0.02);
@@ -38,6 +39,22 @@ describe('createColliderRenderer', () => {
       expect(bb.max.x).toBeLessThanOrEqual(ref[3] + 0.1);
       // And it fills the collider (no tiny placeholder).
       expect(bb.max.y - bb.min.y).toBeGreaterThan(0.9 * (ref[4] - ref[1] - 0.04));
+    }
+  });
+
+  it('batches the parts per (material, casts shadow): a handful of draws, all inside the colliders', () => {
+    const meshes = r.object.children.filter((o) => (o as Mesh).isMesh) as Mesh[];
+    expect(meshes.length).toBeGreaterThan(3);
+    expect(meshes.length).toBeLessThanOrEqual(14);
+    const boxes = resolved.map((c) => colliderWorldAabb(c, 0.12));
+    for (const m of meshes) {
+      const pos = m.geometry.getAttribute('position');
+      for (let k = 0; k < pos.count; k += 7) {
+        const x = pos.getX(k);
+        const y = pos.getY(k);
+        const z = pos.getZ(k);
+        expect(boxes.some((b) => x >= b[0] && x <= b[3] && y >= b[1] - 0.01 && y <= b[4] + 0.06 && z >= b[2] && z <= b[5])).toBe(true);
+      }
     }
   });
 

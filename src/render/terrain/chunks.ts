@@ -276,3 +276,40 @@ export function makeChunkGeometry(data: ChunkLodData, lod: number, box: Box3): B
   g.boundingSphere = new Sphere(g.boundingBox.getCenter(_v).clone(), g.boundingBox.getSize(_v).length() * 0.5);
   return g;
 }
+
+/**
+ * One geometry from several chunk geometries (same attribute layout:
+ * position, aMorph, index): far-field super-chunks draw 4 × 4 LOD-3 chunks
+ * in one call. The bounds are the union of the parts' bounds.
+ */
+export function mergeChunkGeometries(parts: readonly BufferGeometry[]): BufferGeometry {
+  let verts = 0;
+  let idx = 0;
+  for (const p of parts) {
+    verts += p.getAttribute('position').count;
+    idx += p.getIndex()!.count;
+  }
+  const pos = new Float32Array(verts * 3);
+  const morph = new Float32Array(verts * 2);
+  const index = verts > 65535 ? new Uint32Array(idx) : new Uint16Array(idx);
+  const box = new Box3();
+  let v = 0;
+  let k = 0;
+  for (const p of parts) {
+    const pa = p.getAttribute('position') as BufferAttribute;
+    const ma = p.getAttribute('aMorph') as BufferAttribute;
+    pos.set(pa.array as Float32Array, v * 3);
+    morph.set(ma.array as Float32Array, v * 2);
+    const pi = p.getIndex()!;
+    for (let i = 0; i < pi.count; i++) index[k++] = pi.getX(i) + v;
+    v += pa.count;
+    if (p.boundingBox) box.union(p.boundingBox);
+  }
+  const g = new BufferGeometry();
+  g.setIndex(new BufferAttribute(index, 1));
+  g.setAttribute('position', new BufferAttribute(pos, 3));
+  g.setAttribute('aMorph', new BufferAttribute(morph, 2));
+  g.boundingBox = box;
+  g.boundingSphere = new Sphere(box.getCenter(new Vector3()), box.getSize(new Vector3()).length() * 0.5);
+  return g;
+}
