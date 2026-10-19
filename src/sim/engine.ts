@@ -18,6 +18,7 @@ import {
   ACTION_RANGES,
   Action,
   DEFAULT_CAPACITY,
+  MaterialId,
   isLayoutPropId,
   isPropObjectId,
   PROP_DYNAMIC_ID_BASE,
@@ -29,6 +30,7 @@ import {
 } from '../protocol/messages';
 import { applyBeamForces } from './beams';
 import { applyColliderContacts, compileColliders, resetColliderContactState } from './collision/colliders';
+import { OBJ_REBUILD_TICKS, OBJ_REBUILD_TICKS_SLOW, OBJ_SLOW_SPEED, ObjectContacts } from './collision/objects';
 import { applyGroundContacts, PlaneSampler, resetGroundContactState } from './collision/ground';
 import type { ColliderWorld } from './collision/types';
 import { resolveColliders } from '../world/colliders';
@@ -38,9 +40,9 @@ import { integrateNodes } from './integrator';
 import { compileRig } from './rig/builder';
 import type { CompiledRig, RigDef } from './rig/types';
 import { SimArena } from './state';
-import { SIM_OBJECT_FLAG_SLEEPING, type EventSink, type HeightSampler, type MaterialTable, type SimObject, type SimState } from './types';
+import { NODE_FLAG_OBJ_CONTACT, SIM_OBJECT_FLAG_SLEEPING, type EventSink, type HeightSampler, type MaterialTable, type SimObject, type SimState } from './types';
 import { compilePropRig, getPropDef, isPropKey } from './props/catalog';
-import { applyPropDamping, PROP_INTERNAL_DAMPING, propAnchored, type PropRuntime } from './props/runtime';
+import { applyPropDamping, PROP_INTERNAL_DAMPING, PROP_WAKE_SPEED, propAnchored, type PropRuntime } from './props/runtime';
 import type { PropInstance, PropKey } from './props/types';
 import { compileVehicle } from './vehicle/builder';
 import { createTerrainSampler, type HeightfieldSampler } from '../world/sampler';
@@ -236,6 +238,14 @@ export class SimEngine {
   private readonly vehicles = new Map<number, VehicleRuntime>();
   /** Parallel to arena.objects: the object's vehicle runtime or null (hot-loop lookup). */
   private vehicleSlots: (VehicleRuntime | null)[] = [];
+  /** Node-vs-node contact (P5): broadphase + pair list + kernel. */
+  readonly contacts: ObjectContacts;
+  /** Tick of the last / next broadphase rebuild and its interval. */
+  private lastRebuild = 0;
+  private nextRebuild = 0;
+  private rebuildInterval = OBJ_REBUILD_TICKS;
+  /** Set by commands that move nodes or change sleep states: rebuild before the next step. */
+  private contactsDirty = true;
   /** Prop runtime per objectId (layout + dynamic props). */
   private readonly props = new Map<number, PropRuntime>();
   /** Parallel to arena.objects: the object's prop runtime or null. */
@@ -253,6 +263,7 @@ export class SimEngine {
     this.arena = new SimArena(cap.nodeCapacity, cap.beamCapacity, cap.maxObjects);
     this.state = this.arena.state;
     this.events = new PendingEvents(this.arena);
+    this.contacts = new ObjectContacts(cap.nodeCapacity, cap.maxObjects);
     this.gravityX = g[0];
     this.gravityY = g[1];
     this.gravityZ = g[2];
@@ -377,6 +388,9 @@ export class SimEngine {
     resetColliderContactState(this.state, obj.nodeStart, this.state.nodeCount - obj.nodeStart);
     this.repairEpochs.set(objectId, 0);
     this.syncVehicles();
+    // Global node indices shifted: drop the pair list.
+    this.contacts.clear();
+    this.contactsDirty = true;
     return obj;
   }
 
@@ -434,6 +448,7 @@ export class SimEngine {
     recoverVehicle(this.state, v, this.sampler, pos);
     resetGroundContactState(this.state, obj.nodeStart, obj.nodeCount);
     resetColliderContactState(this.state, obj.nodeStart, obj.nodeCount);
+    this.contactsDirty = true;
   }
 
   /** Rebuilds the per-object vehicle/prop slots and rebases every vehicle onto its current arena range. */
@@ -479,30 +494,61 @@ export class SimEngine {
       spawn: { pos: [transform.pos[0], transform.pos[1], transform.pos[2]], quat: [transform.quat[0], transform.quat[1], transform.quat[2], transform.quat[3]] },
       anchorBeams: Int32Array.from(anchor),
       stillS: 0,
+      sleepBox: new Float64Array(6),
+      sleepRmax: 0,
     });
     this.syncVehicles();
     this.setAsleep(obj, asleep);
     return obj;
   }
 
-  /** Puts an object to sleep (velocities zeroed, skipped by every pass) or wakes it. */
+  /**
+   * Puts an object to sleep (velocities and forces zeroed, skipped by every
+   * pass, its current node box stored for the broadphase) or wakes it.
+   */
   setAsleep(obj: SimObject, asleep: boolean): void {
     const rt = this.props.get(obj.objectId);
     if (rt) rt.stillS = 0;
-    if (asleep) {
-      obj.flags |= SIM_OBJECT_FLAG_SLEEPING;
-      const s = this.state;
-      const end = obj.nodeStart + obj.nodeCount;
-      for (let i = obj.nodeStart; i < end; i++) {
-        s.velX[i] = 0;
-        s.velY[i] = 0;
-        s.velZ[i] = 0;
-        s.frcX[i] = 0;
-        s.frcY[i] = 0;
-        s.frcZ[i] = 0;
-      }
-    } else {
+    this.contactsDirty = true;
+    if (!asleep) {
       obj.flags &= ~SIM_OBJECT_FLAG_SLEEPING;
+      return;
+    }
+    obj.flags |= SIM_OBJECT_FLAG_SLEEPING;
+    const s = this.state;
+    const end = obj.nodeStart + obj.nodeCount;
+    const box = rt?.sleepBox;
+    let x0 = Infinity;
+    let y0 = Infinity;
+    let z0 = Infinity;
+    let x1 = -Infinity;
+    let y1 = -Infinity;
+    let z1 = -Infinity;
+    let rmax = 0;
+    for (let i = obj.nodeStart; i < end; i++) {
+      s.velX[i] = 0;
+      s.velY[i] = 0;
+      s.velZ[i] = 0;
+      s.frcX[i] = 0;
+      s.frcY[i] = 0;
+      s.frcZ[i] = 0;
+      if ((s.flags[i]! & NODE_FLAG_OBJ_CONTACT) === 0) continue;
+      x0 = Math.min(x0, s.posX[i]!);
+      y0 = Math.min(y0, s.posY[i]!);
+      z0 = Math.min(z0, s.posZ[i]!);
+      x1 = Math.max(x1, s.posX[i]!);
+      y1 = Math.max(y1, s.posY[i]!);
+      z1 = Math.max(z1, s.posZ[i]!);
+      rmax = Math.max(rmax, s.objRadius[i]!);
+    }
+    if (box && rt) {
+      box[0] = x0;
+      box[1] = y0;
+      box[2] = z0;
+      box[3] = x1;
+      box[4] = y1;
+      box[5] = z1;
+      rt.sleepRmax = rmax;
     }
   }
 
@@ -543,12 +589,32 @@ export class SimEngine {
   }
 
   /**
-   * Layout props (worker, on groundHeightfield): despawns every previous
-   * layout prop, then spawns the instances asleep (objectId per instance).
+   * Layout props (worker, on groundHeightfield): checks the capacity (all
+   * or nothing), despawns every previous layout prop, then spawns the
+   * instances asleep (objectId per instance).
    */
   spawnLayoutProps(instances: readonly PropInstance[]): void {
-    const old = this.arena.objects.filter((o) => isLayoutPropId(o.objectId)).map((o) => o.objectId);
-    for (const id of old) this.despawn(id);
+    const old = this.arena.objects.filter((o) => isLayoutPropId(o.objectId));
+    // Capacity first (all or nothing), counting the layout props this replaces.
+    const s = this.state;
+    let nodes = s.nodeCount;
+    let beams = s.beamCount;
+    for (const o of old) {
+      nodes -= o.nodeCount;
+      beams -= o.beamCount;
+    }
+    for (const inst of instances) {
+      if (!isPropKey(inst.prop)) throw new SimCommandError(`layout prop ${inst.id}: unknown key '${String(inst.prop)}'`);
+      const rig = compilePropRig(inst.prop);
+      nodes += rig.nodeCount;
+      beams += rig.beamCount;
+    }
+    if (this.arena.objects.length - old.length + instances.length > this.arena.maxObjects) {
+      throw new SimCommandError(`${instances.length} layout props exceed the object capacity ${this.arena.maxObjects}`);
+    }
+    if (nodes > s.nodeCapacity) throw new SimCommandError(`layout props exceed the node capacity ${s.nodeCapacity}`);
+    if (beams > s.beamCapacity) throw new SimCommandError(`layout props exceed the beam capacity ${s.beamCapacity}`);
+    for (const o of old) this.despawn(o.objectId);
     for (const inst of instances) this.spawnProp(inst.objectId, inst.prop, inst.transform, true);
   }
 
@@ -588,6 +654,8 @@ export class SimEngine {
     resetGroundContactState(this.state, start, this.state.nodeCount + n - start);
     resetColliderContactState(this.state, start, this.state.nodeCount + n - start);
     this.syncVehicles();
+    this.contacts.clear();
+    this.contactsDirty = true;
   }
 
   reset(objectId: number, transform: Transform): void {
@@ -604,6 +672,7 @@ export class SimEngine {
     this.repairEpochs.set(objectId, ((this.repairEpochs.get(objectId) ?? 0) + 1) >>> 0);
     const v = this.vehicles.get(objectId);
     if (v) resetVehicleRuntime(v);
+    this.contactsDirty = true;
   }
 
   /** Merges named actions (clamped to ACTION_RANGES; gearSelect rounded). */
@@ -654,6 +723,8 @@ export class SimEngine {
     // The wheel kernels' ground is module state: point it at THIS engine's
     // ground every step (several engines may coexist, e.g. in tests).
     if (this.vehicles.size > 0) setWheelGround(sampler, this.materials, SIM_DT);
+    if (this.contactsDirty || this.tick >= this.nextRebuild) this.broadphase();
+    // Phase 1, per awake object ascending: vehicle pre-step → hydros → beams (+ prop damping).
     for (let o = 0; o < objs.length; o++) {
       const obj = objs[o]!;
       if ((obj.flags & SIM_OBJECT_FLAG_SLEEPING) !== 0) continue;
@@ -669,9 +740,16 @@ export class SimEngine {
       applyBeamForces(s, obj.beamStart, obj.beamCount, sink, dbg);
       const prop = pslots[o];
       if (prop) {
-        const anchored = prop.anchorBeams.length > 0 && propAnchored(s, prop, obj.beamStart);
+        const anchored = prop.anchorBeams.length > 0 && propAnchored(s, prop, obj.beamStart, sink);
         applyPropDamping(s, obj.nodeStart, obj.nodeCount, PROP_INTERNAL_DAMPING, anchored);
       }
+    }
+    // Phase 2: node-vs-node contacts over the cached pair list (canonical order).
+    if (this.contacts.pairCount > 0) this.contacts.apply(s, SIM_DT, sink);
+    // Phase 3, per awake object ascending: ground → static colliders → integrate.
+    for (let o = 0; o < objs.length; o++) {
+      const obj = objs[o]!;
+      if ((obj.flags & SIM_OBJECT_FLAG_SLEEPING) !== 0) continue;
       if (sampler !== null) {
         applyGroundContacts(s, obj.nodeStart, obj.nodeCount, sampler, this.materials, SIM_DT, obj.objectId, sink, gx, gy, gz);
       }
@@ -681,6 +759,86 @@ export class SimEngine {
       integrateNodes(s, obj.nodeStart, obj.nodeCount, SIM_DT, gx, gy, gz);
     }
     this.tick++;
+  }
+
+  /**
+   * Broadphase rebuild (every OBJ_REBUILD_TICKS / _SLOW ticks, or right
+   * after a command moved nodes): measures every object, puts still props
+   * to sleep, wakes sleeping objects a MOVING awake object may reach within
+   * the interval (once more through sleeping objects touching a woken one:
+   * a stack wakes together), then rebuilds the node pair list.
+   */
+  private broadphase(): void {
+    const s = this.state;
+    const objs = this.arena.objects;
+    const c = this.contacts;
+    const pslots = this.propSlots;
+    const n = objs.length;
+    const elapsed = (this.tick - this.lastRebuild) * SIM_DT;
+    c.objectCount = n;
+    let allSlow = true;
+    for (let o = 0; o < n; o++) {
+      const obj = objs[o]!;
+      const rt = pslots[o];
+      const mat = rt ? rt.def.material : MaterialId.metal;
+      if ((obj.flags & SIM_OBJECT_FLAG_SLEEPING) !== 0 && rt) {
+        c.setStaticBox(o, obj.nodeStart, obj.nodeCount, obj.objectId, mat, rt.sleepBox, 0, rt.sleepRmax);
+        continue;
+      }
+      const v = c.measureObject(s, o, obj.nodeStart, obj.nodeCount, obj.objectId, mat);
+      if (v >= OBJ_SLOW_SPEED) allSlow = false;
+      // Sleep: props still (max node speed below their threshold) for holdS.
+      if (rt && !this.contactsDirty) {
+        if (v < rt.def.sleep.linearSpeed) {
+          rt.stillS += elapsed;
+          if (rt.stillS >= rt.def.sleep.holdS) {
+            this.setAsleep(obj, true);
+            c.setStaticBox(o, obj.nodeStart, obj.nodeCount, obj.objectId, mat, rt.sleepBox, 0, rt.sleepRmax);
+          }
+        } else {
+          rt.stillS = 0;
+        }
+      }
+    }
+    const interval = allSlow ? OBJ_REBUILD_TICKS_SLOW : OBJ_REBUILD_TICKS;
+    // Wake: a moving awake object near a sleeping one (reachable within the interval).
+    let woke = false;
+    for (let p = 0; p < n; p++) {
+      if (c.oStatic[p] !== 0 || c.oValid[p] === 0 || c.oVmax[p]! < PROP_WAKE_SPEED) continue;
+      for (let q = 0; q < n; q++) {
+        if (c.oStatic[q] === 0 || c.oValid[q] === 0) continue;
+        if (!c.boxesNear(p, q, c.oRmax[p]! + c.oRmax[q]! + c.margin(p, q, interval, SIM_DT))) continue;
+        this.wakeSlot(q);
+        c.oStatic[q] = 2; // woken this pass (propagation source)
+        woke = true;
+      }
+    }
+    if (woke) {
+      // Propagate once: sleeping objects touching a just-woken one wake too.
+      for (let p = 0; p < n; p++) {
+        if (c.oStatic[p] !== 2) continue;
+        for (let q = 0; q < n; q++) {
+          if (c.oStatic[q] !== 1 || c.oValid[q] === 0) continue;
+          if (!c.boxesNear(p, q, c.oRmax[p]! + c.oRmax[q]! + c.margin(p, q, interval, SIM_DT))) continue;
+          this.wakeSlot(q);
+          c.oStatic[q] = 3;
+        }
+      }
+      for (let o = 0; o < n; o++) if (c.oStatic[o]! >= 2) c.oStatic[o] = 0;
+    }
+    c.rebuild(s, interval, SIM_DT, s.friction);
+    this.rebuildInterval = interval;
+    this.lastRebuild = this.tick;
+    this.nextRebuild = this.tick + interval;
+    this.contactsDirty = false;
+  }
+
+  /** Wakes the object in arena slot `o` (broadphase). */
+  private wakeSlot(o: number): void {
+    const obj = this.arena.objects[o]!;
+    obj.flags &= ~SIM_OBJECT_FLAG_SLEEPING;
+    const rt = this.propSlots[o];
+    if (rt) rt.stillS = 0;
   }
 
   /**

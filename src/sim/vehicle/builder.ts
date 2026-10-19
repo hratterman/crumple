@@ -20,7 +20,7 @@ import {
   STRUCTURE_OMEGA_DT_LIMIT,
   withMasses,
 } from '../rig/builder';
-import type { CompiledRig, RigBeamDef, RigDef, RigNodeDef, RigStats, StabilityReport } from '../rig/types';
+import { OBJ_RADIUS_MIN, type CompiledRig, type RigBeamDef, type RigDef, type RigNodeDef, type RigStats, type StabilityReport } from '../rig/types';
 import {
   DIFF_TYPE_ID,
   TORQUE_LUT_STEP_RPM,
@@ -317,6 +317,36 @@ function compileDrivetrain(def: VehicleDef): CompiledDrivetrain {
   };
 }
 
+/** P5: body node object-contact radius cap, m (the 0.6 × spacing default reached 0.35 on 0.6 m sedan beams). */
+export const VEHICLE_OBJ_RADIUS_MAX = 0.2;
+/** P5: a body node's contact sphere keeps this clearance above the rest ground plane, m. */
+export const VEHICLE_OBJ_CLEARANCE = 0.1;
+
+/**
+ * P5 vehicle contact-sphere policy (body nodes without an explicit
+ * objRadius): r ≤ VEHICLE_OBJ_RADIUS_MAX and r ≤ (rest height above the
+ * tyre contact plane) − VEHICLE_OBJ_CLEARANCE, floored at OBJ_RADIUS_MIN.
+ * WHY: with the generic default the floor-rail spheres (0.35 m at 0.17 m
+ * height) reached 18 cm below the ground and trapped cones under the car.
+ * Wheel nodes keep the default (a rotating ring node must not change size).
+ */
+function limitBodyObjRadius(def: VehicleDef, rig: CompiledRig): void {
+  let ground = Infinity;
+  for (let i = def.body.nodes.length; i < rig.nodeCount; i++) {
+    const y = rig.nodePos[3 * i + 1]! - rig.nodeRadius[i]!;
+    if (y < ground) ground = y;
+  }
+  if (!Number.isFinite(ground)) ground = 0;
+  def.body.nodes.forEach((n, i) => {
+    if (n.objRadius !== undefined && n.objRadius > 0) return;
+    let r = rig.nodeObjRadius[i]!;
+    const lift = rig.nodePos[3 * i + 1]! - ground - VEHICLE_OBJ_CLEARANCE;
+    if (r > VEHICLE_OBJ_RADIUS_MAX) r = VEHICLE_OBJ_RADIUS_MAX;
+    if (r > lift) r = lift;
+    rig.nodeObjRadius[i] = r < OBJ_RADIUS_MIN ? OBJ_RADIUS_MIN : r;
+  });
+}
+
 function compileMerged(name: string, merged: RigDef): CompiledRig {
   try {
     return compileRig(merged);
@@ -382,6 +412,7 @@ export const compileVehicle: CompileVehicle = (def) => {
   compileMerged(name, merged); // reports malformed rigs before MINIMASS (which compiles too)
   const masses = minimumMasses(merged);
   const rig = compileMerged(name, withMasses(merged, masses));
+  limitBodyObjRadius(def, rig);
 
   let declared = 0;
   for (const n of merged.nodes) if (n.mass > 0) declared += n.mass;

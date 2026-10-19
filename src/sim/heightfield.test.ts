@@ -392,7 +392,8 @@ describe('WorkerHost groundHeightfield', () => {
     for (let k = 0; k < 200; k++) h.advance(10); // 2 s
     const st = eng.state;
     let maxV = 0;
-    for (let i = 0; i < st.nodeCount; i++) {
+    const cube = eng.arena.get(1)!;
+    for (let i = cube.nodeStart; i < cube.nodeStart + cube.nodeCount; i++) {
       maxV = Math.max(maxV, Math.hypot(st.velX[i]!, st.velY[i]!, st.velZ[i]!));
       expect(st.posY[i]! - st.radius[i]! - eng.sampler!.heightAt(st.posX[i]!, st.posZ[i]!)).toBeGreaterThan(-0.05);
     }

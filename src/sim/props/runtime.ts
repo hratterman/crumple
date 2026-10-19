@@ -21,7 +21,7 @@
  * NUMERICS: hot loop, + − × ÷ only, no allocation, ascending node order.
  */
 import type { Transform } from '../../protocol/messages';
-import type { SimState } from '../types';
+import type { EventSink, SimState } from '../types';
 import type { PropDef, PropKey } from './types';
 
 /** Internal (rigid-relative) damping rate, 1/s. */
@@ -38,12 +38,38 @@ export interface PropRuntime {
   anchorBeams: Int32Array;
   /** Seconds of continuous stillness (sleep bookkeeping). */
   stillS: number;
+  /** While asleep: node-centre box of the contact nodes (min xyz, max xyz) and max contact radius. */
+  sleepBox: Float64Array;
+  sleepRmax: number;
 }
 
-/** True while any anchor beam of the prop (beam range starting at beamStart) is intact. */
-export function propAnchored(state: SimState, rt: PropRuntime, beamStart: number): boolean {
+/** Waking speed: only an awake object whose max node speed exceeds this wakes sleeping neighbours (still neighbours would ping-pong). */
+export const PROP_WAKE_SPEED = 0.1;
+
+/**
+ * True while the prop's anchor is intact. BREAKAWAY: the base fails as a
+ * unit — once any anchor beam has broken, every remaining one is released
+ * here (beamBreak events, discovery order), so the post falls free instead
+ * of hanging on its upper struts while the snapped base swings up.
+ */
+export function propAnchored(state: SimState, rt: PropRuntime, beamStart: number, events: EventSink): boolean {
   const ab = rt.anchorBeams;
-  for (let i = 0; i < ab.length; i++) if (state.active[beamStart + ab[i]!] !== 0) return true;
+  const active = state.active;
+  let intact = 0;
+  for (let i = 0; i < ab.length; i++) if (active[beamStart + ab[i]!] !== 0) intact++;
+  if (intact === ab.length) return true;
+  if (intact > 0) {
+    const { posX, posY, posZ, aIdx, bIdx, strainOut } = state;
+    for (let i = 0; i < ab.length; i++) {
+      const b = beamStart + ab[i]!;
+      if (active[b] === 0) continue;
+      active[b] = 0;
+      strainOut[b] = NaN;
+      const p = aIdx[b]!;
+      const q = bIdx[b]!;
+      events.beamBreak(b, (posX[p]! + posX[q]!) * 0.5, (posY[p]! + posY[q]!) * 0.5, (posZ[p]! + posZ[q]!) * 0.5);
+    }
+  }
   return false;
 }
 
