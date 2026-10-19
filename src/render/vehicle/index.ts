@@ -12,10 +12,11 @@ import { Group } from 'three';
 
 import type { CompiledVehicle } from '../../sim/vehicle/types';
 import type { LightingStack, PatchMaterial, RenderContext } from '../types';
-import { bindPanels } from './binder';
+import { applyFollowers, bindPanels } from './binder';
 import { createVehicleDamage } from './damage';
 import { createFlexSkin, type FlexSkinImpl } from './flexskin';
 import { tessellateVehicle } from './loft';
+import { visualExtras } from './lods';
 import { createLightState, createVehicleMaterials, lightStateFromTelemetry } from './materials';
 import { createDamageFx, type DamageFxSystem } from './shatter';
 import {
@@ -46,13 +47,17 @@ export interface VehicleVisualOptions {
   fx?: boolean;
   /** Static-sag calibration of the skin (flexskin SettleCalibration) — default true. */
   settle?: boolean;
+  /** Render LODs from the def's registered extras (lods.ts) — default true. */
+  lods?: boolean;
 }
 
 export interface VehicleVisualHandle extends VehicleVisual {
   readonly skin: FlexSkinImpl;
   readonly fx: DamageFxSystem | null;
-  /** Bake timings, ms (tessellate, bind, total incl. GPU resource creation). */
-  readonly timings: { tessellateMs: number; bindMs: number; totalMs: number };
+  /** Bake timings, ms (tessellate, bind, LOD tessellate + bind, total incl. GPU resource creation). */
+  readonly timings: { tessellateMs: number; bindMs: number; lodMs: number; totalMs: number };
+  /** Coarser bindings (LOD1, LOD2) the skin draws beyond VEHICLE_LOD1_M / VEHICLE_LOD2_M. */
+  readonly lodBindings: readonly BindingSet[];
   /** Body (skin + wheels) visible for 'body' / 'body+beams'. The caller drives the beam view. */
   setDebugView(view: VehicleDebugView): void;
   readonly debugView: VehicleDebugView;
@@ -107,9 +112,19 @@ export function createVehicleVisual(
   const t0 = performance.now();
   const allGeoms = opts.geoms ?? tessellateVehicle(def);
   const t1 = performance.now();
-  const { binding, def: boundDef } = bindTolerant(compiled, def, allGeoms);
-  def = boundDef;
+  const extras = visualExtras(def);
+  const bound = bindTolerant(compiled, def, allGeoms);
+  const binding = applyFollowers(compiled.rig, bound.binding, extras.follow);
+  def = bound.def;
   const t2 = performance.now();
+  const lodBindings: BindingSet[] = [];
+  if (opts.lods !== false && !opts.geoms) {
+    for (const build of extras.lods ?? []) {
+      const ld = build();
+      lodBindings.push(applyFollowers(compiled.rig, bindTolerant(compiled, ld, tessellateVehicle(ld)).binding, extras.follow));
+    }
+  }
+  const t3 = performance.now();
   const materials = createVehicleMaterials(ctx, def);
   const damage = createVehicleDamage(compiled, binding, def);
   const skin = createFlexSkin(binding, {
@@ -119,11 +134,14 @@ export function createVehicleVisual(
     patchMaterial: opts.patchMaterial,
     anchorNode: compiled.frameNodes[0] ?? 0,
     settle: opts.settle === false ? null : { restNodes: compiled.rig.nodePos, frameNodes: compiled.frameNodes, bodyNodeCount: compiled.bodyNodeCount },
+    lods: lodBindings,
+    renderer: ctx.renderer,
   });
   const wheels = createWheelVisuals(compiled, def.wheels, {
     materials,
     lighting: opts.lighting,
     patchMaterial: opts.patchMaterial,
+    renderer: ctx.renderer,
   });
   const fx =
     opts.fx === false
@@ -148,7 +166,8 @@ export function createVehicleVisual(
     materials,
     damage,
     fx,
-    timings: { tessellateMs: t1 - t0, bindMs: t2 - t1, totalMs: performance.now() - t0 },
+    lodBindings,
+    timings: { tessellateMs: t1 - t0, bindMs: t2 - t1, lodMs: t3 - t2, totalMs: performance.now() - t0 },
     get debugView(): VehicleDebugView {
       return view;
     },

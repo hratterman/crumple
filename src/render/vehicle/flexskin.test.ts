@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Material, MeshDepthMaterial, MeshDistanceMaterial, MeshPhysicalMaterial, ShaderLib, Sphere, Vector3 } from 'three';
+import { Material, MeshDepthMaterial, MeshDistanceMaterial, MeshPhysicalMaterial, PerspectiveCamera, ShaderLib, Sphere, Vector3 } from 'three';
 import type { WebGLProgramParametersWithUniforms, WebGLRenderer } from 'three';
 
 import { patchMaterial } from '../material';
@@ -10,6 +10,7 @@ import {
   cloneBaseMaterial,
   createFlexSkin,
   FLEX_MAIN_CALL,
+  FLEXBODY_SINGLE_PATCH_KEY,
   FLEX_NORMAL_CHUNK,
   FLEX_POSITION_CHUNK,
   FLEX_VERTEX_PARS,
@@ -86,9 +87,23 @@ describe('flex2 GLSL', () => {
       expect(shader.vertexShader).toContain('#define FLEXBODY_COLOR');
       expect(shader.vertexShader).toContain('vec3 objectNormal = flexN;');
       expect(shader.fragmentShader).toContain('varying vec4 vFlexDamage;');
+      expect(shader.vertexShader).not.toContain('#define FLEXBODY_SINGLE');
     } else {
       expect(shader.vertexShader).not.toContain('#define FLEXBODY_COLOR');
+      // depth / distance: one triad (slot 0, the strongest weight)
+      expect(shader.vertexShader).toContain('#define FLEXBODY_SINGLE');
     }
+  });
+
+  it('single-triad colour variant (LOD ≥ 1) and the hidden-panel early-out', () => {
+    const shader = program(ShaderLib.physical);
+    applyFlexGlsl(shader, 'color', true);
+    expect(shader.vertexShader).toContain('#define FLEXBODY_COLOR\n#define FLEXBODY_SINGLE');
+    expect(shader.vertexShader).toContain('flexTriad( vec4( flexTriad0.xyz, 1.0 ), flexCoef0, flexFrame0.xyz, ft0, P0, W0, N0, T0, accD );');
+    expect(shader.vertexShader).toContain('vec3 ft0 = vec3( flexFrame0.w, flexFrameU.xy );');
+    expect(FLEX_VERTEX_PARS).toContain('int p = int( flexFrameU.w + 0.5 );');
+    expect(FLEX_VERTEX_PARS).toContain('texelFetch( uFlexHidden, ivec2( p & 63, p >> 6 ), 0 ).r > 0.5');
+    expect(shader.fragmentShader).toContain('flat varying float vFlexPanel;');
   });
 });
 
@@ -105,42 +120,122 @@ describe('createFlexSkin', () => {
     skin.dispose();
   });
 
-  it('builds one mesh per panel with flex attributes and deforming shadow materials', () => {
+  it('merges panels into one draw per material: flex attributes, panel ids, hidden mask, deforming shadow materials', () => {
     const skin = createFlexSkin(binding, { materials: stubMaterials(), damage: null, lighting, patchMaterial });
-    expect(skin.meshes.length).toBe(2);
+    // both synthetic panels are paint → one draw
+    expect(skin.meshes.length).toBe(1);
+    expect(Array.from(skin.panelDraw)).toEqual([0, 0]);
     expect(skin.patch.key).toBe(FLEXBODY_PATCH_KEY);
-    for (const [i, mesh] of skin.meshes.entries()) {
-      const g = mesh.geometry;
-      const attrs = ['position', 'normal', 'uv', 'tangent', 'flexFrameT', 'flexFrameU'];
-      for (let k = 0; k < FLEX_TRIADS; k++) attrs.push(`flexTriad${k}`, `flexCoef${k}`, `flexFrame${k}`);
-      for (const a of attrs) expect(g.getAttribute(a), a).toBeDefined();
-      // ≤ 16 vertex attribute slots (WebGL2 minimum), `normal` included even though flex2 never reads it.
-      expect(Object.keys(g.attributes).length).toBeLessThanOrEqual(15);
-      const p = binding.panels[i]!;
+    const mesh = skin.meshes[0]!;
+    const g = mesh.geometry;
+    const attrs = ['position', 'normal', 'uv', 'tangent', 'flexFrameT', 'flexFrameU'];
+    for (let k = 0; k < FLEX_TRIADS; k++) attrs.push(`flexTriad${k}`, `flexCoef${k}`, `flexFrame${k}`);
+    for (const a of attrs) expect(g.getAttribute(a), a).toBeDefined();
+    // ≤ 16 vertex attribute slots (WebGL2 minimum), `normal` included even though flex2 never reads it.
+    expect(Object.keys(g.attributes).length).toBeLessThanOrEqual(15);
+    let vo = 0;
+    for (const p of binding.panels) {
       const t1 = g.getAttribute('flexTriad1').array;
-      expect([t1[0], t1[1], t1[2], t1[3]]).toEqual([p.triad[3], p.triad[4], p.triad[5], p.weight[1]]);
-      expect(g.getAttribute('flexCoef2').array[3]).toBe(p.coef[4 * 2 + 3]);
+      expect([t1[4 * vo], t1[4 * vo + 1], t1[4 * vo + 2], t1[4 * vo + 3]]).toEqual([p.triad[3], p.triad[4], p.triad[5], p.weight[1]]);
+      expect(g.getAttribute('flexCoef2').array[4 * vo + 3]).toBe(p.coef[4 * 2 + 3]);
       const fT = g.getAttribute('flexFrameT').array;
-      expect([fT[0], fT[1], fT[2], fT[3]]).toEqual([p.frameTangent![1], p.frameTangent![2], p.frameTangent![4], p.frameTangent![5]]);
+      expect([fT[4 * vo], fT[4 * vo + 1], fT[4 * vo + 2], fT[4 * vo + 3]]).toEqual([p.frameTangent![1], p.frameTangent![2], p.frameTangent![4], p.frameTangent![5]]);
       const fU = g.getAttribute('flexFrameU').array;
-      expect([fU[0], fU[1], fU[2]]).toEqual([p.frameTangent![7], p.frameTangent![8], p.damageWeight[0]]);
-      expect(mesh.customDepthMaterial).toBeInstanceOf(MeshDepthMaterial);
-      expect(mesh.customDistanceMaterial).toBeInstanceOf(MeshDistanceMaterial);
-      expect(mesh.castShadow).toBe(true);
-      expect(mesh.receiveShadow).toBe(true);
-      // The depth twin really reconstructs (shadows of the deformed body).
-      const depth = program(ShaderLib.depth);
-      mesh.customDepthMaterial!.onBeforeCompile(depth, renderer);
-      expect(depth.vertexShader).toContain('flexEvaluate();');
-      expect(depth.uniforms.uFlexNodes!.value).toBe(skin.nodeTexture);
-      expect(depth.uniforms.uFlexRows!.value).toBe(1);
-      const color = program(ShaderLib.physical);
-      (mesh.material as Material).onBeforeCompile(color, renderer);
-      expect(color.vertexShader).toContain('vFlexDamage = vec4( accD.xyz * flexFrameU.z, accD.w );');
-      expect(color.uniforms.uFlexNodes!.value).toBe(skin.nodeTexture);
+      for (const v of [0, p.vertexCount - 1]) {
+        expect(fU[4 * (vo + v) + 3]).toBe(p.panelIndex); // panel id → hidden-mask texel
+      }
+      expect([fU[4 * vo], fU[4 * vo + 1], fU[4 * vo + 2]]).toEqual([p.frameTangent![7], p.frameTangent![8], p.damageWeight[0]]);
+      vo += p.vertexCount;
     }
+    expect(g.getAttribute('position').count).toBe(vo);
+    expect(g.getIndex()!.count).toBe(binding.panels.reduce((n, p) => n + p.index.length, 0));
+    expect(mesh.customDepthMaterial).toBeInstanceOf(MeshDepthMaterial);
+    expect(mesh.customDistanceMaterial).toBeInstanceOf(MeshDistanceMaterial);
+    // no renderer hook → "direct" mode: the colour draw casts its own (single-triad) shadow
+    expect(skin.casters.length).toBe(0);
+    expect(mesh.castShadow).toBe(true);
+    expect(mesh.receiveShadow).toBe(true);
+    // The depth twin really reconstructs (shadows of the deformed body), with one triad.
+    const depth = program(ShaderLib.depth);
+    mesh.customDepthMaterial!.onBeforeCompile(depth, renderer);
+    expect(depth.vertexShader).toContain('flexEvaluate();');
+    expect(depth.vertexShader).toContain('#define FLEXBODY_SINGLE');
+    expect(depth.uniforms.uFlexNodes!.value).toBe(skin.nodeTexture);
+    expect(depth.uniforms.uFlexRows!.value).toBe(1);
+    expect(depth.uniforms.uFlexHidden!.value).toBe(skin.hiddenMask);
+    const color = program(ShaderLib.physical);
+    (mesh.material as Material).onBeforeCompile(color, renderer);
+    expect(color.vertexShader).toContain('vFlexDamage = vec4( accD.xyz * flexFrameU.z, accD.w );');
+    expect(color.uniforms.uFlexNodes!.value).toBe(skin.nodeTexture);
+    // hiding a panel flips its mask texel (the merged draw stays)
+    const v0 = skin.hiddenMask.version;
     skin.setPanelVisible(1, false);
-    expect(skin.meshes[1]!.visible).toBe(false);
+    expect(skin.panelVisible(1)).toBe(false);
+    expect(skin.panelVisible(0)).toBe(true);
+    expect((skin.hiddenMask.image.data as Uint8Array)[1]).toBe(255);
+    expect(skin.hiddenMask.version).toBeGreaterThan(v0);
+    expect(mesh.visible).toBe(true);
+    skin.setPanelVisible(1, true);
+    expect((skin.hiddenMask.image.data as Uint8Array)[1]).toBe(0);
+    skin.dispose();
+  });
+
+  it('LOD levels + shadow casters: caster LOD per cascade around the shadow pass, colour LOD by camera distance', () => {
+    let shadowRenders = 0;
+    const seen: string[] = [];
+    let skinRef: ReturnType<typeof createFlexSkin> | null = null;
+    const fakeRenderer = {
+      shadowMap: {
+        render(): void {
+          shadowRenders++;
+          const s = skinRef!;
+          seen.push(s.casters.map((c) => (c.visible ? 1 : 0)).join(''));
+          for (const m of s.levels.flat()) expect(m.castShadow).toBe(false);
+        },
+      },
+    } as unknown as WebGLRenderer;
+    const coarse = bindPanels(subject.compiled, subject.def, syntheticCubeSubject(5).geoms);
+    const skin = createFlexSkin(binding, {
+      materials: stubMaterials(),
+      damage: null,
+      lighting,
+      patchMaterial,
+      lods: [coarse, coarse],
+      renderer: fakeRenderer,
+    });
+    skinRef = skin;
+    expect(skin.levels.length).toBe(3);
+    expect(skin.casters.length).toBe(2);
+    expect(skin.casters[0]).not.toBe(skin.casters[1]); // [cascade 0: LOD1, cascades ≥ 1: LOD2]
+    expect(skin.casters[0]!.castShadow).toBe(true);
+    expect(skin.patchSingle.key).toBe(FLEXBODY_SINGLE_PATCH_KEY);
+    const lod1 = skin.levels[1]![0]!;
+    expect(lod1.geometry.getAttribute('flexTriad1')).toBeUndefined(); // single-triad layout
+    expect(lod1.geometry.getAttribute('flexFrameU').array[3]).toBe(0);
+    expect(skin.casters[0]!.visible).toBe(false);
+    (fakeRenderer.shadowMap.render as unknown as () => void)();
+    expect(shadowRenders).toBe(1);
+    expect(seen).toEqual(['10']); // no CSM: the cascade-0 caster (LOD1) only
+    expect(skin.casters[0]!.visible).toBe(false); // colour pass: casters hidden again
+    // colour LOD from the camera, with hysteresis
+    const cam = new PerspectiveCamera(60);
+    const nodes = new Float32Array(subject.compiled.rig.nodeCount * 3);
+    const at = (d: number): number => {
+      cam.position.set(d, 0, 0);
+      cam.updateMatrixWorld();
+      skin.update({ ...frameFor(nodes), camera: cam });
+      return skin.lod;
+    };
+    expect(at(10)).toBe(0);
+    expect(at(26)).toBe(0); // inside the hysteresis band
+    expect(at(28)).toBe(1);
+    expect(at(24)).toBe(1);
+    expect(at(22)).toBe(0);
+    expect(at(90)).toBe(2);
+    expect(skin.levels[2]![0]!.visible).toBe(true);
+    expect(skin.meshes[0]!.visible).toBe(false);
+    skin.setForcedLod(0);
+    expect(at(90)).toBe(0);
     skin.dispose();
   });
 
@@ -171,9 +266,8 @@ describe('createFlexSkin', () => {
     const skinNodes = new Float64Array(rig.nodeCount * 3);
     for (let i = 0; i < rig.nodeCount; i++) for (let k = 0; k < 3; k++) skinNodes[3 * i + k] = skin.nodeData[4 * i + k]!;
     const out = new Float64Array(6);
-    for (const [pi, mesh] of skin.meshes.entries()) {
-      const sphere = mesh.geometry.boundingSphere as Sphere;
-      const p = binding.panels[pi]!;
+    for (const p of binding.panels) {
+      const sphere = skin.meshes[skin.panelDraw[p.panelIndex]!]!.geometry.boundingSphere as Sphere;
       for (let v = 0; v < p.vertexCount; v++) {
         evalFlexVertex(p, v, skinNodes, out);
         expect(sphere.containsPoint(new Vector3(out[0], out[1], out[2]))).toBe(true);

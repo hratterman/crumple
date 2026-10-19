@@ -36,7 +36,7 @@ import { createPostStack } from '../src/render/post';
 import { QUALITY_LEVELS, QUALITY_PRESETS } from '../src/render/types';
 import type { QualityLevel, RenderContext } from '../src/render/types';
 import { bindPanels, evalFlexFrame } from '../src/render/vehicle/binder';
-import { createFlexSkin } from '../src/render/vehicle/flexskin';
+import { buildPanelGeometry, createFlexSkin } from '../src/render/vehicle/flexskin';
 import { syntheticCubeSubject } from '../src/render/vehicle/synthetic';
 import type { VehicleFrameInput, VehicleMaterialSet } from '../src/render/vehicle/types';
 
@@ -124,7 +124,8 @@ camera.lookAt(ORIGIN[0], ORIGIN[1] - 0.2, ORIGIN[2]);
 const W = 256;
 function parity(panelIndex = 0): { maxPos: number; maxNrm: number; vertices: number; nan: number } {
   const p = binding.panels[panelIndex]!;
-  const src = skin.meshes[panelIndex]!.geometry;
+  // one panel's own geometry (the skin draws merged panels; parity is per panel, by gl_VertexID)
+  const src = buildPanelGeometry(p);
   const g = new BufferGeometry();
   for (const [name, attr] of Object.entries(src.attributes)) g.setAttribute(name, attr);
   const H = Math.ceil(p.vertexCount / W);
@@ -191,6 +192,7 @@ function parity(panelIndex = 0): { maxPos: number; maxNrm: number; vertices: num
   }
   rt.dispose();
   g.dispose();
+  src.dispose();
   mat.dispose();
   return { maxPos, maxNrm, vertices: p.vertexCount, nan };
 }

@@ -87,10 +87,11 @@ describe('SEDAN_VISUAL', { timeout: 60_000 }, () => {
     }
   });
 
-  it('keeps the triangle budget: LOD0 ≤ 60k, LOD1 ≈ 40 %', () => {
+  // 61k: + ~1k for the subdivided interior door cards (they follow a dented door skin, U6)
+  it('keeps the triangle budget: LOD0 ≤ 61k, LOD1 ≈ 40 %', () => {
     const t0 = tris(geoms);
     const t1 = tris(tessellateVehicle(buildSedanVisual({ lod: 1 })));
-    expect(t0).toBeLessThanOrEqual(60_000);
+    expect(t0).toBeLessThanOrEqual(61_000);
     expect(t1 / t0).toBeGreaterThan(0.3);
     expect(t1 / t0).toBeLessThan(0.5);
   });

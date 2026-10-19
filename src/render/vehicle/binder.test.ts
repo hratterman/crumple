@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { compileRig } from '../../sim/rig/builder';
 import type { RigDef } from '../../sim/rig/types';
 import type { CompiledVehicle } from '../../sim/vehicle/types';
-import { bindPanels, boundaryBeams, evalFlexFrame, evalFlexVertex, rigHashOf, resolveBeamSelector } from './binder';
+import { bindPanels, boundaryBeams, evalFlexFrame, evalFlexVertex, evalFlexVertexSingle, rigHashOf, resolveBeamSelector } from './binder';
 import { syntheticCubeSubject } from './synthetic';
 import {
   BindError,
@@ -369,6 +369,44 @@ describe('bindPanels on the synthetic cube shell', () => {
       expect(blended.max).toBeLessThan(0.65 * one.max);
       expect(blended.p99).toBeLessThan(0.6 * one.p99);
     }
+  });
+
+  it('single-triad evaluation (depth / distance, LOD ≥ 1): exact at rest, bounded deviation from the blend on the crush field', () => {
+    const src = restNodes();
+    const nodes = new Float64Array(src.length);
+    const hash = (i: number): number => {
+      const x = Math.sin(i * 12.9898 + 78.233) * 43758.5453;
+      return x - Math.floor(x) - 0.5;
+    };
+    for (let i = 0; i < src.length; i += 3) {
+      const z = src[i + 2]!;
+      nodes[i] = src[i]! + 0.14 * hash(i);
+      nodes[i + 1] = src[i + 1]! + 0.14 * hash(i + 1);
+      nodes[i + 2] = 0.75 - (0.75 - z) * 0.65 + 0.14 * hash(i + 2);
+    }
+    const a = new Float64Array(6);
+    const b = new Float64Array(6);
+    const devs: number[] = [];
+    let rest = 0;
+    for (const p of binding.panels) {
+      for (let v = 0; v < p.vertexCount; v++) {
+        evalFlexVertexSingle(p, v, src, a);
+        for (let c = 0; c < 3; c++) rest = Math.max(rest, Math.abs(a[c]! - p.restPosition[3 * v + c]!));
+        evalFlexVertexSingle(p, v, nodes, a);
+        evalFlexVertex(p, v, nodes, b);
+        devs.push(Math.hypot(a[0]! - b[0]!, a[1]! - b[1]!, a[2]! - b[2]!));
+      }
+    }
+    devs.sort((x, y) => x - y);
+    const max = devs[devs.length - 1]!;
+    const p99 = devs[Math.floor(devs.length * 0.99)]!;
+    const med = devs[Math.floor(devs.length * 0.5)]!;
+    console.info(`[single triad] crush field: |P1 − Pblend| median ${(med * 100).toFixed(2)} cm, p99 ${(p99 * 100).toFixed(1)} cm, max ${(max * 100).toFixed(1)} cm`);
+    expect(rest).toBeLessThan(1e-5);
+    // the documented bound (docs/CONTRACTS.md "Vehicle perf amendments"): shadow silhouettes of a heavily crushed body
+    expect(med).toBeLessThan(0.02);
+    expect(p99).toBeLessThan(0.06);
+    expect(max).toBeLessThan(0.12);
   });
 
   it('is deterministic and hashes the rig', () => {

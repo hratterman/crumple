@@ -953,9 +953,9 @@ export const evalFlexVertex: EvalFlexVertex = (panel, v, nodes, out) => {
  * data (the skin sanitizes NaN before the GPU sees it) gives P = R, W at
  * the quality floor and no frame.
  */
-function evalTriadSlot(panel: BindingPanel<string>, s: number, k: number, nodes: ArrayLike<number>, withTangent: boolean): void {
+function evalTriadSlot(panel: BindingPanel<string>, s: number, k: number, nodes: ArrayLike<number>, withTangent: boolean, wOverride = -1): void {
   const o = k * SLOT;
-  const w = panel.weight[s]!;
+  const w = wOverride >= 0 ? wOverride : panel.weight[s]!;
   TRI[o + 9] = 0;
   TRI[o + 10] = 0;
   if (!(w > 0)) return;
@@ -1104,4 +1104,135 @@ export function evalFlexFrame(
     normalizeInto(tx - p * qx, ty - p * qy, tz - p * qz, tangentOut, 0);
     tangentOut[3] = panel.restTangent ? (panel.restTangent[4 * v + 3]! < 0 ? -1 : 1) : 1;
   }
+}
+
+/**
+ * CPU mirror of the SINGLE-triad evaluation (flexskin FLEXBODY_SINGLE:
+ * depth / distance targets, colour at LOD ≥ 1): slot 0 only (the
+ * strongest weight), weight 1, no consensus. out[0..3) P, out[3..6) N.
+ */
+export function evalFlexVertexSingle(panel: BindingPanel<string>, v: number, nodes: ArrayLike<number>, out: Float64Array): void {
+  evalTriadSlot(panel, K * v, 0, nodes, false, 1);
+  out[0] = TRI[0]!;
+  out[1] = TRI[1]!;
+  out[2] = TRI[2]!;
+  if (TRI[10]) normalizeInto(TRI[3]!, TRI[4]!, TRI[5]!, out, 3);
+  else {
+    out[3] = 0;
+    out[4] = 1;
+    out[5] = 0;
+  }
+}
+
+/**
+ * Re-binds `follower` with the triads of `leader` (same rig): every
+ * follower vertex takes the K triads + weights of its nearest leader vertex
+ * (rest space) and gets its own (a, b, c, d0) and frame normal/tangent
+ * against them. The follower then deforms as a smooth offset of the
+ * leader's surface: interior door cards stay behind their door skin
+ * however it dents (a card with its own triads, built from sill and belt
+ * nodes, stayed put while the skin folded through it). Pure; returns a new
+ * BindingPanel (the follower's own nodes / bindNodes kept for detach).
+ */
+export function bindFollower<S extends string>(rig: CompiledRig, follower: BindingPanel<S>, leader: BindingPanel<string>): BindingPanel<S> {
+  const n = follower.vertexCount;
+  const ln = leader.vertexCount;
+  if (ln === 0) return follower;
+  const pos = rig.nodePos;
+  const fp = follower.restPosition;
+  const lp = leader.restPosition;
+  const ln3 = leader.restNormal;
+  const triad = new Uint16Array(n * K * 3);
+  const coef = new Float32Array(n * K * 4);
+  const weight = new Float32Array(n * K);
+  const frameNormal = new Float32Array(n * K * 3);
+  const frameTangent = follower.restTangent ? new Float32Array(n * K * 3) : null;
+  const F = new Float64Array(9);
+  for (let v = 0; v < n; v++) {
+    const px = fp[3 * v]!, py = fp[3 * v + 1]!, pz = fp[3 * v + 2]!;
+    // Nearest leader vertex the follower sits BEHIND (follower − leader against the leader's
+    // outward rest normal < 0): the door's outer skin, not its inner return face; else nearest.
+    let best = Infinity;
+    let bestBehind = Infinity;
+    let u = 0;
+    let ub = -1;
+    for (let j = 0; j < ln; j++) {
+      const dx = px - lp[3 * j]!, dy = py - lp[3 * j + 1]!, dz = pz - lp[3 * j + 2]!;
+      const d = dx * dx + dy * dy + dz * dz;
+      if (d < best) {
+        best = d;
+        u = j;
+      }
+      const side = dx * ln3[3 * j]! + dy * ln3[3 * j + 1]! + dz * ln3[3 * j + 2]!;
+      if (side < 0 && d < bestBehind) {
+        bestBehind = d;
+        ub = j;
+      }
+    }
+    if (ub >= 0) u = ub;
+    for (let k = 0; k < K; k++) {
+      const s = K * v + k;
+      const su = K * u + k;
+      const ir = leader.triad[3 * su]!, ix = leader.triad[3 * su + 1]!, iy = leader.triad[3 * su + 2]!;
+      triad[3 * s] = ir;
+      triad[3 * s + 1] = ix;
+      triad[3 * s + 2] = iy;
+      weight[s] = leader.weight[su]!;
+      const rx = pos[3 * ir]!, ry = pos[3 * ir + 1]!, rz = pos[3 * ir + 2]!;
+      const e1x = pos[3 * ix]! - rx, e1y = pos[3 * ix + 1]! - ry, e1z = pos[3 * ix + 2]! - rz;
+      const e2x = pos[3 * iy]! - rx, e2y = pos[3 * iy + 1]! - ry, e2z = pos[3 * iy + 2]! - rz;
+      let cx = e1y * e2z - e1z * e2y;
+      let cy = e1z * e2x - e1x * e2z;
+      let cz = e1x * e2y - e1y * e2x;
+      const cl = Math.sqrt(cx * cx + cy * cy + cz * cz) || 1;
+      cx /= cl;
+      cy /= cl;
+      cz /= cl;
+      const dx = px - rx, dy = py - ry, dz = pz - rz;
+      const c = dx * cx + dy * cy + dz * cz;
+      const l1 = e1x * e1x + e1y * e1y + e1z * e1z;
+      const l2 = e2x * e2x + e2y * e2y + e2z * e2z;
+      const g12 = e1x * e2x + e1y * e2y + e1z * e2z;
+      const d1 = dx * e1x + dy * e1y + dz * e1z;
+      const d2 = dx * e2x + dy * e2y + dz * e2z;
+      const det = l1 * l2 - g12 * g12;
+      const inv = det > 0 ? 1 / det : 0;
+      coef[4 * s] = (d1 * l2 - d2 * g12) * inv;
+      coef[4 * s + 1] = (d2 * l1 - d1 * g12) * inv;
+      coef[4 * s + 2] = c;
+      coef[4 * s + 3] = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      gsFrame(e1x, e1y, e1z, e2x, e2y, e2z, F);
+      toFrame(F, 0, follower.restNormal[3 * v]!, follower.restNormal[3 * v + 1]!, follower.restNormal[3 * v + 2]!, frameNormal, 3 * s);
+      if (frameTangent && follower.restTangent) {
+        const t = follower.restTangent;
+        toFrame(F, 0, t[4 * v]!, t[4 * v + 1]!, t[4 * v + 2]!, frameTangent, 3 * s);
+      }
+    }
+  }
+  const used = new Uint8Array(rig.nodeCount);
+  for (let i = 0; i < triad.length; i++) used[triad[i]!] = 1;
+  let nu = 0;
+  for (let i = 0; i < used.length; i++) nu += used[i]!;
+  const nodes = new Uint16Array(nu);
+  for (let i = 0, k = 0; i < used.length; i++) if (used[i]) nodes[k++] = i;
+  return { ...follower, triad, coef, weight, frameNormal, frameTangent, nodes };
+}
+
+/**
+ * Applies a follower map (follower panel id → leader panel id) to a
+ * BindingSet in place of those panels (returns a new set; unknown ids are
+ * ignored).
+ */
+export function applyFollowers<S extends string>(rig: CompiledRig, set: BindingSet<S>, follow: Readonly<Record<string, string>> | undefined): BindingSet<S> {
+  if (!follow) return set;
+  const byId = new Map(set.panels.map((p) => [p.panelId, p] as const));
+  let changed = false;
+  const panels = set.panels.map((p) => {
+    const lid = follow[p.panelId];
+    const leader = lid !== undefined ? byId.get(lid) : undefined;
+    if (!leader) return p;
+    changed = true;
+    return bindFollower(rig, p, leader);
+  });
+  return changed ? { ...set, panels } : set;
 }

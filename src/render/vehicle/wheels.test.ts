@@ -1,4 +1,4 @@
-import { BufferGeometry, Group, Matrix4, Mesh, Quaternion, ShaderLib, Vector3 } from 'three';
+import { BufferGeometry, Group, InstancedMesh, Matrix4, Mesh, Quaternion, ShaderLib, Vector3 } from 'three';
 import { describe, expect, it } from 'vitest';
 
 import { compileVehicle } from '../../sim/vehicle/builder';
@@ -279,34 +279,64 @@ describe('wheel geometry', () => {
   });
 });
 
-describe('createWheelVisuals', () => {
+describe('createWheelVisuals', { timeout: 60_000 }, () => {
   const def: VehicleVisualDef = { vehicle: compiled.name, panels: [], paint: PAINT_PALETTE.liquidSilver, wheels: WDEF };
   const ctx = { quality: QUALITY_PRESETS.high } as unknown as RenderContext;
   const lighting = { csm: null } as unknown as LightingStack;
 
-  it('builds rim/upright groups per wheel, follows the skin, disposes', () => {
+  it('instanced draws per part (all wheels in one), LOD levels, follows the skin, disposes', () => {
     const materials = createVehicleMaterials(ctx, def);
     const wv = createWheelVisuals(compiled, WDEF, { materials, lighting, patchMaterial });
-    const groups = wv.object.children as Group[];
-    expect(groups).toHaveLength(compiled.wheels.length * 2);
-    const tyres = groups[0]!.children.filter((m) => (m as Mesh).customDepthMaterial);
+    // one geometry variant (all four wheels alike): 5 draws per LOD level, 3 levels, no casters (no renderer hook)
+    expect(wv.levels.map((l) => l.length)).toEqual([5, 5, 5]);
+    expect(wv.casters.length).toBe(0);
+    const lod0 = wv.levels[0]! as InstancedMesh[];
+    for (const m of lod0) {
+      expect(m.isInstancedMesh).toBe(true);
+      expect(m.count).toBe(compiled.wheels.length);
+      expect(m.visible).toBe(true);
+      expect(m.castShadow).toBe(true);
+    }
+    for (const m of wv.levels[1]!) expect(m.visible).toBe(false);
+    const tyres = lod0.filter((m) => m.customDepthMaterial);
     expect(tyres).toHaveLength(2); // tread + sidewall deform in the shadow pass too
+    const rim = lod0.find((m) => m.name === 'wheelRim0')!;
+    expect(rim.geometry.getAttribute('crPbr')).toBeDefined();
+    expect(rim.geometry.getAttribute('color')).toBeDefined();
+    // LOD1 / LOD2 triangle budgets per wheel
+    const tris = (list: readonly Mesh[]): number => list.reduce((n, m) => n + m.geometry.getIndex()!.count / 3, 0);
+    expect(tris(wv.levels[1]!)).toBeLessThanOrEqual(4000);
+    expect(tris(wv.levels[2]!)).toBeLessThan(tris(wv.levels[1]!) / 2);
+    expect(tris(wv.levels[0]!)).toBeGreaterThan(8 * tris(wv.levels[1]!));
     // skin at an anchor, wheel 0 spun by 1 rad
     const nodes = restNodes();
     spinWheel(nodes, 0, 1);
     const root = new Group();
     root.position.set(10, 0, 5);
-    const skin = { object: root, nodeData: nodes } as unknown as FlexSkin;
+    const skin = { object: root, nodeData: nodes, lod: 1 } as unknown as FlexSkin;
     wv.update(skin, 1 / 60);
     expect(wv.object.position.toArray()).toEqual([10, 0, 5]);
-    const spinM = groups[0]!.matrix;
+    expect(wv.lod).toBe(1);
+    expect(wv.levels[1]![0]!.visible).toBe(true);
+    expect(lod0[0]!.visible).toBe(false);
+    const spinM = new Matrix4();
+    rim.getMatrixAt(0, spinM);
     const u = new Vector3().setFromMatrixColumn(spinM, 1);
     expect(u.y).toBeCloseTo(Math.cos(1), 4);
+    expect(rim.boundingSphere!.radius).toBeGreaterThan(1);
     // child of the skin root → no double offset
     root.add(wv.object);
     wv.update(skin, 1 / 60);
     expect(wv.object.position.length()).toBe(0);
     wv.dispose();
     materials.dispose();
+  });
+
+  it('instanced tyre GLSL picks the wheel by gl_InstanceID', () => {
+    const sh = { vertexShader: ShaderLib.physical.vertexShader };
+    applyTyreGlsl(sh, 4);
+    expect(sh.vertexShader).toContain('uniform vec4 uTyreD[ 32 ];');
+    expect(sh.vertexShader).toContain('int tyI = gl_InstanceID;');
+    expect(sh.vertexShader).not.toContain('#include <begin_vertex>');
   });
 });
