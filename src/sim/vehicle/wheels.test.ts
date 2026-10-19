@@ -26,7 +26,7 @@ import {
   type WheelRuntime,
 } from './types';
 import { buildWheelRig, WHEEL_TUNING_205_55R16 } from './wheelrig';
-import { applyParkingClamp, applyWheelTorques, estimateWheelOmega, setWheelGround } from './wheels';
+import { applyParkingClamp, applyWheelTorques, estimateWheelOmega, HOOP_OMEGA_MAX, setWheelGround } from './wheels';
 
 const DT = 1 / 2000;
 const G = -9.81;
@@ -125,6 +125,8 @@ function makeSim(defs: WheelDef[], opts: SimOpts = {}): Sim {
       rollingResistance: 0,
       brushK: 0,
       brushC: 0,
+      rimHoop: 0,
+      treadHoop: 0,
       friction: d.friction,
     };
     const b = obj.nodeStart;
@@ -450,12 +452,17 @@ describe('buildWheelRig', () => {
       if (rays === 12) {
         // Numbers quoted in wheelrig.ts.
         const max = (p: string, a: Float64Array) => Math.max(...r.nodes.map((x, i) => (x.id.includes(p) ? a[i]! : 0)));
-        expect(max('.tire', rep.omegaDt)).toBeCloseTo(0.488, 3);
+        expect(max('.tire', rep.omegaDt)).toBeCloseTo(0.4505, 3);
         expect(max('.rim', rep.omegaDt)).toBeCloseTo(0.347, 3);
         expect(max('.hub', rep.omegaDt)).toBeCloseTo(0.315, 3);
-        expect(max('.tire', rep.dampDt)).toBeCloseTo(0.06, 2);
+        expect(max('.tire', rep.dampDt)).toBeCloseTo(0.051, 3);
         expect(max('.rim', rep.dampDt)).toBeCloseTo(0.027, 3);
         expect(max('.hub', rep.dampDt)).toBeCloseTo(0.022, 3);
+        // Hoop tension's geometric stiffness at HOOP_OMEGA_MAX (wheels.ts
+        // applyHoopTension) adds √f·ω̂/(√2·sin(π/n)) in quadrature.
+        const hoop = (f: number) => (Math.sqrt(f) * HOOP_OMEGA_MAX * DT) / (Math.SQRT2 * Math.sin(Math.PI / 12));
+        expect(Math.hypot(max('.tire', rep.omegaDt), hoop(WHEEL_TUNING_205_55R16.treadHoopTension))).toBeLessThanOrEqual(0.5);
+        expect(Math.hypot(max('.rim', rep.omegaDt), hoop(WHEEL_TUNING_205_55R16.rimHoopTension))).toBeLessThanOrEqual(0.5);
       }
     }
     // Beam damping below 2·sqrt(k·μ_reduced) for every generated beam (attach beams excluded).
@@ -493,11 +500,11 @@ describe('groundNormalForce', () => {
 });
 
 describe('static load', () => {
-  it('3.5 kN deflects the default tyre 25–40 mm (hub drop incl. the tread contact layer), monotone', () => {
+  it('3.5 kN deflects the default tyre 30–50 mm (hub drop incl. the tread contact layer), monotone', () => {
     let prevD = 0;
     let prevF = 0;
     let defl = Infinity;
-    for (let d = 0.004; d <= 0.04; d += 0.004) {
+    for (let d = 0.004; d <= 0.052; d += 0.004) {
       const f = staticLoadAt(d);
       expect(f).toBeGreaterThan(prevF); // no sidewall collapse below 3.5 kN
       if (f >= 3500) {
@@ -507,10 +514,10 @@ describe('static load', () => {
       prevD = d;
       prevF = f;
     }
-    // Measured ≈ 35 mm, ≈ 15 mm of it the soft tread contact layer
-    // (tireContactSpring 1e5 per node; see wheelrig.ts and ground.ts).
-    expect(defl).toBeGreaterThan(0.025);
-    expect(defl).toBeLessThan(0.04);
+    // ≈ 18 mm of it is the soft tread contact layer (tireContactSpring 8e4
+    // per node; see wheelrig.ts and ground.ts).
+    expect(defl).toBeGreaterThan(0.03);
+    expect(defl).toBeLessThan(0.05);
   });
 });
 

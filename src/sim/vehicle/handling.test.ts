@@ -76,7 +76,10 @@ afterAll(() => {
     ['circle speed @max (km/h)', f(circle.speedAtMax * 3.6, 1), ''],
     ['step steer 60 km/h: yaw rate (rad/s)', f(step.yawSteady, 3), 'settles'],
     ['step steer overshoot / std', `${f(step.overshoot)} / ${f(step.yawStd, 4)}`, '< 1.5 / < 0.03'],
-    ['top speed reached (km/h)', f(top.vmaxKmh, 1), '≥ 200'],
+    ['full-throttle accel @200 / 210 km/h (m/s²)', `${f(top.accel200, 2)} / ${f(top.accel210, 2)} (gear ${top.gear200}/${top.gear210})`, '> 0 (v_max ≥ 200)'],
+    ['195 km/h straight, 10 s WOT: end speed (km/h)', f(top.endKmh, 1), ''],
+    ['195 km/h straight, 10 s WOT: max |yaw rate| (rad/s)', f(top.maxYawRate, 3), '< 0.05'],
+    ['195 km/h straight, 10 s WOT: heading drift (deg)', f(top.headingDrift, 2), '< 3'],
   ];
   const w0 = Math.max(...rows.map((r) => r[0].length));
   const w1 = Math.max(...rows.map((r) => r[1].length));
@@ -132,7 +135,13 @@ describe('SEDAN handling harness', () => {
     expect(step.yawStd).toBeLessThan(0.03);
   });
 
-  it.fails('f) top speed ≥ 200 km/h', () => {
-    expect(top.vmaxKmh).toBeGreaterThanOrEqual(200);
+  it('f) top speed ≥ 200 km/h (power balance: still accelerating at 200 km/h)', () => {
+    expect(top.accel200).toBeGreaterThan(0);
+    expect(top.endKmh).toBeGreaterThan(200);
+  });
+
+  it('f) high speed: a 10 s full-throttle straight from 195 km/h stays straight (no weave)', () => {
+    expect(top.maxYawRate).toBeLessThan(0.05);
+    expect(top.headingDrift).toBeLessThan(3);
   });
 });

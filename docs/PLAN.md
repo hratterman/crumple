@@ -26,7 +26,7 @@ The dev container can be reclaimed at any time, and uncommitted work dies with i
 |---|---|
 | P0 Foundation | ✅ done: scaffold, CI, Pages, fetch-assets, bench (31.6 M beam-updates/s/core; f64 faster than f32 on V8), `src/core` (102 tests), real CC0 assets |
 | P1 Sim core + protocol | ✅ done: frozen protocol, beam kernel (plasticity/breaking), ground contact, rig compiler, worker at real-time 2 kHz, soft-cube wireframe demo (172 tests) |
-| P2 Drivable wireframe car | ⏳ in progress |
+| P2 Drivable wireframe car | ✅ done: sedan rig (soft-body wheels, tread brush, hoop tension, rigid subframes), drivetrain + TC, input, chase cam + HUD, beams/nodes view; headless handling harness all green (sag 5.9 cm, 0–100 6.8 s, 100–0 36 m, R40 1.0 g, v_max ≈ 210–218 km/h, no weave); 278 tests. Visual check pending |
 | P3–P9 | not started |
 
 ## Pinned stack

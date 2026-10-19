@@ -409,8 +409,9 @@ export const applyWheelTorques: ApplyWheelTorques = (state, w, driveTorque, brak
  *   u   = v_c·â   (rigid-wheel lateral slip speed; spin adds nothing along s)
  *   δ_j += u·dt   (reset to 0 when the node leaves the ground)
  *   F_j = −k·δ_j − c·u,  |F_j| ≤ share·μ·N_j (δ_j clipped at the cap:
- *         sliding), share = (|u| + V0)/(|u_slip| + V0): the lateral part
- *         of the rigid-wheel slip velocity (combined slip; V0 = 0.5 m/s)
+ *         sliding), share = (|u| + V0)/(|(u, u_x)| + V0), u_x = sliding
+ *         speed of a locked/spinning wheel (slip ratio beyond 0.12 × v):
+ *         combined slip, V0 = 0.5 m/s
  * The lateral contact forces F_j·â at the q_j are applied as a wrench on the
  * RIGID wheel they were measured on (see the wrench split at the end). The node-level ground stick keeps the
  * longitudinal direction (drops the â component, cone √((μN)² − F_j²)):
@@ -436,8 +437,76 @@ export const applyWheelTorques: ApplyWheelTorques = (state, w, driveTorque, brak
 const TREAD_NODE_DAMP = 0.1;
 /** Minimum attach-node height above the wheel centre (m) for the ball-joint load path. */
 const ATTACH_MIN_HEIGHT = 0.05;
+/** Slip ratio below which the brush keeps its full lateral share. */
+const BRUSH_SLIP_DEADZONE = 0.12;
 /** Combined-slip blend speed, m/s (see applyTreadBrush). */
 const BRUSH_SHARE_V0 = 0.5;
+
+/**
+ * HOOP TENSION (wheels with rimHoop / treadHoop > 0). A rim is a stiff
+ * alloy hoop and a tyre's steel belt is near-inextensible: neither grows
+ * much with speed, and the belt's hoop tension (ρ·v²) is what keeps a real
+ * tyre's tread on its circle. The explicit node budget affords only ~5e4
+ * N/m spokes / sidewalls, so at 200 km/h (ω ≈ 170 rad/s, m·ω²·r ≈ 3–6 kN
+ * per node) the rim rings ballooned ~7 cm and the tread ~5 cm, lifting the
+ * car 7.5 cm; above ~205 km/h the tread fell into a standing-wave state
+ * (rolling radius dropped 10 %, the free fronts jumped from −4 % to +5 %
+ * slip) and the car settled into a ±0.1 rad/s yaw limit cycle.
+ * Each ring segment (k, k+1) gets the tension a spinning hoop carries,
+ * T = f·m·ω̂²·r/(2·sin(π/n)) (m = mean endpoint mass, r = the ring's
+ * design radius, ω̂ = min(|ω|, HOOP_OMEGA_MAX), f = the def's fraction,
+ * folded into rimHoop / treadHoop with the 1/(2·sin(π/n))); on a regular
+ * polygon its resultant is f·m·ω²·r toward the axle. Internal forces (equal
+ * and opposite along each segment): no net force or torque on the wheel,
+ * and a flattened contact patch gets none (straight segments). The
+ * tension's geometric stiffness 2T/L adds ω_g = √f·ω̂/(√2·sin(π/n)) (2.7·√f·ω̂
+ * at 12 rays) to the ring nodes in quadrature; HOOP_OMEGA_MAX caps it
+ * (≈ 245 km/h) so the sedan's rim (0.35 → 0.46) and tread (0.45 → 0.50
+ * at f = 0.5) stay within ω·dt ≤ 0.5.
+ */
+export const HOOP_OMEGA_MAX = 220;
+
+export function applyHoopTension(state: SimState, w: WheelRuntime): void {
+  const rim = w.wheel.rimHoop;
+  const tread = w.wheel.treadHoop;
+  if (!(rim > 0) && !(tread > 0)) return;
+  let om = w.omega < 0 ? -w.omega : w.omega;
+  if (om > HOOP_OMEGA_MAX) om = HOOP_OMEGA_MAX;
+  const w2 = om * om;
+  if (!(w2 > 0)) return;
+  const n = w.wheel.rays;
+  if (rim > 0) {
+    const g = w2 * rim * w.wheel.rimRadius;
+    hoopRing(state, w.rimStart, n, g);
+    hoopRing(state, w.rimStart + n, n, g);
+  }
+  if (tread > 0) {
+    const g = w2 * tread * w.wheel.tireRingRadius;
+    hoopRing(state, w.tireStart, n, g);
+    hoopRing(state, w.tireStart + n, n, g);
+  }
+}
+
+/** Tension m·g along each segment of the closed ring start..start+n−1 (m = mean endpoint mass). */
+function hoopRing(state: SimState, start: number, n: number, g: number): void {
+  const { posX, posY, posZ, frcX, frcY, frcZ, invMass } = state;
+  for (let k = 0; k < n; k++) {
+    const a = start + k;
+    const b = k + 1 === n ? start : a + 1;
+    const dx = posX[b]! - posX[a]!;
+    const dy = posY[b]! - posY[a]!;
+    const dz = posZ[b]! - posZ[a]!;
+    const L = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (!(L > 1e-9)) continue;
+    const sc = (0.5 * (1 / invMass[a]! + 1 / invMass[b]!) * g) / L;
+    frcX[a] = frcX[a]! + sc * dx;
+    frcY[a] = frcY[a]! + sc * dy;
+    frcZ[a] = frcZ[a]! + sc * dz;
+    frcX[b] = frcX[b]! - sc * dx;
+    frcY[b] = frcY[b]! - sc * dy;
+    frcZ[b] = frcZ[b]! - sc * dz;
+  }
+}
 
 export function applyTreadBrush(state: SimState, w: WheelRuntime, dt: number): void {
   const k = w.wheel.brushK;
@@ -469,12 +538,22 @@ export function applyTreadBrush(state: SimState, w: WheelRuntime, dt: number): v
   const vcz = (velZ[hi]! + velZ[ho]!) * 0.5;
   const c = w.wheel.brushC;
   const invDt = 1 / dt;
-  // Longitudinal slip speed of the rigid wheel (forward = s × up): the
-  // lateral share of the friction circle follows the slip direction.
-  const fwx = sy * 0 - sz * 1;
-  const fwz = sx * 1 - sy * 0;
+  // Longitudinal sliding speed for the combined-slip share: only slip
+  // beyond BRUSH_SLIP_DEADZONE counts (a locked or spinning wheel). Using
+  // the raw slip VELOCITY scaled with road speed: at 185 km/h a normal
+  // 1.5 % drive slip (and the free wheels' −6 % rolling-radius bias) took
+  // 60 % of the rear's lateral grip under power and the car weaved into a
+  // spin.
+  const fwx = -sz;
+  const fwz = sx;
   const fl = Math.sqrt(fwx * fwx + fwz * fwz);
-  const uxLong = fl > 1e-6 ? (vcx * fwx + vcz * fwz) / fl - w.omega * w.rollRadius : 0;
+  let uxLong = 0;
+  if (fl > 1e-6) {
+    let vf = (vcx * fwx + vcz * fwz) / fl;
+    if (vf < 0) vf = -vf;
+    const sr = w.slipRatio < 0 ? -w.slipRatio : w.slipRatio;
+    if (sr > BRUSH_SLIP_DEADZONE) uxLong = (sr - BRUSH_SLIP_DEADZONE) * (vf > 1 ? vf : 1);
+  }
   // Contact wrench about the wheel centre.
   let Fx = 0;
   let Fy = 0;

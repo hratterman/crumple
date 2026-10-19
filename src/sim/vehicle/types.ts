@@ -122,6 +122,14 @@ export interface WheelDef {
   treadBrushStiffness?: number;
   /** Brush damping on the rigid-wheel slip velocity, N·s/m per tread node. */
   treadBrushDamping?: number;
+  /**
+   * Hoop tension, 0..1 (additive P2 fields, default 0): the fraction of the
+   * rim / tread rings' centripetal load carried as ring-segment tension (a
+   * rim and a belted tyre do not balloon with speed; see wheels.ts
+   * applyHoopTension).
+   */
+  rimHoopTension?: number;
+  treadHoopTension?: number;
   attachSpring?: number;
   attachDamp?: number;
   attachBreakF?: number;
@@ -138,6 +146,9 @@ export const WHEEL_DEFAULTS = {
   /** Tread brush (0 = node-level implicit ground friction). */
   treadBrushStiffness: 0,
   treadBrushDamping: 0,
+  /** Hoop tension fractions (0 = none). */
+  rimHoopTension: 0,
+  treadHoopTension: 0,
   /** Contact radius / μ of rim nodes (scrape on a flat or detached tyre). */
   rimNodeRadius: 0.02,
   rimFriction: 0.5,
@@ -363,6 +374,12 @@ export interface CompiledWheel {
   /** WheelDef.treadBrushStiffness / treadBrushDamping ?? 0 (additive P2). */
   brushK: number;
   brushC: number;
+  /**
+   * WheelDef.rimHoopTension / treadHoopTension ÷ (2·sin(π/rays)) (additive
+   * P2): segment tension T = m·ω²·r·hoop (r = rimRadius / tireRingRadius).
+   */
+  rimHoop: number;
+  treadHoop: number;
   friction: number;
 }
 
@@ -584,8 +601,13 @@ export type ApplyWheelTorques = (
   brakeTorque: number,
 ) => void;
 export const BRAKE_OMEGA_EPS = 1;
-/** Rolling-resistance torque ramp (rad/s): linear below, constant above. */
-export const ROLL_RES_OMEGA_EPS = 0.5;
+/**
+ * Rolling-resistance torque ramp (rad/s): linear below, constant above.
+ * 0.1 rad/s (≈ 3 cm/s at the tread) makes it Coulomb-like for a parked
+ * car: at 0.5 a neutral, unbraked sedan kept rocking fore-aft (~3 mm,
+ * ~9 s period) in the tread-polygon well for > 10 s.
+ */
+export const ROLL_RES_OMEGA_EPS = 0.1;
 
 /**
  * PARKING CLAMP (fights creep from the regularized μ·tanh(v/0.3) friction).

@@ -273,6 +273,8 @@ function compileWheels(def: VehicleDef, rig: CompiledRig, bodyNodeCount: number,
       rollingResistance: wd.rollingResistance ?? 0,
       brushK: wd.treadBrushStiffness ?? 0,
       brushC: wd.treadBrushDamping ?? 0,
+      rimHoop: (wd.rimHoopTension ?? 0) / (2 * Math.sin(Math.PI / n)),
+      treadHoop: (wd.treadHoopTension ?? 0) / (2 * Math.sin(Math.PI / n)),
       friction: wd.friction,
     });
     nodeStart += nodeCount;

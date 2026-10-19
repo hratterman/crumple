@@ -133,7 +133,13 @@ describe('SEDAN definition', () => {
     let peakRpm = 0;
     for (let i = 0; i < d.torqueLut.length; i++) if (d.torqueLut[i]! > peak) [peak, peakRpm] = [d.torqueLut[i]!, i * d.lutStepRpm];
     expect(peak).toBeCloseTo(350, 6);
-    expect(peakRpm).toBe(4500);
+    expect(peakRpm).toBe(3500); // plateau 3500–6500 rpm
+    expect(lut(6500)).toBeCloseTo(350, 6);
+    // ≈ 238 kW peak power (350 N·m at 6500 rpm).
+    let pmax = 0;
+    for (let i = 0; i < d.torqueLut.length; i++) pmax = Math.max(pmax, (d.torqueLut[i]! * i * d.lutStepRpm * Math.PI) / 30);
+    expect(pmax).toBeGreaterThan(230e3);
+    expect(pmax).toBeLessThan(255e3);
     expect(lut(1500)).toBeLessThan(0.8 * peak); // a real curve, not flat
     expect(lut(6800)).toBeLessThan(peak);
     expect(d.redlineRpm).toBe(6800);

@@ -36,7 +36,7 @@ import type {
   VehicleRuntime,
   WheelRuntime,
 } from './types';
-import { applyParkingClamp, applyTreadBrush, applyWheelTorques, estimateWheelOmega } from './wheels';
+import { applyHoopTension, applyParkingClamp, applyTreadBrush, applyWheelTorques, estimateWheelOmega } from './wheels';
 
 /** Air density, kg/m³ (AeroDef contract). */
 export const AIR_DENSITY = 1.225;
@@ -262,6 +262,7 @@ export function vehiclePreStep(state: SimState, vehicle: VehicleRuntime, actions
     const wr = wheels[w]!;
     applyWheelTorques(state, wr, wr.driveTorque, wr.brakeTorque);
     applyTreadBrush(state, wr, dt);
+    applyHoopTension(state, wr);
   }
   applyParkingClamp(state, vehicle, actions, dt);
   applyAero(state, vehicle);

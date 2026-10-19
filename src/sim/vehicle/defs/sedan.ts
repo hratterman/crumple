@@ -221,6 +221,18 @@ const CROSS_CABIN: readonly (readonly [number, string, string])[] = [
  * softens the tyre radially (0.30 m: +15 mm static squish).
  */
 const HUB_SPACING = 0.24;
+/**
+ * Fore-aft reach of the tie rod (front, pivot behind the wheel) and toe
+ * link (rear, pivot ahead), m. The link pivot is the third corner of the
+ * subframe triangle with the two lower-arm pivots (0.56 m inboard, ±0.3 m
+ * fore/aft): at 0.7 / 0.6 m reach both of its subframe edges ran within
+ * 22–30° of each other, so the pivot was soft across them and lateral
+ * load moved it ~2 mm fore-aft relative to the arm pivots (front wheels
+ * steered INTO the turn, ≈ 0.5°/g even with the rigid subframe). At
+ * 0.35 m the edges are ~45° apart and lateral-force compliance steer is
+ * ≈ 0.4°/g OUT of the turn (understeer; static lateral-gravity bench).
+ */
+const LINK_REACH = 0.35;
 interface CornerGeom {
   z: number;
   kU: [number, number, number];
@@ -235,7 +247,7 @@ const FRONT: CornerGeom = {
   kU: [0.66, 0.58, Z_F + 0.03],
   lowerPivots: [[0.34, Y_W, Z_F - 0.3], [0.34, Y_W, Z_F + 0.28]],
   upperPivots: [[0.37, 0.58, Z_F - 0.28], [0.37, 0.58, Z_F + 0.28]],
-  linkPivot: [HALF_TRACK + HUB_SPACING / 2, 0.32, Z_F + 0.7],
+  linkPivot: [HALF_TRACK + HUB_SPACING / 2, 0.32, Z_F + LINK_REACH],
   towerStation: 3,
 };
 const REAR: CornerGeom = {
@@ -243,13 +255,34 @@ const REAR: CornerGeom = {
   kU: [0.66, 0.58, Z_R],
   lowerPivots: [[0.34, Y_W, Z_R - 0.3], [0.34, Y_W, Z_R + 0.3]],
   upperPivots: [[0.37, 0.58, Z_R - 0.28], [0.37, 0.58, Z_R + 0.28]],
-  linkPivot: [HALF_TRACK + HUB_SPACING / 2, 0.32, Z_R - 0.6],
+  linkPivot: [HALF_TRACK + HUB_SPACING / 2, 0.32, Z_R - LINK_REACH],
   towerStation: 10,
 };
 
 /** Upright-top node mass, kg (unsprung). */
 const KNUCKLE_NODE_MASS = 7.5;
-/** Base mass of subframe pivot nodes, kg (before the mass solve): they carry stiff arm beams. */
+/**
+ * SUBFRAME. Per axle, the two lower-arm pivots and the tie-rod / toe-link
+ * pivot of each side, plus the L–R cross members (straight + X), are tied
+ * by FIXED K_SUBFRAME beams into one planar frame that is mounted to the
+ * body by each pivot's 4 auto anchor beams. Before, those links were auto
+ * beams of ~1.2e5 N/m (the pivots' budgets went to the arm/link beams):
+ * the pivots moved 3–5 mm relative to each other at 0.5 g (static bench,
+ * lateral gravity), steering the front wheels INTO the turn by ≈ 1.8°/g —
+ * compliance oversteer that took the understeer gradient to ≈ 0 and made
+ * the car weave and spin at ≈ 205 km/h with or without drive (a neutral
+ * downhill run at a steady 210 km/h diverged in 5 s; rigid subframe:
+ * |r| ≤ 0.001 rad/s). The toe scrub also cost high-speed drag.
+ * Pivot masses carry the fixed beams at SUBFRAME_BUDGET_SHARE of the node
+ * budget, the rest for the anchors; they are fixed (outside the CG/axle
+ * mass solve, which would scale them below that budget).
+ */
+const K_SUBFRAME = 1e6;
+const SUBFRAME_BUDGET_SHARE = 0.7;
+const SUBFRAME_DEFORM = 9e4;
+const SUBFRAME_BREAK = 1.8e5;
+const subframePivotMass = (fixedK: number): number => round(fixedK / (BUDGET_PER_KG * SUBFRAME_BUDGET_SHARE), 2);
+/** Base mass of the upper-arm pivot nodes, kg (before the mass solve). */
 const PIVOT_NODE_MASS = 7;
 /**
  * Fixed suspension stiffnesses, N/m. Budgets (ω·dt ≤ 0.35, Σk ≤ 4.9e5·m):
@@ -262,6 +295,21 @@ const K_UPPER_ARM = 8e5;
 const K_TOE_LINK = 1.5e6;
 const K_AXLE_STUB = 1.2e6;
 const ATTACH_SPRING = 9e5;
+/**
+ * Rear hub-link stiffness factor (axle stub, lower arm, toe link, ARB,
+ * upright attach). At 1× the driven rear upright's compliance let a
+ * straight full-throttle run grow a ~0.7 Hz yaw weave from 120 km/h up
+ * (spun at 185 km/h; coasting, open diff, TC off, brush off all still did
+ * it); 2× is stable to v_max (handling.test.ts high-speed run).
+ */
+const REAR_LINK_FACTOR = 2;
+const linkFactor = (front: boolean): number => (front ? 1 : REAR_LINK_FACTOR);
+/**
+ * Hub / knuckle node masses per axle: the rear ones carry REAR_LINK_FACTOR×
+ * the link stiffness (the hubs' wheel beams do not scale, so 0.81 of it).
+ */
+const hubMass = (front: boolean): number => WHEEL_HUB_MASS * (front ? 1 : REAR_LINK_FACTOR * 0.81);
+const knuckleMass = (front: boolean): number => KNUCKLE_NODE_MASS * linkFactor(front);
 const ATTACH_DAMP = 300;
 const D_ARM = 400;
 /** Anti-roll: ARB roll rate at the wheel as a fraction of the axle's spring wheel rate. */
@@ -280,24 +328,23 @@ const DAMPER_CALIBRATION = 1.9;
 const WHEEL_HUB_MASS = 30;
 
 // ====================================================================== drivetrain
-/** 3.0 L naturally aspirated I6: 350 N·m at 4500 rpm, ~200 kW at 6000 rpm. */
+/**
+ * 3.0 L I6: 350 N·m held from 3500 to 6500 rpm, ≈ 238 kW at 6500–6800 rpm
+ * (a ~250 kW-class sports-sedan engine; the old curve fell to 315 N·m at
+ * 6000 rpm, ~200 kW, and could not hold 200 km/h against drag + rolling).
+ */
 const DRIVETRAIN: DrivetrainDef = {
   torqueCurve: [
     [0, 180],
-    [800, 205],
-    [1500, 265],
-    [2000, 295],
-    [2500, 315],
-    [3000, 328],
-    [3500, 338],
-    [4000, 346],
-    [4500, 350],
-    [5000, 345],
-    [5500, 333],
-    [6000, 315],
-    [6500, 290],
-    [6800, 270],
-    [7200, 215],
+    [800, 210],
+    [1500, 270],
+    [2000, 305],
+    [2500, 330],
+    [3000, 345],
+    [3500, 350],
+    [6500, 350],
+    [6800, 335],
+    [7200, 260],
   ],
   idleRpm: 800,
   redlineRpm: 6800,
@@ -308,13 +355,21 @@ const DRIVETRAIN: DrivetrainDef = {
   reverseRatio: 3.6,
   finalDrive: 3.4,
   shiftTimeS: 0.25,
-  autoShiftUpRpm: 6300,
+  // Torque holds 350 N·m to 6500 rpm: 5th out-pulls 6th up to the 7000
+  // limiter, so full-throttle upshifts go just below it (at 6300 the box
+  // dropped into 6th at ~195 km/h, 190 kW instead of 5th's 240 kW, and
+  // never kicked back down).
+  autoShiftUpRpm: 6900,
   autoShiftDownRpm: 2600,
   diff: 'limited',
   diffLockTorque: 400,
   clutchMaxTorque: 550,
   transmission: 'auto',
-  tractionControl: 0.08,
+  // Driven-wheel excess slip over the undriven reference before TC cuts in.
+  // The soft tyre needs ~8 % rear slip to put 4 kN down at 200 km/h (and
+  // the free-rolling fronts read ≈ −3 % there), so 0.08 cut throttle on a
+  // dry straight and capped the car at ~185 km/h.
+  tractionControl: 0.14,
 };
 
 // ====================================================================== generator
@@ -455,12 +510,12 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
     for (const s of ['L', 'R'] as const) {
       const c = `${axle}${s}`; // == wheel id
       const ids: CornerIds = {
-        kU: addNode(`${c}_kU`, mirror(g.kU, s), KNUCKLE_NODE_MASS, 'knuckle', false, false),
+        kU: addNode(`${c}_kU`, mirror(g.kU, s), knuckleMass(axle === 'F'), 'knuckle', false, false),
         hubI: wheelNodeId(c, 'hubI'),
         hubO: wheelNodeId(c, 'hubO'),
-        lower: g.lowerPivots.map((p, i) => addNode(`${c}_lp${i}`, mirror(p, s), PIVOT_NODE_MASS, 'subframe')),
+        lower: g.lowerPivots.map((p, i) => addNode(`${c}_lp${i}`, mirror(p, s), subframePivotMass(K_LOWER_ARM * linkFactor(axle === 'F') + 4 * K_SUBFRAME), 'subframe', true, false)),
         upper: g.upperPivots.map((p, i) => addNode(`${c}_up${i}`, mirror(p, s), PIVOT_NODE_MASS, 'subframe')),
-        link: addNode(`${c}_${axle === 'F' ? 'rack' : 'toe'}`, mirror(g.linkPivot, s), PIVOT_NODE_MASS, 'subframe'),
+        link: addNode(`${c}_${axle === 'F' ? 'rack' : 'toe'}`, mirror(g.linkPivot, s), subframePivotMass(K_TOE_LINK * linkFactor(axle === 'F') + 3 * K_SUBFRAME), 'subframe', true, false),
         tower: sid(g.towerStation, 'tw', s),
       };
       // Hub rest positions (generated by buildWheelRig from hubInner/hubOuter below).
@@ -471,15 +526,15 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
   }
 
   // ---- wheels
-  const unsprungWheel = WHEEL_HUB_MASS + WHEEL_TUNING_205_55R16.rimMass + WHEEL_TUNING_205_55R16.tireMass;
-  const unsprungCorner = unsprungWheel + KNUCKLE_NODE_MASS;
+  const unsprungWheelOf = (front: boolean): number => hubMass(front) + WHEEL_TUNING_205_55R16.rimMass + WHEEL_TUNING_205_55R16.tireMass;
+  const unsprungCornerOf = (front: boolean): number => unsprungWheelOf(front) + knuckleMass(front);
   const wheel = (id: 'FL' | 'FR' | 'RL' | 'RR'): WheelDef => {
     const front = id[0] === 'F';
     const s: Side = id[1] === 'L' ? 'L' : 'R';
     const c = corners.get(id)!;
     return {
       ...WHEEL_TUNING_205_55R16,
-      hubMass: WHEEL_HUB_MASS,
+      hubMass: hubMass(front),
       id,
       hubInner: pos.get(c.hubI)!,
       hubOuter: pos.get(c.hubO)!,
@@ -491,7 +546,7 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
       brakeTorqueMax: 2500,
       handbrake: !front,
       attach: [c.kU],
-      attachSpring: ATTACH_SPRING,
+      attachSpring: ATTACH_SPRING * linkFactor(front),
       attachDamp: ATTACH_DAMP,
       attachBreakF: 1.0e5,
     };
@@ -521,9 +576,10 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
       fy += n.mass * n.pos[1];
     }
     for (const w of wheels) {
-      fm += unsprungWheel;
-      fz += unsprungWheel * w.hubInner[2];
-      fy += unsprungWheel * w.hubInner[1];
+      const uw = unsprungWheelOf(w.axle === 'front');
+      fm += uw;
+      fz += uw * w.hubInner[2];
+      fy += uw * w.hubInner[1];
     }
     let bSum = 0;
     let zBar = 0;
@@ -569,7 +625,7 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
     for (let k = 0; k < 3; k++) cg[k]! += m * p[k]!;
   };
   for (const n of nodes) accum(n.mass, n.pos);
-  for (const w of wheels) accum(unsprungWheel, [(w.hubInner[0] + w.hubOuter[0]) / 2, Y_W, w.hubInner[2]]);
+  for (const w of wheels) accum(unsprungWheelOf(w.axle === 'front'), [(w.hubInner[0] + w.hubOuter[0]) / 2, Y_W, w.hubInner[2]]);
   for (let k = 0; k < 3; k++) cg[k] = cg[k]! / totalMass;
   const frontAxleShare = (Z_R - cg[2]) / (Z_R - Z_F);
   /*
@@ -578,8 +634,8 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
    * series with the tyre): K_ride = m_s·(2πf)², k_wheel = K_ride·k_t/(k_t − K_ride).
    * Tyre rate k_t ≈ 3.5 kN / 15.6 mm ≈ 2.24e5 N/m (wheelrig.ts static test).
    */
-  const sprungFront = (totalMass * frontAxleShare) / 2 - unsprungCorner;
-  const sprungRear = (totalMass * (1 - frontAxleShare)) / 2 - unsprungCorner;
+  const sprungFront = (totalMass * frontAxleShare) / 2 - unsprungCornerOf(true);
+  const sprungRear = (totalMass * (1 - frontAxleShare)) / 2 - unsprungCornerOf(false);
   const tireRate = 3500 / 0.0156;
   const wheelRateFor = (m: number, hz: number): number => {
     const ride = m * (2 * Math.PI * hz) ** 2;
@@ -719,16 +775,19 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
   for (const axle of ['F', 'R'] as const) {
     const L = corners.get(`${axle}L`)!;
     const R = corners.get(`${axle}R`)!;
-    link(L.lower[0]!, R.lower[0]!, 'subframe');
-    link(L.lower[1]!, R.lower[1]!, 'subframe');
-    link(L.lower[0]!, R.lower[1]!, 'subframe');
-    link(R.lower[0]!, L.lower[1]!, 'subframe');
-    link(L.link, R.link, 'subframe');
+    // Rigid subframe (fixed K_SUBFRAME, see there): cross members + per-side triangles.
+    const sub = (a: string, b: string): void =>
+      fix({ a, b, type: 'normal', k: K_SUBFRAME, d: D_ARM, deform: SUBFRAME_DEFORM, breakF: SUBFRAME_BREAK });
+    sub(L.lower[0]!, R.lower[0]!);
+    sub(L.lower[1]!, R.lower[1]!);
+    sub(L.lower[0]!, R.lower[1]!);
+    sub(R.lower[0]!, L.lower[1]!);
+    sub(L.link, R.link);
     for (const s of [L, R]) {
-      link(s.lower[0]!, s.lower[1]!, 'subframe');
+      sub(s.lower[0]!, s.lower[1]!);
+      sub(s.link, s.lower[1]!);
+      sub(s.link, s.lower[0]!);
       link(s.upper[0]!, s.upper[1]!, 'subframe');
-      link(s.link, s.lower[1]!, 'subframe');
-      link(s.link, s.lower[0]!, 'subframe');
     }
   }
 
@@ -791,8 +850,9 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
     for (const s of ['L', 'R'] as const) {
       const ids = corners.get(`${axle}${s}`)!;
       // Axle stub: the generated hubI–hubO beam has the (soft) rim rate; this one makes the upright triangle rigid.
-      fix({ a: ids.hubI, b: ids.hubO, type: 'normal', k: K_AXLE_STUB, d: D_ARM, deform: 0, breakF: 0 });
-      for (const p of ids.lower) fix({ a: ids.hubI, b: p, type: 'normal', k: K_LOWER_ARM, d: D_ARM, deform: 9e4, breakF: 1.8e5 });
+      const lf = linkFactor(front);
+      fix({ a: ids.hubI, b: ids.hubO, type: 'normal', k: K_AXLE_STUB * lf, d: D_ARM, deform: 0, breakF: 0 });
+      for (const p of ids.lower) fix({ a: ids.hubI, b: p, type: 'normal', k: K_LOWER_ARM * lf, d: D_ARM, deform: 9e4, breakF: 1.8e5 });
       for (const p of ids.upper) fix({ a: ids.kU, b: p, type: 'normal', k: K_UPPER_ARM, d: D_ARM, deform: 7e4, breakF: 1.4e5 });
       fix({
         a: ids.hubI,
@@ -813,8 +873,9 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
          * hubI → kU; hubO swings fore/aft and the fore-aft tie rod follows.
          * The rod runs exactly fore-aft from hubO (travel moves hubO only in
          * x-y, so no bump steer / binding: an inclined rod added ~3e5 N/m of
-         * heave stiffness). It is 0.7 m long so full lock stays ~35° from
-         * the rod's dead point (rod in line with hubO's radius about the axis).
+         * heave stiffness). It is LINK_REACH = 0.35 m long; full lock stays
+         * > 50° from the rod's dead point (rod in line with hubO's radius
+         * about the axis).
          * Unbreakable: a step to full lock briefly loads it k·ΔL ≈ 2e5 N.
          * travel = central difference (L(−δ) − L(+δ)) / (2·L0) at δ = 0.55 rad.
          */
@@ -827,15 +888,16 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
         const d = SEDAN_TARGETS.maxWheelAngleRad;
         hydroTravel[s] = round((Lat(-d) - Lat(d)) / (2 * L0), 4);
         tieRodLength = L0;
-        fix({ a: ids.link, b: ids.hubO, type: 'hydro', k: K_TOE_LINK, d: D_ARM, hydroTravel: hydroTravel[s], deform: 0, breakF: 0 });
+        fix({ a: ids.link, b: ids.hubO, type: 'hydro', k: K_TOE_LINK * lf, d: D_ARM, hydroTravel: hydroTravel[s], deform: 0, breakF: 0 });
       } else {
-        fix({ a: ids.link, b: ids.hubO, type: 'normal', k: K_TOE_LINK, d: D_ARM, deform: 9e4, breakF: 1.6e5 });
+        fix({ a: ids.link, b: ids.hubO, type: 'normal', k: K_TOE_LINK * lf, d: D_ARM, deform: 9e4, breakF: 1.6e5 });
       }
     }
     const L = Lc;
-    const dArb = sig3(0.1 * Math.sqrt(arbK[which] * KNUCKLE_NODE_MASS));
-    fix({ a: L.hubI, b: Rc.kU, type: 'normal', k: arbK[which], d: dArb, deform: 0, breakF: 1e5 });
-    fix({ a: L.kU, b: Rc.hubI, type: 'normal', k: arbK[which], d: dArb, deform: 0, breakF: 1e5 });
+    const dArb = sig3(0.1 * Math.sqrt(arbK[which] * knuckleMass(front)));
+    const arbF = linkFactor(front);
+    fix({ a: L.hubI, b: Rc.kU, type: 'normal', k: arbK[which] * arbF, d: dArb, deform: 0, breakF: 1e5 });
+    fix({ a: L.kU, b: Rc.hubI, type: 'normal', k: arbK[which] * arbF, d: dArb, deform: 0, breakF: 1e5 });
   }
 
   // ---- auto stiffness: split each node's budget by class weight
@@ -851,7 +913,7 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
     addK(b.a, b.k!);
     addK(b.b, b.k!);
   }
-  for (const w of wheels) for (const id of w.attach) addK(id, 2 * ATTACH_SPRING);
+  for (const w of wheels) for (const id of w.attach) addK(id, 2 * (w.attachSpring ?? ATTACH_SPRING));
   const W = new Map<string, number>();
   for (const b of auto) {
     const w = b.w;
@@ -899,7 +961,7 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
     totalMass,
     cg,
     frontAxleShare,
-    unsprungCorner: { front: unsprungCorner, rear: unsprungCorner },
+    unsprungCorner: { front: unsprungCornerOf(true), rear: unsprungCornerOf(false) },
     sprungCornerMass: { front: sprungFront, rear: sprungRear },
     tireRate,
     wheelRate,

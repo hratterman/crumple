@@ -507,7 +507,7 @@ export function runBraking(def: VehicleDef = SEDAN): BrakeResult {
 }
 
 export interface CircleResult {
-  /** Peak sustained lateral acceleration (1 s mean of v·yawRate) before breakaway, g. */
+  /** Peak sustained lateral acceleration (2 s mean of v·yawRate) before breakaway, g. */
   maxLatG: number;
   /** Speed at that point, m/s. */
   speedAtMax: number;
@@ -558,11 +558,16 @@ export function runCircle(def: VehicleDef = SEDAN, radius = 40, rampMs2 = 0.3, s
     },
     stop: (s) => s.t > 6 && Math.abs(s.sideslip) > (15 * Math.PI) / 180,
   });
-  // Rolling 1 s means of v·r and R.
+  // Rolling 2 s means of v·r and R. Near the limit the closed loop (PI
+  // steer, speed ramp, power-on rear slip) swings R ±25 % with a ~3 s
+  // period; 1 s means caught single swings (both the ay peaks and the first
+  // wide excursion that ends the search), so the result jumped 0.74 ↔ 1.10 g
+  // for a 10 % μ change. 2 s means average the cycle (0.92 / 0.99 / 1.02 g
+  // at μ 1.0 / 1.05 / 1.1).
   let best = 0;
   let bestV = 0;
   let bestR = 0;
-  const win = 50;
+  const win = 100;
   for (let i = win; i < samples.length; i++) {
     let ay = 0;
     let v = 0;
@@ -635,23 +640,105 @@ export function runStepSteer(def: VehicleDef = SEDAN, steer = 0.12): StepSteerRe
 }
 
 export interface TopSpeedResult {
-  /** Max speed reached, km/h. */
-  vmaxKmh: number;
+  /** Full-throttle acceleration at 200 / 210 km/h in the best gear (mean over 1–3 s), m/s². > 0 ⇒ v_max above. */
+  accel200: number;
+  accel210: number;
+  /** Gear used at 200 / 210 km/h (most wheel force below the rev limit). */
+  gear200: number;
+  gear210: number;
+  /** 10 s full-throttle straight from 195 km/h in the best gear: max |yaw rate| after 1 s, rad/s (weave check). */
+  maxYawRate: number;
+  /** …its heading change, deg… */
+  headingDrift: number;
+  /** …and the speed it reached, km/h. */
+  endKmh: number;
   samples: HandlingSample[];
 }
 
-/** From 160 km/h at full throttle for `durationS`; reports the max speed. */
-export function runTopSpeed(def: VehicleDef = SEDAN, durationS = 12): TopSpeedResult {
-  const { samples } = runScenario({
-    def,
-    initialSpeed: 160 / 3.6,
-    durationS,
-    sampleHz: 10,
-    control: () => ({ gearSelect: 1, throttle: 1, steer: 0 }),
-    stop: (s) => s.speed > 205 / 3.6,
-  });
-  let vmax = 0;
-  for (const s of samples) vmax = Math.max(vmax, s.speed);
-  return { vmaxKmh: vmax * 3.6, samples };
+/**
+ * Gear (1-based) with the most full-throttle wheel force at `kmh`, rpm from
+ * the unloaded tyre radius (the loaded rolling radius is ~3 % smaller: the
+ * real rpm is a little higher), skipping gears past 98 % of the rev limit.
+ */
+export function bestGear(def: VehicleDef, kmh: number): number {
+  const d = def.drivetrain;
+  const r = def.wheels[0]!.radius;
+  const curve = d.torqueCurve;
+  const torqueAt = (rpm: number): number => {
+    if (rpm <= curve[0]![0]) return curve[0]![1];
+    for (let i = 1; i < curve.length; i++) {
+      const [r1, t1] = curve[i]!;
+      const [r0, t0] = curve[i - 1]!;
+      if (rpm <= r1) return t0 + ((t1 - t0) * (rpm - r0)) / (r1 - r0);
+    }
+    return curve[curve.length - 1]![1];
+  };
+  let best = d.gearRatios.length;
+  let bestF = -Infinity;
+  for (let g = 0; g < d.gearRatios.length; g++) {
+    const ratio = d.gearRatios[g]! * d.finalDrive;
+    const rpm = ((kmh / 3.6 / r) * ratio * 60) / (2 * Math.PI);
+    if (rpm > 0.98 * d.revLimitRpm) continue;
+    const f = torqueAt(rpm) * ratio;
+    if (f > bestF) {
+      bestF = f;
+      best = g + 1;
+    }
+  }
+  return best;
 }
 
+function fullThrottleRun(def: VehicleDef, kmh: number, durationS: number): HandlingSample[] {
+  const gear = bestGear(def, kmh);
+  return runScenario({
+    def,
+    transmission: 'manual',
+    initialSpeed: kmh / 3.6,
+    initialGear: gear,
+    durationS,
+    sampleHz: 20,
+    control: () => ({ gearSelect: gear, throttle: 1, steer: 0 }),
+  }).samples;
+}
+
+function fullThrottleAccel(def: VehicleDef, kmh: number): number {
+  const samples = fullThrottleRun(def, kmh, 3);
+  const a = samples.find((s) => s.t >= 1)!;
+  const b = samples[samples.length - 1]!;
+  return (b.speed - a.speed) / (b.t - a.t);
+}
+
+/**
+ * Top speed as a power balance (a full run from rest takes > 60 s of sim):
+ * full throttle at 200 and 210 km/h, held in the gear with the most wheel
+ * force (manual box, so the measurement is the car's, not the shift
+ * logic's), must still accelerate. Plus a 10 s full-throttle straight from
+ * 195 km/h (it reaches ~210), which catches high-speed weave: a ±0.1 rad/s
+ * yaw limit cycle at v_max before the tread hoop tension (wheels.ts
+ * applyHoopTension), a spin at 185 km/h before the rear hub links were
+ * stiffened (sedan.ts REAR_LINK_FACTOR) and at 205 km/h before the rigid
+ * subframe (sedan.ts K_SUBFRAME).
+ */
+export function runTopSpeed(def: VehicleDef = SEDAN): TopSpeedResult {
+  const accel200 = fullThrottleAccel(def, 200);
+  const accel210 = fullThrottleAccel(def, 210);
+  const samples = fullThrottleRun(def, 195, 10);
+  let maxYawRate = 0;
+  let drift = 0;
+  const h0 = samples[0]!.heading;
+  for (const s of samples) {
+    if (s.t < 1) continue;
+    maxYawRate = Math.max(maxYawRate, Math.abs(s.yawRate));
+    drift = Math.max(drift, Math.abs(s.heading - h0));
+  }
+  return {
+    accel200,
+    accel210,
+    gear200: bestGear(def, 200),
+    gear210: bestGear(def, 210),
+    maxYawRate,
+    headingDrift: (drift * 180) / Math.PI,
+    endKmh: samples[samples.length - 1]!.speed * 3.6,
+    samples,
+  };
+}

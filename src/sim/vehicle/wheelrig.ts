@@ -26,16 +26,25 @@ import {
  * placement/role fields (id, hubInner/hubOuter, axle, flags, attach).
  *
  * Per-node stability with the declared masses at dt = 1/2000 (wheel alone,
- * wheels.test.ts): tread node m 0.333 kg Σk 3.18e5 ω·dt 0.488 (tread nodes
+ * wheels.test.ts): tread node m 0.392 kg Σk 3.18e5 ω·dt 0.451 (tread nodes
  * may run to TREAD_OMEGA_DT_LIMIT 0.49, builder.ts), rim node m 1.0 kg Σk
- * 4.83e5 ω·dt 0.347, hub node 5 kg ω·dt 0.315; (Σd/m)·dt ≤ 0.06.
+ * 4.83e5 ω·dt 0.347, hub node 5 kg ω·dt 0.315; (Σd/m)·dt ≤ 0.051. The hoop
+ * tension's geometric stiffness at HOOP_OMEGA_MAX (wheels.ts) adds in
+ * quadrature: tread 0.451 → 0.498 (f 0.5), rim 0.347 → 0.459 (f 1) —
+ * tireMass 9.4 kg (was 8) buys the tread that headroom.
  *
  * Contact model (handling harness, src/sim/vehicle/handling.test.ts):
- *  - tread contact layer (tireContactSpring 1e5 N/m per node, soft-layer
+ *  - tread contact layer (tireContactSpring 8e4 N/m per node, soft-layer
  *    law in ground.ts): tread nodes run into the "rubber" instead of being
- *    stopped dead at touchdown; 3.5 kN deflects the tyre ≈ 35 mm at the hub;
- *  - light tread (8 kg) and light carcass damping: rolling loss is the
+ *    stopped dead at touchdown (8e4: stiffer re-excited a fore/aft rocking
+ *    of the parked car on the tread polygon); ≈ 40 mm hub drop at 3.5 kN;
+ *  - light tread (9.4 kg) and light carcass damping: rolling loss is the
  *    tread nodes' touchdown impact (∝ tread mass), not hysteresis;
+ *  - rolling resistance C_rr 0.008 (Coulomb-like at rest, see
+ *    ROLL_RES_OMEGA_EPS): the viscous carcass has almost no loss at
+ *    walking pace;
+ *  - rim hoop tension 1 (wheels.ts applyRimHoopTension): the rim does not
+ *    balloon with speed;
  *  - lateral tread brush (treadBrushStiffness 7e4 N/m per node): lateral
  *    grip without carcass stiffness (wheels.ts applyTreadBrush);
  *    longitudinal grip is the node-level stick through the carcass
@@ -49,9 +58,12 @@ export const WHEEL_TUNING_205_55R16 = {
   width: 0.15,
   rays: 12,
   tireNodeRadius: 0.045,
-  tireContactSpring: 1e5,
+  tireContactSpring: 8e4,
   treadBrushStiffness: 7e4,
   treadBrushDamping: 30,
+  rimHoopTension: 1,
+  treadHoopTension: 0.5,
+  rollingResistance: 0.008,
   tireRingSpring: 2.65e4,
   tireRingDamp: 4,
   rimSpring: 5.4e4,
@@ -60,7 +72,7 @@ export const WHEEL_TUNING_205_55R16 = {
   sidewallDamp: 6,
   hubMass: 10,
   rimMass: 24,
-  tireMass: 8,
+  tireMass: 9.4,
   friction: 1.1,
 } as const satisfies Partial<WheelDef>;
 
@@ -106,6 +118,12 @@ export const buildWheelRig: BuildWheelRig = (wheel, bodyNodeLookup) => {
   const tireContactSpring = nonNeg(id, 'tireContactSpring', wheel.tireContactSpring ?? WHEEL_DEFAULTS.tireContactSpring);
   const brush = nonNeg(id, 'treadBrushStiffness', wheel.treadBrushStiffness ?? WHEEL_DEFAULTS.treadBrushStiffness) > 0;
   nonNeg(id, 'treadBrushDamping', wheel.treadBrushDamping ?? WHEEL_DEFAULTS.treadBrushDamping);
+  for (const [field, v] of [
+    ['rimHoopTension', wheel.rimHoopTension ?? WHEEL_DEFAULTS.rimHoopTension],
+    ['treadHoopTension', wheel.treadHoopTension ?? WHEEL_DEFAULTS.treadHoopTension],
+  ] as const) {
+    if (nonNeg(id, field, v) > 1) fail(id, `${field} must be in [0, 1] (got ${v})`);
+  }
   const tireRingRadius = radius - tireNodeRadius;
   if (!(rimRadius < tireRingRadius)) {
     fail(id, `rimRadius ${rimRadius} must be < radius - tireNodeRadius = ${tireRingRadius}`);
