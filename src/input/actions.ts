@@ -9,7 +9,7 @@
  * Bindings (KeyboardEvent.code):
  *   throttle W / ArrowUp      brake S / ArrowDown      steer A,D / ArrowLeft,ArrowRight
  *   handbrake Space           shiftUp Shift / E        shiftDown Ctrl / Q
- *   recover R   repair F   cameraCycle C   toggleBeamView B   pause P   slowMo T
+ *   recover R   repair F   cameraCycle C   toggleBeamView B   pause P / Escape   slowMo T
  *   toggleTractionControl X (additive P5)
  * Gamepad (standard mapping): RT(7) throttle, LT(6) brake, left stick X (axis 0)
  *   steer, A(0) handbrake, RB(5)/LB(4) shift up/down, Y(3) recover,
@@ -69,6 +69,8 @@ export const KEY_BINDINGS: Readonly<Record<string, InputControl>> = {
   KeyC: 'cameraCycle',
   KeyB: 'toggleBeamView',
   KeyP: 'pause',
+  // P6 (S1, additive): Escape opens the pause menu too.
+  Escape: 'pause',
   KeyT: 'slowMo',
   KeyX: 'toggleTractionControl',
 };

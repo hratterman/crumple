@@ -9,20 +9,30 @@
  *     and its hash checked against the physics worker's terrainReady;
  *   - textures + HDRI load in parallel; the lighting stack is created before
  *     any material compiles (it installs the fog chunks);
- *   - terrain/road renderers, post stack, quality controller; the sedan
- *     spawns only after terrainReady; shaders compile and the first frames
- *     render behind the loading screen, which then fades out.
+ *   - terrain/road renderers, post stack, quality controller; the player
+ *     vehicle (P6: the persisted catalog choice, app/player.ts) spawns only
+ *     after terrainReady; shaders compile and the first frames render
+ *     behind the loading screen, which then offers "Choose your car" (first
+ *     launch) and fades out.
  * Frame order follows render/types.ts: sim → camera → lighting → terrain /
  * roads → quality → post.
+ *
+ * P6 modes: 'drive' (the game loop), 'pause' (ui/pause.ts; timescale 0, the
+ * world frame frozen behind the menu) and 'showroom' (ui/showroom + the
+ * render/showroom studio drawn instead of the world, timescale 0).
  */
 import './style.css';
 import { MeshPhysicalMaterial, NoToneMapping, PerspectiveCamera, Scene, SRGBColorSpace, Vector3, WebGLRenderer } from 'three';
+import type { Mesh, Material } from 'three';
 
 import { FrameProfiler, gpuSyncFn, PassCounter, perfGpuSync, perfRequested } from './app/perf';
 import { anisotropyFor, createQualityControllerWith, isQualityLevel, isSoftwareRenderer, loadQualityLevel, SOFTWARE_GL_PIXEL_RATIO } from './app/quality';
 import { SimClient, type ObjectRange } from './app/simClient';
 import { createTrafficController, type TrafficController } from './app/traffic';
-import { placeOnGround, repairSpot, yawOf, type Aabb } from './app/spawn';
+import { placeOnGround, repairSpot, yawOf, yawOfQuat, type Aabb } from './app/spawn';
+import { chaseFramingFor, drivableEntry, hasStoredChoice, loadPlayerAssets, loadVehicleChoice, PlayerVehicle, saveVehicleChoice, speedoMax, type PlayerAssets } from './app/player';
+import { chaseScale, loadSettings, saveSettings, trafficDensityFor, type GameSettings } from './app/settings';
+import { DEFAULT_VEHICLE_ID, getVehicleEntry, PLAYER_VEHICLE_IDS, type VehicleChoice } from './game/catalog';
 import { loadTerrain } from './app/world';
 import { loadAllTerrainSets } from './assets/loader';
 import { quatFromAxisAngle, quatRotateVec3, vec3Normalize, type Quat, type Vec3 } from './core/math';
@@ -30,8 +40,8 @@ import { createInputMapper } from './input/actions';
 import { attachInputDevices } from './input/devices';
 import type { BeamBreakEvent, ImpactEvent, SkidEvent } from './protocol/events';
 import { GAME_CAPACITY, isPropObjectId, type ActionState, type Transform } from './protocol/messages';
-import { createVehicleTelemetryFrame, VehicleTelemetry } from './protocol/telemetry';
-import { vehiclePoseFromNodes, type ChaseTarget } from './render/cameras/chase';
+import { VehicleTelemetry } from './protocol/telemetry';
+import { DEFAULT_CHASE_OPTIONS, vehiclePoseFromNodes, type ChaseTarget } from './render/cameras/chase';
 import { CameraDirector } from './render/cameras/director';
 import { BeamView } from './render/debug/beamview';
 import { createLightingStack, setNearCasters } from './render/lighting';
@@ -43,10 +53,10 @@ import { createFarLand, FARLAND_OUTER_M } from './render/terrain/farland';
 import { createColliderRenderer } from './render/world/colliders';
 import type { FxSystem } from './render/fx/types';
 import type { PropRenderer } from './render/props/types';
+import { createStudio, type Studio } from './render/showroom/studio';
 import { bindPanels } from './render/vehicle/binder';
-import { SEDAN_VISUAL } from './render/vehicle/defs/sedan';
 import { createFlexSkin } from './render/vehicle/flexskin';
-import { bodyVisibleIn, createVehicleVisual, VEHICLE_DEBUG_VIEWS, type VehicleDebugView, type VehicleVisualHandle } from './render/vehicle/index';
+import { bodyVisibleIn, VEHICLE_DEBUG_VIEWS, type VehicleDebugView } from './render/vehicle/index';
 import { syntheticCubeSubject } from './render/vehicle/synthetic';
 import type { FlexSkin, VehicleFrameInput, VehicleMaterialSet } from './render/vehicle/types';
 import {
@@ -62,10 +72,11 @@ import {
 import { resolvePropInstances } from './sim/props/placement';
 import { compileRig } from './sim/rig/builder';
 import { softCube } from './sim/rig/testrigs';
-import { buildVehicleRig, compileVehicle } from './sim/vehicle/builder';
-import { SEDAN } from './sim/vehicle/defs/sedan';
-import { Hud } from './ui/hud';
+import type { TransmissionMode } from './sim/vehicle/types';
+import { Hud, type HudVehicleSpec } from './ui/hud';
 import { LoadingScreen } from './ui/loading';
+import { PauseMenu, type QualityLevelName } from './ui/pause';
+import { Showroom, type ShowroomStage } from './ui/showroom/showroom';
 import type { PerfOverlay, PerfOverlayData } from './ui/perfOverlay';
 import { resolveColliders } from './world/colliders';
 import { DEFAULT_LAYOUT } from './world/layout';
@@ -83,6 +94,8 @@ const WIREFRAME_GAIN = 0.26;
 const SLOW_MO_SCALE = 0.25;
 /** P6: traffic rng seed (fixed: same traffic every boot; replays record it with the setTraffic command). */
 const TRAFFIC_SEED = 0x7a11c;
+/** P6: how long a first launch's loading screen offers "Choose your car" before driving off, ms. */
+const WELCOME_HOLD_MS = 9000;
 
 const params = new URLSearchParams(location.search);
 const loading = new LoadingScreen();
@@ -166,16 +179,26 @@ const client = new SimClient({
 // The worker regenerates in parallel with main's own copy; main compares the two hashes once both exist.
 const physicsReady = client.groundHeightfield(LAYOUT, 0);
 
-// Rest-pose facts of the sedan (pure build; same canonical order the worker uses).
-const sedanDef = buildVehicleRig(SEDAN);
-const sedanRig = compileRig(sedanDef);
-const SEDAN_FRAME_ORIGIN = Math.max(0, sedanDef.nodes.findIndex((n) => n.id === SEDAN.frame.origin));
 const cubeRig = compileRig(softCube());
-/** The sedan as main renders it (same canonical order as the worker; triads index into it). */
-const sedanCompiled = compileVehicle(SEDAN);
 /** ?view=body|body+beams|beams|nodes picks the first debug view (B cycles them). */
 const initialView = ((v) => (VEHICLE_DEBUG_VIEWS as readonly string[]).includes(v ?? '') ? (v as VehicleDebugView) : 'body')(params.get('view'));
-const transmission = SEDAN.drivetrain.transmission ?? 'auto';
+
+// ------------------------------------------------------------ P6: player vehicle choice + settings
+/** Persisted (or ?vehicle= / ?paint=) choice; unknown / unbuilt ids fall back to the sedan. */
+const bootChoice: VehicleChoice = loadVehicleChoice(location.search);
+/** A first launch (nothing stored yet) is offered the showroom on the loading screen. */
+const firstLaunch = !hasStoredChoice();
+const settings: GameSettings = loadSettings();
+/** Start loading the player's vehicle modules right away (dynamic chunks; overlaps the terrain). */
+const bootAssetsP: Promise<PlayerAssets> = loadPlayerAssets(drivableEntry(bootChoice.id)).catch((e: unknown) => {
+  console.error(`[vehicle] '${bootChoice.id}' failed to load; falling back to the sedan`, e);
+  return loadPlayerAssets(getVehicleEntry(DEFAULT_VEHICLE_ID));
+});
+/** The live player vehicle (null until boot loads it). */
+let player: PlayerVehicle | null = null;
+let transmission: TransmissionMode = 'auto';
+/** Confirmed vehicle swaps since boot (tests). */
+let swapCount = 0;
 
 // ------------------------------------------------------------ state filled in by boot()
 let terrain: TerrainData | null = null;
@@ -193,13 +216,16 @@ beamView.visible = true;
 scene.add(beamView.group);
 
 // ------------------------------------------------------------ flexbody visuals (P4)
-/** The sedan's body (null until boot builds it, or when the visual failed: then the wireframe stays on). */
-let sedanVisual: VehicleVisualHandle | null = null;
+/** The player's body (null until boot builds it, or when the visual failed: then the wireframe stays on). */
+function playerVisual() {
+  return player ? player.visual : null;
+}
 /** The arena soft cube skinned as a rounded red block (synthetic subject on the softCube rig). */
 let cubeSkin: FlexSkin | null = null;
 let debugView: VehicleDebugView = initialView;
 
 function applyDebugView(): void {
+  const sedanVisual = playerVisual();
   if (!sedanVisual) {
     // No body mesh: never hide the car — the wireframe cycles beams ⇄ nodes.
     beamView.visible = true;
@@ -214,7 +240,7 @@ function applyDebugView(): void {
 }
 
 function cycleDebugView(): void {
-  if (!sedanVisual) {
+  if (!playerVisual()) {
     debugView = debugView === 'nodes' ? 'beams' : 'nodes';
   } else {
     debugView = VEHICLE_DEBUG_VIEWS[(VEHICLE_DEBUG_VIEWS.indexOf(debugView) + 1) % VEHICLE_DEBUG_VIEWS.length]!;
@@ -234,42 +260,19 @@ function cubeMaterials(): VehicleMaterialSet {
   return { base: () => paint, setPaint() {}, setLights() {}, dispose: () => paint.dispose() };
 }
 
-const sedanBroken = new Uint8Array(sedanCompiled.rig.beamCount);
-const sedanTelemetry = createVehicleTelemetryFrame();
-let sedanBrokenTick = -1;
-const sedanFrame: VehicleFrameInput = {
+const cubeFrame: VehicleFrameInput = {
   nodes: new Float32Array(0),
   nodeOffset: 0,
   tick: 0,
-  broken: sedanBroken,
+  broken: new Uint8Array(cubeRig.beamCount),
   repairEpoch: 0,
   telemetry: null,
   dtS: 0,
 };
-const cubeFrame: VehicleFrameInput = { ...sedanFrame, broken: new Uint8Array(cubeRig.beamCount), telemetry: null };
 
 /** Feeds the interpolated nodes of this frame to the skinned bodies. */
 function updateVisuals(dt: number): void {
-  if (sedanVisual) {
-    const range = findRange(VEHICLE_ID);
-    const ok = !!range && range.nodeCount === sedanCompiled.rig.nodeCount;
-    sedanVisual.object.visible = ok;
-    if (ok) {
-      const tick = client.latestTick;
-      if (tick !== sedanBrokenTick) {
-        sedanBrokenTick = tick;
-        if (client.brokenBeams(VEHICLE_ID, sedanBroken) < 0) sedanBroken.fill(0);
-      }
-      sedanFrame.nodes = positions;
-      sedanFrame.nodeOffset = range.nodeOffset;
-      sedanFrame.tick = tick;
-      sedanFrame.repairEpoch = client.repairEpoch(VEHICLE_ID);
-      sedanFrame.telemetry = client.readTelemetry(VEHICLE_ID, sedanTelemetry) ? sedanTelemetry : null;
-      sedanFrame.dtS = dt;
-      sedanFrame.camera = camera;
-      sedanVisual.update(sedanFrame);
-    }
-  }
+  player?.update(client, VEHICLE_ID, findRange(VEHICLE_ID), positions, dt, camera);
   if (cubeSkin) {
     const range = findRange(CUBE_ID);
     const ok = !!range && range.nodeCount === cubeRig.nodeCount;
@@ -294,6 +297,7 @@ function updateVisuals(dt: number): void {
 const NEAR_CASTER_REACH_M = 9;
 const casterPos = new Vector3();
 function updateNearCasters(lighting: Parameters<typeof setNearCasters>[0]): void {
+  const sedanVisual = playerVisual();
   const root = sedanVisual ? sedanVisual.object : null;
   const d = sedanVisual ? camera.position.distanceTo(sedanVisual.skin.object.getWorldPosition(casterPos)) : 0;
   setNearCasters(lighting, renderer, camera, root, 0.5 * (d - NEAR_CASTER_REACH_M), d + NEAR_CASTER_REACH_M);
@@ -311,19 +315,19 @@ let propBoxes: readonly Aabb[] = [];
 /** Sim events → the sedan's damage, prop scuffs and world FX (allocation-free routing; every object's events reach FX). */
 const eventSink = {
   impact(e: Readonly<ImpactEvent>): void {
-    if (e.objectId === VEHICLE_ID) sedanVisual?.onImpact(e);
+    if (e.objectId === VEHICLE_ID) playerVisual()?.onImpact(e);
     else if (isPropObjectId(e.objectId)) props?.onImpact(e);
     else if (traffic?.owns(e.objectId)) traffic.onImpact(e);
     fx?.onImpact(e);
   },
   beamBreak(e: Readonly<BeamBreakEvent>): void {
-    if (e.objectId === VEHICLE_ID) sedanVisual?.onBeamBreak(e);
+    if (e.objectId === VEHICLE_ID) playerVisual()?.onBeamBreak(e);
     else if (isPropObjectId(e.objectId)) props?.onBeamBreak(e);
     else if (traffic?.owns(e.objectId)) traffic.onBeamBreak(e);
     fx?.onBeamBreak(e);
   },
   skid(e: Readonly<SkidEvent>): void {
-    if (e.objectId === VEHICLE_ID) sedanVisual?.onSkid(e);
+    if (e.objectId === VEHICLE_ID) playerVisual()?.onSkid(e);
     else if (traffic?.owns(e.objectId)) traffic.onSkid(e);
     fx?.onSkid(e);
   },
@@ -334,15 +338,20 @@ const director = new CameraDirector(camera, renderer.domElement, {
   chase: { groundHeight: (x, z) => (sampler ? sampler.heightAt(x, z) : 0) },
 });
 
-const mapper = createInputMapper({ transmission, gearCount: SEDAN.drivetrain.gearRatios.length });
+// Per-vehicle gear count / transmission are applied when the player vehicle loads (applyPlayerSpec).
+const mapper = createInputMapper({ transmission });
 let hud: Hud | null = null;
 let paused = false;
 let slowMo = false;
-/** Traction control (X); the worker spawns vehicles with it engaged. */
-let tractionControl = true;
+/** Traction control (X); P6: every spawn starts with the settings' default. */
+let tractionControl = settings.tractionControl;
 function applyTimescale(): void {
   client.setTimescale(paused ? 0 : slowMo ? SLOW_MO_SCALE : 1);
 }
+
+/** P6 game mode: boot (loading), drive, pause (menu), showroom (studio instead of the world). */
+type GameMode = 'boot' | 'drive' | 'pause' | 'showroom';
+let mode: GameMode = 'boot';
 
 // ------------------------------------------------------------ vehicle pose
 let positions = new Float32Array(0);
@@ -373,10 +382,11 @@ function updateVehiclePose(): boolean {
   return true;
 }
 
-/** The chase target a freshly placed sedan will have (camera setup before its first snapshot). */
-function poseFromTransform(t: Transform, out: ChaseTarget): void {
-  const o = SEDAN_FRAME_ORIGIN;
-  const r = quatRotateVec3([0, 0, 0] as Vec3, t.quat, [sedanRig.nodePos[3 * o]!, sedanRig.nodePos[3 * o + 1]!, sedanRig.nodePos[3 * o + 2]!]);
+/** The chase target a freshly placed vehicle will have (camera setup before its first snapshot). */
+function poseFromTransform(t: Transform, out: ChaseTarget, assets: PlayerAssets): void {
+  const o = Math.max(0, assets.compiled.frameNodes[0] ?? 0);
+  const rest = assets.compiled.rig.nodePos;
+  const r = quatRotateVec3([0, 0, 0] as Vec3, t.quat, [rest[3 * o]!, rest[3 * o + 1]!, rest[3 * o + 2]!]);
   out.position.set(t.pos[0] + r[0], t.pos[1] + r[1], t.pos[2] + r[2]);
   const f = quatRotateVec3([0, 0, 0] as Vec3, t.quat, [0, 0, -1]);
   out.forward.set(f[0], f[1], f[2]);
@@ -385,9 +395,14 @@ function poseFromTransform(t: Transform, out: ChaseTarget): void {
 }
 
 // ------------------------------------------------------------ spawning
-function spawnTransformAt(i: number): Transform {
+/** Rest pose of the current player rig (placement clearance). */
+function playerRest() {
+  return player!.assets.rest;
+}
+
+function spawnTransformAt(i: number, rest = playerRest()): Transform {
   const s = terrain!.spawns[i]!;
-  return placeOnGround(sedanRig, sampler!, s.pos[0], s.pos[2], s.yaw);
+  return placeOnGround(rest, sampler!, s.pos[0], s.pos[2], s.yaw);
 }
 
 /** Teleport (full repair) to layout spawn point `i` (keys 1–8). */
@@ -404,7 +419,7 @@ function teleport(i: number): void {
 /** Full repair at world (x, z) facing `yaw` (rad, 0 = −Z), dropped onto the terrain (tests, screenshots). */
 function placeVehicle(x: number, z: number, yaw: number): void {
   if (!sampler) return;
-  lastSpawn = placeOnGround(sedanRig, sampler, x, z, yaw);
+  lastSpawn = placeOnGround(playerRest(), sampler, x, z, yaw);
   client.reset(VEHICLE_ID, lastSpawn);
   lastSent.gearSelect = NaN;
   snapAfterTick = client.latestTick;
@@ -413,7 +428,8 @@ function placeVehicle(x: number, z: number, yaw: number): void {
 /** F: full repair in place (heading kept), dropped onto the terrain. */
 function repairVehicle(): void {
   let t = lastSpawn;
-  if (poseValid && sampler) {
+  if (poseValid && sampler && player) {
+    const sedanRig = playerRest();
     const f = pose.forward;
     const yaw = Math.hypot(f.x, f.z) > 0.2 ? yawOf(f.x, f.z) : 0;
     // Props return to their spawn poses at the same time: never repair the car inside one's spawn box.
@@ -479,8 +495,8 @@ function handleCommands(): void {
         cycleDebugView();
         break;
       case 'pause':
-        paused = !paused;
-        applyTimescale();
+        // P6: P / Escape / Start open the pause menu (the sim pauses while it is open).
+        openPause();
         break;
       case 'slowMo':
         slowMo = !slowMo;
@@ -499,7 +515,7 @@ function handleCommands(): void {
 
 // Spawn menu (1–8) and quality cycling (L); the driving keys go through the mapper.
 window.addEventListener('keydown', (e) => {
-  if (!running || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (!running || mode !== 'drive' || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
   const m = /^(?:Digit|Numpad)([1-9])$/.exec(e.code);
   if (m) {
     teleport(Number(m[1]) - 1);
@@ -513,6 +529,286 @@ window.addEventListener('keydown', (e) => {
     hud?.showToast(next.toUpperCase(), 'QUALITY', 1500);
   }
 });
+
+// ------------------------------------------------------------ P6: settings, player spec, swap, menus
+/** HUD gauges for the current vehicle (redline from its drivetrain, speedo from its catalog top speed). */
+function hudSpecFor(assets: PlayerAssets): HudVehicleSpec {
+  const d = assets.sim.drivetrain;
+  return {
+    idleRpm: d.idleRpm,
+    redlineRpm: d.redlineRpm,
+    revLimitRpm: d.revLimitRpm,
+    speedoMax: speedoMax(assets.entry.stats.topSpeedKmh, settings.units),
+    units: settings.units,
+  };
+}
+
+/** Chase framing: catalog distance/height × the near/normal/far setting, look height scaled with it. */
+function applyChaseFraming(assets: PlayerAssets): void {
+  const f = chaseFramingFor(assets.entry, chaseScale(settings.chase));
+  const lookHeight = DEFAULT_CHASE_OPTIONS.lookHeight * (assets.entry.chase.height / DEFAULT_CHASE_OPTIONS.height);
+  director.chase.setFraming({ distance: f.distance, height: f.height, lookHeight, baseFov: settings.fov });
+}
+
+/** Mapper / HUD / camera for the current player vehicle. */
+function applyPlayerSpec(assets: PlayerAssets): void {
+  transmission = assets.sim.drivetrain.transmission ?? 'auto';
+  mapper.setTransmission(transmission);
+  mapper.setGearCount(assets.sim.drivetrain.gearRatios.length);
+  hud?.setSpec(hudSpecFor(assets));
+  applyChaseFraming(assets);
+}
+
+/** Traffic density for a preset under the player's traffic setting (the quality controller and the menu both route here). */
+let trafficStarted = false;
+function trafficPreset(q: (typeof QUALITY_PRESETS)[keyof typeof QUALITY_PRESETS]) {
+  return { ...q, traffic: trafficDensityFor(q.traffic, settings.traffic) };
+}
+function startTraffic(): void {
+  if (!traffic || trafficStarted || settings.traffic === 'off' || params.get('traffic') === '0') return;
+  trafficStarted = true;
+  const t = traffic;
+  void t.start(TRAFFIC_SEED).then((on) => {
+    console.info(`[traffic] ${on ? 'running' : 'off'}`);
+    if (on) t.setQuality(trafficPreset(ctx.quality));
+  });
+}
+
+function setSetting(patch: Partial<GameSettings>): void {
+  Object.assign(settings, patch);
+  saveSettings(settings);
+  if (patch.units !== undefined && player) hud?.setSpec(hudSpecFor(player.assets));
+  if ((patch.chase !== undefined || patch.fov !== undefined) && player) applyChaseFraming(player.assets);
+  if (patch.tractionControl !== undefined && patch.tractionControl !== tractionControl) setTractionControl(patch.tractionControl);
+  if (patch.traffic !== undefined) {
+    if (trafficStarted) traffic?.setQuality(trafficPreset(ctx.quality));
+    else startTraffic();
+  }
+}
+
+/** The paint material actually drawn on the player body (tests: the swap really recoloured it). */
+function playerPaintHex(): number | null {
+  const v = playerVisual();
+  if (!v) return null;
+  let hex: number | null = null;
+  v.skin.object.traverse((o) => {
+    if (hex !== null) return;
+    const m = (o as Mesh).material as Material | Material[] | undefined;
+    for (const mat of Array.isArray(m) ? m : m ? [m] : []) {
+      if (/^crPaint/.test(mat.name) && (mat as MeshPhysicalMaterial).color) {
+        hex = (mat as MeshPhysicalMaterial).color.getHex();
+        return;
+      }
+    }
+  });
+  return hex;
+}
+
+/** Creates the player visual for `assets` (hidden; added to the scene), or null with ?body=0 / on failure. */
+let visualDeps: ConstructorParameters<typeof PlayerVehicle>[2] = null;
+function wrapProfiling(p: PlayerVehicle): void {
+  const v = p.visual;
+  if (!v) return;
+  // Vehicle internals (nested in the 'vehicle' lap); wrapping is free while profiling is off.
+  prof.wrap(v.damage, 'update', 'vehicle.damage');
+  prof.wrap(v.skin, 'update', 'vehicle.flexskin');
+  prof.wrap(v.wheels, 'update', 'vehicle.wheels');
+  if (v.fx) prof.wrap(v.fx, 'update', 'vehicle.fx');
+}
+
+/**
+ * Replaces the player car (Drive in the showroom): the new body is built and
+ * its programs compiled first (the old car keeps driving / the showroom keeps
+ * rendering), then objectId 1 is despawned and respawned with the new def at
+ * spawn point `spawnIndex` (or the current one), placed by the new rig's
+ * clearance; FX / HUD / input / chase framing follow, the old visual is
+ * disposed. Traffic keeps its focus (objectId 1).
+ */
+async function swapVehicle(choice: VehicleChoice, spawnAt: number | null): Promise<void> {
+  if (!terrain || !sampler || !player) throw new Error('swapVehicle before boot');
+  const entry = drivableEntry(choice.id);
+  const assets = await loadPlayerAssets(entry);
+  const next = new PlayerVehicle(assets, choice.palette, visualDeps);
+  const obj = next.object;
+  if (obj && post) {
+    scene.add(obj);
+    try {
+      renderer.setRenderTarget(post.composer.inputBuffer);
+      const p = renderer.compileAsync(obj, camera, scene);
+      renderer.setRenderTarget(null);
+      await p;
+    } catch (e) {
+      console.warn('[vehicle] swap pre-compile failed; programs compile on first draw', e);
+    }
+  }
+  // Swap: despawn + spawn the same objectId (no frame in between sees both).
+  const old = player;
+  client.despawn(VEHICLE_ID);
+  fx?.removeObject(VEHICLE_ID);
+  old.dispose();
+  player = next;
+  wrapProfiling(next);
+  if (spawnAt !== null && spawnAt >= 0 && spawnAt < terrain.spawns.length) {
+    spawnIndex = spawnAt;
+    lastSpawn = spawnTransformAt(spawnAt, assets.rest);
+  } else {
+    lastSpawn = placeOnGround(assets.rest, sampler, lastSpawn.pos[0], lastSpawn.pos[2], yawOfQuat(lastSpawn.quat));
+  }
+  applyPlayerSpec(assets);
+  client.spawnVehicle(VEHICLE_ID, assets.sim, lastSpawn, transmission, entry.id);
+  tractionControl = settings.tractionControl;
+  if (!tractionControl) client.setAssists(VEHICLE_ID, { tractionControl: false });
+  fx?.addVehicle(VEHICLE_ID, assets.compiled);
+  applyDebugView();
+  lastSent.gearSelect = NaN;
+  poseValid = false;
+  snapAfterTick = client.latestTick;
+  director.snap();
+  saveVehicleChoice({ id: entry.id, palette: next.palette.id });
+  swapCount++;
+  Object.assign(crumple.debug, { cubeSkin });
+}
+
+// ---- menus
+let pauseMenu: PauseMenu | null = null;
+let showroom: Showroom | null = null;
+let studio: Studio | null = null;
+/** Where the showroom returns on Back. */
+let showroomFrom: 'pause' | 'loading' = 'pause';
+/** Re-render the frozen world once (behind the pause menu: resize, quality change). */
+let redrawPaused = false;
+
+function enterMenuMode(m: 'pause' | 'showroom'): void {
+  mode = m;
+  mapper.releaseAll();
+  paused = true;
+  applyTimescale();
+}
+
+function openPause(): void {
+  if (mode !== 'drive' || !pauseMenu) return;
+  enterMenuMode('pause');
+  pauseMenu.open();
+}
+
+function resume(): void {
+  if (mode !== 'pause' && mode !== 'showroom') return;
+  pauseMenu?.close();
+  if (showroom?.isOpen) closeShowroom();
+  mapper.releaseAll();
+  lastSent.gearSelect = NaN;
+  paused = false;
+  applyTimescale();
+  mode = 'drive';
+}
+
+function openShowroom(from: 'pause' | 'loading'): void {
+  if (!showroom || !player || mode === 'showroom') return;
+  showroomFrom = from;
+  pauseMenu?.close();
+  enterMenuMode('showroom');
+  hud?.setVisible(false);
+  void showroom.open({ id: player.id as VehicleChoice['id'], palette: player.palette.id }, spawnIndex);
+}
+
+function closeShowroom(): void {
+  showroom?.close();
+  hud?.setVisible(true);
+  // The studio owns GPU memory (its composer, env map, visuals): freed on every close.
+  studio?.dispose();
+  studio = null;
+  post?.setSize(ctx.width, ctx.height);
+  camera.aspect = ctx.width / ctx.height;
+  camera.updateProjectionMatrix();
+}
+
+/** Showroom Back: to the pause menu (opened from it) or straight into the drive (from the loading screen). */
+function showroomBack(): void {
+  closeShowroom();
+  if (showroomFrom === 'pause' && pauseMenu) {
+    mode = 'pause';
+    redrawPaused = true;
+    pauseMenu.open('vehicle');
+  } else resume();
+}
+
+/** Discrete commands while a menu is open: only pause (Start / P via the mapper) acts. */
+function handleMenuCommands(): void {
+  for (const c of mapper.drainCommands()) {
+    if (c !== 'pause') continue;
+    if (mode === 'pause') resume();
+    else if (mode === 'showroom') showroom?.back();
+  }
+}
+
+/** The studio stage behind the showroom UI (created on open, disposed on close). */
+const stage: ShowroomStage = {
+  async show(id, paint) {
+    const entry = getVehicleEntry(id);
+    const assets = await loadPlayerAssets(entry);
+    if (!studio) return;
+    await studio.setVehicle({ id, compiled: assets.compiled, visual: assets.visual, paint, extent: entry.extent });
+  },
+  paint: (p) => studio?.setPaint(p),
+  orbit: (dx, dy) => studio?.orbit(dx, dy),
+  zoom: (d) => studio?.zoom(d),
+  intro: () => studio?.intro(),
+  setFraming: (x, y, fill) => studio?.setFraming(x, y, fill),
+  frame: (dt) => studio?.frame(dt),
+  resize: (w, h) => studio?.setSize(w, h),
+};
+
+function createMenus(): void {
+  const spawns = () => (terrain ? terrain.spawns.map((s) => ({ id: s.id, name: s.name })) : []);
+  pauseMenu = new PauseMenu(document.body, {
+    spawns,
+    spawnIndex: () => spawnIndex,
+    vehicle: () => {
+      const e = player ? player.assets.entry : getVehicleEntry(DEFAULT_VEHICLE_ID);
+      return { name: e.stats.name, className: e.stats.class, paint: player ? player.palette.name : e.palettes[0]!.name };
+    },
+    settings: () => settings,
+    quality: () => (quality ? quality.preset.level : ctx.quality.level) as QualityLevelName,
+    onResume: resume,
+    onChooseVehicle: () => openShowroom('pause'),
+    onSpawn: (i) => {
+      resume();
+      teleport(i);
+    },
+    onRestart: () => {
+      resume();
+      teleport(spawnIndex);
+      if (layoutPropCount > 0) client.resetProps();
+      fx?.clear();
+    },
+    onSettings: setSetting,
+    onQuality: (level) => {
+      if (!quality || quality.preset.level === level) return;
+      quality.setLevel(level);
+      redrawPaused = true;
+    },
+  });
+  showroom = new Showroom(document.body, {
+    entries: PLAYER_VEHICLE_IDS.map((id) => getVehicleEntry(id)),
+    spawns,
+    units: () => settings.units,
+    stage: async () => {
+      // ?sq=<level> renders the studio at another preset than the world (screenshots under software GL).
+      const sq = params.get('sq');
+      const studioQuality = isQualityLevel(sq) ? QUALITY_PRESETS[sq] : ctx.quality;
+      studio ??= createStudio(renderer, { quality: studioQuality, width: ctx.width, height: ctx.height, patchMaterial });
+      Object.assign(crumple.debug, { studio });
+      return stage;
+    },
+    onDrive: async (choice, si) => {
+      await swapVehicle(choice, si);
+      resume();
+      const e = getVehicleEntry(choice.id);
+      hud?.showToast(e.stats.name.toUpperCase(), terrain ? terrain.spawns[spawnIndex]!.name.toUpperCase() : '', 3000);
+    },
+    onBack: showroomBack,
+  });
+}
 
 function perfData(): PerfOverlayData {
   const info = renderer.info;
@@ -548,7 +844,9 @@ const crumple = {
   get snapshotHz(): number {
     return client.stats.snapshotHz;
   },
-  idleRpm: SEDAN.drivetrain.idleRpm,
+  get idleRpm(): number {
+    return player ? player.assets.sim.drivetrain.idleRpm : 0;
+  },
   /** True once the game loop runs (the loading screen is fading out). */
   get ready(): boolean {
     return running;
@@ -581,10 +879,12 @@ const crumple = {
   },
   /** True while the sedan's skinned body is drawn. */
   get bodyVisible(): boolean {
+    const sedanVisual = playerVisual();
     return !!sedanVisual && sedanVisual.object.visible && bodyVisibleIn(debugView);
   },
-  /** Flexbody bake facts for the sedan, or null when it has no body. */
+  /** Flexbody bake facts for the player vehicle, or null when it has no body. */
   get body(): { panels: number; vertices: number; triangles: number; repaired: number; tessellateMs: number; bindMs: number; totalMs: number } | null {
+    const sedanVisual = playerVisual();
     if (!sedanVisual) return null;
     const s = sedanVisual.binding.stats;
     return { panels: sedanVisual.binding.panels.length, vertices: s.vertices, triangles: s.triangles, repaired: s.repaired, ...sedanVisual.timings };
@@ -655,9 +955,71 @@ const crumple = {
   setProfiling(on: boolean): void {
     setProfiling(on);
   },
-  /** Dev handles for tuning from the console (not a contract). */
+  // ---- P6 (S1): modes, player vehicle, menus, settings
+  /** 'boot' | 'drive' | 'pause' | 'showroom'. */
+  get mode(): GameMode {
+    return mode;
+  },
+  get paused(): boolean {
+    return paused;
+  },
+  /** The player's vehicle: catalog id, palette, the paint colour actually drawn (sRGB hex), swaps since boot. */
+  get player(): { id: string; palette: string; paletteName: string; paletteHex: number; paintHex: number | null; nodes: number; swaps: number; transmission: string } | null {
+    if (!player) return null;
+    return {
+      id: player.id,
+      palette: player.palette.id,
+      paletteName: player.palette.name,
+      paletteHex: player.palette.paint.color,
+      paintHex: playerPaintHex(),
+      nodes: player.nodeCount,
+      swaps: swapCount,
+      transmission,
+    };
+  },
+  get settings(): Readonly<GameSettings> {
+    return { ...settings };
+  },
+  setSetting(patch: Partial<GameSettings>): void {
+    setSetting(patch);
+  },
+  /** HUD gauge facts (per-vehicle redline / speedo scale). */
+  get hudSpec(): Readonly<HudVehicleSpec> | null {
+    return hud ? { ...hud.vehicleSpec } : null;
+  },
+  openPause(): void {
+    openPause();
+  },
+  resume(): void {
+    resume();
+  },
+  openShowroom(): void {
+    if (mode === 'drive') openPause();
+    openShowroom('pause');
+  },
+  /** Showroom state (tests; the UI is the real path). */
+  get showroom(): { open: boolean; busy: boolean; selection: VehicleChoice | null; spawn: number; studioVehicle: string | null; turntable: number } {
+    return {
+      open: !!showroom?.isOpen,
+      busy: !!showroom?.busy,
+      selection: showroom?.isOpen ? showroom.selection : null,
+      spawn: showroom ? showroom.spawn : -1,
+      studioVehicle: studio ? studio.vehicleId : null,
+      turntable: studio ? studio.turntableAngle : 0,
+    };
+  },
+  /** Swap the player car directly (tests / console): same path as the showroom's Drive. */
+  setVehicle(id: string, palette?: string, spawn?: number): Promise<void> {
+    return swapVehicle({ id: id as VehicleChoice['id'], palette: palette ?? '' }, spawn ?? null);
+  },
+  /** Dev handles for tuning from the console (not a contract). `sedanVisual` stays as an alias of `playerVisual`. */
   debug: { scene, camera, renderer, ctx, client } as Record<string, unknown>,
 };
+Object.defineProperties(crumple.debug, {
+  playerVisual: { get: () => playerVisual(), enumerable: true },
+  sedanVisual: { get: () => playerVisual(), enumerable: true },
+  player: { get: () => player, enumerable: true },
+});
 (window as unknown as { __crumple: typeof crumple }).__crumple = crumple;
 
 window.addEventListener('resize', () => {
@@ -665,8 +1027,11 @@ window.addEventListener('resize', () => {
   ctx.height = window.innerHeight;
   camera.aspect = ctx.width / ctx.height;
   camera.updateProjectionMatrix();
+  if (mode === 'showroom') return; // the showroom resizes its own stage
   renderer.setSize(ctx.width, ctx.height);
   post?.setSize(ctx.width, ctx.height);
+  // setSize clears the canvas: the frozen world behind the pause menu is drawn again.
+  if (mode === 'pause') redrawPaused = true;
 });
 
 // ------------------------------------------------------------ boot
@@ -731,23 +1096,20 @@ async function boot(): Promise<void> {
   // need only the lighting stack), then their programs start compiling in the GPU process right away.
   // ?body=0 skips them (wireframe only: perf comparisons, debugging the sim).
   const withBody = params.get('body') !== '0';
-  try {
-    if (!withBody) throw new Error('disabled by ?body=0');
-    sedanVisual = createVehicleVisual(ctx, sedanCompiled, SEDAN_VISUAL, {
-      lighting,
-      patchMaterial,
-      groundAt: (x, z) => (sampler ? sampler.heightAt(x, z) : 0),
-    });
-    sedanVisual.object.visible = false;
+  visualDeps = withBody ? { ctx, lighting, patchMaterial, groundAt: (x, z) => (sampler ? sampler.heightAt(x, z) : 0) } : null;
+  // P6: the persisted / default catalog vehicle (its modules were requested at script start).
+  const bootAssets = await bootAssetsP;
+  mark('vehicleAssets');
+  player = new PlayerVehicle(bootAssets, bootChoice.id === bootAssets.entry.id ? bootChoice.palette : null, visualDeps);
+  const sedanVisual = player.visual;
+  if (sedanVisual) {
     scene.add(sedanVisual.object);
     const t = sedanVisual.timings;
     console.info(
-      `[vehicle] sedan body: ${sedanVisual.binding.panels.length} panels, ${sedanVisual.binding.stats.vertices} verts, tessellate ${t.tessellateMs.toFixed(0)} ms, bind ${t.bindMs.toFixed(0)} ms, total ${t.totalMs.toFixed(0)} ms`,
+      `[vehicle] ${player.id} body: ${sedanVisual.binding.panels.length} panels, ${sedanVisual.binding.stats.vertices} verts, tessellate ${t.tessellateMs.toFixed(0)} ms, bind ${t.bindMs.toFixed(0)} ms, total ${t.totalMs.toFixed(0)} ms`,
     );
-  } catch (e) {
-    if (withBody) console.error('[vehicle] sedan body failed; showing the beam wireframe', e);
-    sedanVisual = null;
   }
+  applyPlayerSpec(bootAssets);
   try {
     if (!withBody) throw new Error('disabled by ?body=0');
     const cube = syntheticCubeSubject();
@@ -765,14 +1127,8 @@ async function boot(): Promise<void> {
     cubeSkin = null;
   }
   applyDebugView();
-  Object.assign(crumple.debug, { sedanVisual, cubeSkin });
-  if (sedanVisual) {
-    // Vehicle internals (nested in the 'vehicle' lap); wrapping is free while profiling is off.
-    prof.wrap(sedanVisual.damage, 'update', 'vehicle.damage');
-    prof.wrap(sedanVisual.skin, 'update', 'vehicle.flexskin');
-    prof.wrap(sedanVisual.wheels, 'update', 'vehicle.wheels');
-    if (sedanVisual.fx) prof.wrap(sedanVisual.fx, 'update', 'vehicle.fx');
-  }
+  Object.assign(crumple.debug, { cubeSkin });
+  wrapProfiling(player);
   mark('vehicleVisual');
   // Off the critical path: compile the bodies' programs against the composer target (see compileAsync below).
   for (const obj of [sedanVisual?.object, cubeSkin?.object]) {
@@ -834,15 +1190,17 @@ async function boot(): Promise<void> {
   });
   fx = fxR;
   scene.add(fxR.object);
-  fxR.addVehicle(VEHICLE_ID, sedanCompiled);
+  fxR.addVehicle(VEHICLE_ID, bootAssets.compiled);
   fxR.addProps(propInstances);
   const trafficC = createTrafficController(ctx, { client, lighting, patchMaterial, fx: fxR, sampler: smp, focusObjectId: VEHICLE_ID });
   traffic = trafficC;
   scene.add(trafficC.object);
   stats.stages.vegetationMs = Math.round(loaded.vegetationMs);
+  // P6: traffic follows the preset scaled by the player's traffic setting (off / light / normal / heavy).
+  const trafficQ = { setQuality: (q: typeof ctx.quality) => trafficC.setQuality(trafficPreset(q)) };
   const qc = createQualityControllerWith(
     ctx,
-    { lighting, post: postStack, others: [terrainR, roadsR, collidersR, propsR, vegetationR, waterR, fxR, trafficC] },
+    { lighting, post: postStack, others: [terrainR, roadsR, collidersR, propsR, vegetationR, waterR, fxR, trafficQ] },
     forcedLevel ? { initial: forcedLevel, storage: null, maxPixelRatio } : { maxPixelRatio },
   );
   quality = qc;
@@ -868,16 +1226,15 @@ async function boot(): Promise<void> {
   const wanted = params.get('spawn') ?? DEFAULT_SPAWN;
   spawnIndex = Math.max(0, world.spawns.findIndex((s) => s.id === wanted));
   lastSpawn = spawnTransformAt(spawnIndex);
-  client.spawnVehicle(VEHICLE_ID, SEDAN, lastSpawn, transmission, 'sedan');
+  client.spawnVehicle(VEHICLE_ID, bootAssets.sim, lastSpawn, transmission, bootAssets.entry.id);
+  if (!tractionControl) client.setAssists(VEHICLE_ID, { tractionControl: false });
   spawnCube();
-  // P6 traffic: ?traffic=0 disables it (perf comparisons); the stub resolves false until T2 lands.
-  if (params.get('traffic') !== '0') {
-    void trafficC.start(TRAFFIC_SEED).then((on) => console.info(`[traffic] ${on ? 'running' : 'off'}`));
-  }
+  // P6 traffic: ?traffic=0 (perf comparisons) or the 'off' setting disables it; the stub resolves false until T2 lands.
+  startTraffic();
 
   // Camera at the spawn, the first view's LODs built and its programs compiled behind the overlay.
   const startPose = { position: new Vector3(), forward: new Vector3(), up: new Vector3(), velocity: new Vector3() } satisfies ChaseTarget;
-  poseFromTransform(lastSpawn, startPose);
+  poseFromTransform(lastSpawn, startPose, bootAssets);
   director.snap();
   director.update(0, startPose);
   lighting.update(camera);
@@ -904,12 +1261,9 @@ async function boot(): Promise<void> {
   mark('vehicle');
 
   const devices = attachInputDevices(mapper);
-  const hudView = new Hud(document.body, {
-    idleRpm: SEDAN.drivetrain.idleRpm,
-    redlineRpm: SEDAN.drivetrain.redlineRpm,
-    revLimitRpm: SEDAN.drivetrain.revLimitRpm,
-  });
+  const hudView = new Hud(document.body, hudSpecFor(player.assets));
   hud = hudView;
+  createMenus();
 
   const hudStatus = { paused: false, slowMo: false, camera: 'chase', transmission, beamView: true, view: debugView as string, tractionControl };
   const bootTime = performance.now();
@@ -924,14 +1278,17 @@ async function boot(): Promise<void> {
     objects: [],
     tick: 0,
   };
-  const frame = (dt: number): void => {
+  /** One world frame; `input` false = a redraw behind the pause menu (no input, no commands). */
+  const frame = (dt: number, input = true): void => {
     prof.begin();
     // Input → worker.
-    devices.poll();
-    const tel = client.telemetry(VEHICLE_ID);
-    const speed = tel ? (tel[VehicleTelemetry.speed] ?? 0) : 0;
-    sendInput(mapper.update(dt, speed));
-    handleCommands();
+    if (input) {
+      devices.poll();
+      const tel = client.telemetry(VEHICLE_ID);
+      const speed = tel ? (tel[VehicleTelemetry.speed] ?? 0) : 0;
+      sendInput(mapper.update(dt, speed));
+      handleCommands();
+    }
     prof.lap('input');
 
     // Sim → interpolated nodes → beam view + camera subject.
@@ -945,9 +1302,10 @@ async function boot(): Promise<void> {
       prof.lap('beamView+pose');
       updateVisuals(dt);
       prof.lap('vehicle');
-      if (prof.enabled && sedanVisual) {
+      const pv = playerVisual();
+      if (prof.enabled && pv) {
         // Upload the node texture here (it would happen inside the render) so its cost is visible.
-        renderer.initTexture(sedanVisual.skin.nodeTexture);
+        renderer.initTexture(pv.skin.nodeTexture);
         if (cubeSkin) renderer.initTexture(cubeSkin.nodeTexture);
         prof.lap('nodeTexUpload');
       }
@@ -1043,6 +1401,26 @@ async function boot(): Promise<void> {
   const loop = (now: number): void => {
     const dt = Math.min(Math.max((now - last) / 1000, 0), 0.1);
     last = now;
+    if (mode === 'showroom') {
+      // The studio replaces the world (paused, not rendered); Start / P only (handleMenuCommands).
+      devices.poll();
+      handleMenuCommands();
+      showroom?.frame(dt);
+      requestAnimationFrame(loop);
+      return;
+    }
+    if (mode === 'pause') {
+      // The last world frame stays on the canvas behind the menu; redrawn only when it was cleared.
+      devices.poll();
+      handleMenuCommands();
+      pauseMenu?.frame(dt);
+      if (redrawPaused) {
+        redrawPaused = false;
+        frame(0, false);
+      }
+      requestAnimationFrame(loop);
+      return;
+    }
     if (hold) {
       // Held frames (screenshots / tests) still take commands: F, R, X … act as soon as they are pressed.
       devices.poll();
@@ -1056,9 +1434,19 @@ async function boot(): Promise<void> {
     requestAnimationFrame(loop);
   };
   requestAnimationFrame(loop);
+  mode = 'drive';
   running = true;
+  // P6: a first launch (or ?welcome) is offered the showroom before the overlay fades; automation
+  // (navigator.webdriver) and returning players drive straight in with the persisted car.
+  const welcome = params.has('welcome') || (firstLaunch && !navigator.webdriver);
+  if (welcome) {
+    // ?welcome=<ms> overrides the hold (screenshots).
+    const holdParam = Number(params.get('welcome'));
+    const r = await loading.ready(player.assets.entry.stats.name, holdParam > 0 ? holdParam : WELCOME_HOLD_MS);
+    if (r === 'choose') openShowroom('loading');
+  }
   await loading.hide();
-  hudView.showToast(world.spawns[spawnIndex]!.name.toUpperCase(), LAYOUT.name.toUpperCase(), 3200);
+  if (mode === 'drive') hudView.showToast(world.spawns[spawnIndex]!.name.toUpperCase(), LAYOUT.name.toUpperCase(), 3200);
 }
 
 boot().catch((e: unknown) => {

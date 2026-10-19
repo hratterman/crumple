@@ -54,6 +54,18 @@ export function yawOf(fx: number, fz: number): number {
   return Math.atan2(-fx, -fz);
 }
 
+/**
+ * Yaw (rad, 0 = −Z) of a transform's rotation: the heading of its rotated
+ * forward (−Z) projected on the ground plane (0 when it points straight up/down).
+ */
+export function yawOfQuat(q: readonly [number, number, number, number] | Quat): number {
+  const [x, y, z, w] = q;
+  // Rotated (0, 0, −1): −(third column of the rotation matrix).
+  const fx = -(2 * (x * z + w * y));
+  const fz = -(1 - 2 * (x * x + y * y));
+  return Math.hypot(fx, fz) > 1e-9 ? yawOf(fx, fz) : 0;
+}
+
 /** World AABB (min xyz, max xyz), e.g. `PropInstance.aabb`. */
 export type Aabb = readonly [number, number, number, number, number, number];
 

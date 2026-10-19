@@ -185,6 +185,10 @@ describe('pedals, gears and commands', () => {
     }
     expect(m.drainCommands()).toEqual(['recover', 'repair', 'cameraCycle', 'toggleBeamView', 'pause', 'slowMo', 'toggleTractionControl']);
     expect(m.handleKeyEvent({ type: 'keydown', code: 'KeyZ' })).toBe(false);
+    // P6: Escape opens the pause menu too.
+    expect(m.handleKeyEvent({ type: 'keydown', code: 'Escape' })).toBe(true);
+    m.handleKeyEvent({ type: 'keyup', code: 'Escape' });
+    expect(m.drainCommands()).toEqual(['pause']);
     m.keyDown('Space');
     expect(m.update(DT, 0).handbrake).toBe(1);
     m.releaseAll();

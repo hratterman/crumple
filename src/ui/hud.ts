@@ -11,6 +11,10 @@ export interface HudVehicleSpec {
   idleRpm: number;
   redlineRpm: number;
   revLimitRpm: number;
+  /** P6: speedometer full scale in DISPLAY units (catalog top speed + 20 %, app/player.ts speedoMax); default 240. */
+  speedoMax?: number;
+  /** P6: display units (default km/h). */
+  units?: 'kmh' | 'mph';
 }
 
 export interface HudStatus {
@@ -27,8 +31,15 @@ export interface HudStatus {
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const HINT_MS = 8000;
-const SPEEDO_MAX_KMH = 240;
+const SPEEDO_MAX_DEFAULT = 240;
 const MS_TO_KMH = 3.6;
+const KMH_PER_MPH = 1.609344;
+
+/** Major tick step for a dial of `max` (≤ 8 labelled ticks). */
+function majorStep(max: number): number {
+  for (const s of [10, 20, 40, 50, 60, 80, 100]) if (max / s <= 8) return s;
+  return 100;
+}
 
 // Dial geometry: 270° sweep, starting at the lower left (SVG angles, clockwise from +x).
 const SWEEP_START_DEG = 135;
@@ -124,6 +135,10 @@ export class Hud {
   private readonly speedo: Dial;
   private readonly tacho: Dial;
   private readonly speedText: HTMLDivElement;
+  private readonly speedUnit: HTMLDivElement;
+  private speedoMax = SPEEDO_MAX_DEFAULT;
+  /** Display units per m/s. */
+  private speedScale = MS_TO_KMH;
   private readonly gearText: HTMLDivElement;
   private readonly gearMode: HTMLDivElement;
   private readonly rpmText: HTMLDivElement;
@@ -165,10 +180,9 @@ export class Hud {
 
     const speedWrap = div('hud-gauge hud-gauge--speed', cluster);
     this.speedo = createDial(speedWrap, 'Speedometer');
-    setTicks(this.speedo, SPEEDO_MAX_KMH, 10, 40, 1);
     const speedCenter = div('hud-gauge-center', speedWrap);
     this.speedText = div('hud-speed', speedCenter, '0');
-    div('hud-unit', speedCenter, 'km/h');
+    this.speedUnit = div('hud-unit', speedCenter, 'km/h');
 
     const damage = div('hud-damage', cluster);
     div('hud-damage-label', damage, 'DAMAGE');
@@ -185,7 +199,7 @@ export class Hud {
       ['F', 'repair'],
       ['C', 'camera'],
       ['B', 'beams'],
-      ['P', 'pause'],
+      ['Esc', 'menu'],
       ['T', 'slow-mo'],
       ['X', 'traction ctrl'],
       ['1–8', 'spawn points'],
@@ -202,6 +216,15 @@ export class Hud {
     this.applySpec();
   }
 
+  get vehicleSpec(): Readonly<HudVehicleSpec> {
+    return this.spec;
+  }
+
+  /** P6: hidden while a full-screen menu (showroom) owns the screen. */
+  setVisible(visible: boolean): void {
+    this.root.hidden = !visible;
+  }
+
   /** `telemetry`: the object's TELEMETRY_SLOTS block, or null when the vehicle is absent. */
   update(telemetry: ArrayLike<number> | null, status: HudStatus, dt: number): void {
     const T = VehicleTelemetry;
@@ -210,8 +233,8 @@ export class Hud {
     const gear = telemetry ? Math.round(telemetry[T.gear] ?? 0) : 0;
     const damage = telemetry ? Math.min(Math.max(telemetry[T.damage] ?? 0, 0), 1) : 0;
 
-    const kmh = speed * MS_TO_KMH;
-    setDial(this.speedo, kmh / SPEEDO_MAX_KMH);
+    const kmh = speed * this.speedScale;
+    setDial(this.speedo, kmh / this.speedoMax);
     const kmhR = Math.round(kmh);
     if (kmhR !== this.lastNum.kmh) {
       this.lastNum.kmh = kmhR;
@@ -296,5 +319,14 @@ export class Hud {
     const r0 = Math.min(s.redlineRpm / this.tachMax, 1);
     el('path', { d: arcPath(r0, 1, R + 7), class: 'hud-dial-redline' }, this.tacho.extra);
     this.tacho.lastFrac = -1;
+    // P6: per-vehicle speedometer scale and units.
+    const mph = s.units === 'mph';
+    this.speedScale = mph ? MS_TO_KMH / KMH_PER_MPH : MS_TO_KMH;
+    this.speedoMax = Math.max(20, s.speedoMax ?? SPEEDO_MAX_DEFAULT);
+    const major = majorStep(this.speedoMax);
+    setTicks(this.speedo, this.speedoMax, major >= 40 ? major / 4 : major / 2, major, 1);
+    this.speedo.lastFrac = -1;
+    this.lastNum.kmh = -1;
+    this.speedUnit.textContent = mph ? 'mph' : 'km/h';
   }
 }

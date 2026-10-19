@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { quatRotateVec3, type Vec3 } from '../core/math';
-import { clearOfBoxes, placeOnGround, repairSpot, SPAWN_DROP_MAX_M, yawOf, type RestPose } from './spawn';
+import { clearOfBoxes, placeOnGround, repairSpot, SPAWN_DROP_MAX_M, yawOf, yawOfQuat, type RestPose } from './spawn';
 
 const box: RestPose = {
   nodeCount: 4,
@@ -70,5 +70,15 @@ describe('repairSpot', () => {
     expect(repairSpot(box, flat, 0, 0, 0, [high])!.pos[2]).toBe(0);
     const wall = [-50, 0, -50, 50, 1, 50] as const;
     expect(repairSpot(box, flat, 0, 0, 0, [wall], 5)).toBeNull();
+  });
+});
+
+describe('yawOfQuat', () => {
+  it('recovers the yaw placeOnGround encoded (P6 swap keeps the heading)', () => {
+    for (const yaw of [0, 0.7, Math.PI / 2, 2.5, -1.2, -3]) {
+      const t = placeOnGround(box, { heightAt: () => 0 }, 0, 0, yaw);
+      const back = yawOfQuat(t.quat);
+      expect(Math.atan2(Math.sin(back - yaw), Math.cos(back - yaw))).toBeCloseTo(0, 9);
+    }
   });
 });

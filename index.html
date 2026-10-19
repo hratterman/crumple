@@ -162,6 +162,79 @@
         color: #ff9a9a;
         white-space: pre-wrap;
       }
+      /* P6: ready state — choose a car (showroom) or drive the last one. */
+      .loading-ready {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        animation: loading-rise 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+      }
+      .loading-ready[hidden] {
+        display: none;
+      }
+      .loading-btn {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        justify-content: center;
+        gap: 2px;
+        height: 58px;
+        padding: 0 18px;
+        overflow: hidden;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        background: rgba(255, 255, 255, 0.05);
+        color: #eef0f3;
+        font: 800 italic 17px/1 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        font-family: 'Inter Display', 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        cursor: pointer;
+        transition: transform 0.15s ease, border-color 0.2s ease, filter 0.2s ease;
+      }
+      .loading-btn small {
+        font: 700 10px/1.2 system-ui, sans-serif;
+        font-family: 'Inter', system-ui, sans-serif;
+        letter-spacing: 0.16em;
+        opacity: 0.7;
+      }
+      .loading-btn:hover,
+      .loading-btn:focus-visible {
+        transform: translateY(-2px);
+        border-color: rgba(255, 196, 107, 0.6);
+        outline: none;
+      }
+      .loading-btn--primary {
+        border: none;
+        color: #17110b;
+        background: linear-gradient(100deg, #ff7a2e 0%, #ff9b45 45%, #ffc46b 100%);
+        box-shadow: 0 10px 30px rgba(255, 120, 40, 0.35);
+      }
+      .loading-btn--primary:hover,
+      .loading-btn--primary:focus-visible {
+        filter: brightness(1.06);
+      }
+      .loading-btn-timer {
+        position: absolute;
+        left: 0;
+        bottom: 0;
+        height: 2px;
+        width: 100%;
+        background: rgba(255, 196, 107, 0.8);
+        transform-origin: left center;
+        transform: scaleX(0);
+      }
+      @keyframes loading-rise {
+        from {
+          opacity: 0;
+          transform: translateY(8px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
       @keyframes loading-spin {
         to {
           transform: rotate(360deg);
@@ -187,7 +260,11 @@
           <li class="loading-step" data-step="textures" data-state="active">Loading textures</li>
           <li class="loading-step" data-step="shaders" data-state="pending">Compiling shaders</li>
         </ul>
-        <div class="loading-foot"><kbd>W A S D</kbd> drive &nbsp;·&nbsp; <kbd>1</kbd>–<kbd>8</kbd> spawn points &nbsp;·&nbsp; <kbd>C</kbd> camera</div>
+        <div class="loading-ready" hidden>
+          <button class="loading-btn loading-btn--primary" type="button" data-action="choose">Choose your car<small>Showroom</small></button>
+          <button class="loading-btn" type="button" data-action="drive">Drive<small class="loading-ready-car"></small><span class="loading-btn-timer"></span></button>
+        </div>
+        <div class="loading-foot"><kbd>W A S D</kbd> drive &nbsp;·&nbsp; <kbd>1</kbd>–<kbd>8</kbd> spawn points &nbsp;·&nbsp; <kbd>Esc</kbd> menu</div>
       </div>
     </div>
     <script type="module" src="/src/main.ts"></script>

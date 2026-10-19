@@ -48,6 +48,53 @@ export class LoadingScreen {
     }
   }
 
+  /**
+   * P6 ready state: loading is done; offer "Choose your car" (showroom) or
+   * "Drive" with the persisted car. Resolves 'choose' / 'drive' on a click
+   * (Enter = drive, C = choose) or 'drive' after `holdMs` (a countdown bar
+   * runs on the Drive button; 0 = no wait: the buttons stay clickable while
+   * the overlay fades). No-op markup-less pages resolve 'drive'.
+   */
+  ready(carName: string, holdMs: number): Promise<'drive' | 'choose'> {
+    const box = this.root?.querySelector<HTMLElement>('.loading-ready');
+    if (!this.root || !box) return Promise.resolve('drive');
+    const steps = this.root.querySelector<HTMLElement>('.loading-steps');
+    const car = box.querySelector<HTMLElement>('.loading-ready-car');
+    const timer = box.querySelector<HTMLElement>('.loading-btn-timer');
+    if (car) car.textContent = carName;
+    if (steps) steps.hidden = true;
+    box.hidden = false;
+    if (this.fill) this.fill.style.transform = 'scaleX(1)';
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (r: 'drive' | 'choose'): void => {
+        if (done) return;
+        done = true;
+        window.clearTimeout(t);
+        window.removeEventListener('keydown', onKey, true);
+        resolve(r);
+      };
+      const onKey = (e: KeyboardEvent): void => {
+        if (e.code === 'Enter' || e.code === 'NumpadEnter') finish('drive');
+        else if (e.code === 'KeyC') {
+          e.stopImmediatePropagation();
+          e.preventDefault();
+          finish('choose');
+        }
+      };
+      box.querySelector('[data-action="choose"]')?.addEventListener('click', () => finish('choose'));
+      box.querySelector('[data-action="drive"]')?.addEventListener('click', () => finish('drive'));
+      window.addEventListener('keydown', onKey, true);
+      const t = window.setTimeout(() => finish('drive'), Math.max(0, holdMs));
+      if (timer && holdMs > 0) {
+        timer.style.transition = `transform ${holdMs}ms linear`;
+        void timer.offsetWidth;
+        timer.style.transform = 'scaleX(1)';
+      }
+      box.querySelector<HTMLElement>('[data-action="choose"]')?.focus({ preventScroll: true });
+    });
+  }
+
   /** Fades the overlay out (resolves when hidden). */
   hide(): Promise<void> {
     const root = this.root;

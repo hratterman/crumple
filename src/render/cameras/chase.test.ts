@@ -87,3 +87,13 @@ describe('chase camera', () => {
     expect(camera.position.y - h0).toBeLessThan(0.3);
   });
 });
+
+describe('ChaseCamera.setFraming (P6 per-vehicle framing)', () => {
+  it('applies valid values and ignores invalid ones', () => {
+    const chase = new ChaseCamera(new PerspectiveCamera(60, 16 / 9, 0.1, 500));
+    chase.setFraming({ distance: 7.2, height: 2.4, lookHeight: 1.1, baseFov: 65 });
+    expect(chase.options).toMatchObject({ distance: 7.2, height: 2.4, lookHeight: 1.1, baseFov: 65 });
+    chase.setFraming({ distance: -1, height: 0, baseFov: 300 });
+    expect(chase.options).toMatchObject({ distance: 7.2, height: 2.4, baseFov: 65 });
+  });
+});

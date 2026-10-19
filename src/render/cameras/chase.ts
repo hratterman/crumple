@@ -182,6 +182,19 @@ export class ChaseCamera {
     this.initialized = false;
   }
 
+  /**
+   * P6: per-vehicle framing (catalog `chase` × the player's near/normal/far
+   * setting) and the base FOV. The offset spring carries the camera to the
+   * new framing; call reset() as well to snap (a vehicle swap).
+   */
+  setFraming(f: Partial<Pick<ChaseOptions, 'distance' | 'height' | 'lookHeight' | 'baseFov'>>): void {
+    const o = this.options;
+    if (f.distance !== undefined && f.distance > 0) o.distance = f.distance;
+    if (f.height !== undefined && f.height > 0) o.height = f.height;
+    if (f.lookHeight !== undefined && f.lookHeight >= 0) o.lookHeight = f.lookHeight;
+    if (f.baseFov !== undefined && f.baseFov > 10 && f.baseFov < 120) o.baseFov = f.baseFov;
+  }
+
   /** Parked-framing blend, 0 (driving) .. 1 (fully raised). */
   get idleBlend(): number {
     return this.idle;
