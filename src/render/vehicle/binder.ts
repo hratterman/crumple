@@ -37,6 +37,7 @@ import {
   type BindingPanel,
   type BindingSet,
   type BindPanels,
+  type BindRigPanels,
   type EvalFlexVertex,
   type MaterialSlot,
   type NodeSelector,
@@ -549,31 +550,41 @@ interface StatsAcc {
 }
 
 export const bindPanels: BindPanels = (compiled: CompiledVehicle, def, geoms) => {
-  const rig = compiled.rig;
   if (def.vehicle !== compiled.name) {
     throw new BindError(`visual def is for '${def.vehicle}', compiled vehicle is '${compiled.name}'`);
   }
+  return bindRigPanels(compiled.rig, compiled.name, def.panels, geoms, defaultDamageWeight);
+};
+
+/** P5: bindPanels on a plain CompiledRig (props); see BindRigPanels in ./types. */
+export const bindRigPanels: BindRigPanels = <S extends string>(
+  rig: CompiledRig,
+  name: string,
+  defPanels: readonly PanelDef<S>[],
+  geoms: readonly PanelGeometry[],
+  damageWeightOf: (slot: S) => number = () => 1,
+): BindingSet<S> => {
   if (rig.nodeCount > FLEX_MAX_OBJECT_NODES) {
     throw new BindError(`rig '${rig.name}' has ${rig.nodeCount} nodes > ${FLEX_MAX_OBJECT_NODES} (Uint16 triads)`);
   }
-  if (geoms.length !== def.panels.length) {
-    throw new BindError(`${geoms.length} panel geometries for ${def.panels.length} panel defs`);
+  if (geoms.length !== defPanels.length) {
+    throw new BindError(`${geoms.length} panel geometries for ${defPanels.length} panel defs`);
   }
   const ids = new Set<string>();
-  for (const p of def.panels) {
+  for (const p of defPanels) {
     if (ids.has(p.id)) throw new BindError(`duplicate panel id '${p.id}'`);
     ids.add(p.id);
   }
 
   const acc: StatsAcc = { vertices: 0, triangles: 0, repaired: 0, welded: 0, maxAbsC: 0, minAngleDeg: 180, poolTriads: 0, bound: 0, triads: 0 };
-  const panels: BindingPanel[] = [];
-  for (let pi = 0; pi < def.panels.length; pi++) {
-    const pdef = def.panels[pi]!;
+  const panels: BindingPanel<S>[] = [];
+  for (let pi = 0; pi < defPanels.length; pi++) {
+    const pdef = defPanels[pi]!;
     const geom = geoms[pi]!;
     if (geom.panelId !== pdef.id) {
       throw new BindError(`panel ${pi}: geometry '${geom.panelId}' does not match def '${pdef.id}'`);
     }
-    panels.push(bindPanel(rig, pdef, geom, pi, acc));
+    panels.push(bindPanel(rig, pdef, geom, pi, acc, damageWeightOf));
   }
   const stats = {
     vertices: acc.vertices,
@@ -585,10 +596,17 @@ export const bindPanels: BindPanels = (compiled: CompiledVehicle, def, geoms) =>
     poolTriads: acc.poolTriads,
     meanTriads: acc.bound ? acc.triads / acc.bound : 0,
   };
-  return { vehicle: compiled.name, nodeCount: rig.nodeCount, rigHash: rigHashOf(rig), panels, stats };
+  return { vehicle: name, nodeCount: rig.nodeCount, rigHash: rigHashOf(rig), panels, stats };
 };
 
-function bindPanel(rig: CompiledRig, pdef: PanelDef, geom: PanelGeometry, panelIndex: number, stats: StatsAcc): BindingPanel {
+function bindPanel<S extends string>(
+  rig: CompiledRig,
+  pdef: PanelDef<S>,
+  geom: PanelGeometry,
+  panelIndex: number,
+  stats: StatsAcc,
+  damageWeightOf: (slot: S) => number,
+): BindingPanel<S> {
   const what = `panel '${pdef.id}'`;
   const bindNodes = resolveNodeSelector(rig, pdef.bind, what);
   const pos = rig.nodePos;
@@ -761,7 +779,7 @@ function bindPanel(rig: CompiledRig, pdef: PanelDef, geom: PanelGeometry, panelI
 
   const damageWeight = new Float32Array(vcount);
   if (geom.damageWeight) damageWeight.set(geom.damageWeight);
-  else damageWeight.fill(pdef.damageWeight ?? defaultDamageWeight(pdef.material));
+  else damageWeight.fill(pdef.damageWeight ?? damageWeightOf(pdef.material));
 
   return {
     panelId: pdef.id,
@@ -935,7 +953,7 @@ export const evalFlexVertex: EvalFlexVertex = (panel, v, nodes, out) => {
  * data (the skin sanitizes NaN before the GPU sees it) gives P = R, W at
  * the quality floor and no frame.
  */
-function evalTriadSlot(panel: BindingPanel, s: number, k: number, nodes: ArrayLike<number>, withTangent: boolean): void {
+function evalTriadSlot(panel: BindingPanel<string>, s: number, k: number, nodes: ArrayLike<number>, withTangent: boolean): void {
   const o = k * SLOT;
   const w = panel.weight[s]!;
   TRI[o + 9] = 0;
@@ -1023,7 +1041,7 @@ const NRM = new Float64Array(3);
  * when the panel has frame tangents (else tangentOut is left untouched).
  */
 export function evalFlexFrame(
-  panel: BindingPanel,
+  panel: BindingPanel<string>,
   v: number,
   nodes: ArrayLike<number>,
   out: Float64Array,

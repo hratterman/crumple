@@ -152,7 +152,8 @@ export interface MountainsZone extends ZoneBase {
  */
 export interface LakeZone extends ZoneBase {
   kind: 'lake';
-  params: { depth: number; shoreLift: number };
+  /** `water` (P5, render-only optics; default WATER_OPTICS_DEFAULTS) is ignored by the generator. */
+  params: { depth: number; shoreLift: number; water?: Partial<WaterOptics> };
 }
 /** Flattened, paved crash-test pad. Splat paved, material = params.material (concrete). */
 export interface ArenaZone extends ZoneBase {
@@ -245,17 +246,198 @@ export type ResolveColliders = (
   colliders: readonly ColliderDef[],
   heightAt: (x: number, z: number) => number,
 ) => ResolvedCollider[];
-/** P5 placeholder — prop spawn (soft props are rigs, static props are colliders + meshes). */
+/**
+ * PROP PLACEMENT — P5 contract (replaces the P3 placeholder). Soft-body
+ * props are separate sim objects spawned by the WORKER itself on
+ * `groundHeightfield` (like the layout colliders: collision == visual by
+ * construction), expanded by the pure resolvePropInstances
+ * (src/sim/props/placement.ts, docs/CONTRACTS.md "P5 contracts"):
+ *   per placement (declaration order) → row copies k = 0..count−1 at
+ *   pos + k·row.step (x, z) → stack levels l = 0..stack−1 at
+ *   y_ground + l·PropDef.stackHeight. Instance index = expansion order;
+ *   layout objectId = PROP_LAYOUT_ID_BASE + index.
+ * `prop` is a catalog key (src/sim/props/types.ts PropKey; validated by
+ * resolvePropInstances, not here: world never imports sim).
+ * `facing` is a UNIT (x, z) direction the prop's local −Z faces (layout
+ * rule: rotations are data, never angles — the spawn quat is built with
+ * sqrt only). Default (0, −1).
+ */
 export interface PropPlacement {
   id: string;
-  /** Prop catalog key (P5), e.g. 'cone', 'barrier', 'pole', 'ramp'. */
   prop: string;
+  /** Base point; y null = terrain height at (x, z) (per row copy). */
   pos: RoadPoint;
-  yaw: number;
-  dynamic: boolean;
-  /** Pad it sits on (the generator guarantees the pad is flat). */
+  facing?: Vec2;
+  /** Identical props stacked vertically (tires, boxes); default 1. */
+  stack?: number;
+  /** A straight row of copies: copy k sits at pos + k·step (plan metres). */
+  row?: { count: number; step: Vec2 };
+  /** Pad it sits on (documentation + validation that the pad exists). */
   padId?: string;
 }
+
+// ============================================================ water (P5)
+/**
+ * Render-only optics of a lake (LakeZone.params.water; defaults
+ * WATER_OPTICS_DEFAULTS). Colours are sRGB hex.
+ */
+export interface WaterOptics {
+  /** Colour seen through very shallow water / at the shore. */
+  shallowColor: number;
+  /** Scattering colour of deep water (what you see when absorption saturates). */
+  deepColor: number;
+  /** Beer–Lambert absorption per metre of water path, linear RGB (red dies first). */
+  absorption: readonly [number, number, number];
+  /** Shoreline foam band: depth (m of water) below which foam appears. */
+  foamDepth: number;
+  /** Wave normal-map tile size, m, and peak wave height (normal strength only; the surface is flat). */
+  waveScale: number;
+  waveSpeed: number;
+}
+export const WATER_OPTICS_DEFAULTS: WaterOptics = {
+  shallowColor: 0x6fa59a,
+  deepColor: 0x0d2f38,
+  absorption: [0.45, 0.12, 0.08],
+  foamDepth: 0.35,
+  waveScale: 6,
+  waveSpeed: 0.6,
+};
+
+/**
+ * One water body, resolved from a LakeZone + the generated terrain by the
+ * pure resolveWater (src/world/water.ts) — the worker (buoyancy) and main
+ * (water mesh, FX splashes) call it on identical terrain. The flat surface
+ * is y = level over the plan rectangle [minX, maxX] × [minZ, maxZ]: the
+ * AABB of the grid samples with height < level that are 4-connected to the
+ * sample nearest the zone centre (flood fill), grown by WATER_AABB_MARGIN_M.
+ * Inside that rectangle and below `level` a point is "in water" (the
+ * shoreline rises above level, so dry land never qualifies above ground).
+ */
+export interface WaterBody {
+  /** The LakeZone id. */
+  id: string;
+  name: string;
+  level: number;
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+  /** level − min terrain height inside the flood region, m. */
+  maxDepth: number;
+  /** Flooded sample count (diagnostics / tests). */
+  samples: number;
+  optics: WaterOptics;
+}
+export const WATER_AABB_MARGIN_M = 2;
+/** Pure, deterministic; one body per lake zone (declaration order). A lake whose centre sample is dry yields no body. */
+export type ResolveWater = (layout: WorldLayout, terrain: TerrainData) => WaterBody[];
+
+/**
+ * WATER PHYSICS (U1, worker; per awake collidable node i, after beams and
+ * node-vs-node, before ground — so the implicit ground/collider friction
+ * sees it). Only + − × ÷ sqrt. With h = WATER_PHYSICS.nodeHalfDepth:
+ *   f_i = clamp((level − y_i + h) / (2h), 0, 1)          submerged fraction (depth-proportional)
+ *   V_i = m_i / ρ_obj                                     ρ_obj = PropDef.density | vehicleDensity
+ *   F_buoy = ρ_w·g·V_i·f_i  (up, g = |gravity|)
+ *   F_drag = −f_i·(linearDrag·m_i·v + 0.5·ρ_w·Cd·(V_i/ℓ)·|v|·v),  ℓ = nodeLength
+ *   (explicit; |drag impulse| capped at m_i·|v| per step so it never reverses v)
+ * Node in water ⇔ inside a WaterBody rectangle and y_i − h < level.
+ */
+export const WATER_PHYSICS = {
+  density: 1000,
+  nodeHalfDepth: 0.15,
+  linearDrag: 0.8,
+  dragCoeff: 1.0,
+  nodeLength: 0.3,
+  /** Effective density of vehicles (cabin air): a sedan floats low for a moment, then the drag stops it. */
+  vehicleDensity: 900,
+} as const;
+
+// ============================================================ vegetation (P5)
+/** Vegetation kinds (Uint8 ids in VegetationScatter.kind). Grass tufts are NOT scattered (render-side, around the camera). */
+export const VegetationKind = {
+  conifer: 0,
+  broadleaf: 1,
+  shrub: 2,
+  rock: 3,
+  boulder: 4,
+} as const;
+export type VegetationKind = (typeof VegetationKind)[keyof typeof VegetationKind];
+export const VEGETATION_KIND_COUNT = 5;
+
+/**
+ * Deterministic scatter (U4: src/world/vegetation.ts `scatterVegetation`),
+ * a PURE function of (layout, terrain) with the generator's numeric rules
+ * (core/rng forked from layout.seed, core/noise, + − × ÷ sqrt floor
+ * abs min max only, fixed loop order) — the worker derives the tree
+ * colliders from it, so main and worker must agree bit for bit
+ * (hashVegetation, compared via terrainReady.vegetationHash).
+ * SoA, instance order = generation order (kinds interleaved), `count` used.
+ * Always generated at FULL density; render keeps instance i iff
+ * rank[i] < QualityPreset.vegetationDensity OR collider[i] ≥ 0 (collider
+ * instances are always drawn: you never hit an invisible tree).
+ *
+ * PLACEMENT RULES (U4; numbers are contract, tests assert them):
+ *   - no instance within VEG_ROAD_CLEARANCE_M[kind] of any road
+ *     carriageway + shoulder edge (all roads, incl. dirt), inside a pad
+ *     shape, an arena/town zone (mask > 0.1), a static collider's AABB
+ *     (+ 2 m), a layout prop placement (+ 3 m), a spawn point (12 m);
+ *   - none in water: terrain height < waterLevel + 0.4;
+ *   - trees/shrubs need normal.y ≥ 0.8 and rock splat < 0.5; rocks and
+ *     boulders prefer rock splat / steep ground;
+ *   - minimum trunk spacing VEG_TREE_MIN_SPACING_M between trees;
+ *   - totals ≤ VEG_MAX_INSTANCES.
+ * TREE / BOULDER COLLIDER RULE: a conifer/broadleaf whose trunk is within
+ * VEG_COLLIDER_REACH_M of a carriageway + shoulder edge, a pad or the arena
+ * zone becomes a static CYLINDER collider (ColliderDef id `veg:${i}`,
+ * material wood, visual 'none' — the vegetation renderer draws it), radius
+ * = trunk radius at the base (VEG_TRUNK_RADIUS_M[kind]·scale), half
+ * height VEG_TRUNK_HALF_HEIGHT_M, pos y null; a boulder within reach becomes
+ * a SPHERE collider (material rock, visual 'none', radius r =
+ * VEG_BOULDER_RADIUS_M·scale, centre y = terrain(x, z) + VEG_BOULDER_CENTER_LIFT·r:
+ * a half-buried dome; the mesh is drawn on the same sphere). Small rocks
+ * never collide. Collider trees keep
+ * ≥ VEG_TREE_MIN_SPACING_M apart and total ≤ VEG_MAX_COLLIDERS (so the
+ * 8 m collider grid stays under COLLIDER_MAX_CANDIDATES per object).
+ * The worker appends `scatter.colliders` after the layout colliders and
+ * before the setColliders extra set (one id space).
+ */
+export interface VegetationScatter {
+  count: number;
+  /** VegetationKind per instance. */
+  kind: Uint8Array;
+  /** Base point (trunk foot / rock centre on the ground), world m. */
+  x: Float32Array;
+  y: Float32Array;
+  z: Float32Array;
+  /** Uniform size multiplier around the kind's reference size (≈ 0.6–1.6). */
+  scale: Float32Array;
+  /** Render yaw, rad in [0, 2π) (render only — never feeds the sim). */
+  yaw: Float32Array;
+  /** Mesh variant 0..3 within the kind. */
+  variant: Uint8Array;
+  /** Density threshold 0..1 (uniform over instances of a kind). */
+  rank: Float32Array;
+  /** Index into `colliders`, or −1. */
+  collider: Int32Array;
+  colliders: ColliderDef[];
+  /** hashVegetation(this). */
+  hash: number;
+}
+export const VEG_MAX_INSTANCES = 60000;
+export const VEG_MAX_COLLIDERS = 2500;
+export const VEG_COLLIDER_REACH_M = 25;
+export const VEG_TREE_MIN_SPACING_M = 4;
+export const VEG_TRUNK_HALF_HEIGHT_M = 2.5;
+/** Per VegetationKind (conifer, broadleaf, shrub, rock, boulder). */
+export const VEG_ROAD_CLEARANCE_M: readonly number[] = [4, 5, 1.5, 1, 3];
+export const VEG_TRUNK_RADIUS_M: readonly number[] = [0.2, 0.28, 0, 0, 0];
+export const VEG_BOULDER_RADIUS_M = 1.1;
+export const VEG_BOULDER_CENTER_LIFT = 0.35;
+/** Pure, deterministic (U4). */
+export type ScatterVegetation = (layout: WorldLayout, terrain: TerrainData) => VegetationScatter;
+/** FNV-1a 32 word-wise over count, kind, x, y, z, scale, collider (U4). */
+export type HashVegetation = (scatter: VegetationScatter) => number;
 
 // ============================================================ roads
 /**
@@ -388,15 +570,17 @@ export interface WorldLayout {
   name: string;
   /**
    * Bump on ANY change that alters generated terrain OR the static
-   * colliders (replays key on the terrain hash and this version; colliders
-   * are not in hashTerrain).
+   * colliders OR the props / vegetation (replays key on the terrain hash
+   * and this version; colliders, props and the scatter are not in
+   * hashTerrain). v4 = P5 (props, vegetation colliders, water); P5 units
+   * edit layout content under v4 without further bumps until P5 exits.
    */
   version: number;
   seed: number;
   /** Square map edge length, m, centred on the origin. size/terrain.spacing must be an integer multiple of TERRAIN_CHUNK_CELLS. */
   size: number;
   terrain: TerrainParams;
-  /** Single global water plane height, m; rendered over 'lake' zones (P5). */
+  /** Single global water plane height, m; water bodies = lake zones resolved by resolveWater (P5). */
   waterLevel: number;
   zones: readonly ZoneDef[];
   pads: readonly PadDef[];
@@ -408,7 +592,7 @@ export interface WorldLayout {
    * (resolved against its own terrain) in declaration order = collider index.
    */
   colliders: readonly ColliderDef[];
-  /** P5: empty until then. */
+  /** Soft-body props (P5), spawned by the worker on groundHeightfield; see PropPlacement. */
   props: readonly PropPlacement[];
 }
 

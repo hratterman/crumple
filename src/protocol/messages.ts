@@ -11,6 +11,7 @@
  * given (tick, command) log.
  */
 import type { Quat, Vec3 } from '../core/math';
+import type { PropKey } from '../sim/props/types';
 import type { RigDef } from '../sim/rig/types';
 import type { TransmissionMode, VehicleDef } from '../sim/vehicle/types';
 import type { ColliderDef, WorldLayout } from '../world/types';
@@ -19,6 +20,13 @@ import type { ColliderDef, WorldLayout } from '../world/types';
 /**
  * Surface/material ids — FROZEN numeric values. Canonical home is here (both
  * sides need it); `src/sim/types.ts` re-exports it.
+ *
+ * P5 additive (7..10): OBJECT materials. They never appear in the terrain
+ * material map (the generator paints 0..6 only; world/validate keeps roads
+ * and pads to 0..6) but are valid for static colliders (tree trunks = wood)
+ * and are the `materialId` of node-vs-node contact events (the OTHER
+ * object's contact material: PropDef.material, vehicles = metal). FX keys
+ * sparks / chips / dust on them (docs/CONTRACTS.md "FX event → effect").
  */
 export const MaterialId = {
   asphalt: 0,
@@ -28,9 +36,15 @@ export const MaterialId = {
   gravel: 4,
   concrete: 5,
   metal: 6,
+  plastic: 7,
+  rubber: 8,
+  wood: 9,
+  cardboard: 10,
 } as const;
 export type MaterialId = (typeof MaterialId)[keyof typeof MaterialId];
-export const MATERIAL_COUNT = 7;
+export const MATERIAL_COUNT = 11;
+/** Terrain-paintable materials are [0, TERRAIN_MATERIAL_COUNT) (P1 values). */
+export const TERRAIN_MATERIAL_COUNT = 7;
 
 // ============================================================ ActionState
 /**
@@ -106,6 +120,36 @@ export const DEFAULT_CAPACITY: SnapshotCapacity = {
   nodeCapacity: 32768,
   beamCapacity: 131072,
 };
+/**
+ * P5: the game's init capacity (layout props are separate objects: up to
+ * PROP_LAYOUT_MAX_INSTANCES of them plus vehicles and dynamic props).
+ * DEFAULT_CAPACITY stays the P1 value for tests.
+ */
+export const GAME_CAPACITY: SnapshotCapacity = {
+  maxObjects: 320,
+  nodeCapacity: 32768,
+  beamCapacity: 131072,
+};
+
+// ---------------------------------------------------------------- object id ranges (P5)
+/**
+ * objectId ranges (u32; convention shared by worker and main — objects stay
+ * ordered by ascending id, so props always step AFTER vehicles):
+ *   [1, PROP_LAYOUT_ID_BASE)            vehicles + main-spawned rigs (player 1, debug cube 2, P6 traffic 100+)
+ *   [PROP_LAYOUT_ID_BASE, +MAX)         LAYOUT props, auto-spawned by the worker on groundHeightfield:
+ *                                       objectId = PROP_LAYOUT_ID_BASE + PropInstance.index
+ *   [PROP_DYNAMIC_ID_BASE, +MAX)        props spawned by `spawnProps` (challenge set-ups, debug)
+ */
+export const PROP_LAYOUT_ID_BASE = 4096;
+export const PROP_LAYOUT_MAX_INSTANCES = 256;
+export const PROP_DYNAMIC_ID_BASE = 8192;
+export const PROP_DYNAMIC_MAX = 4096;
+export function isLayoutPropId(objectId: number): boolean {
+  return objectId >= PROP_LAYOUT_ID_BASE && objectId < PROP_LAYOUT_ID_BASE + PROP_LAYOUT_MAX_INSTANCES;
+}
+export function isPropObjectId(objectId: number): boolean {
+  return isLayoutPropId(objectId) || (objectId >= PROP_DYNAMIC_ID_BASE && objectId < PROP_DYNAMIC_ID_BASE + PROP_DYNAMIC_MAX);
+}
 
 // ============================================================ main → worker
 export interface InitMsg {
@@ -255,6 +299,39 @@ export interface SetCollidersMsg {
   colliders: ColliderDef[];
 }
 
+// ---------------------------------------------------------------- props (P5, additive)
+/** One prop to spawn: the worker compiles PROP_CATALOG[prop].rig (pure, cached per key). */
+export interface PropSpawn {
+  /** In [PROP_DYNAMIC_ID_BASE, +PROP_DYNAMIC_MAX); unique among live objects. */
+  objectId: number;
+  prop: PropKey;
+  /** Rig rest pose (base on local y = 0) placed by this transform. */
+  transform: Transform;
+  /** Start asleep (frozen in the rest pose until woken). Default true. */
+  asleep?: boolean;
+}
+/**
+ * Batch spawn (atomic: every item is validated first — unknown key, id out
+ * of the dynamic range or in use, capacity — and on any failure NOTHING
+ * spawns and one `error` names the first bad item). Layout props are NOT
+ * spawned with this: the worker spawns them itself on `groundHeightfield`.
+ */
+export interface SpawnPropsMsg {
+  type: 'spawnProps';
+  items: PropSpawn[];
+}
+/**
+ * Full repair + re-place props at their spawn transforms, asleep: layout
+ * props at their resolved placement, dynamic props at the transform they
+ * were spawned with. `objectIds` omitted = every LAYOUT prop (the arena
+ * "reset props" key). Unknown / non-prop ids → `error`, nothing changes.
+ * Each repaired prop's OBJ_REPAIR_EPOCH increments (visual damage clears).
+ */
+export interface ResetPropsMsg {
+  type: 'resetProps';
+  objectIds?: number[];
+}
+
 /** RESERVED (P6): awake bubble around the player. Worker may answer `unimplemented`. */
 export interface SetBubbleMsg {
   type: 'setBubble';
@@ -286,6 +363,8 @@ export type MainToWorker =
   | RecoverMsg
   | GroundHeightfieldCmd
   | SetCollidersMsg
+  | SpawnPropsMsg
+  | ResetPropsMsg
   | SetBubbleMsg
   | KeyframeRequestMsg
   | ReplaySeekMsg;
@@ -330,6 +409,17 @@ export interface TerrainReadyMsg {
   matched: boolean;
   /** Worker generation time, ms (perf telemetry). */
   generateMs: number;
+  /**
+   * P5 additive (absent from pre-P5 workers): layout prop instances spawned
+   * (objectIds PROP_LAYOUT_ID_BASE + [0, props)), vegetation colliders
+   * installed after the layout colliders, hashVegetation() of the worker's
+   * scatter (main compares it with its own; mismatch = console error, like
+   * terrainHash), water bodies installed for buoyancy.
+   */
+  props?: number;
+  vegetationColliders?: number;
+  vegetationHash?: number;
+  waterBodies?: number;
 }
 
 export type WorkerToMain = ReadyMsg | SnapshotMsg | FatalMsg | UnimplementedMsg | ErrorMsg | TerrainReadyMsg;

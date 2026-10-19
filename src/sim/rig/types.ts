@@ -48,7 +48,27 @@ export interface RigNodeDef {
    * (friction) force. Default false.
    */
   tread?: boolean;
+  /**
+   * P5 NODE-VS-NODE contact (additive): participates in contact with OTHER
+   * objects' nodes. Default = `collidable`. A node with collidable false and
+   * objContact true is a COLLISION-ONLY node (mid-panel nodes against gap
+   * interlock: ground/collider passes skip it, object contact uses it).
+   * Compiled into RIG_NODE_FLAG_OBJ_CONTACT.
+   */
+  objContact?: boolean;
+  /**
+   * P5 exterior contact radius against other objects' nodes, m (additive).
+   * Default (≤ 0 / absent): 0.6 × the node's median incident beam rest
+   * length, clamped to [0.04, 0.35] (≈ 0.6 × local node spacing, so
+   * neighbouring spheres overlap and an object's skin has no gaps).
+   * Independent of `radius` (ground/collider contact), which stays small.
+   * Compiled into CompiledRig.nodeObjRadius (U1 adds it in the rig builder).
+   */
+  objRadius?: number;
 }
+
+/** P5: compiled node flag — node-vs-node contact participant (sim NODE_FLAG_OBJ_CONTACT, same bit; U1 sets it in compileRig). */
+export const RIG_NODE_FLAG_OBJ_CONTACT = 1 << 3;
 
 export interface RigBeamDef {
   /** Node ids. */

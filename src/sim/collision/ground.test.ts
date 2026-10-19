@@ -164,7 +164,7 @@ class SlopeSampler implements HeightSampler {
 describe('materials', () => {
   it('default table matches the plan values per frozen MaterialId', () => {
     const f = DEFAULT_MATERIALS.friction;
-    expect(f.length).toBe(7);
+    expect(f.length).toBe(11); // P5: object materials 7..10 (plastic, rubber, wood, cardboard)
     expect(f[MaterialId.asphalt]).toBe(1.0);
     expect(f[MaterialId.grass]).toBe(0.6);
     expect(f[MaterialId.dirt]).toBe(0.7);
@@ -172,6 +172,7 @@ describe('materials', () => {
     expect(f[MaterialId.gravel]).toBe(0.65);
     expect(f[MaterialId.concrete]).toBe(1.0);
     expect(f[MaterialId.metal]).toBe(0.4);
+    expect(f[MaterialId.wood]).toBe(0.6);
     expect(createMaterialTable({ grass: 0.1 }).friction[MaterialId.grass]).toBe(0.1);
   });
 });

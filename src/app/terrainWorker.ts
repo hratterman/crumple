@@ -3,14 +3,19 @@
  * main thread (generateTerrain blocks for ~2–3 s) and TRANSFERS the arrays
  * back (zero-copy). Independent of the physics worker, which regenerates its
  * own copy from the same layout (groundHeightfield); main compares hashes.
+ * P5: also runs the pure vegetation scatter on the fresh terrain (same
+ * function the physics worker runs for tree colliders) and transfers it.
  */
 import { generateTerrain } from '../world/terrain';
-import type { TerrainData, WorldLayout } from '../world/types';
+import type { TerrainData, VegetationScatter, WorldLayout } from '../world/types';
+import { scatterBuffers, scatterVegetation } from '../world/vegetation';
 
 export interface TerrainJob {
   layout: WorldLayout;
 }
-export type TerrainJobResult = { ok: true; terrain: TerrainData; ms: number } | { ok: false; message: string };
+export type TerrainJobResult =
+  | { ok: true; terrain: TerrainData; ms: number; vegetation: VegetationScatter; vegetationMs: number }
+  | { ok: false; message: string };
 
 const scope = self as unknown as {
   onmessage: ((ev: MessageEvent<TerrainJob>) => void) | null;
@@ -20,8 +25,14 @@ const scope = self as unknown as {
 scope.onmessage = (ev) => {
   const t0 = performance.now();
   let terrain: TerrainData;
+  let vegetation: VegetationScatter;
+  let ms: number;
+  let t1: number;
   try {
     terrain = generateTerrain(ev.data.layout);
+    t1 = performance.now();
+    ms = t1 - t0;
+    vegetation = scatterVegetation(ev.data.layout, terrain);
   } catch (e) {
     scope.postMessage({ ok: false, message: e instanceof Error ? e.message : String(e) }, []);
     return;
@@ -30,5 +41,6 @@ scope.onmessage = (ev) => {
   for (const a of [terrain.heights, terrain.splat, terrain.material, ...terrain.roads.map((r) => r.stations)]) {
     if (a.buffer instanceof ArrayBuffer) buffers.add(a.buffer);
   }
-  scope.postMessage({ ok: true, terrain, ms: performance.now() - t0 }, [...buffers]);
+  for (const b of scatterBuffers(vegetation)) buffers.add(b);
+  scope.postMessage({ ok: true, terrain, ms, vegetation, vegetationMs: performance.now() - t1 }, [...buffers]);
 };

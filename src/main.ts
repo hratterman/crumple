@@ -28,7 +28,7 @@ import { quatFromAxisAngle, quatRotateVec3, vec3Normalize, type Quat, type Vec3 
 import { createInputMapper } from './input/actions';
 import { attachInputDevices } from './input/devices';
 import type { BeamBreakEvent, ImpactEvent, SkidEvent } from './protocol/events';
-import type { ActionState, Transform } from './protocol/messages';
+import { GAME_CAPACITY, isPropObjectId, type ActionState, type Transform } from './protocol/messages';
 import { createVehicleTelemetryFrame, VehicleTelemetry } from './protocol/telemetry';
 import { vehiclePoseFromNodes, type ChaseTarget } from './render/cameras/chase';
 import { CameraDirector } from './render/cameras/director';
@@ -40,6 +40,12 @@ import { createRoadRenderer } from './render/roads';
 import { createTerrainRenderer, prebuildTerrainArrays, terrainAnisotropy, terrainTextureSize } from './render/terrain';
 import { createFarLand, FARLAND_OUTER_M } from './render/terrain/farland';
 import { createColliderRenderer } from './render/world/colliders';
+import { createFxSystem } from './render/fx';
+import type { FxSystem } from './render/fx/types';
+import { createPropRenderer } from './render/props';
+import type { PropRenderer } from './render/props/types';
+import { createVegetationRenderer } from './render/vegetation';
+import { createWaterRenderer } from './render/water';
 import { bindPanels } from './render/vehicle/binder';
 import { SEDAN_VISUAL } from './render/vehicle/defs/sedan';
 import { createFlexSkin } from './render/vehicle/flexskin';
@@ -48,12 +54,15 @@ import { syntheticCubeSubject } from './render/vehicle/synthetic';
 import type { FlexSkin, VehicleFrameInput, VehicleMaterialSet } from './render/vehicle/types';
 import {
   DEFAULT_QUALITY,
+  LAYER_NO_REFLECTION,
   QUALITY_LEVELS,
   QUALITY_PRESETS,
   type PostStack,
   type QualityController,
   type RenderContext,
+  type WorldFrame,
 } from './render/types';
+import { resolvePropInstances } from './sim/props/placement';
 import { compileRig } from './sim/rig/builder';
 import { softCube } from './sim/rig/testrigs';
 import { buildVehicleRig, compileVehicle } from './sim/vehicle/builder';
@@ -64,6 +73,7 @@ import type { PerfOverlay, PerfOverlayData } from './ui/perfOverlay';
 import { resolveColliders } from './world/colliders';
 import { DEFAULT_LAYOUT } from './world/layout';
 import { createTerrainSampler } from './world/sampler';
+import { resolveWater } from './world/water';
 import type { TerrainData, TerrainSampler } from './world/types';
 
 const LAYOUT = DEFAULT_LAYOUT;
@@ -102,6 +112,8 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 const scene = new Scene();
 // Far plane: the far-land ring's outer edge seen from the opposite map corner.
 const camera = new PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, Math.ceil(FARLAND_OUTER_M + 704 * Math.SQRT2 + 200));
+// P5: particles, skidmarks, grass and water live on this layer (excluded from the water's planar reflection).
+camera.layers.enable(LAYER_NO_REFLECTION);
 scene.add(camera);
 
 // ------------------------------------------------------------ profiling (?perf=1 or the ` key)
@@ -145,6 +157,8 @@ const client = new SimClient({
   gravity: [0, -9.81, 0],
   snapshotHz: 120,
   debugStrains: true,
+  // P5: layout props are separate objects (auto-spawned by the worker with the heightfield).
+  capacity: GAME_CAPACITY,
   onFatal: (message) => {
     fatalBox.textContent = `Simulation stopped: ${message}`;
     fatalBox.hidden = false;
@@ -253,6 +267,7 @@ function updateVisuals(dt: number): void {
       sedanFrame.repairEpoch = client.repairEpoch(VEHICLE_ID);
       sedanFrame.telemetry = client.readTelemetry(VEHICLE_ID, sedanTelemetry) ? sedanTelemetry : null;
       sedanFrame.dtS = dt;
+      sedanFrame.camera = camera;
       sedanVisual.update(sedanFrame);
     }
   }
@@ -285,16 +300,26 @@ function updateNearCasters(lighting: Parameters<typeof setNearCasters>[0]): void
   setNearCasters(lighting, renderer, camera, root, 0.5 * (d - NEAR_CASTER_REACH_M), d + NEAR_CASTER_REACH_M);
 }
 
-/** Sim events → the sedan's damage (allocation-free routing; FX consumers come in P5). */
+// ------------------------------------------------------------ P5 world layer (props, FX; set by boot())
+let fx: FxSystem | null = null;
+let props: PropRenderer | null = null;
+let layoutPropCount = 0;
+
+/** Sim events → the sedan's damage, prop scuffs and world FX (allocation-free routing; every object's events reach FX). */
 const eventSink = {
   impact(e: Readonly<ImpactEvent>): void {
     if (e.objectId === VEHICLE_ID) sedanVisual?.onImpact(e);
+    else if (isPropObjectId(e.objectId)) props?.onImpact(e);
+    fx?.onImpact(e);
   },
   beamBreak(e: Readonly<BeamBreakEvent>): void {
     if (e.objectId === VEHICLE_ID) sedanVisual?.onBeamBreak(e);
+    else if (isPropObjectId(e.objectId)) props?.onBeamBreak(e);
+    fx?.onBeamBreak(e);
   },
   skid(e: Readonly<SkidEvent>): void {
     if (e.objectId === VEHICLE_ID) sedanVisual?.onSkid(e);
+    fx?.onSkid(e);
   },
 };
 
@@ -379,6 +404,8 @@ function repairVehicle(): void {
   client.reset(VEHICLE_ID, t);
   lastSent.gearSelect = NaN;
   snapAfterTick = client.latestTick;
+  // P5: F also rebuilds the arena (every layout prop repaired and re-placed asleep).
+  if (layoutPropCount > 0) client.resetProps();
 }
 
 /** The soft cube: a target dropped in the crash-test arena, ahead of the arena spawn. */
@@ -723,19 +750,49 @@ async function boot(): Promise<void> {
     patchMaterial,
   });
   scene.add(collidersR.object);
+  // P5 world layer (contracts: docs/CONTRACTS.md "P5 contracts"). Same pure inputs as the physics worker.
+  const heightAt = (x: number, z: number): number => smp.heightAt(x, z);
+  const waterBodies = resolveWater(LAYOUT, world);
+  const propInstances = resolvePropInstances(LAYOUT.props, heightAt);
+  layoutPropCount = propInstances.length;
+  const propsR = createPropRenderer(ctx, propInstances, { lighting, patchMaterial });
+  props = propsR;
+  scene.add(propsR.object);
+  const vegetationR = createVegetationRenderer(ctx, loaded.vegetation, world, smp, { lighting, patchMaterial });
+  scene.add(vegetationR.object);
+  const waterR = createWaterRenderer(ctx, waterBodies, world, { lighting, patchMaterial });
+  scene.add(waterR.object);
+  const fxR = createFxSystem(ctx, {
+    lighting,
+    patchMaterial,
+    sampler: smp,
+    terrain: world,
+    water: waterBodies,
+    telemetry: (id) => client.telemetry(id),
+  });
+  fx = fxR;
+  scene.add(fxR.object);
+  fxR.addVehicle(VEHICLE_ID, sedanCompiled);
+  fxR.addProps(propInstances);
+  stats.stages.vegetationMs = Math.round(loaded.vegetationMs);
   const qc = createQualityControllerWith(
     ctx,
-    { lighting, post: postStack, others: [terrainR, roadsR, collidersR] },
+    { lighting, post: postStack, others: [terrainR, roadsR, collidersR, propsR, vegetationR, waterR, fxR] },
     forcedLevel ? { initial: forcedLevel, storage: null, maxPixelRatio } : { maxPixelRatio },
   );
   quality = qc;
-  Object.assign(crumple.debug, { terrain: terrainR, roads: roadsR, post: postStack, director });
+  Object.assign(crumple.debug, { terrain: terrainR, roads: roadsR, post: postStack, director, props: propsR, vegetation: vegetationR, water: waterR, fx: fxR, waterBodies, propInstances });
   mark('renderers');
   await nextFrame();
 
   // Physics: spawn only once the worker's heightfield is installed.
   const info = await physicsReady;
   stats.terrainMatched = info.terrainHash >>> 0 === world.hash >>> 0;
+  if (info.vegetationHash !== undefined && info.vegetationHash >>> 0 !== loaded.vegetation.hash >>> 0) {
+    console.error(
+      `[world] vegetation hash mismatch: physics 0x${(info.vegetationHash >>> 0).toString(16)} vs render 0x${(loaded.vegetation.hash >>> 0).toString(16)}`,
+    );
+  }
   if (!stats.terrainMatched) {
     console.error(
       `[world] terrain hash mismatch: physics 0x${(info.terrainHash >>> 0).toString(16)} vs render 0x${(world.hash >>> 0).toString(16)}`,
@@ -786,6 +843,18 @@ async function boot(): Promise<void> {
   hud = hudView;
 
   const hudStatus = { paused: false, slowMo: false, camera: 'chase', transmission, beamView: true, view: debugView as string };
+  const bootTime = performance.now();
+  const worldFrame: WorldFrame = {
+    dtS: 0,
+    time: 0,
+    simTime: 0,
+    timeScale: 1,
+    camera,
+    nodes: positions,
+    interpolated: false,
+    objects: [],
+    tick: 0,
+  };
   const frame = (dt: number): void => {
     prof.begin();
     // Input → worker.
@@ -837,6 +906,23 @@ async function boot(): Promise<void> {
     prof.lap('terrain');
     roadsR.update(camera);
     prof.lap('roads');
+    // P5 world layer: camera is final; water last (its planar reflection sees this frame's props/vegetation).
+    worldFrame.dtS = dt;
+    worldFrame.time = (performance.now() - bootTime) / 1000;
+    worldFrame.simTime = client.renderTime();
+    worldFrame.timeScale = paused ? 0 : slowMo ? SLOW_MO_SCALE : 1;
+    worldFrame.nodes = positions;
+    worldFrame.interpolated = interpolated;
+    worldFrame.objects = client.objectRanges();
+    worldFrame.tick = client.latestTick;
+    propsR.update(worldFrame);
+    prof.lap('props');
+    vegetationR.update(worldFrame);
+    prof.lap('vegetation');
+    fxR.update(worldFrame);
+    prof.lap('fx');
+    waterR.update(worldFrame);
+    prof.lap('water');
     qc.frame(dt);
     prof.lap('quality');
     if (passCounter.attached) {

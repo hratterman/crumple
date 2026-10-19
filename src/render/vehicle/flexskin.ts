@@ -268,7 +268,7 @@ export function nodeTextureRows(nodeCount: number): number {
 }
 
 /** Panel geometry: rest attributes + the packed flex2 attributes (types.ts "FLEXBODY SHADER PATCH v2"). */
-export function buildPanelGeometry(p: BindingPanel): BufferGeometry {
+export function buildPanelGeometry(p: BindingPanel<string>): BufferGeometry {
   const g = new BufferGeometry();
   const n = p.vertexCount;
   g.setAttribute('position', new BufferAttribute(p.restPosition, 3));
@@ -704,7 +704,7 @@ export function createFlexSkin(binding: BindingSet, opts: FlexSkinOptions & Flex
 export const SKIN_INSTANCES: FlexSkinImpl[] = [];
 if (typeof window !== 'undefined') (window as unknown as { __crumpleSkins: FlexSkinImpl[] }).__crumpleSkins = SKIN_INSTANCES;
 
-function restBounds(p: BindingPanel, out: Sphere): void {
+function restBounds(p: BindingPanel<string>, out: Sphere): void {
   out.center.set(p.restCenter[0], p.restCenter[1], p.restCenter[2]);
   out.radius = p.restRadius + 0.1;
 }

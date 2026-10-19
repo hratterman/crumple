@@ -41,6 +41,7 @@
  * ======================================================================
  */
 import type {
+  Camera,
   DataTexture,
   Group,
   Mesh,
@@ -51,6 +52,7 @@ import type {
 
 import type { BeamBreakEvent, ImpactEvent, SkidEvent } from '../../protocol/events';
 import type { VehicleTelemetryFrame } from '../../protocol/telemetry';
+import type { CompiledRig } from '../../sim/rig/types';
 import type { CompiledVehicle } from '../../sim/vehicle/types';
 import type { LightingStack, PatchMaterial, RenderContext, ShaderPatch } from '../types';
 
@@ -234,11 +236,16 @@ export interface GlassSpec {
   shatterBrokenFraction: number;
 }
 
-export interface PanelDef {
+/**
+ * `S` = material-slot vocabulary: vehicles use MaterialSlot (default); P5
+ * props bind through the same binder with their own slots
+ * (PropMaterialSlot, src/render/props/types.ts) via `bindRigPanels`.
+ */
+export interface PanelDef<S extends string = MaterialSlot> {
   /** Unique within the vehicle; [A-Za-z0-9_]+ (e.g. 'hood', 'doorFL', 'glassRear'). */
   id: string;
   kind: PanelKind;
-  material: MaterialSlot;
+  material: S;
   surface: SurfaceSpec;
   /**
    * The ONLY nodes this panel may bind to ("panels bind only to their own
@@ -432,12 +439,12 @@ export const FLEX_CRUMPLE_AMP = 0.04;
 export const FLEX_MAX_OBJECT_NODES = 65535;
 
 /** Per-panel binder output. All arrays per vertex unless noted; vertex order = PanelGeometry order. */
-export interface BindingPanel {
+export interface BindingPanel<S extends string = MaterialSlot> {
   panelId: string;
   /** Index in VehicleVisualDef.panels / BindingSet.panels. */
   panelIndex: number;
   kind: PanelKind;
-  material: MaterialSlot;
+  material: S;
   vertexCount: number;
   /** REST rig-local (geometry `position` attribute; also feeds vFlexRest). */
   restPosition: Float32Array;
@@ -491,14 +498,14 @@ export interface BindingStats {
   meanTriads: number;
 }
 
-export interface BindingSet {
-  /** CompiledVehicle.name. */
+export interface BindingSet<S extends string = MaterialSlot> {
+  /** CompiledVehicle.name (props: the PropKey). */
   vehicle: string;
   /** CompiledRig.nodeCount (node texture sizing). */
   nodeCount: number;
   /** FNV-1a over node ids, rest positions (f32) and beam endpoint pairs: a binding is valid only for this rig. */
   rigHash: number;
-  panels: BindingPanel[];
+  panels: BindingPanel<S>[];
   stats: BindingStats;
 }
 
@@ -522,13 +529,28 @@ export type BindPanels = (
 ) => BindingSet;
 
 /**
+ * P5: the same binder on a plain CompiledRig (props). Identical rules and
+ * output; `name` becomes BindingSet.vehicle; `defaultDamageWeight` (by
+ * slot) replaces the vehicle slot table (default 1). bindPanels(compiled,
+ * def, geoms) ≡ bindRigPanels(compiled.rig, compiled.name, def.panels,
+ * geoms) after the name check.
+ */
+export type BindRigPanels = <S extends string>(
+  rig: CompiledRig,
+  name: string,
+  panels: readonly PanelDef<S>[],
+  geoms: readonly PanelGeometry[],
+  defaultDamageWeight?: (slot: S) => number,
+) => BindingSet<S>;
+
+/**
  * CPU mirror of the shader (A2 exports `evalFlexVertex` from binder.ts):
  * writes vertex v of `panel` (position xyz, normal xyz) into out[0..6) from
  * node positions `nodes` (xyz interleaved, object-local). The v2 formula
  * above in f64; tests assert rest-pose round trip ≤ 1e-5 m, rigid-motion
  * invariance, and continuity under a synthetic crush field.
  */
-export type EvalFlexVertex = (panel: BindingPanel, v: number, nodes: ArrayLike<number>, out: Float64Array) => void;
+export type EvalFlexVertex = (panel: BindingPanel<string>, v: number, nodes: ArrayLike<number>, out: Float64Array) => void;
 
 // ====================================================================== node texture (A2 flexskin)
 /**
@@ -605,6 +627,11 @@ export interface VehicleFrameInput {
   repairEpoch: number;
   telemetry: VehicleTelemetryFrame | null;
   dtS: number;
+  /**
+   * P5 additive (U6 LOD): the view camera (previous frame's pose is fine:
+   * main updates vehicles before the camera). Absent = LOD0 always.
+   */
+  camera?: Camera;
 }
 
 export interface FlexSkin {

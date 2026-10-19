@@ -60,10 +60,28 @@ export interface QualityPreset {
   smaa: boolean;
   /** Multiplies terrain/road LOD switch distances (1 = TERRAIN_LOD_DISTANCES). */
   terrainLodBias: number;
-  /** P5: 0..1 fraction of the vegetation instance budget. */
+  /** P5: 0..1 fraction of the vegetation instance budget (instance i drawn iff rank < density, or it is a collider). */
   vegetationDensity: number;
   /** P5: max live particles across all FX pools. */
   particleBudget: number;
+  /** P5 FX: skidmark ribbon segment pool (all wheels; the oldest segment is recycled). */
+  skidSegments: number;
+  /** P5 FX: pooled rigid debris chunks (instanced; oldest recycled). */
+  debrisBudget: number;
+  /** P5 vegetation: mesh → impostor switch distance, m (× nothing; already per level). */
+  vegetationNearM: number;
+  /** P5 vegetation: impostors culled beyond this, m (fog + far land take over). */
+  vegetationFarM: number;
+  /** P5 vegetation: max near-mesh tree instances drawn per frame (nearest first). */
+  vegetationMeshCap: number;
+  /** P5 vegetation: grass-tuft radius around the camera, m (0 = no grass). */
+  grassRadiusM: number;
+  /** P5 vegetation: tree meshes cast into CSM cascades [0, n) only (0 = no tree shadows; impostors never cast). */
+  vegetationShadowCascades: number;
+  /** P5 water: 'env' = fresnel × environment/sky only; 'planar' = + planar reflection render. */
+  waterReflection: 'env' | 'planar';
+  /** P5 water: planar reflection target size as a fraction of the drawing buffer (ignored for 'env'). */
+  waterReflectionScale: number;
   adaptiveResolution: AdaptiveResolution;
 }
 
@@ -81,6 +99,15 @@ export const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualityPreset>> = {
     terrainLodBias: 0.6,
     vegetationDensity: 0.25,
     particleBudget: 600,
+    skidSegments: 512,
+    debrisBudget: 48,
+    vegetationNearM: 50,
+    vegetationFarM: 300,
+    vegetationMeshCap: 300,
+    grassRadiusM: 0,
+    vegetationShadowCascades: 0,
+    waterReflection: 'env',
+    waterReflectionScale: 0,
     adaptiveResolution: { enabled: true, targetFps: 50, minScale: 0.6 },
   },
   medium: {
@@ -96,6 +123,15 @@ export const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualityPreset>> = {
     terrainLodBias: 1,
     vegetationDensity: 0.5,
     particleBudget: 1500,
+    skidSegments: 1024,
+    debrisBudget: 96,
+    vegetationNearM: 80,
+    vegetationFarM: 450,
+    vegetationMeshCap: 800,
+    grassRadiusM: 25,
+    vegetationShadowCascades: 1,
+    waterReflection: 'env',
+    waterReflectionScale: 0,
     adaptiveResolution: { enabled: true, targetFps: 60, minScale: 0.7 },
   },
   high: {
@@ -111,6 +147,15 @@ export const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualityPreset>> = {
     terrainLodBias: 1.4,
     vegetationDensity: 0.8,
     particleBudget: 3000,
+    skidSegments: 2048,
+    debrisBudget: 192,
+    vegetationNearM: 120,
+    vegetationFarM: 650,
+    vegetationMeshCap: 1600,
+    grassRadiusM: 40,
+    vegetationShadowCascades: 2,
+    waterReflection: 'planar',
+    waterReflectionScale: 0.5,
     adaptiveResolution: { enabled: true, targetFps: 60, minScale: 0.75 },
   },
   ultra: {
@@ -126,11 +171,78 @@ export const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualityPreset>> = {
     terrainLodBias: 2,
     vegetationDensity: 1,
     particleBudget: 6000,
+    skidSegments: 4096,
+    debrisBudget: 320,
+    vegetationNearM: 170,
+    vegetationFarM: 900,
+    vegetationMeshCap: 3000,
+    grassRadiusM: 60,
+    vegetationShadowCascades: 3,
+    waterReflection: 'planar',
+    waterReflectionScale: 0.75,
     adaptiveResolution: { enabled: false, targetFps: 60, minScale: 1 },
   },
 };
 /** Default when settings hold nothing (1080p mid-range target: 60 fps). */
 export const DEFAULT_QUALITY: QualityLevel = 'high';
+
+// ============================================================ P5 world layer (shared)
+/**
+ * Render layer for objects that must NOT appear in the water's planar
+ * reflection (particles, skidmarks, grass, the water itself). Such objects
+ * enable this layer IN ADDITION to layer 0's role: they call
+ * `obj.layers.set(LAYER_NO_REFLECTION)` and the main camera enables it
+ * (`camera.layers.enable(LAYER_NO_REFLECTION)`, done once in main.ts); the
+ * reflection camera only sees layer 0. (CSM shadow passes test layers
+ * against the VIEW camera, so these still follow castShadow.)
+ */
+export const LAYER_NO_REFLECTION = 2;
+
+/** Structural twin of SimClient's ObjectRange (render must not import src/app). */
+export interface SimObjectSlice {
+  objectId: number;
+  /** Snapshot OBJECT_FLAG_* (bit0 sleeping). */
+  flags: number;
+  nodeOffset: number;
+  nodeCount: number;
+  beamOffset: number;
+  beamCount: number;
+}
+
+/**
+ * One frame of world-layer input, built ONCE per frame by main.ts and
+ * handed to every P5 renderer's update(frame) (props, FX, vegetation,
+ * water). Valid only during the frame (arrays are reused).
+ */
+export interface WorldFrame {
+  /** Render dt, s (0 on the boot frame). */
+  dtS: number;
+  /** Wall-clock seconds since boot (wind, waves, flicker): monotonic, never scaled. */
+  time: number;
+  /** Interpolated sim time, s (FX ages scale with the sim: slow-mo slows smoke). */
+  simTime: number;
+  /** Sim timescale in effect (0 paused … 1). */
+  timeScale: number;
+  /** The final camera of this frame (main updates it before the camera-dependent renderers run). */
+  camera: PerspectiveCamera;
+  /** SimClient.interpolate output (global, xyz interleaved, world m); length ≥ 3·Σ nodeCount. */
+  nodes: Float32Array;
+  /** false when no snapshot pair was available this frame (nodes stale: keep last state). */
+  interpolated: boolean;
+  /** Ascending objectId (SimClient.objectRanges()). */
+  objects: readonly SimObjectSlice[];
+  /** Latest snapshot tick (snapshot-rate work runs when it changes). */
+  tick: number;
+}
+
+/** Common shape of the P5 world-layer renderers (props, FX, vegetation, water). */
+export interface WorldLayerRenderer {
+  /** Add to the scene by the caller. */
+  readonly object: Object3D;
+  update(frame: WorldFrame): void;
+  setQuality(q: QualityPreset): void;
+  dispose(): void;
+}
 
 // ============================================================ context
 /**

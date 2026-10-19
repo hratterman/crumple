@@ -24,6 +24,7 @@ import {
   type ActionState,
   type MainToWorker,
   type MaterialId,
+  type PropSpawn,
   type SnapshotCapacity,
   type TerrainReadyMsg,
   type Transform,
@@ -460,6 +461,20 @@ export class SimClient {
    */
   setColliders(colliders: ColliderDef[]): void {
     this.post({ type: 'setColliders', colliders });
+  }
+
+  /**
+   * P5: batch-spawn dynamic props (atomic; ids in the PROP_DYNAMIC range).
+   * Layout props need no call: the worker spawns them on groundHeightfield.
+   * Until the worker implements it, it answers `error` (unknown command).
+   */
+  spawnProps(items: PropSpawn[]): void {
+    this.post({ type: 'spawnProps', items });
+  }
+
+  /** P5: full repair + re-place props asleep (omitted ids = every layout prop). */
+  resetProps(objectIds?: number[]): void {
+    this.post(objectIds ? { type: 'resetProps', objectIds } : { type: 'resetProps' });
   }
 
   /** Delivers and clears every event received since the last drain, in arrival order per kind. */

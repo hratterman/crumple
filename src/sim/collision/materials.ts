@@ -15,6 +15,11 @@ export const MATERIAL_FRICTION: Readonly<Record<keyof typeof MaterialId, number>
   gravel: 0.65,
   concrete: 1.0,
   metal: 0.4,
+  // P5 object materials (static colliders such as tree trunks; node-vs-node contact uses node friction only).
+  plastic: 0.5,
+  rubber: 1.1,
+  wood: 0.6,
+  cardboard: 0.55,
 };
 
 /** Builds a MaterialTable; `overrides` replace individual entries. Not for hot paths (allocates). */

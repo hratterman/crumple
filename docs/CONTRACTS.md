@@ -248,6 +248,105 @@ Set-up: plane ground y = 0 (concrete), rigid collider barrier, sedan at rest pos
 - **A5 sim colliders + crash tuning:** `src/sim/collision/colliders.ts` (`compileColliders`, `applyColliderContacts`), `src/world/colliders.ts` (`resolveColliders`), engine/worker integration in `src/sim/engine.ts` + `src/sim/worker.ts` (layout colliders on `groundHeightfield`, `setColliders`, collider pass, `writeBrokenBeams` + repair epoch in `writeSnapshot`), `src/sim/vehicle/defs/sedan.ts` (hood sub-rig FIRST — A1/A2 bind to it — then crash tuning), `src/sim/vehicle/crash.ts` + `crash.test.ts` (+ optional `tools/crash-report.mjs`), `src/render/world/colliders.ts` (`createColliderRenderer(ctx, resolved, {lighting, patchMaterial})`: wall, jersey profile, poles, ramp; wired into `main.ts` by A2).
 - Shared contract files (`src/render/vehicle/types.ts`, `src/sim/collision/types.ts`, `src/world/types.ts`, `src/world/layout.ts`, `src/protocol/*`) change only via this doc.
 
+## P5 contracts — world objects + FX
+
+Contract files (change only via this doc): `src/protocol/messages.ts` (additions below), `src/world/types.ts` (PropPlacement, water, vegetation), `src/sim/props/types.ts` (PropDef, PropInstance), `src/sim/rig/types.ts` (P5 node fields), `src/render/types.ts` (P5 quality fields, `WorldFrame`, `LAYER_NO_REFLECTION`), `src/render/{props,fx,vegetation,water}/types.ts`, `src/render/vehicle/types.ts` (generic `PanelDef<S>` / `BindingSet<S>`, `bindRigPanels`, `VehicleFrameInput.camera`). Full rules live in those files' doc comments; this section is the summary + the decisions.
+
+### Boundary amendment — P5
+Main-thread code MAY import the pure prop modules `src/sim/props/types.ts`, `src/sim/props/catalog.ts`, `src/sim/props/placement.ts` and `src/sim/props/defs/*.ts` (same purity rules as the P1/P2 rig and vehicle modules: no engine/state/worker imports, no three, no DOM). `src/protocol` may `import type` from `src/sim/props/types.ts`. `src/world` still never imports `src/sim` (a placement's `prop` is a plain string, validated by `resolvePropInstances`).
+
+### Pre-wired seams (landed with these contracts)
+- **Stubs** with the frozen factory signatures, already wired into `src/main.ts`: `createPropRenderer` (`src/render/props/index.ts`), `createFxSystem` (`src/render/fx/index.ts`), `createVegetationRenderer` (`src/render/vegetation/index.ts`), `createWaterRenderer` (`src/render/water/index.ts`), `scatterVegetation` (`src/world/vegetation.ts`, empty scatter + real `hashVegetation`), `resolvePropInstances` (`src/sim/props/placement.ts`, `[]` for no props). Each unit replaces ITS stub; nobody else edits it.
+- **Implemented:** `resolveWater` / `waterAt` (`src/world/water.ts` + test), `bindRigPanels` (`src/render/vehicle/binder.ts`; `bindPanels` delegates, output identical), `SimClient.spawnProps / resetProps`, `GAME_CAPACITY` at init, F (repair) also sends `resetProps` when the layout has props, `LoadedTerrain.vegetation` (scatter computed in the terrain helper worker, arrays transferred), `camera.layers.enable(LAYER_NO_REFLECTION)`.
+- **main.ts frame order (P5):** input → interpolate → beam view/pose → vehicles (`sedanFrame.camera` set) → event drain (impact/beamBreak/skid of EVERY object → `fx.on*`; vehicle → sedan damage; prop ids → `props.on*`) → camera → lighting → terrain → roads → `props.update(frame)` → `vegetation.update(frame)` → `fx.update(frame)` → `water.update(frame)` (planar reflection last) → quality → post. One `WorldFrame` object per frame (`src/render/types.ts`). All four are in the quality controller's `others`.
+
+### Protocol additions (P5, additive; SNAPSHOT_VERSION stays 1, no snapshot layout change)
+- **MaterialId** 7 plastic, 8 rubber, 9 wood, 10 cardboard (`MATERIAL_COUNT` 11; `TERRAIN_MATERIAL_COUNT` 7: the generator and `world/validate` keep terrain/roads/pads to 0..6). Friction multipliers plastic 0.5, rubber 1.1, wood 0.6, cardboard 0.55 (`collision/materials.ts`). Valid for colliders (tree trunks = wood) and as the `materialId` of node-vs-node events.
+- **objectId ranges:** `[1, 4096)` vehicles + main-spawned rigs; `[PROP_LAYOUT_ID_BASE 4096, +256)` layout props, auto-spawned by the worker, `objectId = 4096 + PropInstance.index`; `[PROP_DYNAMIC_ID_BASE 8192, +4096)` `spawnProps`. Helpers `isLayoutPropId`, `isPropObjectId`. Props therefore always step after vehicles.
+- **`GAME_CAPACITY`** {maxObjects 320, nodes 32768, beams 131072}; `DEFAULT_CAPACITY` unchanged (tests).
+- **`spawnProps{items: PropSpawn[]}`**, `PropSpawn{objectId, prop: PropKey, transform, asleep? (default true)}`: atomic batch (all validated first; any failure → one `error`, nothing spawns).
+- **`resetProps{objectIds?}`**: full repair + re-place at the spawn transform, asleep; omitted = every layout prop; repair epoch +1 each.
+- **`groundHeightfield` worker sequence (U1):** generate → install heightfield → resolve layout colliders → `scatterVegetation(layout, terrain).colliders` appended (ids `veg:*`, before the extra set) → `resolveWater(layout, terrain)` installed → `resolvePropInstances(layout.props, heightAt)` spawned asleep → `terrainReady{…, props, vegetationColliders, vegetationHash, waterBodies}` (new fields optional). Main logs an error when `vegetationHash` ≠ its own scatter's hash (already wired).
+- **Sleep flag:** the existing `OBJECT_FLAG_SLEEPING` (object flags bit 0) — now written for sleeping props.
+- **No `splash` event (decision):** water FX is derived on main from `WorldFrame.nodes` vs `WaterBody` (the same precedent as plastic strain): main already has every node position and the water bodies; a node crossing `level` downward faster than `FX_SPLASH_SPEED` is a splash, horizontal speed in water > `FX_WAKE_SPEED` is a wake. A new event ring would have meant a snapshot section + header words for something 120 Hz positions resolve visually.
+
+### Sim (U1) — node-vs-node, sleep, water, props
+- **Phase order (amends canonical rule 3/5):** per AWAKE object ascending: vehicle pre-step → hydros → beams; then (every `rebuild` ticks) broadphase + sleep/wake; then the node-vs-node pass over the cached pair list (canonical order); then per awake object ascending: water → ground → colliders → integrate. Splitting the loop is bit-identical for objects with no object/water contact (per-node accumulation order beams → ground → colliders is unchanged); the determinism test stays green and a new one covers props + contact.
+- **Broadphase:** rebuild every 8 ticks (16 while every awake object is slower than 2 m/s). Object AABBs of awake objects fattened by `max node speed · rebuild·dt + 2·max objRadius`; sleeping objects use their transformed proxy box. Overlapping object pairs (lower id first) → spatial hash of the overlapping nodes (cell = 2 × max objRadius of the pair) → candidate node pairs with distance < r_a + r_b + margin, SORTED (lower objectId node first, then node index a, then b); capacity 32768 pairs per rebuild, overflow drops the tail (deterministic) and is counted. Same-object pairs are never generated.
+- **Contact law (sphere–sphere, `RigNodeDef.objRadius`, flag `objContact`):** depth = r_a + r_b − |d|; m_r = m_a m_b/(m_a + m_b) (pinned node: m_r = m_free); k = min(`OBJ_KC_MAX` 1e6, 0.2·m_r/dt²); c = 2·0.65·sqrt(k·m_r); Fn = max(0, k·depth − c·v_rel·n); friction implicit backward-Euler on the relative tangential velocity, F_req = −m_r·v_t/dt clamped to μ·Fn, μ = sqrt(μ_a·μ_b) (node friction); equal and opposite. Only + − × ÷ sqrt, zero allocation. Events: impact for BOTH objects (lower id first) when m_r·approach speed ≥ 2 N·s (`materialId` = the other object's contact material: PropDef.material, vehicles metal; normal into the receiving object); skid (scrape) with the ground thresholds and the shared per-node cooldown.
+- **CompiledRig additions (U1, `compileRig`):** `nodeObjRadius: Float64Array` (default 0.6 × median incident beam rest length, clamped [0.04, 0.35]; prop nodes ≥ `PROP_MIN_OBJ_RADIUS`), flag `RIG_NODE_FLAG_OBJ_CONTACT` (1<<3, = sim `NODE_FLAG_OBJ_CONTACT`); `SimState.objRadius` (f64). Collision-only nodes = `collidable: false, objContact: true` (mid-panel nodes against interlock; the sedan gets them only if playtests show interlock).
+- **Sleep:** `PropSleepParams` (default linearSpeed 0.05 m/s, holdS 0.75 s, startAsleep true): checked at rebuilds; asleep = skipped by every pass, velocities 0, `OBJECT_FLAG_SLEEPING`. Wake = an awake object's fattened AABB overlaps the sleeping box (propagates once through touching sleeping boxes: a stack wakes together), `resetProps`/`spawnProps{asleep:false}`. Vehicles never sleep.
+- **Water (`WATER_PHYSICS`, `src/world/types.ts`):** per awake collidable node in a body's rect with y − 0.15 < level: f = clamp((level − y + 0.15)/0.3, 0, 1), V = m/ρ_obj (PropDef.density, vehicles 900), buoyancy ρ_w·g·V·f up, drag −f·(0.8·m·v + 0.5·ρ_w·1.0·(V/0.3)·|v|·v), drag impulse capped at m·|v| per tick.
+- **Props:** `PropDef{key, name, rig (base on y = 0, front −Z), surface, material, density, stackHeight, proxy, sleep, anchor, frame}` with `PROP_RIG_BUDGET` per key and the node-id prefixes in `src/sim/props/types.ts` (U2 binds by them). Catalog keys: cone, barrel (200 L), tire, boxCardboard, boxWood, signPost, lightPole, concreteBlock. **Breakable sign post / light pole = PINNED anchor nodes** (`mass ≤ 0`) tied to the base by anchor beams with `anchor.breakF` (signPost ≈ 15 kN, lightPole ≈ 40 kN; a 50 km/h sedan snaps both); `ColliderDef.breakable` stays RESERVED and unused. Concrete block 1000 kg, near-rigid beams. `resolvePropInstances` (pure, both sides) expands rows × stacks, resolves y, builds the yaw quat from `facing` with sqrt only, validates (unknown key, stack on non-stackable, > 256 instances, overlapping proxies) and copies `surface`/`material` into each `PropInstance`.
+- **P4 follow-up:** sedan `hood_2C` and trunk-lid support rests (compression-only `support` beams from the hood/lid centre rows to the bay/rear structure, elastic, snap at 15 kN like the P4 hood rests) so the settled body does not sag: static sag ≤ 1 cm (hood_2C) / ≤ 1.5 cm (trunk lid centre) after 2 s; handling + crash harnesses stay green. The render-side settle calibration stays as a safety net.
+
+### World (PropPlacement, water, vegetation)
+- **`PropPlacement{id, prop, pos: [x, y|null, z], facing?: unit (x, z) (default (0, −1)), stack?, row?: {count, step: (x, z)}, padId?}`** — no angles (layout rule). `DEFAULT_LAYOUT.version` 4 (props, vegetation colliders, water); P5 units do not bump again before P5 exits.
+- **`WaterBody{id, name, level, minX..maxZ, maxDepth, samples, optics}`** = `resolveWater(layout, terrain)`: flood fill of samples below `waterLevel` 4-connected to the lake centre, AABB + 2 m. `LakeZone.params.water?: Partial<WaterOptics>` (render-only; generator ignores it); `WATER_OPTICS_DEFAULTS`.
+- **`VegetationScatter`** (SoA: kind, x, y, z, scale, yaw, variant, rank, collider, colliders, hash) = `scatterVegetation(layout, terrain)`, generator numerics, always full density. Exclusions and constants in `src/world/types.ts` (`VEG_ROAD_CLEARANCE_M`, no water/pads/arena/town/colliders/props/spawns, slope + rock rules, `VEG_TREE_MIN_SPACING_M` 4, `VEG_MAX_INSTANCES` 60 k). **Tree collider rule:** a conifer/broadleaf within `VEG_COLLIDER_REACH_M` (25 m) of a carriageway + shoulder edge, a pad or the arena becomes a static cylinder collider (`veg:${i}`, wood, `visual: 'none'`, r = trunk radius × scale, half height 2.5 m, y null); a boulder within reach a sphere collider (rock, centre = ground + 0.35 r); ≤ `VEG_MAX_COLLIDERS` 2500, ≥ 4 m apart (keeps ≤ `COLLIDER_MAX_CANDIDATES` per object in the 8 m grid). Collider instances are always drawn regardless of density.
+
+### Render budgets per QUALITY preset (P5 fields of `QualityPreset`)
+
+| field | low | medium | high | ultra |
+|---|---|---|---|---|
+| particleBudget (live particles, all pools) | 600 | 1500 | 3000 | 6000 |
+| skidSegments | 512 | 1024 | 2048 | 4096 |
+| debrisBudget (rigid chunks) | 48 | 96 | 192 | 320 |
+| vegetationDensity | 0.25 | 0.5 | 0.8 | 1 |
+| vegetationNearM (mesh → impostor) | 50 | 80 | 120 | 170 |
+| vegetationFarM (impostor cull) | 300 | 450 | 650 | 900 |
+| vegetationMeshCap (tree meshes / frame) | 300 | 800 | 1600 | 3000 |
+| grassRadiusM | 0 (off) | 25 | 40 | 60 |
+| vegetationShadowCascades | 0 | 1 | 2 | 3 |
+| waterReflection / scale | env | env | planar 0.5 | planar 0.75 |
+
+**Draw budget amendment (additive to "Render budget amendments"):** main pass P5 total ≤ 54 draws (props ≤ 24 — one per (prop key, material slot) batch; vegetation ≤ 14; FX ≤ 8; water ≤ 2 + the reflection pass ≤ 80 at reduced resolution, 'planar' only, skipped when no lake is in view or > 900 m away). Shadow passes: props only cascades 0–1, tree meshes only cascades < `vegetationShadowCascades`, never impostors/grass/particles/skidmarks/water; ≤ 30 extra draws in any cascade. Sanitize stays the last line of defence: sparks ≤ 40, water ≤ 64 scene-linear radiance, all finite.
+
+### Props visuals (U2) — instanced flexbody
+One binding per PropKey (`bindRigPanels` on the catalog rig, panels `PanelDef<PropMaterialSlot>`), one shared props node texture (block A world − propsOrigin, propsOrigin = camera snapped to 64 m; block B strain/scuff), one InstancedBufferGeometry draw per (key, slot) with per-instance `propNodeBase` added to triad indices, patch key `flexI1` (v2 reconstruction, color + depth + distance), per-instance culling + compaction, sleeping objects skip texel writes. Props deform, crush (strain shading) and cast deformed shadows. Arena content (U2, `DEFAULT_LAYOUT.props`): cone slalom, barrel wall, tyre walls (stacks of 3) around the pole row, cardboard + wooden box stacks to smash, a landing zone beyond the ramp with boxes/cones, concrete blocks, a few signs/light poles; plus roadside props elsewhere (cones at a works zone, signs at junctions, light poles in Millbrook). ≤ 256 instances total (`PROP_LAYOUT_MAX_INSTANCES`), proxies non-overlapping.
+
+### FX event → effect (U3)
+Classification: an event is a TYRE contact when its position is within tyre radius + `FX_TYRE_CLASSIFY_MARGIN` of a registered vehicle's hub midpoint; otherwise the mover is the object's surface (vehicles metal, props `PropInstance.surface`). Hard ground = asphalt, concrete, rock, metal; soft = grass, dirt, gravel; object materials 7–10 behave per their surface.
+
+| source | condition | effect |
+|---|---|---|
+| wheel telemetry (per frame, registered vehicles) | hard ground, slip ≥ 3 m/s | tyre SMOKE (rate ∝ (slip − 3)·load, white-grey, lingers, drifts with slow-mo-scaled time) |
+| wheel telemetry | hard ground, slip ≥ 2 m/s, load ≥ 800 N | SKIDMARK ribbon (dark rubber, width = tyre width, opacity ∝ slip·load) |
+| wheel telemetry | soft ground, slip ≥ 1 m/s | RUT mark (darker, wider, material-tinted) + DIRT/GRAVEL/GRASS spray (clods + dust, material colour) |
+| wheel telemetry | dirt/gravel, ground speed ≥ 6 m/s | rooster-tail DUST (behind the wheel, ∝ speed) |
+| skid event, non-tyre, metal/concrete mover | hard ground, slip ≥ 2 m/s, load ≥ 100 N | SPARK stream + light scrape mark (pale grey) |
+| skid event, non-tyre, other movers | any | DUST puff (soft) / CHIPS of the mover's surface (hard), no sparks |
+| impact event, metal/concrete mover | hard ground or metal/concrete object material, impulse ≥ 6 N·s | SPARK burst (count ∝ impulse) + small dust puff |
+| impact event | soft ground, impulse ≥ 10 N·s | DIRT clod puff |
+| impact event, plastic/cardboard/wood/rubber mover or object material | impulse ≥ 6 N·s | CHIPS of that surface (plastic shards / cardboard flakes / wood splinters), no sparks |
+| beamBreak event | vehicle | DEBRIS chunks (paint-coloured + black plastic) + a few sparks if metal |
+| beamBreak event | prop | DEBRIS of the prop surface (splinters, flakes, concrete chunks, cone shards) |
+| nodes vs water (main-derived) | node crosses level downward ≥ 1.5 m/s | SPLASH (crown + droplets, ∝ Σ m·v per object per frame) |
+| nodes vs water | horizontal speed in water ≥ 2 m/s | WAKE spray (continuous, ∝ speed) |
+Glass shatter/cracks stay in the vehicle's own `shatter.ts` (U6 dir); FX never handles `DamageFx`.
+
+### Vegetation (U4) / Water (U5)
+See `src/render/vegetation/types.ts` (density/rank rule, mesh ↔ impostor LOD with dithered cross-fade, wind sway in color AND depth, grass tiles around the camera, shadows per preset) and `src/render/water/types.ts` (flat grid per body, terrain height texture → depth, Beer–Lambert colour + soft intersection, shoreline foam, fresnel env/planar reflection with oblique clipping, `WATER_MAX_RADIANCE` 64, transparent + depthWrite, `LAYER_NO_REFLECTION`).
+
+### Vehicle perf amendments (U6; `src/render/vehicle/**`)
+- **Merged draws:** FlexSkin builds one Mesh per (material slot, castShadow, damage-patch variant) group with merged panel geometry + a per-vertex `flexPanel` attribute (float, exact) and a hidden-panel mask (uniform texture, one texel per panel) read in the vertex stage (hidden → vertex collapsed to its triad R, degenerate). `setPanelVisible(panelIndex, visible)` keeps its signature; `FlexSkin.meshes` becomes the merged draws (add `panelDraw: Int32Array` panel → mesh). Glass panes may stay separate (per-pane crack uniforms). Target: sedan ≤ 20 draws main pass, ≤ 12 per cascade.
+- **LOD1 beyond `VEHICLE_LOD1_M` 25 m** (±2 m hysteresis, distance from `VehicleFrameInput.camera`): body tessellated at ≥ 3× `resolution` (≤ 25 % of LOD0 triangles) bound with `bindPanels` to the same nodes/texture; wheels LOD1 ≤ 4 k triangles each (LOD0 today ≈ 32 k). Shadow cascades ≥ 1 always use LOD1.
+- **Depth/distance single triad:** depth + distance materials evaluate triad 0 only (weight 1, no consensus; key `flex2s`), color keeps `flex2`; documented max shadow-silhouette deviation on the crush test field.
+- **damage.update** ≤ 0.25 ms mean (perf probe, high, 120 Hz snapshots): snapshot-rate work only on tick change, precomputed body-beam list, dirty tracking, no allocation.
+- **Door cards** never outside the door skin at 80 km/h (bind interior door cards to the door's own bind set with |c| ≤ door thickness; CPU-mirror test on a recorded 80 km/h frame).
+
+## P5 work split (file ownership)
+
+Landing order: **U1 lands the prop catalog first** (`src/sim/props/catalog.ts` + `defs/*.ts` with the node-id prefixes; U2 binds to them, like the P4 hood sub-rig), then everything else in parallel. Every unit adds its own tests and keeps `npx tsc --noEmit` + `npx vitest run` green; the contract files above change only via this doc (note the change here in the same commit).
+
+- **U1 SIM:** `src/sim/**` — `engine.ts`, `worker.ts`, `state.ts`, `types.ts` (`NODE_FLAG_OBJ_CONTACT`, `SimState.objRadius`, worker-internal), `beams.ts`, `integrator.ts`, `collision/**` (new `objects.ts` node-vs-node + broadphase, `water.ts`; `materials.ts`), `rig/builder.ts` (+ `CompiledRig.nodeObjRadius` in `rig/types.ts`), `props/catalog.ts`, `props/defs/*.ts`, `props/placement.ts` (replaces the stub), `vehicle/defs/sedan.ts` (support rests) + their tests (catalog budgets/stability, placement, contact determinism, sleep/wake, buoyancy, sag); `src/world/validate.ts` (prop placement shape checks); `src/app/simClient.ts` (anything beyond `spawnProps/resetProps`); `tools/bench*`.
+- **U2 PROP VISUALS + ARENA:** `src/render/props/**` except `types.ts` (index.ts replaces the stub; defs, tessellation, materials, instanced flex patch, tests); `src/world/layout.ts` (`props` content only — no terrain, road or collider edits); `src/main.ts` integration polish if any (U2 is main.ts's only P5 owner; other units ask through it).
+- **U3 FX:** `src/render/fx/**` except `types.ts` (particles, skidmarks, debris, rules + tests).
+- **U4 VEGETATION:** `src/world/vegetation.ts` (+ test; replaces the stub, keeps `hashVegetation`'s word order), `src/render/vegetation/**` except `types.ts`, `src/app/terrainWorker.ts` + `src/app/world.ts` (only if the scatter hand-off needs it).
+- **U5 WATER:** `src/render/water/**` except `types.ts`; `src/world/water.ts` (refinements only: `resolveWater` semantics are consumed by U1); the numbers of `WATER_OPTICS_DEFAULTS` (the one contract value U5 may tune without a doc note).
+- **U6 VEHICLE PERF:** `src/render/vehicle/**` except `types.ts` (amendments above go through this doc) — `flexskin.ts`, `index.ts`, `damage.ts`, `wheels.ts`, `loft.ts`, `materials.ts`, `shatter.ts`, `binder.ts` (`bindRigPanels` signature frozen: U2 uses it), `defs/sedan.ts`; `src/app/perf.ts` / `tools/perf-probe.mjs` (measurement).
+- **Nobody** edits another unit's directory, `src/protocol/**`, or the contract files without a note here. Shared-file conflicts to avoid: `src/sim/vehicle/defs/sedan.ts` (U1 only), `src/render/vehicle/defs/sedan.ts` (U6 only), `src/world/layout.ts` (U2 only), `src/main.ts` (U2 only).
+
 ## ReplayFile — pending (freezes end of P7)
 
 Tick-indexed input log + keyframes + build hash (refuse cross-build playback).
