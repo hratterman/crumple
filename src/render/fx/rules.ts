@@ -147,7 +147,7 @@ export function smokeRate(slip: number, load: number): number {
   const x = slip - FX_TYRE_SMOKE_SLIP;
   if (x <= 0) return 0;
   const l = Math.min(Math.max(load / REF_LOAD, 0.25), 1.8);
-  return Math.min(1.6 * x * l * 3.2, 150);
+  return Math.min(1.6 * x * l * 2.7, 128);
 }
 /** Skid mark coverage 0..1 (∝ slip·load, from 0 at the threshold, saturating). */
 export function skidStrength(slip: number, load: number): number {

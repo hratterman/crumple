@@ -13,7 +13,7 @@
  *   4. debris integration, uniforms, pool uploads.
  * Zero allocation per frame after warm-up.
  */
-import { Group, Vector2, Vector3, type FogExp2 } from 'three';
+import { Group, Vector2, Vector3, type FogExp2, type Vector4 } from 'three';
 
 import { createRng } from '../../core/rng';
 import { OBJECT_FLAG_SLEEPING } from '../../protocol/layout';
@@ -143,6 +143,10 @@ const PATCH_LENGTH_M = 0.28;
 /** Burnout (wheel spinning while its contact barely moves): a rubber patch is stamped under it every STAMP_S of slip. */
 const STAMP_S = 0.2;
 const STAMP_MAX_SPEED = 1.5;
+const STAMP_LENGTH_M = 1.1;
+const STAMP_BACK_M = 0.3;
+/** Radius around the player vehicle (the first registered) inside which smoke between it and the camera thins out, m. */
+const FOCUS_RADIUS_M = 2.6;
 /** Sim step (s): WorldFrame.tick × SIM_DT = the latest snapshot's sim time. */
 const SIM_DT = 1 / 2000;
 const PLASTIC_BLACK: readonly [number, number, number] = [0.02, 0.02, 0.022];
@@ -480,17 +484,20 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
     w.lastS = 0;
   };
   /**
-   * Burnout patch: one PATCH_LENGTH_M-long quad along heading (hx, hz) centred
-   * on the contact (a strip never grows while the contact stands still;
+   * Burnout patch: one STAMP_LENGTH_M quad along heading (hx, hz), centred
+   * STAMP_BACK_M behind the contact (a strip never grows while the contact stands still;
    * repeated stamps darken the patch).
    */
   const stampPatch = (w: WheelFx, s: number, t: number, hx: number, hz: number, onObj: boolean): void => {
     const hw = 0.5 * Math.max(0.06, w.tread);
-    const hl = 0.5 * PATCH_LENGTH_M * 1.6;
-    const ax = w.cx - hx * hl;
-    const az = w.cz - hz * hl;
-    const bx = w.cx + hx * hl;
-    const bz = w.cz + hz * hl;
+    const hl = 0.5 * STAMP_LENGTH_M;
+    // smeared rearward of the contact (the tread spins forward), so it shows behind the tyre
+    const ccx = w.cx - hx * STAMP_BACK_M;
+    const ccz = w.cz - hz * STAMP_BACK_M;
+    const ax = ccx - hx * hl;
+    const az = ccz - hz * hl;
+    const bx = ccx + hx * hl;
+    const bz = ccz + hz * hl;
     const l0x = ax - hz * hw;
     const l0z = az + hx * hw;
     const r0x = ax + hz * hw;
@@ -752,10 +759,11 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
             v.vz * 0.15 - fz * ej + (rng.float() - 0.5) * 1.4,
           );
           const grey = 0.84 + rng.float() * 0.1;
+          // wispy: thin puffs that spread wide (P5 review: the plume read as an opaque blob)
           spawnSoft(
             K_SMOKE, t0 + (t1 - t0) * f, 6 + rng.float() * 5,
-            0.35 + rng.float() * 0.25, (2.2 + rng.float() * 1.8) * big,
-            (0.3 + rng.float() * 0.22) * (0.45 + 0.55 * heat),
+            0.35 + rng.float() * 0.25, (2.4 + rng.float() * 2.0) * big,
+            (0.18 + rng.float() * 0.13) * (0.45 + 0.55 * heat),
             grey * 0.97, grey * 0.985, grey * 1.02, groundY,
           );
         }
@@ -1202,6 +1210,25 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
       lagLo = Math.min(Number.isFinite(prevLatest) ? Math.min(Math.max(prevLatest - t1, -0.1), hi) : hi - 0.1, 0) - 0.012;
       prevLatest = latest;
       for (let i = 0; i < vehicles.length; i++) updateVehicle(vehicles[i]!, frame, t0, t1, dtSim);
+      {
+        const focus = (soft.mesh.material.uniforms.uFocus as { value: Vector4 }).value;
+        focus.w = 0;
+        const pv = vehicles[0];
+        if (pv) {
+          let n = 0;
+          let x = 0;
+          let y = 0;
+          let z = 0;
+          for (const w of pv.wheels) {
+            if (!w.valid) continue;
+            x += w.hx;
+            y += w.hy;
+            z += w.hz;
+            n++;
+          }
+          if (n > 0) focus.set(x / n, y / n + 0.4, z / n, FOCUS_RADIUS_M);
+        }
+      }
       processEvents(t1);
       updateWater(frame, t0, t1, dtSim);
       chunks.update(dtSim);

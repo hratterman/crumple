@@ -164,6 +164,8 @@ const SOFT_VERTEX = /* glsl */ `
 #include <fog_pars_vertex>
 ${MOTION_GLSL}
 uniform float uSizeScale;
+// player vehicle centre (xyz) + radius (w; 0 = off): puffs between it and the camera thin out
+uniform vec4 uFocus;
 varying vec2 vUv;
 varying vec2 vCorner;
 varying vec4 vChannel;
@@ -173,12 +175,14 @@ varying float vAlpha;
 varying float vSoft;
 varying float vErode;
 varying float vFlat;
+varying float vSmoke;
 void main() {
   float age = uTime - iA.w;
   float life = iB.w;
   if ( age < -1e-3 || age >= life ) { ${OFFSCREEN_GLSL} return; }
   int kind = int( iD.w );
   float opacity = fract( iD.w );
+  vSmoke = kind == 0 ? 1.0 : 0.0;
   vec4 k = uKind[ kind ];
   vec4 kb = uKindB[ kind ];   // x fade-in s, y fade-out start (life fraction), z turbulence m, w flat (1) / billboard (0)
   vec3 vel;
@@ -192,7 +196,7 @@ void main() {
   vFlat = kb.w;
   if ( kb.w < 0.5 ) p.y = max( p.y, ground + size * 0.3 );
   // rotate the texture, not the quad (the lighting normal stays camera-aligned)
-  float ang = seed * 6.2831853 + age * ( seed - 0.5 ) * 0.9;
+  float ang = seed * 6.2831853 + age * ( seed - 0.5 ) * ( 0.9 - 0.5 * vSmoke );
   float ca = cos( ang ), sa = sin( ang );
   vec2 c = position.xy;
   vUv = vec2( ca * c.x - sa * c.y, sa * c.x + ca * c.y ) * 0.5 + 0.5;
@@ -219,6 +223,17 @@ void main() {
   float dcam = -mvPosition.z;
   // particles around the camera dissolve instead of slicing through the near plane
   vAlpha = opacity * fadeIn * fadeOut * smoothstep( 0.25, 0.9 + size * 0.6, dcam );
+  if ( uFocus.w > 0.0 && kb.w < 0.5 ) {
+    // keep the player's car readable: billboards in front of it along the view ray thin out
+    vec3 toF = uFocus.xyz - cameraPosition;
+    float lf = max( length( toF ), 1e-3 );
+    vec3 toP = p - cameraPosition;
+    float along = dot( toP, toF ) / lf;
+    float lateral = length( toP - toF * ( along / lf ) );
+    float before = 1.0 - smoothstep( lf - uFocus.w, lf + 0.5 * uFocus.w, along );
+    float onRay = 1.0 - smoothstep( uFocus.w + 0.4 * size, uFocus.w + 1.2 * size, lateral );
+    vAlpha *= 1.0 - 0.6 * before * onRay;
+  }
   gl_Position = projectionMatrix * mvPosition;
   #include <fog_vertex>
 }
@@ -241,6 +256,7 @@ varying float vAlpha;
 varying float vSoft;
 varying float vErode;
 varying float vFlat;
+varying float vSmoke;
 void main() {
   float vFlatInv = 1.0 - vFlat;
   float d;
@@ -252,11 +268,17 @@ void main() {
     d = ring * brk;
   } else {
     d = dot( texture2D( uPuff, vUv ), vChannel );
+    // tyre smoke: half the billow pattern traded for a smooth radial body (wispy, no visible noise)
+    float r2 = dot( vCorner, vCorner );
+    float body = clamp( 1.0 - r2, 0.0, 1.0 );
+    d = mix( d, body * body * 0.8, 0.45 * vSmoke );
   }
   // derivatives before any discard (helper lanes stay well-defined)
   float px = max( length( vec2( dFdx( vCorner.x ), dFdy( vCorner.x ) ) ), 1e-4 );
-  vec2 g = clamp( vec2( dFdx( d ), dFdy( d ) ) / px, -4.0, 4.0 );
-  float den = smoothstep( vErode, vErode + 0.5, d );
+  vec2 g = clamp( vec2( dFdx( d ), dFdy( d ) ) / px, -4.0, 4.0 ) * ( 1.0 - 0.65 * vSmoke );
+  float den = smoothstep( vErode * ( 1.0 - 0.3 * vSmoke ), vErode + 0.5 + 0.35 * vSmoke, d );
+  // soft rim on smoke billboards
+  den *= 1.0 - vSmoke * smoothstep( 0.35, 1.0, length( vCorner ) );
   float a = vAlpha * den * clamp( vSoft, 0.0, 1.0 );
   if ( a < 0.003 ) discard;
   // lighting: a camera-facing sphere normal bent by the puff's density
@@ -463,7 +485,7 @@ export function createSoftMaterial(
     name: 'fx.soft',
     vertexShader: SOFT_VERTEX,
     fragmentShader: SOFT_FRAGMENT,
-    uniforms: { ...UniformsUtils.clone(UniformsLib.fog), ...motionUniforms(kinds, shaping), uPuff: { value: puff }, uSizeScale: { value: 1 }, ...light },
+    uniforms: { ...UniformsUtils.clone(UniformsLib.fog), ...motionUniforms(kinds, shaping), uPuff: { value: puff }, uSizeScale: { value: 1 }, uFocus: { value: new Vector4(0, 0, 0, 0) }, ...light },
     transparent: true,
     depthWrite: false,
     depthTest: true,
