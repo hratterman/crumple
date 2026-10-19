@@ -82,6 +82,14 @@ export function finishName(p: PaintDef): string {
   return 'Solid';
 }
 
+/** A black curtain that lifts off the world after DRIVE (the cut from studio to road). */
+function curtain(): void {
+  const c = document.createElement('div');
+  c.className = 'sr-curtain';
+  document.body.appendChild(c);
+  window.setTimeout(() => c.remove(), 1200);
+}
+
 export class Showroom {
   readonly root: HTMLDivElement;
   private readonly opts: ShowroomOptions;
@@ -194,7 +202,10 @@ export class Showroom {
       h('span', 'sr-tile-name', t, e.stats.name);
       h('span', 'sr-tile-class', t, e.stats.class);
       if (!e.available) t.classList.add('sr-tile--locked');
-      t.addEventListener('click', () => this.select(i));
+      t.addEventListener('click', () => {
+        if (e.available) this.select(i);
+        else this.nope(t);
+      });
       return t;
     });
     const drive = h('button', 'sr-drive', bottom);
@@ -354,6 +365,7 @@ export class Showroom {
     this.setBusy(`Rolling ${e.stats.name} out`);
     try {
       await this.opts.onDrive(this.selection, this.spawnIndex);
+      curtain();
     } catch (err) {
       console.error('[showroom] drive failed', err);
       this.setBusy(null);
@@ -384,6 +396,13 @@ export class Showroom {
         return;
       }
     }
+  }
+
+  /** Locked tile: a short shake (still in the workshop). */
+  private nope(t: HTMLElement): void {
+    t.classList.remove('sr-tile--nope');
+    void t.offsetWidth;
+    t.classList.add('sr-tile--nope');
   }
 
   private stepPaint(d: number): void {
@@ -486,7 +505,7 @@ export class Showroom {
       const free = Math.max(w * 0.3, right - left);
       this.stage.setFraming((left + right) / 2 - w / 2, hgt * 0.04, Math.min(0.62, free / w));
     } else {
-      this.stage.setFraming(0, hgt * 0.1, 0.86);
+      this.stage.setFraming(0, hgt * 0.1, 0.78);
     }
   }
 
@@ -504,7 +523,7 @@ export class Showroom {
     const spec = (label: string, value: string, unit: string, wide = false): string =>
       `<div class="sr-spec${wide ? ' sr-spec--wide' : ''}"><span class="sr-spec-label">${label}</span><span class="sr-spec-value">${value}<small>${unit}</small></span></div>`;
     this.el.specs.innerHTML = [
-      spec('Power', String(Math.round(s.powerKw)), `kW · ${Math.round(s.powerKw * KW_TO_HP)} hp`),
+      spec('Power', String(Math.round(s.powerKw)), `kW<span class="sr-hp"> · ${Math.round(s.powerKw * KW_TO_HP)} hp</span>`),
       spec('Torque', String(Math.round(s.torqueNm)), 'N·m'),
       spec('Weight', s.massKg.toLocaleString('en-US'), 'kg'),
       spec('Drive', s.drivetrain, ''),

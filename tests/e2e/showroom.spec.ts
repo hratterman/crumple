@@ -93,12 +93,13 @@ test('showroom: Escape pauses, pick a paint, DRIVE swaps the car with it, reload
   expect(p.paintHex).toBe(p.paletteHex);
   await expect(page.getByTestId('showroom')).toBeHidden();
 
-  // It drives: > 5 m/s after ~3 s of throttle (settled first; SwiftShader frames delay the first
-  // input by a frame or two, so the speed is polled for a little longer than 3 s).
+  // It drives: > 5 m/s after ~3 s of throttle (settled first). The worker falls behind real time
+  // on a loaded software-GL runner and input reaches it once per (slow) frame, so the speed is
+  // polled for up to 12 s of wall time.
   await page.waitForTimeout(1000);
   await page.keyboard.down('KeyW');
   await page.waitForTimeout(3000);
-  await waitFor(page, 'c.vehicle && c.vehicle.speed > 5', 3000);
+  await waitFor(page, 'c.vehicle && c.vehicle.speed > 5', 9000);
   await page.keyboard.up('KeyW');
 
   // ---- Reload keeps the choice (localStorage).

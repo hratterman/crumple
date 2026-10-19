@@ -263,6 +263,13 @@ const FLOOR_REFLECTION_SHADER = {
     uniform float uStrength;
     varying vec4 vUv;
     varying vec3 vWorld;
+    float crHash( vec2 p ) { return fract( sin( dot( p, vec2( 127.1, 311.7 ) ) ) * 43758.5453 ); }
+    float crNoise( vec2 p ) {
+      vec2 i = floor( p );
+      vec2 f = fract( p );
+      f = f * f * ( 3.0 - 2.0 * f );
+      return mix( mix( crHash( i ), crHash( i + vec2( 1.0, 0.0 ) ), f.x ), mix( crHash( i + vec2( 0.0, 1.0 ) ), crHash( i + vec2( 1.0, 1.0 ) ), f.x ), f.y );
+    }
     void main() {
       vec2 uv = vUv.xy / vUv.w;
       float r = length( vWorld.xz );
@@ -278,7 +285,9 @@ const FLOOR_REFLECTION_SHADER = {
       vec3 v = normalize( cameraPosition - vWorld );
       float f = 0.06 + 0.94 * pow( 1.0 - clamp( v.y, 0.0, 1.0 ), 5.0 );
       float fade = 1.0 - smoothstep( uFadeR.x, uFadeR.y, r );
-      float a = clamp( f * uStrength * fade, 0.0, 0.85 );
+      // Polished-concrete variation: the gloss breaks up gently at two scales.
+      float n = crNoise( vWorld.xz * 0.85 ) * 0.6 + crNoise( vWorld.xz * 3.3 + 17.0 ) * 0.4;
+      float a = clamp( f * uStrength * fade * ( 0.78 + 0.44 * n ), 0.0, 0.85 );
       gl_FragColor = vec4( c * color, a );
       #include <colorspace_fragment>
     }`,
