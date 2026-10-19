@@ -14,6 +14,7 @@ import {
   ConeGeometry,
   CylinderGeometry,
   DataTexture,
+  DoubleSide,
   Group,
   InstancedMesh,
   LinearMipmapLinearFilter,
@@ -48,6 +49,11 @@ import { patchMaterial } from '../src/render/material';
 import { createPostStack, postDebug } from '../src/render/post';
 import { QUALITY_LEVELS, QUALITY_PRESETS } from '../src/render/types';
 import type { QualityLevel, RenderContext } from '../src/render/types';
+import { createVehicleMaterials, PAINT_NAMES, PAINT_PALETTE } from '../src/render/vehicle/materials';
+import type { FlexSkin, MaterialSlot, PaintDef, VehicleMaterialSet, VehicleVisualDef, WheelVisualDef } from '../src/render/vehicle/types';
+import { createWheelVisuals } from '../src/render/vehicle/wheels';
+import { compileVehicle } from '../src/sim/vehicle/builder';
+import { SEDAN } from '../src/sim/vehicle/defs/sedan';
 
 const params = new URLSearchParams(location.search);
 const canvas = document.getElementById('c') as HTMLCanvasElement;
@@ -411,6 +417,270 @@ for (let i = 0; i < TREES; i++) {
 }
 scene.add(crowns, trunks);
 
+// ------------------------------------------------------------ car materials showcase (?show=materials)
+// Paint palette pebbles + a flake/orange-peel hood panel, the sedan's soft-body wheels in a settled
+// pose (tyre flat from synthetic contact), lamp boards OFF vs ON, side glass over an interior.
+const showMaterials = params.get('show') === 'materials';
+const matShow = {
+  lampsOn: null as VehicleMaterialSet | null,
+  wheelSkin: null as { object: Group; nodeData: Float32Array } | null,
+  wheels: null as ReturnType<typeof createWheelVisuals> | null,
+  restNodes: null as Float32Array | null,
+  compiled: null as ReturnType<typeof compileVehicle> | null,
+};
+if (showMaterials) {
+  for (const o of [hero, second, third]) o.visible = false;
+  for (const o of scene.children) if (o instanceof Mesh && o.geometry instanceof SphereGeometry) o.visible = false;
+  const show = new Group();
+  show.name = 'materialsShowcase';
+  scene.add(show);
+  const SHOW_WHEELS: WheelVisualDef = {
+    rim: { style: 'spoke', spokes: 5, spokeWidth: 0.34, dish: 0.034, lip: 0.012, finish: 'silver', boltCount: 5 },
+    tire: { tread: 'street', sidewallText: 'Crumple Sport', bulge: 0.1 },
+    brake: { discRadius: 0.15, caliperColor: 0xc8102e },
+  };
+  /** Gently domed lens quad in rig-local metres (facing ±z), as both a MeshSurface and a BufferGeometry. */
+  const lens = (x0: number, x1: number, y0: number, y1: number, z: number, facing: 1 | -1, bulge = 0.012) => {
+    const nu = 16;
+    const nv = 8;
+    const position: number[] = [];
+    const uv: number[] = [];
+    const index: number[] = [];
+    for (let j = 0; j <= nv; j++) {
+      for (let i = 0; i <= nu; i++) {
+        const u = i / nu;
+        const v = j / nv;
+        const x = x0 + (x1 - x0) * u;
+        const y = y0 + (y1 - y0) * v;
+        const b = (1 - (2 * u - 1) ** 2) * (1 - (2 * v - 1) ** 2);
+        position.push(x, y, z + facing * bulge * b);
+        uv.push(Math.abs(x - x0), y - y0);
+      }
+    }
+    for (let j = 0; j < nv; j++) {
+      for (let i = 0; i < nu; i++) {
+        const a = j * (nu + 1) + i;
+        const c = a + nu + 1;
+        const flip = (facing > 0) === (x1 > x0);
+        if (flip) index.push(a, a + 1, c, a + 1, c + 1, c);
+        else index.push(a, c, a + 1, a + 1, c, c + 1);
+      }
+    }
+    const g = new BufferGeometry();
+    g.setAttribute('position', new BufferAttribute(new Float32Array(position), 3));
+    g.setAttribute('uv', new BufferAttribute(new Float32Array(uv), 2));
+    g.setIndex(index);
+    g.computeVertexNormals();
+    return { surface: { type: 'mesh' as const, position, index, uv }, geometry: g };
+  };
+  const mirrorPair = (x0: number, x1: number, y0: number, y1: number, z: number, facing: 1 | -1) => [lens(x0, x1, y0, y1, z, facing), lens(-x0, -x1, y0, y1, z, facing)];
+  const LAMPS = {
+    lightHead: mirrorPair(0.4, 0.8, 0.62, 0.75, -2.2, -1),
+    lightIndicator: mirrorPair(0.5, 0.8, 0.565, 0.6, -2.19, -1),
+    lightTail: mirrorPair(0.42, 0.82, 0.7, 0.83, 2.2, 1),
+    lightReverse: mirrorPair(0.2, 0.38, 0.72, 0.8, 2.2, 1),
+  } as const;
+  const sidePane = (z0: number, z1: number, y0: number, y1: number) => {
+    const position = [-0.86, y0, z0, -0.86, y0, z1, -0.86, y1, z1 - 0.06, -0.86, y1, z0 + 0.04];
+    return { type: 'mesh' as const, position, index: [0, 1, 2, 0, 2, 3] };
+  };
+  const panes = { front: sidePane(-0.62, 0.12, 0.98, 1.34), rear: sidePane(0.24, 1.0, 0.98, 1.32) };
+  const visualDef = (paintDef: PaintDef): VehicleVisualDef => ({
+    vehicle: 'showcase',
+    paint: paintDef,
+    wheels: SHOW_WHEELS,
+    panels: [
+      ...Object.entries(LAMPS).flatMap(([slot, pair]) =>
+        pair.map((l, k) => ({ id: `${slot}${k}`, kind: 'light' as const, material: slot as MaterialSlot, surface: l.surface, bind: [], detach: null })),
+      ),
+      { id: 'glassF', kind: 'glass' as const, material: 'glass' as const, surface: panes.front, bind: [], detach: null },
+      { id: 'glassR', kind: 'glass' as const, material: 'glass' as const, surface: panes.rear, bind: [], detach: null },
+    ],
+  });
+  const vmat = (set: VehicleMaterialSet, slot: MaterialSlot): Material => set.base(slot).clone();
+
+  // ---- paint pebbles (squashed spheres, UVs rescaled to metres) on pedestals
+  const pebbleGeo = new SphereGeometry(0.42, 96, 48);
+  {
+    const uvA = pebbleGeo.getAttribute('uv') as BufferAttribute;
+    for (let i = 0; i < uvA.count; i++) uvA.setXY(i, uvA.getX(i) * 2 * Math.PI * 0.42, uvA.getY(i) * Math.PI * 0.42);
+  }
+  pebbleGeo.scale(1, 0.62, 1);
+  const pedestal = new CylinderGeometry(0.26, 0.3, 0.55, 48);
+  const sets: VehicleMaterialSet[] = [];
+  PAINT_NAMES.forEach((name, k) => {
+    const set = createVehicleMaterials(ctx, visualDef(PAINT_PALETTE[name]));
+    sets.push(set);
+    const x = -4.9 + k * 1.4;
+    const peb = lit(new Mesh(pebbleGeo, vmat(set, 'paint')));
+    peb.position.set(x, 0.55 + 0.26, -3.2);
+    peb.rotation.y = 0.4;
+    peb.name = `paint:${name}`;
+    show.add(peb);
+    const ped = lit(new Mesh(pedestal, vmat(set, 'trim')));
+    ped.position.set(x, 0.275, -3.2);
+    show.add(ped);
+  });
+  // ---- hood panel: doubly curved sheet (R 2.6 m) in the hero paint, sun grazing for flake glints
+  {
+    const R = 2.6;
+    const hood = new SphereGeometry(R, 160, 80, Math.PI * 0.5 - 0.36, 0.72, Math.PI * 0.5 - 0.24, 0.48);
+    const uvA = hood.getAttribute('uv') as BufferAttribute;
+    for (let i = 0; i < uvA.count; i++) uvA.setXY(i, uvA.getX(i) * 2 * Math.PI * R, uvA.getY(i) * Math.PI * R);
+    const m = lit(new Mesh(hood, vmat(sets[0]!, 'paint')));
+    m.position.set(0, 0.85 - R, -6.0);
+    m.rotation.set(-Math.PI / 2, 0, 0);
+    m.name = 'paint:hood';
+    show.add(m);
+    const m2 = lit(new Mesh(hood, vmat(sets[1]!, 'paint')));
+    m2.position.set(3.4, 0.85 - R, -6.0);
+    m2.rotation.set(-Math.PI / 2, 0, 0);
+    show.add(m2);
+  }
+
+  // ---- wheels: the real sedan rig in a synthetic settled pose (hub 0.281 m, contact sink K·c)
+  const compiled = compileVehicle(SEDAN);
+  matShow.compiled = compiled;
+  const wset = createVehicleMaterials(ctx, visualDef(PAINT_PALETTE.crimsonCandy));
+  const wheels = createWheelVisuals(compiled, SHOW_WHEELS, { materials: wset, lighting, patchMaterial });
+  const N = compiled.rig.nodeCount;
+  const nodes = new Float32Array(N * 4);
+  const rp = compiled.rig.nodePos;
+  let hubY = 0;
+  for (const w of compiled.wheels) hubY += (rp[3 * w.hubI + 1]! + rp[3 * w.hubO + 1]!) / 2 / compiled.wheels.length;
+  const dy = 0.281 - hubY;
+  for (let i = 0; i < N; i++) nodes.set([rp[3 * i]!, rp[3 * i + 1]! + dy, rp[3 * i + 2]!, 0], 4 * i);
+  matShow.restNodes = nodes.slice();
+  const wheelSkin = { object: new Group(), nodeData: nodes };
+  wheelSkin.object.position.set(0, 0, 4.5);
+  show.add(wheelSkin.object, wheels.object);
+  matShow.wheelSkin = wheelSkin;
+  matShow.wheels = wheels;
+  const settle = (spin: number): void => {
+    const src = matShow.restNodes!;
+    nodes.set(src);
+    for (const w of compiled.wheels) {
+      // spin rim + tyre nodes about the rim axis, then press the tyre ring onto y = 0
+      const cI = new Vector3();
+      const cO = new Vector3();
+      for (let k = 0; k < w.rays; k++) {
+        cI.add(new Vector3(src[4 * (w.rimStart + k)]!, src[4 * (w.rimStart + k) + 1]!, src[4 * (w.rimStart + k) + 2]!));
+        cO.add(new Vector3(src[4 * (w.rimStart + w.rays + k)]!, src[4 * (w.rimStart + w.rays + k) + 1]!, src[4 * (w.rimStart + w.rays + k) + 2]!));
+      }
+      cI.multiplyScalar(1 / w.rays);
+      cO.multiplyScalar(1 / w.rays);
+      const c = cI.clone().add(cO).multiplyScalar(0.5);
+      const s = cO.clone().sub(cI).normalize();
+      const q = new Quaternion().setFromAxisAngle(s, spin);
+      for (let k = 0; k < 4 * w.rays; k++) {
+        const i = w.rimStart + k; // rim then tyre (contiguous)
+        const p = new Vector3(src[4 * i]!, src[4 * i + 1]!, src[4 * i + 2]!).sub(c).applyQuaternion(q);
+        if (i >= w.tireStart) {
+          const pen = 0.045 - (c.y + p.y);
+          if (pen > 0) {
+            const radial = p.clone().addScaledVector(s, -p.dot(s));
+            const r = radial.length();
+            p.addScaledVector(radial, -(pen / 2.17) / r);
+          }
+        }
+        nodes.set([c.x + p.x, c.y + p.y, c.z + p.z], 4 * i);
+      }
+    }
+    wheels.update(wheelSkin as unknown as FlexSkin, 1 / 60);
+  };
+  settle(0.3);
+  (matShow as unknown as { settle: (a: number) => void }).settle = settle;
+  // ---- lamp boards: OFF (left) and ON (right), front fascia + rear fascia
+  const boards: [number, boolean][] = [
+    [7.2, false],
+    [9.6, true],
+  ];
+  for (const [bx, on] of boards) {
+    const set = createVehicleMaterials(ctx, visualDef(PAINT_PALETTE.obsidianBlack));
+    const root = new Group();
+    root.position.set(bx, 0, 3.2);
+    root.rotation.y = 0;
+    show.add(root);
+    for (const z of [-2.17, 2.17]) {
+      const fascia = lit(new Mesh(new RoundedBoxGeometry(1.9, 0.5, 0.3, 4, 0.06), vmat(set, 'paint')));
+      fascia.position.set(0, 0.67, z - Math.sign(z) * 0.14);
+      root.add(fascia);
+    }
+    for (const [slot, pair] of Object.entries(LAMPS)) {
+      for (const l of pair) {
+        const m = lit(new Mesh(l.geometry, vmat(set, slot as MaterialSlot)));
+        root.add(m);
+      }
+    }
+    if (on) {
+      set.setLights({ head: true, highBeam: false, brake: 1, reverse: true, indicatorL: true, indicatorR: false, fog: false });
+      matShow.lampsOn = set;
+    }
+  }
+
+  // ---- glass over an interior (front pane clear, rear pane privacy)
+  {
+    const set = createVehicleMaterials(ctx, visualDef(PAINT_PALETTE.liquidSilver));
+    const root = new Group();
+    root.position.set(-7.5, 0, 3.4);
+    show.add(root);
+    const door = lit(new Mesh(new RoundedBoxGeometry(1.8, 0.62, 2.1, 4, 0.06), vmat(set, 'paint')));
+    door.position.set(0, 0.64, 0.2);
+    root.add(door);
+    const roof = lit(new Mesh(new RoundedBoxGeometry(1.76, 0.07, 1.86, 3, 0.03), vmat(set, 'paint')));
+    roof.position.set(0, 1.375, 0.2);
+    root.add(roof);
+    // closed cabin: far wall, front/rear bulkheads and a dark floor tub so the interior is shaded like a car's
+    const shell = vmat(set, 'paint');
+    for (const [w, h, d, x, y, z] of [
+      [0.04, 0.44, 1.82, 0.84, 1.16, 0.2],
+      [1.7, 0.44, 0.04, 0, 1.16, -0.7],
+      [1.7, 0.44, 0.04, 0, 1.16, 1.1],
+    ] as const) {
+      const wall = lit(new Mesh(new BoxGeometry(w, h, d), shell));
+      wall.position.set(x, y, z);
+      root.add(wall);
+    }
+    const tub = lit(new Mesh(new BoxGeometry(1.7, 0.02, 1.8), vmat(set, 'interiorTrim')));
+    tub.position.set(0, 0.96, 0.2);
+    root.add(tub);
+    for (const z of [-0.66, 0.18, 1.04]) {
+      const pillar = lit(new Mesh(new BoxGeometry(0.06, 0.42, 0.08), vmat(set, 'trim')));
+      pillar.position.set(-0.84, 1.16, z);
+      root.add(pillar);
+    }
+    const fabric = vmat(set, 'interior');
+    const dash = vmat(set, 'interiorTrim');
+    for (const [z, yy] of [
+      [0.05, 0.0],
+      [0.95, 0.0],
+    ] as const) {
+      const cushion = lit(new Mesh(new RoundedBoxGeometry(0.55, 0.14, 0.55, 4, 0.05), fabric));
+      cushion.position.set(-0.4, 0.74 + yy, z);
+      root.add(cushion);
+      const back = lit(new Mesh(new RoundedBoxGeometry(0.55, 0.56, 0.14, 4, 0.05), fabric));
+      back.position.set(-0.4, 1.02, z + 0.3);
+      back.rotation.x = -0.18;
+      root.add(back);
+      const head = lit(new Mesh(new RoundedBoxGeometry(0.3, 0.16, 0.12, 4, 0.05), fabric));
+      head.position.set(-0.4, 1.36, z + 0.36);
+      root.add(head);
+    }
+    const dashboard = lit(new Mesh(new RoundedBoxGeometry(1.6, 0.22, 0.4, 4, 0.06), dash));
+    dashboard.position.set(0, 0.98, -0.62);
+    root.add(dashboard);
+    for (const p of [panes.front, panes.rear]) {
+      const g = new BufferGeometry();
+      g.setAttribute('position', new BufferAttribute(new Float32Array(p.position), 3));
+      g.setAttribute('uv', new BufferAttribute(new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]), 2));
+      g.setIndex(p.index);
+      g.computeVertexNormals();
+      const pane = lit(new Mesh(g, vmat(set, 'glass')), false, true);
+      root.add(pane);
+    }
+  }
+}
+
 // ------------------------------------------------------------ views
 interface View {
   name: string;
@@ -429,7 +699,20 @@ const VIEWS: View[] = [
   { name: 'vista', pos: [-60, 28, 70], target: [120, 5, -140], fov: 55 },
   { name: 'contact', pos: [12.6, 0.9, -2.2], target: [10.2, 0.35, -6.4], fov: 35 },
 ];
-let viewIndex = Math.min(VIEWS.length - 1, Math.max(0, Number(params.get('view') ?? 0) | 0));
+if (showMaterials) {
+  VIEWS.push(
+    { name: 'mat-paint', pos: [0.3, 1.45, 0.4], target: [0, 0.72, -3.2], fov: 52 },
+    { name: 'mat-sparkle', pos: [-1.1, 1.25, -1.9], target: [-0.7, 0.85, -3.2], fov: 34 },
+    { name: 'mat-flake', pos: [1.2, 1.3, -7.4], target: [0.0, 0.84, -5.6], fov: 24 },
+    { name: 'mat-wheel', pos: [-2.25, 0.52, 2.35], target: [-0.78, 0.3, 3.2], fov: 30 },
+    { name: 'mat-lamps-front', pos: [8.4, 1.05, -2.4], target: [8.4, 0.62, 1.0], fov: 44 },
+    { name: 'mat-lamps-rear', pos: [8.4, 1.1, 9.0], target: [8.4, 0.72, 5.4], fov: 44 },
+    { name: 'mat-glass', pos: [-10.9, 1.35, 3.0], target: [-8.0, 1.12, 3.6], fov: 40 },
+  );
+}
+const viewParam = params.get('view');
+const namedView = viewParam ? VIEWS.findIndex((v) => v.name === viewParam) : -1;
+let viewIndex = namedView >= 0 ? namedView : Math.min(VIEWS.length - 1, Math.max(0, Number(viewParam ?? 0) | 0));
 function setView(i: number): void {
   viewIndex = ((i % VIEWS.length) + VIEWS.length) % VIEWS.length;
   const v = VIEWS[viewIndex]!;
@@ -527,6 +810,20 @@ const hooks = {
   },
   setToneMapping(mode: 'aces' | 'agx') {
     postDebug(post).setToneMapping(mode === 'agx' ? ToneMappingMode.AGX : ToneMappingMode.ACES_FILMIC);
+  },
+  /** Debug access to the scene graph (materials showcase inspection). */
+  get scene() {
+    return scene;
+  },
+  get camera() {
+    return camera;
+  },
+  /** Materials showcase (?show=materials): wheel spin angle (rad) and lamp state of the ON board. */
+  setWheelSpin(angle: number) {
+    (matShow as unknown as { settle?: (a: number) => void }).settle?.(angle);
+  },
+  setLamps(state: { head?: boolean; highBeam?: boolean; brake?: number; reverse?: boolean; indicatorL?: boolean; indicatorR?: boolean }) {
+    matShow.lampsOn?.setLights({ head: false, highBeam: false, brake: 0, reverse: false, indicatorL: false, indicatorR: false, fog: false, ...state });
   },
   setAoDisplay(mode: 'Combined' | 'AO' | 'No AO') {
     postDebug(post).ao.setDisplayMode(mode);
