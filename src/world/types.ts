@@ -1,0 +1,561 @@
+/**
+ * World / terrain contracts — FROZEN (P3). Pure data + type-only function
+ * signatures shared by the sim worker (heightfield collision) and the main
+ * thread (terrain mesh, road ribbons, cameras, AI). No three, no DOM, no
+ * imports from src/sim or src/render (see the boundary amendment in
+ * docs/CONTRACTS.md).
+ *
+ * Coordinates: SI metres, Y up, right-handed (three.js default). The map is
+ * a square centred on the origin; "north" is −Z (top of the ASCII sketch in
+ * layout.ts), east is +X. Yaw is a rotation about +Y; yaw 0 faces −Z and
+ * yaw π/2 faces −X (same convention as main.ts / the vehicle frame).
+ *
+ * ======================================================================
+ * DETERMINISM (the reason the worker regenerates instead of receiving
+ * arrays): generateTerrain(layout) is a PURE function. Given the same
+ * WorldLayout it must produce bit-identical TerrainData in the worker, on
+ * main and in node tests, and hashTerrain() of both must match. Rules:
+ *   - randomness only from core/rng + core/noise seeded by layout.seed
+ *     (fork per zone/purpose with fixed stream ids), never Math.random;
+ *   - only + − × ÷ sqrt floor abs min max and simplex-noise in the
+ *     generator (no Math.sin/cos/pow/exp/atan2 — they are not IEEE-exact
+ *     across engines, and replays carry the terrain hash). Rotations in
+ *     layout data are given as unit direction vectors, never angles;
+ *   - fixed iteration order (rows ascending, cols ascending; zones, pads
+ *     and roads in declaration order except where a rule below says
+ *     otherwise).
+ * ======================================================================
+ */
+import type { MaterialId } from '../protocol/messages';
+
+// ============================================================ primitives
+/** Plan-view point (x, z). */
+export type Vec2 = readonly [x: number, z: number];
+/** World point (x, y, z). */
+export type WorldVec3 = readonly [x: number, y: number, z: number];
+/**
+ * Road control point. y = null means "follow the terrain": the generator
+ * resolves it to the pre-carve terrain height averaged over a disc of
+ * radius ROAD_KIND_DEFAULTS[kind].smoothRadius around (x, z).
+ */
+export type RoadPoint = readonly [x: number, y: number | null, z: number];
+
+/**
+ * Plan-view shape with a soft edge. Mask m(x,z) = 1 inside, falling to 0 at
+ * `blend` metres outside the boundary with smoothstep(1 − dist/blend)
+ * (smoothstep(t) = t²(3 − 2t)). `axis` is a UNIT (x, z) direction giving the
+ * local +X of rect/ellipse shapes (no angles: see DETERMINISM). Omitted
+ * axis = world +X.
+ */
+export type ZoneShape =
+  | { type: 'circle'; center: Vec2; radius: number; blend: number }
+  | { type: 'ellipse'; center: Vec2; radiusX: number; radiusZ: number; axis?: Vec2; blend: number }
+  | { type: 'rect'; center: Vec2; halfX: number; halfZ: number; axis?: Vec2; blend: number }
+  /** Simple polygon (no self-intersections), either winding. */
+  | { type: 'polygon'; points: readonly Vec2[]; blend: number };
+
+// ============================================================ terrain params
+export interface NoiseParams {
+  /** Peak deviation, m (the normalized fbm/ridged output is scaled by this). */
+  amplitude: number;
+  /** Base feature size, m (noise is sampled at x / wavelength). */
+  wavelength: number;
+  octaves: number;
+  /** Default 2 / 0.5. */
+  lacunarity?: number;
+  gain?: number;
+}
+
+export interface TerrainParams {
+  /** Grid spacing, m. 1.0 for the default map (see TerrainData). */
+  spacing: number;
+  /** Datum of the plains, m. Every zone contribution is relative to it. */
+  baseHeight: number;
+  /** Map-wide gentle fbm undulation (applied everywhere, before zones). */
+  detail: NoiseParams;
+  /**
+   * Rim that encloses the world: within `width` m of the map edge the
+   * height rises by `height`·smoothstep(1 − edgeDist/width). Hides the edge
+   * and keeps cars in.
+   */
+  edgeRise: { width: number; height: number };
+  /** Final clamp of all heights, m. */
+  minHeight: number;
+  maxHeight: number;
+}
+
+// ============================================================ zones
+/**
+ * One mountain mass: macro height = height·(1 − u²)² for u < 1, where
+ * u = elliptical distance sqrt((dx'/radiusX)² + (dz'/radiusZ)²) in the
+ * peak's local frame (axis = local +X). The mountains zone takes the MAX
+ * over its peaks (overlapping peaks form ridges/saddles, not stacks).
+ */
+export interface MountainPeak {
+  name: string;
+  center: Vec2;
+  height: number;
+  radiusX: number;
+  radiusZ: number;
+  axis?: Vec2;
+}
+
+interface ZoneBase {
+  id: string;
+  name: string;
+  shape: ZoneShape;
+}
+/**
+ * Zones, applied in this FIXED order regardless of declaration order
+ * (declaration order breaks ties within a kind):
+ *   1. plains     h += mask·fbm(params.detail)           (extra undulation)
+ *   2. hills      h += mask·(lift + fbm(params.noise))   (rolling, signed)
+ *   3. mountains  h += max_peaks(bump) + mask·(bump/peakMax)·ridged(params.ridged)
+ *                 (peak bumps are NOT masked: each peak's radii bound it)
+ *   4. lake       h = lerp(h, waterLevel − depth·(1 − r²)… see LakeZone, mask)
+ *   5. town / arena pads: h = lerp(h, height, mask)
+ * then the edge rise (TerrainParams.edgeRise), then layout.pads
+ * (declaration order), then roads (resolve profiles, then carve; see
+ * RoadDef / JunctionDef), then the clamp. The final step paints splat +
+ * material (zones → pads → road verges → carriageways, later wins).
+ */
+export interface PlainsZone extends ZoneBase {
+  kind: 'plains';
+  params: { detail: NoiseParams };
+}
+export interface HillsZone extends ZoneBase {
+  kind: 'hills';
+  params: {
+    noise: NoiseParams;
+    /** Constant lift inside the zone (m), added with the mask. */
+    lift: number;
+  };
+}
+export interface MountainsZone extends ZoneBase {
+  kind: 'mountains';
+  params: {
+    peaks: readonly MountainPeak[];
+    /** Ridged detail, scaled by mask × (macro / max peak height) so it vanishes on the plains. */
+    ridged: NoiseParams;
+    /** Macro slope (rise/run) above which the splat turns to rock. */
+    rockSlope: number;
+  };
+}
+/**
+ * Lake basin. Shape MUST be a circle or ellipse. With r = normalized
+ * elliptical distance from the centre (0 centre, 1 shoreline), inside:
+ *   h = waterLevel − depth·(1 − r²)
+ * The shoreline band is the shape's `blend` (m outside r = 1): there the
+ * natural terrain is first clamped to ≥ waterLevel + shoreLift (a dry,
+ * drivable beach), then blended with the mask. Splat: underwater dirt,
+ * shore band gravel → grass.
+ */
+export interface LakeZone extends ZoneBase {
+  kind: 'lake';
+  params: { depth: number; shoreLift: number };
+}
+/** Flattened, paved crash-test pad. Splat paved, material = params.material (concrete). */
+export interface ArenaZone extends ZoneBase {
+  kind: 'arena';
+  params: { height: number; material: MaterialId };
+}
+/** Flattened town plateau (streets are RoadDefs; ground stays grass/paved lots in P5). */
+export interface TownZone extends ZoneBase {
+  kind: 'town';
+  params: { height: number };
+}
+export type ZoneDef = PlainsZone | HillsZone | MountainsZone | LakeZone | ArenaZone | TownZone;
+export type ZoneKind = ZoneDef['kind'];
+
+// ============================================================ pads / P5 placeholders
+/**
+ * Extra flat pad (summit lookout, prop yards, spawn aprons). height null =
+ * the mean pre-pad terrain height inside the shape. `material` (optional)
+ * paints the pad core (mask ≥ 0.5) for physics and the splat.
+ */
+export interface PadDef {
+  id: string;
+  purpose: 'lookout' | 'spawn' | 'props' | 'parking';
+  shape: ZoneShape;
+  height: number | null;
+  material?: MaterialId;
+}
+
+/**
+ * P5 placeholder — static collider primitive (sim static-primitive pass).
+ * quat [x, y, z, w]; y of `pos` null = terrain height at (x, z) + the
+ * shape's half height (resolved when the world is built).
+ */
+export type ColliderShape =
+  | { type: 'obb'; halfExtents: WorldVec3 }
+  | { type: 'cylinder'; radius: number; halfHeight: number }
+  | { type: 'sphere'; radius: number };
+export interface ColliderDef {
+  id: string;
+  shape: ColliderShape;
+  pos: RoadPoint;
+  quat: readonly [number, number, number, number];
+  material: MaterialId;
+}
+/** P5 placeholder — prop spawn (soft props are rigs, static props are colliders + meshes). */
+export interface PropPlacement {
+  id: string;
+  /** Prop catalog key (P5), e.g. 'cone', 'barrier', 'pole', 'ramp'. */
+  prop: string;
+  pos: RoadPoint;
+  yaw: number;
+  dynamic: boolean;
+  /** Pad it sits on (the generator guarantees the pad is flat). */
+  padId?: string;
+}
+
+// ============================================================ roads
+/**
+ * Road kinds. Carve PRIORITY (low → high) decides who wins where roads
+ * overlap at junctions: dirt < street < country < mountain < arena < highway.
+ */
+export type RoadKind = 'highway' | 'country' | 'mountain' | 'dirt' | 'street' | 'arena';
+/**
+ * Marking styles for the ribbon shader (E):
+ *  - highway: white solid edge lines, white dashed lane dividers (3 m dash,
+ *    9 m gap), double yellow centre line;
+ *  - center:  white solid edge lines, single yellow dashed centre line
+ *    (solid where |curvature| > 1/120 m⁻¹ — "no passing" on bends);
+ *  - edge:    white solid edge lines only;
+ *  - none.
+ */
+export type RoadMarkings = 'highway' | 'center' | 'edge' | 'none';
+
+/**
+ * PROFILE RESOLUTION + CARVING (generator, after zones/edge/pads):
+ *  1. Resolve null control-point y (see RoadPoint) on the pre-road terrain.
+ *  2. Centreline = core/spline createSpline(points, closed) (y included);
+ *     stations every ROAD_STATION_SPACING m of arc (ArcTable). Tangent and
+ *     curvature come from the plan (x, z) projection.
+ *  3. bank(s) = −sign(κ)·bank·min(1, |κ|·bankFullRadius), then a moving
+ *     average over 30 m so superelevation runs in/out smoothly.
+ *  4. Junctions: resolve roads by priority DESC (ties: declaration order).
+ *     A road meeting an already-resolved road at a junction has its station
+ *     y within JUNCTION_EASE_M of pos pulled to that road's surface height
+ *     at pos (smoothstep weight, 1 at pos) and its bank faded to 0 there.
+ *  5. Carve in priority ASC (higher priority wins overlaps). Per grid
+ *     sample near a road, (s, d) = projection; a = width/2, b = a + shoulder:
+ *       |d| ≤ b           h = y(s) + bank(s)·clamp(d, −a, a)  (verge level)
+ *       b < |d| < b+blend h = lerp(surface(±b), h, smoothstep((|d|−b)/blend))
+ *     Open road ends get the same falloff along s (round ends).
+ *  6. Paint: carriageway → road material + splat (ribbon roads paved; splat
+ *     roads their material's channel), verge → gravel; the blend band keeps
+ *     the zone paint.
+ * Road ribbons (E) sit ON the carved terrain, never on the raw spline.
+ */
+export interface RoadDef {
+  id: string;
+  name: string;
+  kind: RoadKind;
+  closed: boolean;
+  /**
+   * Centripetal Catmull-Rom control points (core/spline). Explicit y pins
+   * the design grade; null follows the terrain (see RoadPoint).
+   */
+  points: readonly RoadPoint[];
+  /** Carriageway width, m (edge to edge). */
+  width: number;
+  /** Lanes per direction (marking layout). */
+  lanes: number;
+  /** Verge width each side beyond the carriageway, m (gravel, drivable). */
+  shoulder: number;
+  /**
+   * Max superelevation as cross-slope (m/m ≈ rad for these magnitudes).
+   * Applied ∝ curvature, full at ROAD_KIND_DEFAULTS[kind].bankFullRadius,
+   * outside of the bend high. Omitted = 0 (flat).
+   */
+  bank?: number;
+  /** Physics material of the carriageway (shoulders are gravel). */
+  material: MaterialId;
+  markings: RoadMarkings;
+}
+
+/**
+ * Per-kind tuning used by the generator and checks. All roads of a kind
+ * share these (not per-road data so the layout stays small).
+ *  - priority:       carve order (higher overwrites lower).
+ *  - smoothRadius:   m; disc radius for y = null control points.
+ *  - maxGrade:       design check (tests assert the resolved profile).
+ *  - bankFullRadius: m; bend radius at which `bank` is fully applied.
+ *  - blend:          m; embankment/cutting width from verge edge back to
+ *                    natural terrain (smoothstep).
+ *  - surface:        'ribbon' = a road mesh (E) draws the carriageway;
+ *                    'splat' = only the terrain splat (dirt trails).
+ */
+export interface RoadKindDefaults {
+  priority: number;
+  smoothRadius: number;
+  maxGrade: number;
+  bankFullRadius: number;
+  blend: number;
+  surface: 'ribbon' | 'splat';
+}
+export const ROAD_KIND_DEFAULTS: Readonly<Record<RoadKind, RoadKindDefaults>> = {
+  dirt: { priority: 0, smoothRadius: 6, maxGrade: 0.22, bankFullRadius: 30, blend: 6, surface: 'splat' },
+  street: { priority: 1, smoothRadius: 20, maxGrade: 0.08, bankFullRadius: 60, blend: 8, surface: 'ribbon' },
+  country: { priority: 2, smoothRadius: 25, maxGrade: 0.1, bankFullRadius: 120, blend: 14, surface: 'ribbon' },
+  mountain: { priority: 3, smoothRadius: 15, maxGrade: 0.13, bankFullRadius: 45, blend: 12, surface: 'ribbon' },
+  arena: { priority: 4, smoothRadius: 30, maxGrade: 0.02, bankFullRadius: 200, blend: 10, surface: 'ribbon' },
+  highway: { priority: 5, smoothRadius: 60, maxGrade: 0.07, bankFullRadius: 300, blend: 26, surface: 'ribbon' },
+};
+
+/**
+ * Junction: every listed road passes within 1 m of `pos`. The through road
+ * is the highest-priority one; every other road must START or END at `pos`
+ * (a branch). The generator snaps a branch's end y to the through road's
+ * surface height there and eases the branch profile into it over
+ * JUNCTION_EASE_M. Roads may only meet at junctions (overpass-free map; a
+ * test asserts no other centreline approaches).
+ */
+export interface JunctionDef {
+  id: string;
+  pos: Vec2;
+  roads: readonly string[];
+}
+export const JUNCTION_EASE_M = 40;
+
+// ============================================================ spawns / layout
+/**
+ * Named spawn. Either on a road (`road`: arc distance s from the road start
+ * in m, signed lateral offset d, + = right of travel; heading = direction
+ * of travel, or reversed when `reverse`) or free (`pos` + `yaw`). The
+ * generator resolves both forms into TerrainData.spawns (surface y).
+ */
+export interface SpawnPoint {
+  id: string;
+  name: string;
+  road?: { id: string; s: number; d: number; reverse?: boolean };
+  pos?: Vec2;
+  yaw?: number;
+}
+
+export interface WorldLayout {
+  /** Stable id (protocol, saves, replays). */
+  id: string;
+  name: string;
+  /** Bump on ANY change that alters generated terrain (replays key on the terrain hash too). */
+  version: number;
+  seed: number;
+  /** Square map edge length, m, centred on the origin. size/terrain.spacing must be an integer multiple of TERRAIN_CHUNK_CELLS. */
+  size: number;
+  terrain: TerrainParams;
+  /** Single global water plane height, m; rendered over 'lake' zones (P5). */
+  waterLevel: number;
+  zones: readonly ZoneDef[];
+  pads: readonly PadDef[];
+  roads: readonly RoadDef[];
+  junctions: readonly JunctionDef[];
+  spawnPoints: readonly SpawnPoint[];
+  /** P5: empty in P3. */
+  colliders: readonly ColliderDef[];
+  props: readonly PropPlacement[];
+}
+
+// ============================================================ TerrainData
+/**
+ * Splat layout: 4 explicit RGBA8 weights + an IMPLICIT fifth.
+ *   R paved (asphalt set; concrete is the same set tinted, see material)
+ *   G dirt, B rock, A gravel, grass = 255 − (R+G+B+A).
+ * The generator guarantees R+G+B+A ≤ 255 per sample, so the five weights
+ * are an exact partition of unity — and stay one under bilinear texture
+ * filtering. Why: 5 PBR sets in ONE RGBA8 texture (no second array, one
+ * fetch); grass is the default ground cover so it costs no channel.
+ */
+export const SPLAT_PAVED = 0;
+export const SPLAT_DIRT = 1;
+export const SPLAT_ROCK = 2;
+export const SPLAT_GRAVEL = 3;
+export const SPLAT_CHANNELS = 4;
+
+/** Render chunk size in cells (B's LOD0 chunk; 1408 m / 1 m / 64 = 22 × 22 chunks). */
+export const TERRAIN_CHUNK_CELLS = 64;
+
+/** Road station spacing, m, of RoadProfile. */
+export const ROAD_STATION_SPACING = 2;
+/** Floats per station in RoadProfile.stations. */
+export const ROAD_STATION_STRIDE = 7;
+/** Offsets inside a station record. */
+export const RoadStation = {
+  /** Centreline position (y = carriageway surface height at the centre). */
+  x: 0,
+  y: 1,
+  z: 2,
+  /** Unit HORIZONTAL tangent (direction of travel). Right = (−tz, 0, tx). */
+  tx: 3,
+  tz: 4,
+  /** Cross-slope m/m, + = right side higher. Surface y(d) = y + bank·d. */
+  bank: 5,
+  /** Signed plan curvature 1/m, + = turning right. */
+  curvature: 6,
+} as const;
+
+/**
+ * Resolved road (generator output; the ribbon mesher (E), AI routes and
+ * spawns consume THIS, never re-deriving heights from RoadDef).
+ * Stations are at s = i·ROAD_STATION_SPACING (i < stationCount − 1); the
+ * last station is at s = length (open) or i·spacing (closed: the last
+ * station is NOT a duplicate of the first; wrap when sampling).
+ */
+export interface RoadProfile {
+  id: string;
+  kind: RoadKind;
+  closed: boolean;
+  width: number;
+  lanes: number;
+  shoulder: number;
+  material: MaterialId;
+  markings: RoadMarkings;
+  surface: 'ribbon' | 'splat';
+  /** Total arc length, m (plan + vertical chord sum of the stations). */
+  length: number;
+  stationCount: number;
+  /** stationCount × ROAD_STATION_STRIDE. */
+  stations: Float64Array;
+}
+
+/** Resolved spawn (world surface point; place the vehicle by its own clearance). */
+export interface ResolvedSpawn {
+  id: string;
+  name: string;
+  pos: WorldVec3;
+  yaw: number;
+}
+
+/**
+ * Generated terrain — FROZEN (P3). Grid sample (col, row) sits at
+ *   x = originX + col·spacing,  z = originZ + row·spacing,
+ * row-major: index = row·cols + col (rows run along +Z, cols along +X).
+ * cols = rows = size/spacing + 1 (samples on both edges).
+ *
+ * Default map: size 1408 m, spacing 1 m → 1409² = 1 985 281 samples
+ * (1.98 km²; 1408 = 22 × 64 so LOD chunks tile exactly).
+ *   heights  f32  7.9 MB   splat u8×4  7.9 MB   material u8  2.0 MB
+ * ≈ 18 MB per side. 1 m resolves a 7 m lane with 7+ samples across and a
+ * 30 m hairpin cleanly; 2 m would alias road crowns and kerbs against
+ * 2 kHz tyre contact. f32 heights: ulp at 200 m is 1.5e-5 m, far below
+ * contact penetration scales.
+ *
+ * Transfer: NONE. The worker regenerates from the WorldLayout (a few KB of
+ * JSON) via the `groundHeightfield` command; both sides compare
+ * hashTerrain(). Structured-cloning 18 MB would cost ~20–40 ms of main
+ * stall plus a second copy; regenerating costs ~1 s of worker time at load
+ * that overlaps main's own generation, and makes collision == visual by
+ * construction. The worker may drop `splat` after generation.
+ */
+export interface TerrainData {
+  layoutId: string;
+  layoutVersion: number;
+  seed: number;
+  originX: number;
+  originZ: number;
+  spacing: number;
+  cols: number;
+  rows: number;
+  /** World Y per sample, rows × cols. */
+  heights: Float32Array;
+  /** rows × cols × SPLAT_CHANNELS (see SPLAT_*), R+G+B+A ≤ 255. */
+  splat: Uint8Array;
+  /** Dominant MaterialId per sample (physics friction; nearest-sample lookup). */
+  material: Uint8Array;
+  minHeight: number;
+  maxHeight: number;
+  waterLevel: number;
+  /** Same order as layout.roads. */
+  roads: readonly RoadProfile[];
+  /** Same order as layout.spawnPoints. */
+  spawns: readonly ResolvedSpawn[];
+  /** hashTerrain(this) — u32. */
+  hash: number;
+}
+
+// ============================================================ samplers / helpers
+/**
+ * Terrain query. STRUCTURALLY IDENTICAL to sim's HeightSampler (FROZEN P1,
+ * src/sim/types.ts) so the same object plugs into the ground kernel; world
+ * must not import sim, hence the duplicate. Semantics:
+ *  - heightAt: bilinear interpolation of the 4 surrounding samples
+ *    (penetration depth); outside the grid the edge samples extend (clamp).
+ *  - normalAt: C0-continuous smoothed normal = bilinear blend of the 4
+ *    corner VERTEX normals, each from central differences
+ *    (−(h[c+1]−h[c−1])/2s, 1, −(h[r+1]−h[r−1])/2s) normalized, then the
+ *    blend renormalized. (Raw bilinear-patch normals jump across cell
+ *    edges → 2 kHz contact chatter.) Writes out[0..2].
+ *  - materialAt: material[nearest sample].
+ * Allocation-free, only + − × ÷ sqrt floor (sim numerics contract).
+ */
+export interface TerrainSampler {
+  heightAt(x: number, z: number): number;
+  normalAt(x: number, z: number, out: Float64Array): void;
+  materialAt(x: number, z: number): number;
+  /** Splat weights at the nearest sample (0..1 each, 5 values: paved, dirt, rock, gravel, grass) into out[0..4]. */
+  splatAt(x: number, z: number, out: Float64Array): void;
+  /** True when (x, z) is inside the grid. */
+  contains(x: number, z: number): boolean;
+}
+
+/** Reusable output of sampleRoad (no allocation per call). */
+export interface RoadSample {
+  /** Arc distance actually sampled (clamped open / wrapped closed). */
+  s: number;
+  x: number;
+  y: number;
+  z: number;
+  tx: number;
+  tz: number;
+  /** Right vector (−tz, tx). */
+  rx: number;
+  rz: number;
+  bank: number;
+  curvature: number;
+}
+/** Reusable output of projectToRoad. */
+export interface RoadProjection {
+  s: number;
+  /** Signed lateral offset, + = right of travel. */
+  d: number;
+  /** Plan distance to the centreline (|d| unless past an open end). */
+  dist: number;
+  /** Carriageway surface height at (s, d) = y(s) + bank(s)·d. */
+  y: number;
+}
+
+/** Pure, deterministic generator (A: src/world/terrain.ts). Validates the layout and throws WorldLayoutError on bad data. */
+export type GenerateTerrain = (layout: WorldLayout) => TerrainData;
+/**
+ * FNV-1a 32 (per u32 word: h = Math.imul(h ^ w, 0x01000193) >>> 0, seed
+ * 0x811c9dc5) over: cols, rows, then heights as raw u32 words, then
+ * material and splat as u32 words (zero-padded tail), then per road
+ * stationCount + stations as raw u32 words (f64 → 2 words). Returns u32.
+ * Word-wise (not byte-wise) keeps it ~20 ms for 18 MB. Shared by worker and
+ * main (A: src/world/terrain.ts).
+ */
+export type HashTerrain = (terrain: TerrainData) => number;
+/** D: src/world/sampler.ts. */
+export type CreateTerrainSampler = (terrain: TerrainData) => TerrainSampler;
+/**
+ * Road helpers (A: src/world/roads.ts). Linear interpolation between
+ * stations (2 m: chord error < 2 cm on a 25 m hairpin); tangent
+ * renormalized. Allocation-free.
+ */
+export type SampleRoad = (road: RoadProfile, s: number, out: RoadSample) => RoadSample;
+/** Closest centreline point in plan view; `hintS` (optional) enables a local search for per-frame tracking. */
+export type ProjectToRoad = (
+  road: RoadProfile,
+  x: number,
+  z: number,
+  out: RoadProjection,
+  hintS?: number,
+) => RoadProjection;
+
+/** Thrown by generateTerrain for an invalid layout (bad junction, size not chunk-aligned, unknown road id…). */
+export class WorldLayoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WorldLayoutError';
+  }
+}

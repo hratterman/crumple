@@ -9,6 +9,7 @@ Commands: `npm run dev` | `build` (tsc + vite build) | `typecheck` | `test` (vit
 ## Architecture map
 
 - `src/core/` — pure shared utilities (math, rng, events, spline, noise)
+- `src/world/` — pure world layer shared by sim and render (map layout, terrain generation, road sampling)
 - `src/protocol/` — the FROZEN worker⇄main seam (messages, buffer layout, codec)
 - `src/sim/` — physics, runs in the worker only
 - `src/render/` — three.js scene, terrain, vehicle visuals, FX, cameras

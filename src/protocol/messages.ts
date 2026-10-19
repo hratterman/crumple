@@ -13,6 +13,7 @@
 import type { Quat, Vec3 } from '../core/math';
 import type { RigDef } from '../sim/rig/types';
 import type { TransmissionMode, VehicleDef } from '../sim/vehicle/types';
+import type { WorldLayout } from '../world/types';
 
 // ============================================================ MaterialId
 /**
@@ -129,8 +130,8 @@ export interface GroundPlaneMsg {
   materialId: MaterialId;
 }
 /**
- * RESERVED for P3 (TerrainData freezes then). The worker answers
- * `unimplemented` until P3. `terrain` will become `TerrainData`.
+ * SUPERSEDED (P3) by `groundHeightfield` below; kept so the P1 union stays
+ * unchanged. The worker keeps answering `unimplemented` for this variant.
  */
 export interface GroundHeightfieldMsg {
   type: 'ground';
@@ -215,6 +216,31 @@ export interface RecoverMsg {
   pos?: Vec3;
 }
 
+// ---------------------------------------------------------------- terrain (P3, additive)
+/**
+ * Replace the ground with the heightfield of `layout`. The worker runs the
+ * PURE generateTerrain(layout) itself (src/world/terrain.ts) instead of
+ * receiving ~18 MB of arrays: the layout is a few KB of JSON, and
+ * collision == visual by construction. It then compares
+ * hashTerrain(its terrain) with `terrainHash` (main's result for the same
+ * layout):
+ *   - match    → installs the heightfield sampler, posts `terrainReady`;
+ *   - mismatch → STILL installs its own terrain (the car must have ground),
+ *                posts `terrainReady{matched:false}` and an `error`
+ *                (build skew / non-determinism bug — surface loudly).
+ * Generation blocks the worker (~1 s); commands queued behind it (spawns)
+ * apply afterwards in arrival order, so send this BEFORE spawning. Ticks
+ * that fall due meanwhile are dropped by the backlog cap (no catch-up).
+ * Main may skip waiting for its own hash by sending terrainHash = 0
+ * (no comparison; `matched` reports false).
+ */
+export interface GroundHeightfieldCmd {
+  type: 'groundHeightfield';
+  layout: WorldLayout;
+  /** u32 hashTerrain() of main's generateTerrain(layout); 0 = don't compare. */
+  terrainHash: number;
+}
+
 /** RESERVED (P6): awake bubble around the player. Worker may answer `unimplemented`. */
 export interface SetBubbleMsg {
   type: 'setBubble';
@@ -244,6 +270,7 @@ export type MainToWorker =
   | SpawnVehicleMsg
   | SetTransmissionMsg
   | RecoverMsg
+  | GroundHeightfieldCmd
   | SetBubbleMsg
   | KeyframeRequestMsg
   | ReplaySeekMsg;
@@ -278,5 +305,17 @@ export interface ErrorMsg {
   objectId?: number;
 }
 
-export type WorkerToMain = ReadyMsg | SnapshotMsg | FatalMsg | UnimplementedMsg | ErrorMsg;
+/** Answer to `groundHeightfield` once the heightfield is active (P3, additive). */
+export interface TerrainReadyMsg {
+  type: 'terrainReady';
+  layoutId: string;
+  /** The worker's own hashTerrain(). */
+  terrainHash: number;
+  /** terrainHash equals the one main sent. */
+  matched: boolean;
+  /** Worker generation time, ms (perf telemetry). */
+  generateMs: number;
+}
+
+export type WorkerToMain = ReadyMsg | SnapshotMsg | FatalMsg | UnimplementedMsg | ErrorMsg | TerrainReadyMsg;
 export type WorkerToMainType = WorkerToMain['type'];

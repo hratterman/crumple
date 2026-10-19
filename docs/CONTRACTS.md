@@ -21,7 +21,7 @@ Main-thread code (render/ui/game/app) MAY import the pure-data rig modules `src/
 ## protocol/ — FROZEN (P1)
 
 - **messages.ts**: discriminated unions on `type`.
-  - Main→worker: `init{seed, gravity, snapshotHz (default 120), debugStrains, capacity?}`, `ground{mode:'plane', y, materialId}` (`mode:'heightfield'` reserved for P3), `spawn{objectId, rig: RigDef, transform{pos, quat[x,y,z,w]}}`, `despawn`, `input{objectId, actions: Partial<ActionState>}` (merge), `reset{objectId, transform}` (full repair), `timescale{value}`, `returnBuffer{buffer}` (transferred). Reserved: `setBubble`, `keyframeRequest`, `replaySeek`.
+  - Main→worker: `init{seed, gravity, snapshotHz (default 120), debugStrains, capacity?}`, `ground{mode:'plane', y, materialId}` (`mode:'heightfield'` superseded by P3 `groundHeightfield`, see Terrain protocol), `spawn{objectId, rig: RigDef, transform{pos, quat[x,y,z,w]}}`, `despawn`, `input{objectId, actions: Partial<ActionState>}` (merge), `reset{objectId, transform}` (full repair), `timescale{value}`, `returnBuffer{buffer}` (transferred). Reserved: `setBubble`, `keyframeRequest`, `replaySeek`.
   - Worker→main: `ready`, `snapshot{buffer}` (transferred), `fatal{message, stack?}`, `unimplemented{command}` (reserved commands/variants), `error{command, message, objectId?}` (recoverable rejection).
   - Commands apply in arrival order at the next step boundary.
 - **Snapshot capacity** is fixed at `init` (`DEFAULT_CAPACITY` 64 objects / 32768 nodes / 131072 beams); spawns beyond it get `error`.
@@ -105,9 +105,57 @@ Measured by `src/sim/vehicle/handling.test.ts` (`node tools/handling-report.mjs`
 
 `src/input/actions.ts`: pure `createInputMapper({tuning?, transmission?, gearCount?})` → `handleKeyEvent({type, code, repeat})`, `setGamepad(GamepadLike|null)` (per frame), `update(dtS, speedMs) → ActionState` (reused object), `drainCommands() → InputCommand[]`, `setTransmission`, `setGearCount`, `releaseAll`. Commands: `shiftUp shiftDown recover repair cameraCycle toggleBeamView pause slowMo`. Bindings: WASD/arrows, Space handbrake, Shift/E up, Ctrl/Q down, R F C B P T; gamepad standard mapping RT/LT pedals, left-stick X steer, A handbrake, RB/LB shift, Y recover, X camera, Back beam view, Start pause, D-pad up repair / down slow-mo. Steering: `limit(v) = max(0.25, 1/(1+(v/20)²))`, outward slew `rate/(1+v/15)` (keyboard 2.5/s, gamepad 6/s), return 4/s; stick deadzone 0.12 + exponent 1.6. Auto mode arcade reverse (brake at standstill → R, pedals swapped). Defaults in `DEFAULT_INPUT_TUNING`.
 
-## TerrainData — pending (freezes end of P3)
+## Boundary amendment — FROZEN (P3)
 
-`src/render/terrain/data.ts` pure function output (heights f32, splat u8, spacing/origin) — shared by sim collision and render mesh.
+`src/world/` is a new PURE shared layer (like `src/core`): no three, no DOM, no imports from `src/sim`, `src/render`, `src/ui`, `src/game`, `src/app`; it may import `src/core` and `import type` from `src/protocol`. Both `src/sim` (worker) and main-thread code may import any `src/world` module. `src/protocol` may `import type` from `src/world/types.ts`. This supersedes PLAN's `render/terrain/data.ts`: the generator lives in `src/world/terrain.ts` (sim may not import render).
+
+## P3 work split (file ownership)
+
+- **A** world generator: `src/world/terrain.ts` (`generateTerrain`, `hashTerrain`), `src/world/roads.ts` (`sampleRoad`, `projectToRoad`), tests. Owns layout validation (`WorldLayoutError`).
+- **B** terrain render: `src/render/terrain/**` (`createTerrainRenderer`).
+- **C** lighting/post/quality: `src/render/lighting.ts`, `src/render/post.ts`, `src/render/material.ts` (`patchMaterial`), `src/app/quality.ts`.
+- **D** heightfield collision: `src/world/sampler.ts` (`createTerrainSampler`), worker/engine handling of `groundHeightfield` + `terrainReady`, `SimClient.groundHeightfield(layout, hash)`.
+- **E** road ribbons: `src/render/roads/**` (`createRoadRenderer`).
+- Shared contract files (`src/world/types.ts`, `src/world/layout.ts`, `src/render/types.ts`) change only via this doc.
+
+## WorldLayout — FROZEN (P3)
+
+`src/world/types.ts` (full rules in doc comments); the map itself is `DEFAULT_LAYOUT` in `src/world/layout.ts` (data, hand-designed control points, ASCII sketch in its header; `WORLD_LAYOUTS` registry by id).
+- Coordinates: metres, Y up, map square of `size` centred on the origin, north = −Z. Yaw about +Y, 0 faces −Z (vehicle frame). Rotations in layout data are unit direction vectors, never angles.
+- `WorldLayout{id, name, version, seed, size, terrain: TerrainParams, waterLevel, zones, pads, roads, junctions, spawnPoints, colliders (P5), props (P5)}`. Bump `version` on any change that alters generated terrain.
+- **Zones** (`ZoneShape` circle/ellipse/rect/polygon + soft `blend` → smoothstep mask) apply in a fixed kind order: plains (fbm) → hills (fbm + lift) → mountains (MAX over `MountainPeak` bumps `height·(1−u²)²`, plus ridged detail scaled by mask × macro/peak) → lake (`waterLevel − depth·(1−r²)`, dry shore ≥ waterLevel + shoreLift in the blend band) → town/arena flatten. Then edge rise, `pads` (flatten, height null = mean), roads, clamp, paint.
+- **Roads** `RoadDef{id, name, kind: highway|country|mountain|dirt|street|arena, closed, points: [x, y|null, z][], width, lanes (per direction), shoulder, bank? (max cross-slope), material, markings: highway|center|edge|none}`. y null = follow pre-road terrain (disc average). Centreline = `core/spline` centripetal Catmull-Rom. Per-kind tuning in `ROAD_KIND_DEFAULTS` (priority dirt < street < country < mountain < arena < highway, smoothRadius, maxGrade, bankFullRadius, blend, surface ribbon|splat). Carving: verge-level cross-section `y + bank·clamp(d, ±w/2)` out to the shoulder edge, smoothstep blend back to terrain; higher priority carves last. Bank sign: + = right side higher; κ + = turning right; right vector `(−tz, 0, tx)`.
+- **Junctions** `{id, pos, roads[]}`: every listed road passes within 1 m of pos. Roads resolve by priority DESC; a road meeting a resolved one has its y eased to that road's surface over `JUNCTION_EASE_M` (40 m). Roads meet ONLY at junctions (overpass-free; A tests no other centreline approach).
+- **Spawns**: on-road `{road: {id, s, d, reverse?}}` or free `{pos, yaw}`, resolved into `TerrainData.spawns`.
+- P5 placeholders: `PadDef`, `ColliderDef` (obb/cylinder/sphere + quat), `PropPlacement`.
+
+## TerrainData — FROZEN (P3)
+
+`src/world/types.ts`. `generateTerrain(layout): TerrainData` is PURE and deterministic (seeded `core/rng`/`core/noise` only; only `+ − × ÷ sqrt floor abs min max` and simplex-noise; fixed iteration order) and validates the layout.
+- Grid: sample (col, row) at `x = originX + col·spacing`, `z = originZ + row·spacing`; row-major `row·cols + col`; `cols = rows = size/spacing + 1`. Default 1408 m @ 1 m → 1409² ≈ 1.99 M samples, 22 × 22 chunks of `TERRAIN_CHUNK_CELLS` = 64.
+- `heights` Float32Array (7.9 MB); `splat` Uint8Array ×4 (7.9 MB): **R paved, G dirt, B rock, A gravel, grass = 255 − (R+G+B+A)** (sum ≤ 255 guaranteed: 5 sets in one RGBA8 texture, exact partition of unity under filtering; concrete = paved set tinted via the material map); `material` Uint8Array MaterialId per sample (2 MB, nearest lookup). ≈ 18 MB per side.
+- Also `layoutId, layoutVersion, seed, minHeight, maxHeight, waterLevel`, `roads: RoadProfile[]` (layout order) and `spawns: ResolvedSpawn[]`, `hash` = `hashTerrain()` (FNV-1a 32 word-wise over dims, heights, material, splat, road stations).
+- **RoadProfile** = resolved road: stations every `ROAD_STATION_SPACING` 2 m, `ROAD_STATION_STRIDE` 7 f64 `[x, y, z, tx, tz, bank, curvature]` (`RoadStation` offsets), `length`, `stationCount`, width/lanes/shoulder/material/markings/surface. Ribbons, AI and spawns consume profiles, never re-derive from RoadDef. Helpers `sampleRoad(profile, s, out)` (linear between stations, wraps closed) and `projectToRoad(profile, x, z, out, hintS?)` → `{s, d, dist, y}`; allocation-free.
+- **TerrainSampler** (`createTerrainSampler(terrain)`, `src/world/sampler.ts`) is structurally identical to sim's FROZEN `HeightSampler` plus `splatAt`/`contains`: bilinear `heightAt`; `normalAt` = bilinear blend of central-difference vertex normals, renormalized (C0-continuous); `materialAt` nearest; edge-clamped outside the grid; allocation-free, sim numerics. The same object drives collision, cameras and ribbon conforming.
+
+## Terrain protocol — FROZEN (P3, additive to protocol)
+
+- Main→worker `groundHeightfield{layout: WorldLayout, terrainHash}`: the worker regenerates terrain itself (KB of JSON instead of 18 MB of arrays; collision == visual by construction), compares `hashTerrain` with `terrainHash` (0 = skip), installs its own terrain either way, and answers worker→main `terrainReady{layoutId, terrainHash, matched, generateMs}`; a mismatch also posts `error`. Send before spawning (spawns queued behind it apply after). The P1 `ground{mode:'plane'}` is unchanged; the reserved `ground{mode:'heightfield'}` variant stays `unimplemented` (superseded).
+
+## Render API — FROZEN (P3)
+
+`src/render/types.ts` (full spec in doc comments).
+- `RenderContext{renderer, scene, camera, quality: QualityPreset, width, height, sampler}`. Renderer: no MSAA, sRGB output, `NoToneMapping`, shadows on.
+- Frame order: sim/vehicles → camera → `lighting.update(camera)` → terrain/roads `update(camera)` → `quality.frame(dt)` → `post.render(dt)` (the only draw).
+- `QualityPreset` (`QUALITY_PRESETS` low/medium/high/ultra, default high): `pixelRatioCap, shadowMapSize, csmCascades, csmFar, aoEnabled, aoSamples, bloom, smaa, terrainLodBias, vegetationDensity (P5), particleBudget (P5), adaptiveResolution{enabled, targetFps, minScale}`. `createQualityController(ctx, {lighting, post, others})` owns `ctx.quality` and adaptive scale.
+- `createLightingStack(ctx, opts) → Promise<{sun, sunDirection, csm, environment, update(camera), setQuality, dispose}>`: kiara_1_dawn HDRI via PMREM, matched sun, CSM (`sun` is a descriptor, not in the scene, while CSM is active).
+- `createPostStack(ctx) → {composer, render(dt), setSize, setQuality, setDepthOfField? (P7), dispose}`: RenderPass → N8AOPostPass (`gammaCorrection` false) → EffectPass(SMAA, Bloom, [DoF], ACES), HalfFloat buffers.
+- `createTerrainRenderer(ctx, terrain, materials, {lighting, patchMaterial}) → {object, update(camera), setQuality, stats, dispose}`: 64-cell chunks, LOD every 2^k sample at `TERRAIN_LOD_DISTANCES` × lodBias, skirts, splat texture + `TERRAIN_TILE_M`, triplanar rock/steep, CSM receiver.
+- `createRoadRenderer(ctx, terrain, sampler, materials, {lighting, patchMaterial}) → {object, update, setQuality, dispose}`: ribbons from `RoadProfile`s with surface 'ribbon', vertices on the carved terrain + `RIBBON_LIFT_M` 0.03 (+ polygonOffset), UV = (lateral d m, arc s m) with procedural markings; dirt trails are splat only.
+
+## patchMaterial — FROZEN (P3)
+
+`patchMaterial(material, {csm?, flexbody?, damage?}) → {color, depth, distance}`; assign `mesh.material`, `mesh.customDepthMaterial`, `mesh.customDistanceMaterial`. **Order (`PATCH_ORDER`): CSM first, then flexbody, then damage.** CSM: `csm.setupMaterial(color)` runs first because it overwrites `onBeforeCompile`; patchMaterial captures that hook and composes `prior hook → features in order`; CSM never touches depth/distance. Flexbody (P4 `ShaderPatch`) applies to color AND depth (RGBADepthPacking) AND distance, so shadows deform with the body. Damage (P4) applies to color after flexbody. `customProgramCacheKey` = prior key + feature keys in order; patching the same material twice throws. Every shadow-receiving lit material (terrain, roads, vehicles, props) must be patched with `csm`.
 
 ## BindingSet — pending (freezes end of P4)
 
