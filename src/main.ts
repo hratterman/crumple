@@ -40,12 +40,8 @@ import { createRoadRenderer } from './render/roads';
 import { createTerrainRenderer, prebuildTerrainArrays, terrainAnisotropy, terrainTextureSize } from './render/terrain';
 import { createFarLand, FARLAND_OUTER_M } from './render/terrain/farland';
 import { createColliderRenderer } from './render/world/colliders';
-import { createFxSystem } from './render/fx';
 import type { FxSystem } from './render/fx/types';
-import { createPropRenderer } from './render/props';
 import type { PropRenderer } from './render/props/types';
-import { createVegetationRenderer } from './render/vegetation';
-import { createWaterRenderer } from './render/water';
 import { bindPanels } from './render/vehicle/binder';
 import { SEDAN_VISUAL } from './render/vehicle/defs/sedan';
 import { createFlexSkin } from './render/vehicle/flexskin';
@@ -670,8 +666,17 @@ function nextFrame(): Promise<void> {
   return new Promise((resolve) => requestAnimationFrame(() => resolve()));
 }
 
+/**
+ * The P5 world layer (props, vegetation, water, FX) is its own chunks, fetched in parallel with the
+ * terrain generation (the app chunk stays under 500 kB and parses sooner).
+ */
+function loadWorldLayer() {
+  return Promise.all([import('./render/props'), import('./render/vegetation'), import('./render/water'), import('./render/fx')]);
+}
+
 async function boot(): Promise<void> {
   const t0 = performance.now();
+  const worldLayerP = loadWorldLayer();
   physicsReady.then(
     (info) => {
       stats.physicsMs = info.generateMs;
@@ -771,7 +776,11 @@ async function boot(): Promise<void> {
   }
   await nextFrame();
 
-  const [loaded, materials] = await Promise.all([terrainP, materialsP]);
+  const [loaded, materials, [{ createPropRenderer }, { createVegetationRenderer }, { createWaterRenderer }, { createFxSystem }]] = await Promise.all([
+    terrainP,
+    materialsP,
+    worldLayerP,
+  ]);
   mark('assets+terrain');
   const world = loaded.terrain;
   terrain = world;
