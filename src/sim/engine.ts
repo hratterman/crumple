@@ -51,6 +51,8 @@ import { buildRouteNetwork } from '../world/routes';
 import type { RouteNetwork, WorldLayout } from '../world/types';
 import { clampDensity, TrafficSim } from './traffic/traffic';
 import { buildVariant, type TrafficVariant } from './traffic/templates';
+import { AutopilotSet } from './traffic/autopilot';
+import type { SetAutopilotMsg } from '../protocol/messages';
 import { createTerrainSampler, type HeightfieldSampler } from '../world/sampler';
 import type { TerrainData } from '../world/types';
 import {
@@ -266,6 +268,8 @@ export class SimEngine {
   private propSlots: (PropRuntime | null)[] = [];
   /** AI traffic (P6), null = off. Runs at the start of every TRAFFIC_AI_TICKS-th tick. */
   traffic: TrafficSim | null = null;
+  /** P8: worker-side drivers of main-spawned vehicles (setAutopilot), run right after the traffic update. */
+  readonly autopilots = new AutopilotSet();
   /** Route network cache (layout id/version + terrain hash). */
   private routeCache: { key: string; net: RouteNetwork } | null = null;
   /** VehicleCatalog id per vehicle objectId (spawnVehicle.catalogId; P7 replay header). */
@@ -701,6 +705,7 @@ export class SimEngine {
     const start = obj.nodeStart;
     const n = obj.nodeCount;
     this.arena.remove(objectId);
+    this.autopilots.remove(objectId);
     this.rigs.delete(objectId);
     this.vehicles.delete(objectId);
     this.props.delete(objectId);
@@ -726,6 +731,7 @@ export class SimEngine {
     resetGroundContactState(this.state, obj.nodeStart, obj.nodeCount);
     resetColliderContactState(this.state, obj.nodeStart, obj.nodeCount);
     this.repairEpochs.set(objectId, ((this.repairEpochs.get(objectId) ?? 0) + 1) >>> 0);
+    this.autopilots.resetTimers(objectId);
     const v = this.vehicles.get(objectId);
     if (v) resetVehicleRuntime(v);
     const fl = this.floods.get(objectId);
@@ -753,6 +759,43 @@ export class SimEngine {
     }
   }
 
+  /**
+   * P8 protocol `setAutopilot`: a worker-side driver for a vehicle (challenge
+   * opponents). Unknown / non-vehicle object, bad mode or target → error.
+   * 'off' removes it and zeroes the object's actions.
+   */
+  setAutopilot(msg: SetAutopilotMsg): void {
+    const id = msg.objectId;
+    if (!this.vehicles.has(id)) throw new SimCommandError(`setAutopilot: objectId ${id} is not a vehicle`, id);
+    if (msg.mode !== 'off' && msg.mode !== 'ram') throw new SimCommandError(`setAutopilot: unknown mode ${String(msg.mode)}`, id);
+    if (msg.targetObjectId !== undefined && !Number.isInteger(msg.targetObjectId)) throw new SimCommandError('setAutopilot: targetObjectId must be an integer', id);
+    if (msg.aggression !== undefined && !(typeof msg.aggression === 'number' && Number.isFinite(msg.aggression))) throw new SimCommandError('setAutopilot: aggression must be a finite number', id);
+    this.autopilots.set(msg);
+    if (msg.mode === 'off') {
+      const obj = this.arena.get(id);
+      if (obj) for (let i = 0; i < obj.actions.length; i++) obj.actions[i] = 0;
+    }
+  }
+
+  /** AutopilotHost: [origin, front, top] global node indices of a vehicle's frame. */
+  frameNodesOf(objectId: number, out: Int32Array): boolean {
+    const v = this.vehicles.get(objectId);
+    if (!v) return false;
+    const f = v.vehicle.frameNodes;
+    out[0] = v.nodeStart + f[0]!;
+    out[1] = v.nodeStart + f[1]!;
+    out[2] = v.nodeStart + f[2]!;
+    return true;
+  }
+
+  /** AutopilotHost: one action of an object by index (clamped). */
+  setObjectAction(objectId: number, index: number, value: number): boolean {
+    const obj = this.arena.get(objectId);
+    if (!obj) return false;
+    this.setAction(obj, index, value);
+    return true;
+  }
+
   /** Sets one action by index (clamped). */
   setAction(obj: SimObject, index: number, value: number): void {
     const r = ACTION_RANGES[index];
@@ -770,6 +813,7 @@ export class SimEngine {
   step(): void {
     // P6: traffic driver model + scheduler at the START of every TRAFFIC_AI_TICKS-th tick (may spawn/despawn).
     if (this.traffic !== null && this.tick % TRAFFIC_AI_TICKS === 0) this.traffic.update(this);
+    if (this.autopilots.size > 0 && this.tick % TRAFFIC_AI_TICKS === 0) this.autopilots.update(this);
     const s = this.state;
     const objs = this.arena.objects;
     const sampler = this.sampler;

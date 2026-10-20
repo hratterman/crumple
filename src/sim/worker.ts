@@ -214,8 +214,7 @@ export class WorkerHost {
           engine.setTrafficDensity(msg.density);
           return;
         case 'setAutopilot':
-          // P8: contract landed; the ram driver lands with src/sim/traffic/autopilot.ts.
-          this.post({ type: 'unimplemented', command: msg.type });
+          engine.setAutopilot(msg);
           return;
         case 'setTransmission':
           engine.setTransmission(msg.objectId, msg.mode);
