@@ -267,9 +267,9 @@ export class AudioDirector {
     this.acc.onSkid(e);
   }
 
-  get engineState(): { rpm: number; load: number; pitch: number; limiter: boolean; crank: boolean; profile: string } {
+  get engineState(): { rpm: number; load: number; pitch: number; limiter: boolean; crank: boolean; horn: boolean; profile: string } {
     const e = this.eng;
-    return { rpm: e.rpm, load: e.load, pitch: e.pitch, limiter: e.limiter >= 0.5, crank: e.crank >= 0.5, profile: this.profile ? this.profile.id : '' };
+    return { rpm: e.rpm, load: e.load, pitch: e.pitch, limiter: e.limiter >= 0.5, crank: e.crank >= 0.5, horn: e.horn >= 0.5, profile: this.profile ? this.profile.id : '' };
   }
 
   /** One frame. `now` = AudioContext.currentTime; `running` = the context is running. */

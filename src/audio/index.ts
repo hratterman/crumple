@@ -113,7 +113,7 @@ function silentSystem(reason: string): AudioSystem {
     frames: 0,
     errors: [reason],
     lastCrash: null,
-    engine: { rpm: 0, load: 0, pitch: 1, limiter: false, crank: false, profile: '' },
+    engine: { rpm: 0, load: 0, pitch: 1, limiter: false, crank: false, horn: false, profile: '' },
     world: { rate: 0, pitch: 1, lowpass: 20000, gain: 0 },
     resume: () => Promise.resolve('unavailable'),
   };

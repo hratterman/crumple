@@ -19,7 +19,7 @@ interface AudioDebug {
   frames: number;
   errors: string[];
   lastCrash: { gain: number; kind: string } | null;
-  engine: { rpm: number; load: number; pitch: number; limiter: boolean; crank: boolean; profile: string };
+  engine: { rpm: number; load: number; pitch: number; limiter: boolean; crank: boolean; horn: boolean; profile: string };
   world: { rate: number; pitch: number; lowpass: number; gain: number };
 }
 interface G {
@@ -28,7 +28,7 @@ interface G {
   position: [number, number, number] | null;
   place(x: number, z: number, yawDeg?: number): void;
   audio: AudioDebug | null;
-  replay: { enter(o?: { time?: number }): Promise<boolean>; exit(): Promise<void>; seek(t: number): void; play(): void; pause(): void; setSpeed(s: number): void; markers(): { time: number; severity: number }[]; state: { phase: string; time: number } };
+  replay: { enter(o?: { time?: number }): Promise<boolean>; exit(): Promise<void>; seek(t: number): void; play(): void; pause(): void; setSpeed(s: number): void; markers(): { time: number; severity: number }[]; state: { phase: string; time: number; end: number } };
   debug: { client: { despawn(id: number): void; input(id: number, a: Record<string, number>): void } };
 }
 const c = (page: Page) => page.evaluate(() => {
@@ -85,6 +85,15 @@ test('audio: boots, resumes on a gesture, voices run, a crash fires one-shots, r
   expect(a.lastCrash!.gain).toBeGreaterThan(0.3);
   expect(a.frames).toBeGreaterThan(10);
 
+  // horn (H): the worker flags it, the audio sounds it; it is in the replay buffer too
+  await page.keyboard.down('KeyH');
+  await page.waitForFunction(() => (window as unknown as { __crumple: G }).__crumple.audio!.engine.horn, null, { timeout: 20_000 });
+  await page.waitForTimeout(1500);
+  await page.keyboard.up('KeyH');
+  await page.waitForFunction(() => !(window as unknown as { __crumple: G }).__crumple.audio!.engine.horn, null, { timeout: 20_000 });
+  await page.waitForTimeout(800);
+  const hornEnd = await page.evaluate(() => (window as unknown as { __crumple: G }).__crumple.replay.state.end);
+
   // replay: 1/4× → pitch 0.25^0.75, paused → world silent
   const entered = await page.evaluate(() => (window as unknown as { __crumple: G }).__crumple.replay.enter());
   expect(entered).toBe(true);
@@ -101,6 +110,14 @@ test('audio: boots, resumes on a gesture, voices run, a crash fires one-shots, r
   expect(a.world.lowpass).toBeLessThan(3000);
   await page.evaluate(() => (window as unknown as { __crumple: G }).__crumple.replay.pause());
   await page.waitForFunction(() => (window as unknown as { __crumple: G }).__crumple.audio!.world.gain === 0, null, { timeout: 20_000 });
+  // the recorded horn plays back: seek into the honk, play
+  await page.evaluate((t) => {
+    const r = (window as unknown as { __crumple: G }).__crumple.replay;
+    r.seek(t - 1.6);
+    r.setSpeed(1);
+    r.play();
+  }, hornEnd);
+  await page.waitForFunction(() => (window as unknown as { __crumple: G }).__crumple.audio!.engine.horn, null, { timeout: 20_000 });
   await page.evaluate(() => (window as unknown as { __crumple: G }).__crumple.replay.exit());
   await page.waitForTimeout(1000);
   a = (await c(page))!;

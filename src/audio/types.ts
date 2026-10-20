@@ -80,7 +80,7 @@ export interface AudioDebug {
   readonly frames: number;
   readonly errors: readonly string[];
   readonly lastCrash: { gain: number; kind: string; t: number } | null;
-  readonly engine: { rpm: number; load: number; pitch: number; limiter: boolean; crank: boolean; profile: string };
+  readonly engine: { rpm: number; load: number; pitch: number; limiter: boolean; crank: boolean; horn: boolean; profile: string };
   readonly world: { rate: number; pitch: number; lowpass: number; gain: number };
   /** Resume the context (tests; a user gesture does this in the game). */
   resume(): Promise<string>;
