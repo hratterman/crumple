@@ -56,8 +56,6 @@ import { createPostStack } from './render/post';
 import { createRoadRenderer } from './render/roads';
 import { createTerrainRenderer, prebuildTerrainArrays, terrainAnisotropy, terrainTextureSize } from './render/terrain';
 import { createFarLand, FARLAND_OUTER_M } from './render/terrain/farland';
-import { createColliderRenderer } from './render/world/colliders';
-import { createStuntParkRenderer } from './render/world/stuntpark';
 import type { FxSystem } from './render/fx/types';
 import type { PropRenderer } from './render/props/types';
 import { createStudio, type Studio } from './render/showroom/studio';
@@ -1197,7 +1195,15 @@ function nextFrame(): Promise<void> {
  * terrain generation (the app chunk stays under 500 kB and parses sooner).
  */
 function loadWorldLayer() {
-  return Promise.all([import('./render/props'), import('./render/vegetation'), import('./render/water'), import('./render/fx')]);
+  return Promise.all([
+    import('./render/props'),
+    import('./render/vegetation'),
+    import('./render/water'),
+    import('./render/fx'),
+    // P8: static colliders + stunt-park decoration (procedural textures / geometry: ~40 kB off the app chunk)
+    import('./render/world/colliders'),
+    import('./render/world/stuntpark'),
+  ]);
 }
 
 async function boot(): Promise<void> {
@@ -1293,7 +1299,7 @@ async function boot(): Promise<void> {
   }
   await nextFrame();
 
-  const [loaded, materials, [{ createPropRenderer }, { createVegetationRenderer }, { createWaterRenderer }, { createFxSystem }]] = await Promise.all([
+  const [loaded, materials, [{ createPropRenderer }, { createVegetationRenderer }, { createWaterRenderer }, { createFxSystem }, { createColliderRenderer }, { createStuntParkRenderer }]] = await Promise.all([
     terrainP,
     materialsP,
     worldLayerP,
