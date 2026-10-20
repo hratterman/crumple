@@ -89,11 +89,55 @@ export const AUTO_CLUTCH_TAU = 0.05;
 export const TC_MIN_REF_SPEED = 5;
 /** TC never cuts below this × idle rpm (clutch slip handles the launch; cutting there bogged the engine). */
 export const TC_RPM_FLOOR = 2.5;
-/** Throttle cut per m/s of excess driven-wheel speed. */
-export const TC_GAIN = 0.5;
+/**
+ * Traction control is a PI controller on the excess driven-wheel speed
+ * (m/s): cut = TC_GAIN·e + ∫TC_KI·e dt (integral clamped to [0, 1]), the
+ * excess first low-passed (TC_FILTER) and the cut slewed (TC_ATTACK /
+ * TC_RELEASE). WHY: the old proportional cut (0.5 per m/s, 20 ms attack,
+ * 150 ms release) limit-cycled at ~6 Hz with the tyre's stick-slip (a
+ * sawtooth throttle and ±2–3 m/s² of surging on every launch); the integral
+ * settles on the cut that holds the slip instead of hunting around it.
+ */
+export const TC_GAIN = 0.15;
+export const TC_KI = 1.2;
+export const TC_FILTER = 0.03;
 /** Cut attack / release time constants, s. */
-export const TC_ATTACK = 0.02;
-export const TC_RELEASE = 0.15;
+export const TC_ATTACK = 0.03;
+export const TC_RELEASE = 0.06;
+/**
+ * POWER-ON UPSHIFT (clutch-to-clutch, like a torque-converter automatic or a
+ * DCT): the new ratio is selected at once and the clutch slips at the
+ * torque that keeps the wheel torque where it was (and always
+ * Ie·UPSHIFT_MIN_DECEL above the engine torque) while the throttle is
+ * retarded to UPSHIFT_TORQUE_FACTOR, so the clutch pulls the engine down to
+ * the new gear's speed with the wheels still driven; the throttle returns
+ * as the slip falls through UPSHIFT_RAMP_SLIP, so the clutch locks
+ * (slip < UPSHIFT_SYNC_RAD_S) onto a driven engine. WHY: the old upshift opened the clutch for half the shift
+ * time (zero drive torque: the car pitched and the tyres' wound-up carcass
+ * snapped back, −5 m/s²) and then re-closed it on an engine ~2000 rpm above
+ * the new gear (its flywheel energy dumped into the tyres: a 2× torque spike
+ * and wheelspin) — the "jittery acceleration" at every gear change.
+ * Downshifts keep the open-clutch rev-matched shift.
+ */
+export const UPSHIFT_TORQUE_FACTOR = 0.3;
+/** Launch control engine speed (× idle) and its throttle band (rpm). */
+export const LAUNCH_RPM_FACTOR = 4;
+export const LAUNCH_RPM_BAND = 800;
+/** Launch control fades out between these road speeds, m/s. */
+export const LAUNCH_FADE_LO = 3;
+export const LAUNCH_FADE_HI = 7;
+/** Launch control clutch limit: this × the driven tyres' μ·load·r. */
+export const LAUNCH_TRACTION_MARGIN = 0.9;
+/** Low-pass time constant of the launch control's traction estimate, s. */
+export const LAUNCH_TRACTION_TAU = 0.4;
+/** The inertia phase clutch capacity always exceeds the engine torque by Ie × this (rad/s²): synchronisation is guaranteed. */
+export const UPSHIFT_MIN_DECEL = 600;
+/** Throttle comes back while the slip falls below this (rad/s), so the clutch locks onto a driven engine (no dip). */
+export const UPSHIFT_RAMP_SLIP = 60;
+/** Inertia phase never lasts longer than this (then the clutch locks anyway), s. */
+export const UPSHIFT_MAX_S = 1;
+/** Engine-to-gearbox slip at which the inertia phase ends (clutch locks), rad/s. */
+export const UPSHIFT_SYNC_RAD_S = 3;
 /**
  * LINE LOCK (burnouts, P5): with traction control OFF, throttle and service
  * brake both ≥ LINE_LOCK_PEDAL in a forward gear while the undriven wheels
@@ -185,6 +229,17 @@ export interface DrivetrainStateEx extends DrivetrainState {
   shiftCooldown: number;
   /** Gear engaged when the current shift started. */
   shiftFrom: number;
+  /** Power-on upshift phase: 0 none, 1 inertia phase (clutch slipping onto the new ratio). */
+  upshift: number;
+  /** Clutch capacity held during the inertia phase, N·m. */
+  upshiftCap: number;
+  /** Inertia phase elapsed / UPSHIFT_MAX_S. */
+  upshiftRamp: number;
+  /** TC integral term and filtered excess (m/s). */
+  tcI: number;
+  tcExcess: number;
+  /** Launch control: low-passed driven-tyre traction torque μ·load·r, N·m (0 = not launching). */
+  launchTrac: number;
   /** Per wheel (VehicleDef order) rotational inertia about the axle, kg·m². */
   wheelInertia: Float64Array;
   /** Locked-diff angle deviation per wheel, rad. */
@@ -221,6 +276,12 @@ export function createDrivetrainState(
     gearboxOmega: 0,
     shiftCooldown: 0,
     shiftFrom: 0,
+    upshift: 0,
+    upshiftCap: 0,
+    upshiftRamp: 0,
+    tcI: 0,
+    tcExcess: 0,
+    launchTrac: 0,
     wheelInertia,
     diffPhi: new Float64Array(wheelInertia.length),
   };
@@ -246,6 +307,12 @@ export function resetDrivetrainState(s: DrivetrainStateEx, dt: CompiledDrivetrai
   s.gearboxOmega = 0;
   s.shiftCooldown = 0;
   s.shiftFrom = 0;
+  s.upshift = 0;
+  s.upshiftCap = 0;
+  s.upshiftRamp = 0;
+  s.tcI = 0;
+  s.tcExcess = 0;
+  s.launchTrac = 0;
   s.diffPhi.fill(0);
 }
 
@@ -303,11 +370,20 @@ function smooth(e0: number, e1: number, x: number): number {
   return t * t * (3 - 2 * t);
 }
 
-function startShift(s: DrivetrainStateEx, target: number, shiftTimeS: number): void {
+function startShift(s: DrivetrainStateEx, target: number, shiftTimeS: number, table: Float64Array): void {
   s.shiftFrom = s.gear;
   s.targetGear = target;
   s.clutchWind = 0;
-  if (shiftTimeS > 0) {
+  if (shiftTimeS > 0 && target > s.gear && s.gear > 0) {
+    // power-on upshift: new ratio now; the clutch slips at the torque that keeps the WHEEL torque where it
+    // was (clutch torque × old / new ratio; applyClutch adds the sync minimum), see UPSHIFT_*
+    const t = s.clutchTorque > 0 ? s.clutchTorque : 0;
+    s.upshiftCap = (t * table[s.gear + 1]!) / table[target + 1]!;
+    s.gear = target;
+    s.upshift = 1;
+    s.upshiftRamp = 0;
+    s.shiftTimer = 0;
+  } else if (shiftTimeS > 0) {
     s.shiftTimer = shiftTimeS;
   } else {
     s.gear = target;
@@ -429,12 +505,26 @@ export const stepDrivetrain: StepDrivetrain = (
     let rpmG = gCur * omegaMean * RPM_PER_RAD_S;
     if (rpmG < 0) rpmG = -rpmG;
     const target = chooseGear(s, d, select, pedalThrottle, rpmG);
-    if (target !== s.gear) startShift(s, target, d.shiftTimeS);
+    if (target !== s.gear) startShift(s, target, d.shiftTimeS, table);
     if (s.shiftTimer > 0) {
       shiftOpen = 1;
       shiftCut = !(target > 0 && s.shiftFrom > 0 && target < s.shiftFrom);
     }
   }
+  // Power-on upshift: inertia phase until the engine is synchronised with the new ratio (≤ UPSHIFT_MAX_S).
+  let upFactor = 1;
+  if (s.upshift === 1) {
+    s.upshiftRamp += dt / UPSHIFT_MAX_S;
+    const slip = s.engineOmega - table[s.gear + 1]! * fd * omegaMean;
+    if (slip < UPSHIFT_SYNC_RAD_S || s.upshiftRamp >= 1) {
+      s.upshift = 0;
+      s.upshiftRamp = 0;
+    } else {
+      const r = 1 - (slip < UPSHIFT_RAMP_SLIP ? slip / UPSHIFT_RAMP_SLIP : 1);
+      upFactor = UPSHIFT_TORQUE_FACTOR + (1 - UPSHIFT_TORQUE_FACTOR) * r;
+    }
+  }
+  if (s.gear <= 0 || s.shiftTimer > 0) s.upshift = 0;
   const G = table[s.gear + 1]! * fd;
   const omegaG = G * omegaMean;
   s.gearboxOmega = omegaG;
@@ -447,18 +537,42 @@ export const stepDrivetrain: StepDrivetrain = (
   } else if (rpm >= d.revLimitRpm) {
     s.revLimiterActive = true;
   }
-  let throttle = shiftCut ? 0 : pedalThrottle;
+  let throttle = shiftCut ? 0 : pedalThrottle * upFactor;
   // Downshift rev-match blip while the clutch is open (first half of the shift).
   if (shiftOpen === 1 && !shiftCut && s.targetGear > 0) {
     const wTarget = table[s.targetGear + 1]! * fd * omegaMean;
     const blip = clamp01((wTarget - s.engineOmega) * REV_MATCH_GAIN);
     if (blip > throttle) throttle = blip;
   }
+  let tcThrottleShare = 1;
+  // Launch control state: road speed from the undriven wheels, fade 0 (launch) → 1 (rolling). Active with TC
+  // on, and always on a car without TC (its auto box launches like a torque converter: it never dumps the
+  // clutch); TC off on a car that has it = raw launches and burnouts.
+  let launchFade = 1;
+  let tTrac = 0;
+  if ((d.tcSlip > 0 ? s.tractionControl : true) && s.gear > 0) {
+    let vRoad = 0;
+    let nR = 0;
+    for (let w = 0; w < wheels.length; w++) {
+      const wr = wheels[w]!;
+      if (wr.wheel.driven || wr.detached !== 0) continue;
+      const v = wr.omega * wr.rollRadius;
+      vRoad += v < 0 ? -v : v;
+      nR++;
+    }
+    if (nR > 0) launchFade = smooth(LAUNCH_FADE_LO, LAUNCH_FADE_HI, vRoad / nR);
+    // driven tyres' traction torque μ·load·r; none on the ground (airborne, lifted): no launch control
+    for (let j = 0; j < driven.length; j++) {
+      const wr = wheels[driven[j]!]!;
+      if (wr.detached === 0) tTrac += wr.wheel.friction * wr.load * wr.rollRadius;
+    }
+    if (!(tTrac > 0)) launchFade = 1;
+  }
   // Traction control: compare the fastest driven wheel's rolling speed with
   // the undriven (reference) wheels' mean, cut throttle on the excess.
   if (d.tcSlip > 0 && s.tractionControl) {
     let target = 0;
-    if (s.gear > 0 && throttle > 0 && rpm > idle * TC_RPM_FLOOR) {
+    if (s.gear > 0 && throttle > 0) {
       let vRef = 0;
       let nRef = 0;
       let vDrv = -Infinity;
@@ -477,16 +591,40 @@ export const stepDrivetrain: StepDrivetrain = (
         vRef /= nRef;
         const den = vRef > TC_MIN_REF_SPEED ? vRef : TC_MIN_REF_SPEED;
         const excess = vDrv - vRef - d.tcSlip * den;
-        if (excess > 0) target = excess * TC_GAIN > 1 ? 1 : excess * TC_GAIN;
+        s.tcExcess += (excess - s.tcExcess) * (dt / (TC_FILTER + dt));
+        const e = s.tcExcess;
+        let ii = s.tcI + TC_KI * e * dt;
+        ii = ii < 0 ? 0 : ii > 1 ? 1 : ii;
+        s.tcI = ii;
+        const u = TC_GAIN * e + ii;
+        target = u < 0 ? 0 : u > 1 ? 1 : u;
       }
+    } else {
+      // inactive (lifted, neutral, low rpm): the integral bleeds off
+      s.tcI *= 1 - dt / TC_RELEASE;
+      s.tcExcess = 0;
     }
     const tau = target > s.tcCut ? TC_ATTACK : TC_RELEASE;
     s.tcCut += (target - s.tcCut) * (dt / (tau + dt));
-    throttle *= 1 - s.tcCut;
+    // Above TC_RPM_FLOOR·idle the cut retards the engine; below it (a launch, the clutch still slipping) it
+    // opens the clutch instead (cutting the throttle there bogged the engine), blended over 1–1.3× the floor.
+    tcThrottleShare = smooth(idle * TC_RPM_FLOOR, idle * TC_RPM_FLOOR * 1.3, rpm);
+    throttle *= 1 - s.tcCut * tcThrottleShare;
   } else {
     s.tcCut = 0;
+    s.tcI = 0;
+    s.tcExcess = 0;
   }
   if (s.revLimiterActive) throttle = 0;
+  // Launch control holds the engine near LAUNCH_RPM_FACTOR × idle while the clutch slips (from the limiter
+  // the flywheel dumped its energy into the tyres when the clutch locked: wheelspin, TC cut, surging).
+  if (launchFade < 1) {
+    const rpmL = idle * LAUNCH_RPM_FACTOR;
+    let lim = (rpmL - rpm) / LAUNCH_RPM_BAND;
+    lim = lim < 0 ? 0 : lim > 1 ? 1 : lim;
+    lim = lim + (1 - lim) * launchFade;
+    if (throttle > lim) throttle = lim;
+  }
   const gov = clamp01((idle - rpm) / IDLE_GOVERNOR_BAND_RPM);
   if (gov > throttle) throttle = gov;
 
@@ -508,11 +646,39 @@ export const stepDrivetrain: StepDrivetrain = (
   let applied = 1 - s.autoEngage;
   if (pedalClutch > applied) applied = pedalClutch;
   if (shiftOpen > applied) applied = shiftOpen;
+  // Upshift inertia phase: the clutch slips at the held torque (capacity = upshiftCap).
+  if (s.upshift === 1 && d.clutchMaxTorque > 0) {
+    const a = 1 - s.upshiftCap / d.clutchMaxTorque;
+    if (a > applied) applied = a;
+  }
   s.clutch = applied;
 
   // ---- clutch coupling (implicit spring-damper, see header)
   const Ie = d.engineInertia;
-  const cap = d.clutchMaxTorque * (1 - applied);
+  let cap = d.clutchMaxTorque * (1 - applied);
+  if (s.tcCut > 0 && tcThrottleShare < 1) cap *= 1 - s.tcCut * (1 - tcThrottleShare);
+  // Launch control (see launchFade; road speed below LAUNCH_FADE_*): the clutch never passes more torque than the driven
+  // tyres can put down (μ·load·r per wheel, × LAUNCH_TRACTION_MARGIN). The auto-clutch closes in ~50 ms,
+  // far faster than any slip feedback: without this every launch dumped ~1.8× the traction torque into the
+  // tyres (slip ratio ≈ 11, then ~1.5 s of ±5 m/s² surging while it recovered).
+  if (launchFade < 1 && G !== 0 && nAttached > 0) {
+    // low-passed: the instantaneous load follows the body's squat / pitch, and a limit on it closed a
+    // feedback loop (more torque → more squat → more rear load → more torque) that surged at ~5 Hz
+    s.launchTrac = s.launchTrac > 0 ? s.launchTrac + (tTrac - s.launchTrac) * (dt / (LAUNCH_TRACTION_TAU + dt)) : tTrac;
+    const lim = (LAUNCH_TRACTION_MARGIN * s.launchTrac) / (G < 0 ? -G : G);
+    const c = lim + (cap - lim) * launchFade;
+    if (c < cap) cap = c;
+  } else {
+    s.launchTrac = 0;
+  }
+  // Upshift inertia phase: always enough capacity to pull the engine down onto the new ratio.
+  if (s.upshift === 1) {
+    // the deceleration margin fades with the slip so the lock-up does not overshoot the held torque
+    let sl = (s.engineOmega - omegaG) / UPSHIFT_RAMP_SLIP;
+    sl = sl < 0.15 ? 0.15 : sl > 1 ? 1 : sl;
+    const need = tEng + Ie * UPSHIFT_MIN_DECEL * sl;
+    if (cap < need) cap = need < d.clutchMaxTorque ? need : d.clutchMaxTorque;
+  }
   let tClutch = 0;
   if (G !== 0 && nAttached > 0 && cap > 0) {
     const Iref = inertiaSum / (G * G);

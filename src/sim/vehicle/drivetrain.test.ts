@@ -315,14 +315,39 @@ describe('clutch + gearbox', () => {
     expect(r.v.telemetry[30]).toBeLessThan(1e9);
   });
 
-  it('cuts torque during a shift', () => {
+  it('upshifts under power without a torque hole or a lock-up spike (power-on upshift)', () => {
     const v = makeVehicle('open', 'manual');
     const car = new ToyCar(v);
     for (let t = 0; t < 4000; t++) car.step(actions({ throttle: 0.6, gearSelect: 1 }));
+    const before = ds(v).driveTorque;
+    expect(before).toBeGreaterThan(0);
+    // the new ratio straight away, the clutch slipping onto it (the old shift opened it: 0 drive torque, then a 2× spike)
+    car.step(actions({ throttle: 0.6, gearSelect: 2 }));
+    expect(ds(v).gear).toBe(2);
+    let min = Infinity;
+    let max = 0;
+    for (let t = 0; t < 1000; t++) {
+      car.step(actions({ throttle: 0.6, gearSelect: 2 }));
+      if (ds(v).upshift !== 1) continue;
+      // inertia phase: the wheel torque is held near the pre-shift level (this toy driveline has no
+      // damping of its own, so it rings after the lock-up; the full car is checked by the launch harness)
+      min = Math.min(min, ds(v).driveTorque);
+      max = Math.max(max, ds(v).driveTorque);
+    }
+    expect(ds(v).upshift).toBe(0);
+    expect(min).toBeGreaterThan(0.8 * before);
+    expect(max).toBeLessThan(1.3 * before);
+    // locked again, synchronised
+    expect(Math.abs(ds(v).engineOmega - ds(v).gearboxOmega)).toBeLessThan(5);
+  });
+
+  it('downshifts still open the clutch and rev-match', () => {
+    const v = makeVehicle('open', 'manual');
+    const car = new ToyCar(v);
+    for (let t = 0; t < 8000; t++) car.step(actions({ throttle: 0.6, gearSelect: 3 }));
     car.step(actions({ throttle: 0.6, gearSelect: 2 }));
     expect(ds(v).shiftTimer).toBeGreaterThan(0);
     expect(ds(v).clutch).toBe(1);
-    expect(ds(v).driveTorque).toBe(0);
     for (let t = 0; t < 1000; t++) car.step(actions({ throttle: 0.6, gearSelect: 2 }));
     expect(ds(v).gear).toBe(2);
     expect(ds(v).driveTorque).toBeGreaterThan(0);

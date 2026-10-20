@@ -339,6 +339,8 @@ describe.skipIf(missing.length > 0)('SEDAN in the engine', () => {
 
   it('full drive torque for 1 s: every axle stays within 5° of its rest direction (body frame)', () => {
     const sim = spawn();
+    // TC off: launch control (part of TC) would hold the clutch at the tyres' traction torque
+    sim.eng.setAssists(1, { tractionControl: false });
     for (let t = 0; t < 4000; t++) sim.eng.step();
     const rest = cv.wheels.map((_, w) => bodyAxle(sim, w));
     sim.eng.setInput(1, { gearSelect: 1, throttle: 1 });

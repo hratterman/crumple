@@ -604,7 +604,9 @@ const DRIVETRAIN: DrivetrainDef = {
   reverseRatio: 3.0,
   finalDrive: 4.42,
   shiftTimeS: 0.8,
-  autoShiftUpRpm: 5600,
+  // 5000 (was 5600): with seamless power-on upshifts (drivetrain.ts) the old box lost no time per shift and
+  // ran 0–100 in 10.6 s; shifting short of the torque peak puts it back at ≈ 12 s (target 11–14)
+  autoShiftUpRpm: 5000,
   autoShiftDownRpm: 2300,
   diff: 'open',
   clutchMaxTorque: 280,
