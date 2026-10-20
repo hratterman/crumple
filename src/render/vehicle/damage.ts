@@ -48,6 +48,9 @@ import {
 } from './types';
 
 export const DAMAGE_PATCH_KEY = 'dmg1';
+export const DMG_TUNE = { value: new Vector4(0.7, 1, 1, 0.01) };
+export const DMG_TUNE2 = { value: new Vector4(0.12, 0.15, 0.16, 0) };
+(globalThis as unknown as { __dmgTune: unknown }).__dmgTune = [DMG_TUNE, DMG_TUNE2];
 
 /** Event queues per update (beyond: dropped — they are FX/scuff, never state). */
 const IMPACT_QUEUE = 1024;
@@ -235,6 +238,8 @@ export function damageVariant(panel: Pick<BindingPanel, 'glass' | 'material' | '
 // ====================================================================== GLSL
 const DMG_COMMON = /* glsl */ `
 uniform float uDmgAmount;
+uniform vec4 uDmgTune;
+uniform vec4 uDmgTune2;
 float dmgHash13(vec3 p) {
   p = fract(p * 0.1031);
   p += dot(p, p.zyx + 31.32);
@@ -335,9 +340,12 @@ const DMG_SURFACE = /* glsl */ `
   vec3 dmgGFold = (dmgFa ? 3.0 * dmgR1 * dmgR1 * dmgRa : 2.1 * dmgR1b * dmgR1b * dmgRb) * dmgW1;
   // + the vertex stage's geometric crumple folds (flexskin FLEX_CRUMPLE_GLSL), so they shade.
   float dmgCrum = flexCrumpleG(dmgP, 0.03 + 20.0 * dmgPx, dmgGc);
+  // Crease zones: crush concentrates in buckle bands; between them panels keep broad dents.
+  vec3 dmgGm;
+  float dmgMask = mix(1.0, smoothstep(-0.3, 0.45, flexSnoise(dmgP * vec3(1.5, 1.7, 2.3) + 17.3, dmgGm)), uDmgTune.z);
   // height h = strain · (folds + dents + crumple) in metres; only its gradient is needed
-  vec3 dmgGH = dmgStrain * (0.008 * dmgGFold + 0.005 * dmgW2 * dmgR2 * dmgR2g + 0.0005 * dmgW3 * dmgG3 + 0.0025 * dmgGd
-    + ${FLEX_CRUMPLE_AMP} * dmgGc);
+  vec3 dmgGH = dmgStrain * (uDmgTune.y * mix(0.25, 1.0, dmgMask) * (0.008 * dmgGFold + 0.005 * dmgW2 * dmgR2 * dmgR2g) + 0.0005 * dmgW3 * dmgG3 + uDmgTune.w * dmgGd
+    + uDmgTune.x * mix(0.5, 1.0, dmgMask) * ${FLEX_CRUMPLE_AMP} * dmgGc);
   // crease valleys (inside of a fold): grime collects there
   float dmgValley = clamp(0.5 - 1.6 * dmgCrum, 0.0, 1.0) * dmgW1;
   // Scrape streaks: long horizontal scratches (stretched along y) broken up by coarse noise and a
@@ -355,22 +363,29 @@ const DMG_SURFACE = /* glsl */ `
   vec3 dmgGS = 0.21 * dmgWF * dmgSs1 * dmgGs1 + 0.18 * dmgSs2 * dmgGs2 + 0.44 * dmgGs3 + 0.05 * dmgWE * vec3(55.0, 70.0, 55.0) * dmgGs4;
   // streak change across one pixel: every scrape edge is at least that soft (no stair-stepping)
   float dmgAA = 0.7 * dmgPx * length(dmgGS);
-  // Bent metal keeps its paint; only the sharpest fold crests of a heavily crushed panel crack
-  // it (small chips), everything broader is scrape damage.
-  float dmgChip = smoothstep(0.55, 1.0, dmgStrain) * smoothstep(0.5, 0.9, dmgFold) * 0.35;
-  float dmgCover = clamp(dmgScuff * 0.9 + dmgChip, 0.0, 1.0);
+  // Scrapes (impact / skid scuff) cut through to primer, then bare metal, in streaks.
+  float dmgCover = dmgScuff * 0.9;
   float dmgOn = smoothstep(0.0, 0.02, dmgCover);
   float dmgT = 0.8 - 0.62 * dmgCover;
   float dmgDP;
   float dmgDM;
   float dmgPrimer = dmgStep(dmgT - dmgAA, dmgT + 0.03 + dmgAA, dmgStreak, dmgDP) * dmgOn;
   float dmgMetal = dmgStep(dmgT + 0.1 - dmgAA, dmgT + 0.125 + dmgAA, dmgStreak, dmgDM) * dmgOn;
+  // Bent metal keeps its paint: only the sharp crest lines of hard creases crack it, in flakes
+  // along the crest (primer shows), never as a wash over the whole crushed panel.
+  vec3 dmgGk;
+  float dmgCrest = max(dmgR1, dmgR1b);
+  float dmgCrestAA = 0.06 + 1.5 * dmgPx * max(length(dmgGa), length(dmgGb));
+  float dmgFlakeN = 0.5 + 0.5 * flexSnoise(dmgP * 48.0 + 5.1, dmgGk);
+  float dmgChip = smoothstep(1.0 - 0.07 - dmgCrestAA, 1.0 - 0.07 + dmgCrestAA, dmgCrest)
+    * smoothstep(0.4, 0.6, dmgFlakeN + 0.25 * (dmgStrain - 0.6)) * smoothstep(0.6, 1.0, dmgStrain) * dmgMask * dmgW2;
+  dmgPrimer = max(dmgPrimer, dmgChip);
   // the polished-out halo around scrapes (not around crease chips)
   float dmgHalo = smoothstep(dmgT - 0.16 - dmgAA, dmgT + dmgAA, dmgStreak) * dmgOn * clamp(dmgScuff * 3.0, 0.0, 1.0);
   // the paint layers' thickness: a tiny step down at each scrape edge catches the light
   dmgGH -= (0.00025 * dmgDP + 0.0002 * dmgDM) * dmgOn * dmgGS;
   // Dirt / dust ground into the damage: in crease valleys, around scrapes, never as a flat wash.
-  float dmgDirtAmt = clamp(dmgScuff * 0.75 + dmgStrain * 0.55 + dmgTorn * 0.4, 0.0, 1.0);
+  float dmgDirtAmt = clamp(dmgScuff * 0.75 + dmgStrain * uDmgTune2.w * dmgValley + dmgTorn * 0.4, 0.0, 1.0);
   float dmgDirtN = 0.5 * dmgS2 + 0.3 * (0.5 + 0.5 * dmgND) + 0.2 * (0.5 + 0.5 * dmgN2 * dmgW2);
   float dmgDirt = smoothstep(0.62 - 0.45 * dmgDirtAmt, 0.9 - 0.45 * dmgDirtAmt, dmgDirtN + 0.3 * dmgValley) * dmgDirtAmt;
   float dmgDx = dot(dmgGH, dmgPdx);
@@ -379,14 +394,14 @@ const DMG_SURFACE = /* glsl */ `
 
 const DMG_PAINT = /* glsl */ `
   // shallow crease valleys read a touch darker (micro-shadowed, grimy); bent paint keeps its colour
-  diffuseColor.rgb *= 1.0 - dmgStrain * (0.04 + 0.16 * dmgValley);
+  diffuseColor.rgb *= 1.0 - dmgStrain * (0.04 + uDmgTune2.z * dmgValley);
   diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * 1.2 + 0.035, dmgHalo * 0.6 * (1.0 - dmgPrimer));
   diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.2, 0.205, 0.2) * (0.75 + 0.35 * dmgS2), dmgPrimer);
   diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.6, 0.6, 0.62) * (0.8 + 0.35 * dmgS1), dmgMetal);
   diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.085, 0.072, 0.058) * (0.8 + 0.4 * dmgS3), dmgDirt * 0.6 * (1.0 - 0.6 * dmgMetal));
   // torn-edge grime: vFlexDamage.w is a smooth triad-weighted share, so square it to keep it at the tear
   diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.03, 0.027, 0.024), clamp(0.45 * dmgTorn * dmgTorn + 0.04 * dmgStrain, 0.0, 0.6));
-  roughnessFactor = mix(roughnessFactor, 0.5, clamp(dmgStrain * 0.15 + dmgHalo * 0.7 + dmgTorn * 0.3, 0.0, 1.0));
+  roughnessFactor = mix(roughnessFactor, 0.5, clamp(dmgStrain * uDmgTune2.y + dmgHalo * 0.7 + dmgTorn * 0.3, 0.0, 1.0));
   roughnessFactor = mix(roughnessFactor, 0.78, dmgPrimer);
   roughnessFactor = mix(roughnessFactor, 0.36 + 0.2 * dmgS1, dmgMetal);
   roughnessFactor = mix(roughnessFactor, 0.88, dmgDirt * 0.8);
@@ -394,7 +409,7 @@ const DMG_PAINT = /* glsl */ `
   metalnessFactor = mix(metalnessFactor, 1.0, dmgMetal);
   metalnessFactor = mix(metalnessFactor, 0.0, dmgDirt * 0.6);
   float dmgCoatKill = clamp(max(max(dmgPrimer, dmgHalo * 0.8), dmgDirt * 0.75), 0.0, 1.0);
-  float dmgCoatRough = 0.12 * dmgStrain + 0.3 * dmgTorn;
+  float dmgCoatRough = uDmgTune2.x * dmgStrain * (0.5 + 0.5 * dmgMask) + 0.3 * dmgTorn;
   normal = dmgBump(-vViewPosition, normal, dmgDx, dmgDy, faceDirection);
 `;
 
@@ -1768,6 +1783,8 @@ function makeGlassGroupPatch(panes: readonly { panel: number; u: CrackUniforms }
     apply(shader: WebGLProgramParametersWithUniforms, target: PatchTarget): void {
       if (target !== 'color') return;
       shader.uniforms.uDmgAmount = amount;
+      shader.uniforms.uDmgTune = DMG_TUNE;
+      shader.uniforms.uDmgTune2 = DMG_TUNE2;
       shader.uniforms.uCrackAs = uA;
       shader.uniforms.uCrackBs = uB;
       shader.uniforms.uCrackUs = uU;
@@ -1787,6 +1804,8 @@ function makePatch(variant: DamageVariant, amount: { value: number }, crack: Cra
     apply(shader: WebGLProgramParametersWithUniforms, target: PatchTarget): void {
       if (target !== 'color') return;
       shader.uniforms.uDmgAmount = amount;
+      shader.uniforms.uDmgTune = DMG_TUNE;
+      shader.uniforms.uDmgTune2 = DMG_TUNE2;
       if (variant === 'glass') {
         const c = crack!;
         shader.uniforms.uCrackA = c.uCrackA;
