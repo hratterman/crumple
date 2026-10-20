@@ -1,7 +1,7 @@
 /**
  * Player settings (P6 S1, pause menu): speed units, traffic density,
- * traction-control default, chase-camera framing, field of view and the
- * audio placeholder. Pure (no DOM, no three): storage is injected, every
+ * traction-control default, chase-camera framing, field of view, the
+ * audio placeholder and (P7) the crash cam. Pure (no DOM, no three): storage is injected, every
  * read is validated field by field (an unknown or corrupt value falls back
  * to its default) and storage errors are ignored, like the quality level
  * (`crumple.quality.v1`, owned by app/quality.ts).
@@ -26,6 +26,8 @@ export interface GameSettings {
   fov: number;
   /** 0..1, reserved for the P8 synthesized audio. */
   volume: number;
+  /** P7: a severe crash plays back as an instant replay (crash cam) before driving on. */
+  crashCam: boolean;
 }
 
 export const SPEED_UNITS: readonly SpeedUnits[] = ['kmh', 'mph'];
@@ -40,6 +42,7 @@ export const DEFAULT_SETTINGS: Readonly<GameSettings> = {
   chase: 'normal',
   fov: 60,
   volume: 0.8,
+  crashCam: true,
 };
 
 export const KMH_PER_MPH = 1.609344;
@@ -89,6 +92,7 @@ export function sanitizeSettings(raw: unknown): GameSettings {
     chase: pick(CHASE_FRAMINGS, o.chase, d.chase),
     fov: pick(FOV_CHOICES, o.fov, d.fov),
     volume: vol,
+    crashCam: typeof o.crashCam === 'boolean' ? o.crashCam : d.crashCam,
   };
 }
 

@@ -189,6 +189,10 @@ describe('pedals, gears and commands', () => {
     expect(m.handleKeyEvent({ type: 'keydown', code: 'Escape' })).toBe(true);
     m.handleKeyEvent({ type: 'keyup', code: 'Escape' });
     expect(m.drainCommands()).toEqual(['pause']);
+    // P7: Backspace opens the replay.
+    expect(m.handleKeyEvent({ type: 'keydown', code: 'Backspace' })).toBe(true);
+    m.handleKeyEvent({ type: 'keyup', code: 'Backspace' });
+    expect(m.drainCommands()).toEqual(['replay']);
     m.keyDown('Space');
     expect(m.update(DT, 0).handbrake).toBe(1);
     m.releaseAll();

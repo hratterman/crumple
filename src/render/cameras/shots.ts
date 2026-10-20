@@ -19,6 +19,7 @@ import {
   framingFov,
   keepAboveGround,
   lineOfSight,
+  smoothstep,
   spring1,
   springAngle,
   springTrack,
@@ -185,6 +186,7 @@ export class BumperShot implements Shot {
   readonly pose = createPose();
   healthy = true;
   private side = 1;
+  // (see goalOffset: front quarter while moving, rear quarter at rest)
   private readonly heading: Spring1 = { x: 0, v: 0 };
   private readonly offset = new Vector3();
   private readonly offsetVel = new Vector3();
@@ -219,11 +221,15 @@ export class BumperShot implements Shot {
   private goalOffset(f: ShotFrame, out: Vector3): Vector3 {
     const r = subjectRadius(f.subject);
     const fwd = yawVec(this.heading.x, _b);
-    // right of travel = fwd × up = (-fz, 0, fx) for yaw about +Y with 0 = +Z… (x, z) → (-z, x)
+    // right of travel = fwd × up = (−fz, 0, fx)
     const rx = -fwd.z;
     const rz = fwd.x;
     const lateral = this.side * (r * 0.62 + 1.25);
-    const ahead = r * 0.95 + 0.6;
+    // Moving: the camera car runs ahead at the front quarter. Stopped (a wreck against a wall): it
+    // settles at the rear quarter, never inside whatever the car hit.
+    const v = f.subject.velocity;
+    const k = smoothstep(2, 8, Math.hypot(v[0]!, v[2]!));
+    const ahead = -(r * 0.7) * (1 - k) + (r * 0.95 + 0.6) * k;
     return out.set(fwd.x * ahead + rx * lateral, 0, fwd.z * ahead + rz * lateral);
   }
 
@@ -418,7 +424,7 @@ export class HeliShot implements Shot {
     keepAboveGround(f.world, p, 12);
     this.pose.look.copy(this.center);
     const d = p.distanceTo(this.center);
-    const fov = framingFov(r, d, 0.24, 9, 40);
+    const fov = framingFov(r, d, 0.3, 8, 40);
     if (snap) this.fovS.x = fov;
     else spring1(this.fovS, fov, 2, f.dt);
     this.pose.fov = this.fovS.x;

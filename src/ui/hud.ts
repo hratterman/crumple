@@ -201,6 +201,7 @@ export class Hud {
       ['B', 'beams'],
       ['Esc', 'menu'],
       ['T', 'slow-mo'],
+      ['⌫', 'replay'],
       ['X', 'traction ctrl'],
       ['1–8', 'spawn points'],
     ]

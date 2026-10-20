@@ -392,3 +392,18 @@ describe('replay camera rig', () => {
     expect(rig.pose.position.distanceTo(p)).toBeLessThan(1e-6);
   });
 });
+
+describe('occluder', () => {
+  it('segment vs AABB', async () => {
+    const { createAabbOccluder, segmentHitsAabb } = await import('./occluder');
+    const wall = [-5, 0, -0.5, 5, 2, 0.5] as const;
+    expect(segmentHitsAabb(0, 1, -5, 0, 1, 5, wall)).toBe(true);
+    expect(segmentHitsAabb(0, 3, -5, 0, 3, 5, wall)).toBe(false);
+    expect(segmentHitsAabb(6, 1, -5, 6, 1, 5, wall)).toBe(false);
+    expect(segmentHitsAabb(0, 1, -5, 0, 1, -1, wall)).toBe(false);
+    const occ = createAabbOccluder([wall]);
+    const world: CameraWorld = { groundHeight: () => 0, occluded: occ };
+    expect(lineOfSight(world, new Vector3(0, 1, -5), new Vector3(0, 1, 5))).toBe(false);
+    expect(lineOfSight(world, new Vector3(0, 1, -5), new Vector3(8, 1, -2))).toBe(true);
+  });
+});

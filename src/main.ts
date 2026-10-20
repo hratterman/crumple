@@ -44,6 +44,8 @@ import { GAME_CAPACITY, isPropObjectId, type ActionState, type Transform } from 
 import { VehicleTelemetry } from './protocol/telemetry';
 import { DEFAULT_CHASE_OPTIONS, vehiclePoseFromNodes, type ChaseTarget } from './render/cameras/chase';
 import { CameraDirector } from './render/cameras/director';
+import { createAabbOccluder } from './render/cameras/occluder';
+import { createRoadside } from './render/cameras/roadside';
 import { BeamView } from './render/debug/beamview';
 import { createLightingStack, setNearCasters } from './render/lighting';
 import { patchMaterial } from './render/material';
@@ -78,8 +80,9 @@ import { Hud, type HudVehicleSpec } from './ui/hud';
 import { LoadingScreen } from './ui/loading';
 import { PauseMenu, type QualityLevelName } from './ui/pause';
 import { Showroom, type ShowroomStage } from './ui/showroom/showroom';
+import { createReplaySession, type ReplaySession } from './ui/replay/session';
 import type { PerfOverlay, PerfOverlayData } from './ui/perfOverlay';
-import { resolveColliders } from './world/colliders';
+import { colliderWorldAabb, resolveColliders } from './world/colliders';
 import { DEFAULT_LAYOUT } from './world/layout';
 import { createTerrainSampler } from './world/sampler';
 import { resolveWater } from './world/water';
@@ -374,6 +377,8 @@ const director = new CameraDirector(camera, renderer.domElement, {
 // Per-vehicle gear count / transmission are applied when the player vehicle loads (applyPlayerSpec).
 const mapper = createInputMapper({ transmission });
 let hud: Hud | null = null;
+/** P7 (R2): replay UI, replay cameras, crash cam and photo mode (ui/replay/session.ts); null until boot. */
+let replaySession: ReplaySession | null = null;
 let paused = false;
 let slowMo = false;
 /** Traction control (X); P6: every spawn starts with the settings' default. */
@@ -446,6 +451,7 @@ function teleport(i: number): void {
   client.reset(VEHICLE_ID, lastSpawn);
   lastSent.gearSelect = NaN; // force a full input resend
   snapAfterTick = client.latestTick;
+  replaySession?.quietCrashCam(); // P7: the drop onto the spawn is not a crash
   hud?.showToast(terrain.spawns[i]!.name.toUpperCase(), `SPAWN ${i + 1}`);
 }
 
@@ -456,6 +462,7 @@ function placeVehicle(x: number, z: number, yaw: number): void {
   client.reset(VEHICLE_ID, lastSpawn);
   lastSent.gearSelect = NaN;
   snapAfterTick = client.latestTick;
+  replaySession?.quietCrashCam();
 }
 
 /** F: full repair in place (heading kept), dropped onto the terrain. */
@@ -471,6 +478,7 @@ function repairVehicle(): void {
   client.reset(VEHICLE_ID, t);
   lastSent.gearSelect = NaN;
   snapAfterTick = client.latestTick;
+  replaySession?.quietCrashCam();
   // P5: F also rebuilds the arena (every layout prop repaired and re-placed asleep).
   if (layoutPropCount > 0) client.resetProps();
 }
@@ -516,6 +524,7 @@ function handleCommands(): void {
     switch (c) {
       case 'recover':
         client.recover(VEHICLE_ID);
+        replaySession?.quietCrashCam();
         break;
       case 'repair':
         repairVehicle();
@@ -537,6 +546,10 @@ function handleCommands(): void {
         break;
       case 'toggleTractionControl':
         setTractionControl(!tractionControl);
+        break;
+      case 'replay':
+        // P7: Backspace / D-pad right opens the live replay (its UI takes the keyboard while open).
+        replaySession?.toggleReplay();
         break;
       case 'shiftUp':
       case 'shiftDown':
@@ -709,6 +722,7 @@ async function swapVehicle(choice: VehicleChoice, spawnAt: number | null): Promi
   }
   applyPlayerSpec(assets);
   client.spawnVehicle(VEHICLE_ID, assets.sim, lastSpawn, transmission, entry.id);
+  replaySession?.quietCrashCam();
   tractionControl = settings.tractionControl;
   if (!tractionControl) client.setAssists(VEHICLE_ID, { tractionControl: false });
   fx?.addVehicle(VEHICLE_ID, assets.compiled);
@@ -840,6 +854,16 @@ function createMenus(): void {
       quality.setLevel(level);
       redrawPaused = true;
     },
+    // P7 (R2): replay + photo mode from the menu.
+    onReplay: () => {
+      resume();
+      void replaySession?.enterReplay();
+    },
+    onPhoto: () => {
+      resume();
+      void replaySession?.enterPhoto();
+    },
+    replayInfo: () => ({ seconds: replay.duration, crashes: replay.markers().length }),
   });
   showroom = new Showroom(document.body, {
     entries: PLAYER_VEHICLE_IDS.map((id) => getVehicleEntry(id)),
@@ -1068,6 +1092,10 @@ const crumple = {
   /** P7 live replay (app/replay/types.ts ReplayDebugApi). */
   get replay() {
     return replay.debug;
+  },
+  /** P7 (R2) replay UI / cameras / crash cam / photo mode (ui/replay/session.ts ReplaySessionDebug), null before boot. */
+  get replayUi() {
+    return replaySession ? replaySession.debug : null;
   },
   /** Dev handles for tuning from the console (not a contract). `sedanVisual` stays as an alias of `playerVisual`. */
   debug: { scene, camera, renderer, ctx, client } as Record<string, unknown>,
@@ -1322,6 +1350,38 @@ async function boot(): Promise<void> {
   hud = hudView;
   createMenus();
 
+  // P7 (R2): the replay session (UI, replay cameras, crash cam, photo mode). Crash cam: on by the
+  // player's setting; automation (navigator.webdriver) keeps it off unless ?crashcam=1.
+  const crashCamParam = params.get('crashcam');
+  const cameraHeight = (x: number, z: number): number => smp.heightAt(x, z);
+  replaySession = createReplaySession({
+    replay,
+    camera,
+    renderer,
+    post: postStack,
+    world: {
+      groundHeight: cameraHeight,
+      occluded: createAabbOccluder(resolveColliders(LAYOUT.colliders, cameraHeight).map((c) => colliderWorldAabb(c))),
+      roadside: createRoadside(world.roads, cameraHeight),
+    },
+    pickMeshes: () => [collidersR.object],
+    renderFrame: () => frame(0, false),
+    canHighlight: () => running && mode === 'drive' && !paused && !hold && !pinnedCamera,
+    crashCamEnabled: () => (crashCamParam !== null ? crashCamParam !== '0' : settings.crashCam && !navigator.webdriver),
+    onActiveChange: (on) => {
+      mapper.releaseAll();
+      lastSent.gearSelect = NaN; // full input resend after the replay
+      hudView.setVisible(!on);
+    },
+    onExitToLive: (smooth) => {
+      if (smooth) director.handOver();
+      else director.snap();
+    },
+    toast: (title, sub) => hudView.showToast(title, sub, 1800),
+    subjectName: (t) => (t.objectId === VEHICLE_ID && player ? player.assets.entry.stats.name : t.kind === 'traffic' ? 'Traffic' : 'Object'),
+    units: () => settings.units,
+  });
+
   const hudStatus = { paused: false, slowMo: false, camera: 'chase', transmission, beamView: true, view: debugView as string, tractionControl };
   const bootTime = performance.now();
   const worldFrame: WorldFrame = {
@@ -1390,7 +1450,8 @@ async function boot(): Promise<void> {
       camera.position.fromArray(pinnedCamera.pos);
       camera.lookAt(pinnedCamera.target[0], pinnedCamera.target[1], pinnedCamera.target[2]);
       camera.updateMatrixWorld();
-    } else director.update(dt, poseValid ? pose : null);
+    } else if (replaySession?.ownsCamera) replaySession.updateCamera(dt);
+    else director.update(dt, poseValid ? pose : null);
     prof.lap('camera');
     lighting.update(camera);
     updateNearCasters(lighting);
@@ -1441,6 +1502,8 @@ async function boot(): Promise<void> {
     hudView.update(client.telemetry(VEHICLE_ID), hudStatus, dt);
     prof.lap('hud');
     perfOverlay?.update(perfData);
+    // P7 (R2): replay UI, crash cam (after the frame is drawn).
+    if (input) replaySession?.frame(dt);
   };
 
   // P7 replay: main's side of a settled seek (damage reset + deterministic FX re-run) and the mode switch.

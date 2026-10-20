@@ -1,7 +1,7 @@
 /**
  * Pause menu (P6 S1): Escape / P / gamepad Start. The sim is paused
  * (timescale 0) while it is open and the world shows frozen behind a
- * blurred glass overlay. Sections: resume, choose vehicle (showroom), spawn
+ * blurred glass overlay. Sections: resume, replay & photo (P7), choose vehicle (showroom), spawn
  * point (the layout's named spawns), settings (quality preset, traffic,
  * units, TC default, camera framing / FOV, audio placeholder), controls
  * and restart (full repair at the current spawn point, props re-placed).
@@ -14,8 +14,8 @@ import './pause.css';
 import type { GameSettings } from '../app/settings';
 import { firstGamepad, keyIntent, moveFocus, PadNav, type NavIntent } from './showroom/nav';
 
-export type PauseSection = 'resume' | 'vehicle' | 'spawn' | 'settings' | 'controls' | 'restart';
-export const PAUSE_SECTIONS: readonly PauseSection[] = ['resume', 'vehicle', 'spawn', 'settings', 'controls', 'restart'];
+export type PauseSection = 'resume' | 'replay' | 'vehicle' | 'spawn' | 'settings' | 'controls' | 'restart';
+export const PAUSE_SECTIONS: readonly PauseSection[] = ['resume', 'replay', 'vehicle', 'spawn', 'settings', 'controls', 'restart'];
 
 export interface PauseSpawn {
   id: string;
@@ -36,10 +36,16 @@ export interface PauseMenuOptions {
   onRestart: () => void;
   onSettings: (patch: Partial<GameSettings>) => void;
   onQuality: (level: QualityLevelName) => void;
+  /** P7 (R2): open the live replay / photo mode (the menu closes first). */
+  onReplay?: () => void;
+  onPhoto?: () => void;
+  /** Seconds held in the replay buffer and crash markers in it. */
+  replayInfo?: () => { seconds: number; crashes: number };
 }
 
 const LABELS: Readonly<Record<PauseSection, string>> = {
   resume: 'Resume',
+  replay: 'Replay & photo',
   vehicle: 'Choose vehicle',
   spawn: 'Spawn point',
   settings: 'Settings',
@@ -48,6 +54,7 @@ const LABELS: Readonly<Record<PauseSection, string>> = {
 };
 const SUBS: Readonly<Record<PauseSection, string>> = {
   resume: 'Back to the road',
+  replay: 'Rewind · slow-mo · photo mode',
   vehicle: 'Showroom · paint',
   spawn: 'Teleport anywhere',
   settings: 'Graphics · traffic · camera',
@@ -289,6 +296,9 @@ export class PauseMenu {
       case 'vehicle':
         this.renderOverview(p);
         break;
+      case 'replay':
+        this.renderReplay(p);
+        break;
       case 'spawn':
         this.renderSpawns(p);
         break;
@@ -331,6 +341,31 @@ export class PauseMenu {
         ? 'Step into the studio: pick a car and a paint, then drive it out at the start point you choose.'
         : 'The world is frozen. Press Esc or Start to drive on.',
     );
+  }
+
+  private renderReplay(p: HTMLElement): void {
+    this.head(p, 'Replay', 'The last moments, again');
+    const info = this.opts.replayInfo?.();
+    const grid = h('div', 'pm-overview', p);
+    const card = (label: string, value: string): void => {
+      const c = h('div', 'pm-ov-card', grid);
+      h('span', 'pm-ov-label', c, label);
+      h('span', 'pm-ov-value', c, value);
+    };
+    card('Recorded', info ? `${Math.floor(info.seconds)} s` : '—');
+    card('Crashes', info ? String(info.crashes) : '—');
+    const row = h('div', 'pm-replay-actions', p);
+    const watch = h('button', 'pm-confirm', row);
+    watch.dataset.nav = '';
+    watch.dataset.testid = 'pause-replay-watch';
+    h('span', '', watch, 'Watch replay');
+    watch.addEventListener('click', () => this.opts.onReplay?.());
+    const photo = h('button', 'pm-confirm pm-confirm--ghost', row);
+    photo.dataset.nav = '';
+    photo.dataset.testid = 'pause-replay-photo';
+    h('span', '', photo, 'Photo mode');
+    photo.addEventListener('click', () => this.opts.onPhoto?.());
+    h('p', 'pm-note', p, 'Scrub the timeline, slow it down to 1/8×, fly a free camera or let the director cut it. Backspace opens it while driving.');
   }
 
   private renderSpawns(p: HTMLElement): void {
@@ -425,6 +460,17 @@ export class PauseMenu {
         set: (v) => set({ fov: v as number }),
       },
       {
+        key: 'crashCam',
+        label: 'Crash cam',
+        note: 'Severe crashes play back as an instant replay',
+        options: [
+          { value: true, label: 'On' },
+          { value: false, label: 'Off' },
+        ],
+        get: () => o.settings().crashCam,
+        set: (v) => set({ crashCam: v as boolean }),
+      },
+      {
         key: 'volume',
         label: 'Master volume',
         note: 'Synthesized audio arrives in a later update',
@@ -501,6 +547,11 @@ export class PauseMenu {
       ['Slow motion', 'T', 'D-pad ↓'],
       ['Traction control', 'X', 'D-pad ←'],
       ['Spawn points', '1 – 8', '—'],
+      ['Replay', '⌫', 'D-pad →'],
+      ['Replay: play · frame · speed', 'Space · ← → · [ ]', 'A · D-pad · LB RB'],
+      ['Replay: reverse · camera · subject', 'R · C · 1–7 · Tab', 'Back · X · Y'],
+      ['Replay: crashes · hide UI · exit', ', . · H · Esc', 'B'],
+      ['Photo mode (in replay)', 'P · Enter shoots', '—'],
       ['Menu', 'Esc · P', 'Start'],
     ];
     const head = h('div', 'pm-ctl pm-ctl--head', t);

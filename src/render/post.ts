@@ -26,6 +26,7 @@ import { HalfFloatType, NoToneMapping, ShaderMaterial, SRGBColorSpace } from 'th
 import type { Camera, Scene, WebGLRenderer } from 'three';
 import {
   BloomEffect,
+  DepthOfFieldEffect,
   EffectComposer,
   EffectPass,
   RenderPass,
@@ -184,6 +185,16 @@ export const createPostStack: CreatePostStack = (ctx: RenderContext): PostStack 
   let sanitizePass: ShaderPass | null = null;
   let effects: { smaa: SMAAEffect; bloom: BloomEffect; tone: ToneMappingEffect; vignette: VignetteEffect } | null = null;
   let flagsKey = '';
+  // P7 photo mode: DoF in its own pass right before the EffectPass (SMAA and DoF are both convolution
+  // effects and cannot share a pass); absent unless setDepthOfField is on, so the default path is unchanged.
+  let dofPass: EffectPass | null = null;
+  let dofEffect: DepthOfFieldEffect | null = null;
+  const placeDof = (): void => {
+    if (!dofPass) return;
+    composer.removePass(dofPass);
+    const i = effectPass ? composer.passes.indexOf(effectPass) : -1;
+    composer.addPass(dofPass, i >= 0 ? i : undefined);
+  };
 
   const makeEffects = (q: QualityPreset) => ({
     smaa: new SMAAEffect({ preset: smaaPresetFor(q) }),
@@ -231,6 +242,7 @@ export const createPostStack: CreatePostStack = (ctx: RenderContext): PostStack 
     effectPass = new EffectPass(camera, ...orderedEffects<Effect>(flags, effects));
     effectPass.dithering = true; // 8-bit output of half-float sky gradients bands without it
     composer.addPass(effectPass);
+    placeDof();
   };
 
   const setQuality = (q: QualityPreset): void => {
@@ -250,8 +262,27 @@ export const createPostStack: CreatePostStack = (ctx: RenderContext): PostStack 
       composer.setSize(Math.max(1, width), Math.max(1, height));
     },
     setQuality,
+    setDepthOfField(opts) {
+      if (!opts) {
+        if (dofPass) {
+          composer.removePass(dofPass);
+          dofPass.dispose();
+          dofPass = dofEffect = null;
+        }
+        return;
+      }
+      if (!dofEffect || !dofPass) {
+        dofEffect = new DepthOfFieldEffect(camera, { focusDistance: opts.focusDistance, focusRange: opts.focalLength, bokehScale: opts.bokehScale, resolutionScale: 1 });
+        dofPass = new EffectPass(camera, dofEffect);
+        placeDof();
+      }
+      dofEffect.cocMaterial.focusDistance = Math.max(0.1, opts.focusDistance);
+      dofEffect.cocMaterial.focusRange = Math.max(0.05, opts.focalLength);
+      dofEffect.bokehScale = Math.max(0, opts.bokehScale);
+    },
     dispose() {
       composer.removeAllPasses();
+      dofPass?.dispose();
       effectPass?.dispose();
       sanitizePass?.dispose();
       ao.dispose();
@@ -265,6 +296,9 @@ export const createPostStack: CreatePostStack = (ctx: RenderContext): PostStack 
       },
       get effects() {
         return effects;
+      },
+      get dof() {
+        return dofPass;
       },
       setToneMapping(mode: ToneMappingMode) {
         toneMode = mode;
@@ -280,6 +314,8 @@ export interface PostDebug {
   readonly ao: N8AOPostPass;
   readonly sanitize: ShaderPass | null;
   readonly effects: { smaa: SMAAEffect; bloom: BloomEffect; tone: ToneMappingEffect; vignette: VignetteEffect } | null;
+  /** P7: the depth-of-field pass while setDepthOfField is on, else null. */
+  readonly dof: EffectPass | null;
   setToneMapping(mode: ToneMappingMode): void;
 }
 

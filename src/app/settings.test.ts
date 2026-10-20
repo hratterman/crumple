@@ -15,7 +15,10 @@ describe('settings', () => {
       chase: 'far',
       fov: 70,
       volume: 0.4,
+      crashCam: true,
     });
+    expect(sanitizeSettings({ crashCam: false }).crashCam).toBe(false);
+    expect(sanitizeSettings({ crashCam: 'no' }).crashCam).toBe(true);
     const bad = sanitizeSettings({ units: 'knots', traffic: 7, tractionControl: 'yes', chase: null, fov: 61, volume: 9 });
     expect(bad).toEqual({ ...DEFAULT_SETTINGS, volume: 1 });
   });

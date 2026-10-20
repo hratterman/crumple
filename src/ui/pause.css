@@ -476,6 +476,22 @@
   outline: 2px solid #fff;
   outline-offset: 3px;
 }
+/* P7: replay & photo actions */
+.pm-replay-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 22px 0 6px;
+}
+.pm-confirm--ghost {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: var(--pm-fg) !important;
+  box-shadow: none;
+}
+.pm-confirm--ghost:hover {
+  border-color: rgba(255, 196, 107, 0.6);
+}
 
 /* footer */
 .pm-foot {

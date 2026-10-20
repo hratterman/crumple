@@ -53,6 +53,12 @@ export class CameraDirector {
     this.chase.reset();
   }
 
+  /** P7: another rig moved the camera (replay): the next update continues smoothly from where it is. */
+  handOver(): void {
+    this.pendingSwitch = true;
+    if (this.orbit.enabled) this.orbit.deactivate();
+  }
+
   /** `target` null = subject not visible yet (cameras hold still). */
   update(dt: number, target: ChaseTarget | null): void {
     if (this._mode === 'chase') {
