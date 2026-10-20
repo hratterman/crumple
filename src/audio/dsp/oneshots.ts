@@ -225,7 +225,7 @@ function addBody(out: Float32Array, sr: number, rng: Noise, start: number, amp: 
     out[i0 + i] = out[i0 + i]! + v * env * (i < atk ? i / atk : 1);
     env *= dec;
   }
-  addThump(out, sr, start, 105 + 30 * rng.next(), 58, 0.03, decayS * 1.1, amp * 0.55, 1.6);
+  addThump(out, sr, start, 105 + 30 * rng.next(), 58, 0.03, decayS * 0.9, amp * 0.32, 1.6);
 }
 
 /**
@@ -373,6 +373,8 @@ export function synthOneShot(kind: OneShotKind, sr: number, seed: number): Float
       addCracks(out, sr, rng, 0, 2, 1);
       addGrains(out, sr, rng, 0, 0.09, 5000, 600, 0.9, 1800, 9000, 0.2, 1.6, 0.5, 1.5);
       addBurst(out, sr, rng, 0, 0.12, 4500, 0.4, 0.35, 0.03);
+      // the pane's crunch body (1–3 kHz) under the bright burst
+      addGrains(out, sr, rng, 0, 0.07, 2500, 400, 0.45, 900, 3200, 0.3, 2, 0.6, 1.4);
       const ticks = 6 + Math.floor(rng.next() * 9);
       for (let k = 0; k < ticks; k++) {
         const t = 0.12 + Math.pow(rng.next(), 1.4) * (dur - 0.2);
@@ -405,16 +407,17 @@ export function synthOneShot(kind: OneShotKind, sr: number, seed: number): Float
     }
     case 'clang': {
       // hard metal on metal: dense inharmonic partials, heavily damped (< 150 ms), with a body knock
-      addMetal(out, sr, rng, 0, 48, 280, 6000, 0.025, 0.12, 1);
-      addBody(out, sr, rng, 0, 0.5, 0.03, 300);
-      addGrains(out, sr, rng, 0, 0.05, 1500, 300, 0.4, 600, 3500, 0.3, 2);
+      addMetal(out, sr, rng, 0, 64, 280, 6000, 0.012, 0.05, 0.6);
+      addBody(out, sr, rng, 0, 0.6, 0.03, 300);
+      addGrains(out, sr, rng, 0, 0.07, 2200, 300, 0.6, 600, 4000, 0.3, 2);
       return normalize(out, 0.85);
     }
     case 'drum': {
       // 200 L steel drum: hollow body boom + a dense, short shell ring
       addThump(out, sr, 0, 125 + 20 * rng.next(), 85, 0.04, 0.13, 0.9, 1.3);
       addBody(out, sr, rng, 0, 0.6, 0.05, 260);
-      addMetal(out, sr, rng, 0, 40, 160, 3200, 0.06, 0.24, 1.1);
+      addMetal(out, sr, rng, 0, 56, 160, 3200, 0.035, 0.13, 0.7);
+      addGrains(out, sr, rng, 0, 0.05, 1500, 300, 0.35, 400, 2500, 0.3, 2);
       return normalize(out, 0.85);
     }
     case 'cone': {
@@ -452,7 +455,8 @@ export function synthOneShot(kind: OneShotKind, sr: number, seed: number): Float
     case 'pole': {
       // a sign / light pole: a knock and a dense, damped ring (a pole sings a little longer than a panel)
       addBody(out, sr, rng, 0, 0.5, 0.03, 300);
-      addMetal(out, sr, rng, 0, 56, 140, 3600, 0.08, 0.32, 1.2);
+      addMetal(out, sr, rng, 0, 72, 140, 3600, 0.04, 0.16, 0.8);
+      addGrains(out, sr, rng, 0, 0.04, 1500, 300, 0.3, 500, 3000, 0.3, 2);
       return normalize(out, 0.8);
     }
     case 'concrete': {

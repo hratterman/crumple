@@ -146,19 +146,38 @@ export function mixAt(dst: Float32Array, src: Float32Array, at: number, gain: nu
   }
 }
 
-/** A heavy crash as the game layers it: boom + thump + crunch + snaps + glass + debris (seconds). */
-export function renderCrash(sr: number, severity: number, seed = 1, rate = 1): Float32Array {
-  const out = new Float32Array(Math.ceil(3 * sr / rate));
-  const v = (k: OneShotKind, i: number): Float32Array => synthOneShot(k, sr, seed * 31 + i);
-  mixAt(out, v('boom', 0), 0, 0.4 * severity, sr, rate);
-  mixAt(out, v('thump', 1), 0, 0.35 * severity, sr, rate);
-  mixAt(out, v('crunch', 2), 0.002, 0.7, sr, rate);
-  mixAt(out, v('crunch', 3), 0.06, 0.45 * severity, sr, rate);
-  mixAt(out, v('snap', 4), 0.03, 0.25, sr, rate);
-  mixAt(out, v('snap', 5), 0.11, 0.2, sr, rate);
-  mixAt(out, v('glass', 6), 0.04, 0.42 * severity, sr, rate);
-  mixAt(out, v('debris', 7), 0.18, 0.35, sr, rate);
-  for (let i = 0; i < out.length; i++) out[i] = Math.tanh(out[i]! * 1.1) * 0.9;
+/**
+ * A crash as the director layers it (director.ts vehicleFrame) at level g
+ * (0.15 light tap, 0.4 medium, 1 heavy): body thud, tap or crunch, the
+ * rolling crumple chosen by level, a boom for heavy hits, continuation
+ * crunches while the car keeps deforming, snaps / plastic for breaking
+ * beams, debris. `rate` = playback rate (slow-mo pitch).
+ */
+export function renderCrash(sr: number, g: number, seed = 1, rate = 1): Float32Array {
+  const out = new Float32Array(Math.ceil((2.6 * sr) / rate));
+  let n = 0;
+  const v = (k: OneShotKind, variant = -1): Float32Array => synthOneShot(k, sr, variant >= 0 ? variant + 1 : seed * 31 + ++n);
+  const at = (t: number): number => t / rate;
+  mixAt(out, v('thump'), 0, 0.45 + 0.55 * g, sr, rate);
+  if (g < 0.22) mixAt(out, v('tap'), 0, 0.45 + g, sr, rate);
+  else {
+    mixAt(out, v('crunch'), 0, 0.5 + 0.45 * g, sr, rate);
+    if (g >= 0.4) mixAt(out, v('crumple', Math.min(3, Math.floor((g - 0.4) / 0.15))), at(0.02), 0.45 + 0.5 * g, sr, rate);
+  }
+  if (g >= 0.6) mixAt(out, v('boom'), 0, 0.9 * g, sr, rate);
+  // the episode: deformation continues for 0.25 + 1.25·g s, a crunch grain every ≥ 90 ms while it does
+  if (g >= 0.3) {
+    const len = 0.25 + 1.25 * g;
+    for (let t = 0.12; t < len * 0.8; t += 0.09 + 0.08 * ((t * 7.3) % 1)) mixAt(out, v('crunch'), at(t), Math.min(0.9, 0.25 + 0.5 * g * (1 - t / len)), sr, rate);
+    const snaps = Math.round(2 + 6 * g);
+    for (let k = 0; k < snaps; k++) mixAt(out, v('snap'), at(0.02 + (k / snaps) * len * 0.7), 0.35 + 0.3 * g, sr, rate);
+    if (g >= 0.5) mixAt(out, v('plastic'), at(0.05), 0.5 * g, sr, rate);
+    if (g >= 0.5) mixAt(out, v('debris'), at(0.25 + len * 0.3), 0.6 * g, sr, rate);
+  }
+  let peak = 0;
+  for (let i = 0; i < out.length; i++) peak = Math.max(peak, Math.abs(out[i]!));
+  const k = peak > 0.9 ? 0.9 / peak : 1;
+  for (let i = 0; i < out.length; i++) out[i] = Math.tanh(out[i]! * k * 1.15) / Math.tanh(1.15) * 0.95;
   return out;
 }
 
@@ -248,7 +267,14 @@ export function renderScenarios(sr: number): RenderedScenario[] {
   }
   // crashes: heavy at 1×, the same at the crash cam's 1/4× (pitch 0.25^0.75), light knock; every one-shot kind
   out.push({ name: 'crash_heavy', channels: [renderCrash(sr, 1, 3)] });
+  out.push({ name: 'crash_medium', channels: [renderCrash(sr, 0.4, 5)] });
+  out.push({ name: 'crash_light_tap', channels: [renderCrash(sr, 0.15, 7)] });
   out.push({ name: 'crash_heavy_slowmo_quarter', channels: [renderCrash(sr, 1, 3, Math.pow(0.25, 0.75))] });
+  {
+    const g = new Float32Array(Math.ceil(1.2 * sr));
+    mixAt(g, synthOneShot('glass', sr, 2), 0, 0.9, sr);
+    out.push({ name: 'glass_break', channels: [g] });
+  }
   for (const k of ONE_SHOT_KINDS) {
     const len = synthOneShot(k, sr, 1).length;
     const all = new Float32Array(len * 2 + sr);
