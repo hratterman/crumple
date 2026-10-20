@@ -140,7 +140,7 @@ function buildCatalog(world: CatalogWorld): ChallengeDef[] {
         { type: 'timeLimit', seconds: 25, onExpire: 'fail' },
       ],
       scoring: { metric: 'crush', better: 'higher', unit: 'cm', decimals: 0 },
-      medals: { bronze: 70, silver: 95, gold: 115, crumple: 135 },
+      medals: { bronze: 70, silver: 95, gold: 115, crumple: 128 },
       botLine: [[360, 400], [360, 250]],
     },
     {

@@ -157,7 +157,7 @@ describe.skipIf(!ON)('challenge playtests (PLAYTEST=1)', () => {
   }, 900_000);
 
   it.runIf(want('barrel-roll'))('barrel-roll', () => {
-    for (const kmh of [40, 55, 70, 85]) report('barrel-roll', `${kmh} km/h`, playtest(def('barrel-roll'), { bot: { speedKmh: kmh, latAcc: 50 } }));
+    for (const kmh of [40, 50, 55, 58, 60, 62, 70, 85]) report('barrel-roll', `${kmh} km/h`, playtest(def('barrel-roll'), { bot: { speedKmh: kmh, latAcc: 50 } }));
   }, 900_000);
 
   it.runIf(want('truck-topple'))('truck-topple', () => {
