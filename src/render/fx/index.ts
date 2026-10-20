@@ -102,7 +102,7 @@ const SOFT_KINDS: readonly KindMotion[] = [
 ];
 /** (fade-in s, fade-out start fraction, turbulence m, flat) */
 const SOFT_SHAPING: readonly (readonly number[])[] = [
-  [0.1, 0.4, 0.8, 0],
+  [0.08, 0.3, 1.1, 0],
   [0.06, 0.3, 0.5, 0],
   [0.8, 0.35, 1.1, 0],
   [0.02, 0.45, 0.05, 0],
@@ -147,10 +147,17 @@ const STAMP_S = 0.2;
 const STAMP_MAX_SPEED = 1.5;
 const STAMP_LENGTH_M = 1.1;
 const STAMP_BACK_M = 0.3;
+/**
+ * Optical cross-section (puff opacity × (puff size scale)²) per sim second a smoking wheel
+ * may feed into its local cloud at standstill (× (1 + 0.5 · ground speed m/s) when moving).
+ * A 10 s standing burnout saturates at a translucent cloud the chase camera sees the car
+ * through, at every preset.
+ */
+export const SMOKE_OPACITY_RATE = 30;
 /** Tyre smoke puffs are laid at least this far apart along the contact path (high preset), m. */
 export const SMOKE_SPACING_M = 0.45;
 /** Radius around the player vehicle (the first registered) inside which smoke between it and the camera thins out, m. */
-const FOCUS_RADIUS_M = 2.6;
+const FOCUS_RADIUS_M = 3.2;
 /** Sim step (s): WorldFrame.tick × SIM_DT = the latest snapshot's sim time. */
 const SIM_DT = 1 / 2000;
 const PLASTIC_BLACK: readonly [number, number, number] = [0.02, 0.02, 0.022];
@@ -290,11 +297,13 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
 
   let rateScale = 1;
   let smokeSpacing = SMOKE_SPACING_M;
+  let smokeArea = 1;
   const applyBudgetScales = (): void => {
     rateScale = Math.min(1.5, q.particleBudget / 3000);
     // smaller budgets draw bigger puffs (sizeScale), so they can sit further apart
     smokeSpacing = SMOKE_SPACING_M / Math.sqrt(Math.max(rateScale, 0.2));
     const sizeScale = Math.min(1.7, Math.max(1, Math.pow(3000 / q.particleBudget, 0.3)));
+    smokeArea = sizeScale * sizeScale;
     (soft.mesh.material.uniforms.uSizeScale as { value: number }).value = sizeScale;
   };
   applyBudgetScales();
@@ -785,6 +794,12 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
         }
         n = Math.min(n, 48);
         const heat = Math.min(1, (slip - 3) / 5);
+        // Cloud density budget: the opacity a wheel may feed into its LOCAL cloud per sim second.
+        // A standing burnout feeds one spot (only wind + rise carry smoke away); a moving wheel
+        // spreads the same smoke along its path, so its allowance grows with ground speed.
+        // feed counts optical cross-section (opacity × puff area): small budgets draw bigger puffs
+        const feed = smokeRate(slip, load) * rateScale * 0.72 * (0.45 + 0.55 * heat) * smokeArea;
+        const budgetK = Math.min(1, (SMOKE_OPACITY_RATE * (1 + 0.5 * gs)) / Math.max(feed, 1e-6));
         const ej = Math.min(slip, 28) * 0.12 * spin;
         const big = 0.75 + 0.5 * Math.min(slip / 18, 1);
         for (let k = 0; k < n; k++) {
@@ -798,13 +813,13 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
             0.25 + rng.float() * 0.7,
             v.vz * 0.15 - fz * ej + (rng.float() - 0.5) * 1.4,
           );
-          const grey = 0.84 + rng.float() * 0.1;
-          // wispy: thin puffs that spread wide (P5 review: the plume read as an opaque blob)
+          const grey = 0.72 + rng.float() * 0.12;
+          // dense young puffs that grow, thin out (shader: opacity ~ (s0/s)^0.55) and dissipate
           spawnSoft(
-            K_SMOKE, t0 + (t1 - t0) * f, 6 + rng.float() * 5,
-            0.35 + rng.float() * 0.25, (2.4 + rng.float() * 2.0) * big,
-            (0.21 + rng.float() * 0.15) * (0.45 + 0.55 * heat) * opK,
-            grey * 0.97, grey * 0.985, grey * 1.02, groundY,
+            K_SMOKE, t0 + (t1 - t0) * f, 4.5 + rng.float() * 3,
+            0.35 + rng.float() * 0.25, (2.0 + rng.float() * 1.6) * big,
+            Math.min(0.999, (0.6 + rng.float() * 0.25) * (0.45 + 0.55 * heat) * opK * budgetK),
+            grey * 0.97, grey * 0.985, grey * 1.03, groundY,
           );
         }
       }

@@ -202,6 +202,14 @@ void main() {
   float size = mix( iD.x, iD.y, 1.0 - pow( 1.0 - x, 2.6 ) ) * uSizeScale;
   float turb = kb.z * ( 1.0 - exp( -age * 0.7 ) );
   p += turb * vec3( sin( age * 0.83 + seed * 37.1 ), 0.45 * sin( age * 0.61 + seed * 53.7 ), cos( age * 0.97 + seed * 71.3 ) );
+  // smoke: a second, faster eddy octave and a slow per-puff curl around the plume axis, so the
+  // cloud breaks into lobes and wisps instead of one uniform blob
+  if ( kind == 0 ) {
+    float t2 = kb.z * 0.55 * ( 1.0 - exp( -age * 1.6 ) );
+    p += t2 * vec3( sin( age * 2.3 + seed * 91.7 ), 0.6 * sin( age * 1.9 + seed * 17.3 ), cos( age * 2.7 + seed * 29.9 ) );
+    float ca2 = seed * 6.2831853 + age * 0.35;
+    p.xz += vec2( cos( ca2 ), sin( ca2 ) ) * ( 0.35 * age / ( 1.0 + 0.25 * age ) );
+  }
   float ground = iE.w;
   vFlat = kb.w;
   if ( kb.w < 0.5 ) p.y = max( p.y, ground + size * 0.3 );
@@ -237,6 +245,10 @@ void main() {
   vSoftR = max( size * 0.45, 0.2 );
   // particles around the camera dissolve instead of slicing through the near plane
   vAlpha = opacity * fadeIn * fadeOut * smoothstep( 0.25, 0.9 + size * 0.6, dcam );
+  // a puff's mass spreads as it grows: optical depth through it falls with its size
+  // (dense young cores, thin old wisps); smoke ~ (s0/s)^0.55, dust ~ (s0/s)^0.6
+  float grow = clamp( iD.x * uSizeScale / max( size, 1e-3 ), 0.0, 1.0 );
+  vAlpha *= kind == 0 ? pow( grow, 0.55 ) : kind == 1 ? pow( grow, 0.6 ) : 1.0;
   // a puff filling the screen is a flat wall with a visible rim: thin it by its projected radius
   // (projectionMatrix[1][1] = 1 / tan(fov / 2); 1 = half the screen height)
   float rNdc = size * projectionMatrix[ 1 ][ 1 ] / max( dcam, 1e-3 );
@@ -248,9 +260,11 @@ void main() {
     vec3 toP = p - cameraPosition;
     float along = dot( toP, toF ) / lf;
     float lateral = length( toP - toF * ( along / lf ) );
-    float before = 1.0 - smoothstep( lf - uFocus.w, lf + 0.5 * uFocus.w, along );
+    // from the car's own centre toward the camera (its tyre smoke spawns around it)
+    float before = 1.0 - smoothstep( lf - 0.3 * uFocus.w, lf + 0.3 * uFocus.w, along );
     float onRay = 1.0 - smoothstep( uFocus.w + 0.4 * size, uFocus.w + 1.2 * size, lateral );
-    vAlpha *= 1.0 - 0.5 * before * onRay;
+    // fresh, small puffs pouring off the tyres stay half visible; grown ones would wall the car off
+    vAlpha *= 1.0 - 0.92 * mix( 0.45, 1.0, smoothstep( 0.3, 1.2, age ) ) * before * onRay;
   }
   gl_Position = projectionMatrix * mvPosition;
   #include <fog_vertex>
@@ -305,14 +319,14 @@ void main() {
     // tyre smoke: half the billow pattern traded for a smooth radial body (wispy, no visible noise)
     float r2 = dot( vCorner, vCorner );
     float body = clamp( 1.0 - r2, 0.0, 1.0 );
-    float k = 0.45 * vSmoke;
+    float k = 0.15 * vSmoke;
     d = mix( d, body * body * 0.8, k );
     g = mix( g, -3.2 * body * vCorner, k );
-    g = clamp( g, -4.0, 4.0 ) * ( 1.0 - 0.65 * vSmoke );
+    g = clamp( g, -4.0, 4.0 ) * ( 1.0 - 0.35 * vSmoke );
   }
   float den = smoothstep( vErode * ( 1.0 - 0.3 * vSmoke ), vErode + 0.5 + 0.35 * vSmoke, d );
   // soft rim on every billboard (smoke wider): a magnified puff never shows the edge of its disc
-  den *= 1.0 - vFlatInv * smoothstep( mix( 0.55, 0.35, vSmoke ), 1.0, rC );
+  den *= 1.0 - vFlatInv * smoothstep( mix( 0.55, 0.45, vSmoke ), 1.0, rC );
   float a = vAlpha * den * clamp( vSoft, 0.0, 1.0 );
   // soft particles: fade where the puff meets geometry behind it (car bodies, walls, ground)
   if ( uSoftDepth.x > 0.5 && a >= 0.003 ) {
@@ -322,23 +336,29 @@ void main() {
     a *= smoothstep( 0.0, 1.0, clamp( gap / vSoftR, 0.0, 1.0 ) );
   }
   if ( a < 0.003 ) discard;
-  // lighting: a camera-facing sphere normal bent by the puff's density
-  // gradient (screen-space derivatives → lumpy billows), wrapped diffuse
-  // (translucent), forward scattering toward the sun, dense cores
-  // self-shadowing, darker undersides
+  // Lighting: a camera-facing sphere normal bent by the puff's density gradient (lumpy
+  // billows). Smoke is a scattering volume, so the key light is shaped hard: the sun side lit
+  // and wrapped, the far side in the puff's own shadow (density-weighted), undersides only
+  // seeing the ground (dark, warm) and tops the sky (blue-grey), plus a forward-scattering
+  // rim when backlit. Flat white fog came from a strong isotropic ambient and soft wrap.
   vec2 q = vCorner;
-  vec3 nv = normalize( vec3( q * 0.75 - g * 0.32 * vFlatInv, sqrt( max( 1.0 - dot( q, q ) * 0.7, 0.05 ) ) ) );
+  vec3 nv = normalize( vec3( q * 0.8 - g * 0.6 * vFlatInv, sqrt( max( 1.0 - dot( q, q ) * 0.75, 0.05 ) ) ) );
   vec3 nw = ( vec4( nv, 0.0 ) * viewMatrix ).xyz;
   float ndl = dot( nw, uSunDir );
-  float wrap = clamp( ndl * 0.6 + 0.4, 0.0, 1.0 );
+  float wrap = clamp( ndl * 0.55 + 0.45, 0.0, 1.0 );
   vec3 V = normalize( vWorld - cameraPosition );
-  float fwd = pow( max( dot( V, uSunDir ), 0.0 ), 5.0 );
-  float self = mix( 1.0, 0.3 + 0.7 * wrap, clamp( d * 1.4, 0.0, 1.0 ) );
+  float cosV = dot( V, uSunDir );
+  float fwd = pow( max( cosV, 0.0 ), 6.0 );
+  float dn = clamp( d * 1.5, 0.0, 1.0 );
+  // self-shadow: light reaching the far side crossed the puff's dense core
+  float shadow = mix( 1.0, 0.18 + 0.82 * smoothstep( -0.35, 0.6, ndl ), dn );
   float up = clamp( nw.y * 0.5 + 0.5, 0.0, 1.0 );
-  vec3 amb = mix( uGroundAmb, uSkyAmb * 2.0, up ) * ( 0.6 + 0.4 * up ) * ( 1.0 - 0.25 * d );
-  // multiple scattering whitens the key light inside the plume
-  vec3 sunC = mix( vec3( dot( uSunColor, vec3( 0.2126, 0.7152, 0.0722 ) ) ), uSunColor, 0.55 );
-  vec3 sun = sunC * ( wrap * wrap * self * 0.26 + fwd * ( 1.0 - 0.6 * d ) * 0.45 );
+  vec3 amb = mix( uGroundAmb * 0.8, uSkyAmb * 1.25, up * up ) * ( 0.45 + 0.55 * up ) * ( 1.0 - 0.35 * dn );
+  // multiple scattering whitens the key light a little inside the plume
+  vec3 sunC = mix( vec3( dot( uSunColor, vec3( 0.2126, 0.7152, 0.0722 ) ) ), uSunColor, 0.65 );
+  // silver lining: thin edges glow when the sun is behind the puff
+  float rim = fwd * ( 1.0 - dn ) * ( 0.35 + 0.65 * smoothstep( 0.3, 0.95, rC ) );
+  vec3 sun = sunC * ( wrap * wrap * shadow * 0.22 + rim * 0.5 + fwd * 0.08 );
   gl_FragColor = vec4( vColor * ( amb + sun ), a );
   #include <fog_fragment>
   gl_FragColor.rgb *= gl_FragColor.a;
