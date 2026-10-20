@@ -11,7 +11,7 @@
  * Lateral acceleration is + to the vehicle right. "Speed" is the COM
  * velocity along the vehicle forward (telemetry slot 0 definition).
  */
-import { MaterialId, type ActionState } from '../../protocol/messages';
+import { Action, MaterialId, type ActionState } from '../../protocol/messages';
 import { SimEngine, SIM_DT, SIM_HZ } from '../engine';
 import type { SimObject } from '../types';
 import { SEDAN } from './defs/sedan';
@@ -50,6 +50,14 @@ export interface HandlingSample {
   driveTorque: number[];
   /** Distance travelled by the COM in the ground plane, m. */
   dist: number;
+  /**
+   * Body attitude from the frame nodes (R-PHYS, additive), rad: roll + = the
+   * body top leaning to the vehicle RIGHT; pitch + = nose DOWN.
+   */
+  roll: number;
+  pitch: number;
+  /** Applied steer action (−1..1), R-PHYS additive. */
+  steer: number;
 }
 
 export interface HandlingSim {
@@ -138,6 +146,37 @@ export function kinematics(sim: HandlingSim): Kin {
 /** Heading of the vehicle forward in the ground plane, rad (0 = −Z, + = toward +X). */
 export function headingOf(k: Kin): number {
   return Math.atan2(k.fx, -k.fz);
+}
+
+/** Body roll / pitch (rad) from the frame nodes: roll + = top leaning right, pitch + = nose down. */
+export function attitudeOf(sim: HandlingSim): { roll: number; pitch: number } {
+  const s = sim.eng.state;
+  const start = sim.obj.nodeStart;
+  const fr = sim.cv.frameNodes;
+  const o = start + fr[0]!;
+  const f = start + fr[1]!;
+  const t = start + fr[2]!;
+  let fx = s.posX[f]! - s.posX[o]!;
+  let fy = s.posY[f]! - s.posY[o]!;
+  let fz = s.posZ[f]! - s.posZ[o]!;
+  const fl = Math.hypot(fx, fy, fz) || 1;
+  fx /= fl;
+  fy /= fl;
+  fz /= fl;
+  let ux = s.posX[t]! - s.posX[o]!;
+  let uy = s.posY[t]! - s.posY[o]!;
+  let uz = s.posZ[t]! - s.posZ[o]!;
+  const d = ux * fx + uy * fy + uz * fz;
+  ux -= d * fx;
+  uy -= d * fy;
+  uz -= d * fz;
+  // horizontal right of the heading: (forward × up_world) = (−fz, 0, fx) normalised
+  const hl = Math.hypot(fx, fz) || 1;
+  const rx = -fz / hl;
+  const rz = fx / hl;
+  const roll = Math.atan2(ux * rx + uz * rz, uy);
+  const pitch = Math.asin(Math.max(-1, Math.min(1, -fy)));
+  return { roll, pitch };
 }
 
 /**
@@ -292,6 +331,7 @@ export class Recorder {
     const vLat = k.vx * k.rx + k.vz * k.rz;
     const groundSpeed = Math.hypot(k.vx, k.vz);
     const dts = sim.veh.drivetrain as DrivetrainStateEx;
+    const att = attitudeOf(sim);
     const smp: HandlingSample = {
       t,
       speed,
@@ -313,6 +353,9 @@ export class Recorder {
       load: corners(sim, (w) => w.load),
       driveTorque: corners(sim, (w) => w.driveTorque),
       dist: this.dist,
+      roll: att.roll,
+      pitch: att.pitch,
+      steer: sim.obj.actions[Action.steer]!,
     };
     this.prev = { k, t, heading: hRaw };
     this.samples.push(smp);
@@ -612,9 +655,12 @@ export interface StepSteerResult {
   samples: HandlingSample[];
 }
 
-/** Step steer at 60 km/h: hold speed, steer step to `steer` at t = 0.5 s, hold 4 s. */
-export function runStepSteer(def: VehicleDef = SEDAN, steer = 0.12): StepSteerResult {
-  const v0 = 60 / 3.6;
+/**
+ * Step steer at 60 km/h: hold speed, steer step to `steer` at t = 0.5 s, hold 4 s.
+ * R-PHYS (additive): `speedKmh` (default 60) for the ISO 7401 80 km/h step.
+ */
+export function runStepSteer(def: VehicleDef = SEDAN, steer = 0.12, speedKmh = 60): StepSteerResult {
+  const v0 = speedKmh / 3.6;
   const { samples } = runScenario({
     def,
     initialSpeed: v0,
