@@ -68,15 +68,6 @@ export const SHELL_RELEASE_FIREWALL: Readonly<ShellRelease> = { lo: 0.04, hi: 0.
  */
 export const SHELL_RELEASE_CELL: Readonly<ShellRelease> = { lo: 0.03, hi: 0.15, vLo: 5, vHi: 9 };
 
-/** Never released (an engine block: cast iron does not crumple; it moves as one piece or not at all). */
-export const SHELL_RELEASE_NEVER: Readonly<ShellRelease> = { lo: Infinity, hi: Infinity, vLo: Infinity, vHi: Infinity };
-/**
- * The engine / gearbox block (group 'engine') as its own rigid cluster, never released.
- * WHY: its nodes are tied by non-yielding beams that, at the stability-limited k, compressed 8–10 cm
- * elastically when the block hit the wall and threw it back (100 km/h sedan frontal: 12–15 kJ stored in
- * the block's own beams at peak crush, the largest single store after the cell rails).
- */
-export const ENGINE_BLOCK_SHELL: ShellDef = { groups: ['engine'], release: SHELL_RELEASE_NEVER, freqHz: 200 };
 
 /** VehicleDef.shell (optional, additive): one cluster, an array of clusters, or false (none). */
 export interface ShellDef {
@@ -87,8 +78,6 @@ export interface ShellDef {
   zeta?: number;
   /** Tier 0: every node no zone claims (crumple zones). Default SHELL_RELEASE_CRUMPLE. */
   release?: Partial<ShellRelease>;
-  /** compileShells appends no ENGINE_BLOCK_SHELL when any listed cluster sets this. */
-  noEngineBlock?: boolean;
   /** Calm time before a released shell is recaptured, s (default RECAPTURE_S). */
   recaptureS?: number;
   /** Tier 0 lets go as a whole once any of its nodes starts to (default false). */
@@ -189,15 +178,10 @@ export interface CompiledShell {
   release: Float64Array;
 }
 
-/**
- * Compiles VehicleDef.shell: clusters in order, a node claimed by an earlier cluster is skipped by later ones.
- * A rig with an 'engine' group always gets ENGINE_BLOCK_SHELL appended (unless a listed cluster already names
- * the group, or opts out with noEngineBlock), so every vehicle's block is one rigid piece.
- */
+/** Compiles VehicleDef.shell: clusters in order, a node claimed by an earlier cluster is skipped by later ones. */
 export function compileShells(rig: CompiledRig, bodyNodeCount: number, def: ShellDef | readonly ShellDef[] | false | undefined): CompiledShell[] {
   if (def === false) return [];
-  const listed: readonly (ShellDef | undefined)[] = def === undefined ? [undefined] : Array.isArray(def) ? (def as readonly ShellDef[]) : [def as ShellDef];
-  const defs = rig.groups.includes('engine') && !listed.some((d) => d?.groups?.includes('engine') || d?.noEngineBlock) ? [...listed, ENGINE_BLOCK_SHELL] : listed;
+  const defs: readonly (ShellDef | undefined)[] = def === undefined ? [undefined] : Array.isArray(def) ? (def as readonly ShellDef[]) : [def as ShellDef];
   const taken = new Uint8Array(rig.nodeCount);
   const out: CompiledShell[] = [];
   for (const d of defs) {

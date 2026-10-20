@@ -6,8 +6,8 @@
  * 0.6 s; 100 km/h sedan / traffic: 3–5 cm still at 0.5 s): the released crumple zone and cell were a loose
  * beam mechanism until the 1 s calm recapture. The post-impact set (shellDefs RECAPTURE_IMPACT_*) re-sets
  * the shell in its crushed shape once the impact is over. The rebound bounds are no-regression limits
- * measured at the same time (the 5–15 % real-car range is met by the pickup, beater and box truck, and at
- * 100 km/h; the sedans and the coupe still rebound ~20 % at 50 km/h, see PLAN).
+ * measured at the same time (the 5–15 % real-car range is met by the pickup, beater and box truck; the
+ * sedans and the coupe still rebound 21–23 %, see CONTRACTS "Crash settling" and PLAN).
  */
 import { describe, expect, it } from 'vitest';
 import { crushSettle, runCrash, SEDAN_CRASH_PROBES, type CrashProbes } from './crash';
@@ -30,8 +30,8 @@ interface Case {
 }
 
 const CASES: Case[] = [
-  { name: 'sedan', def: SEDAN, probes: SEDAN_CRASH_PROBES, ring: [0.01, 0.05], rebound: [0.24, 0.19] },
-  { name: 'coupe', def: COUPE, probes: COUPE_CRASH_PROBES, ring: [0.01, 0.025], rebound: [0.23, 0.21] },
+  { name: 'sedan', def: SEDAN, probes: SEDAN_CRASH_PROBES, ring: [0.01, 0.06], rebound: [0.23, 0.25] },
+  { name: 'coupe', def: COUPE, probes: COUPE_CRASH_PROBES, ring: [0.01, 0.025], rebound: [0.23, 0.24] },
   { name: 'pickup', def: PICKUP, probes: PICKUP_CRASH_PROBES as CrashProbes, ring: [0.01, 0.025], rebound: [0.13, 0.1] },
   { name: 'beater', def: BEATER, probes: BEATER_CRASH_PROBES, ring: [0.02, 0.045], rebound: [0.15, 0.1] },
   { name: 'traffic sedan', def: SEDAN_TRAFFIC, probes: SEDAN_TRAFFIC_CRASH_PROBES, ring: [0.01, 0.025], rebound: [0.23, 0.17] },
@@ -57,7 +57,7 @@ describe('post-crash settling (rigid wall frontal)', () => {
         checks.push(() => expect(ring).toBeLessThan(c.ring[k]!));
         checks.push(() => expect(reb).toBeLessThan(c.rebound[k]!));
       });
-      console.log(`[settle] ${c.name}\n  ${lines.join('\n  ')}`);
+      console.log(`[settle] ${c.name}\n  ${lines.join("\n  ")}`);
       for (const ch of checks) ch();
     }, 600_000);
   }

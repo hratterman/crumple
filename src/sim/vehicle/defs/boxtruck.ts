@@ -1877,9 +1877,6 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
         exclude: [0, 1, 2, 3, 4, 5, 6, 7].flatMap((i) => [`b${i}_fi_*`, `b${i}_fc`]),
         zones: [{ ids: ['*'], release: SHELL_RELEASE_DENT, whole: true }],
         freqHz: 60,
-        // the I6 block stays a beam lattice: a rigid block tore the box mounts further in the 50 km/h frontal
-        // (box shift 30.6 → 31.1 cm, limit 30) and the truck's rebound is low anyway (3 % at 100 km/h)
-        noEngineBlock: true,
       },
     ],
   };
