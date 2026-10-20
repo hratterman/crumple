@@ -85,14 +85,23 @@ test('audio: boots, resumes on a gesture, voices run, a crash fires one-shots, r
   expect(a.lastCrash!.gain).toBeGreaterThan(0.3);
   expect(a.frames).toBeGreaterThan(10);
 
-  // horn (H): the worker flags it, the audio sounds it; it is in the replay buffer too
+  // horn (H): the worker flags it, the audio sounds it
   await page.keyboard.down('KeyH');
   await page.waitForFunction(() => (window as unknown as { __crumple: G }).__crumple.audio!.engine.horn, null, { timeout: 20_000 });
-  await page.waitForTimeout(1500);
   await page.keyboard.up('KeyH');
   await page.waitForFunction(() => !(window as unknown as { __crumple: G }).__crumple.audio!.engine.horn, null, { timeout: 20_000 });
-  await page.waitForTimeout(800);
-  const hornEnd = await page.evaluate(() => (window as unknown as { __crumple: G }).__crumple.replay.state.end);
+  // a honk recorded at full rate (render loop held: main records every snapshot, as in replay.spec)
+  const hornAt = await page.evaluate(async () => {
+    const g = (window as unknown as { __crumple: G & { hold: boolean } }).__crumple;
+    g.hold = true;
+    await new Promise((r) => setTimeout(r, 400));
+    g.debug.client.input(1, { horn: 1 });
+    await new Promise((r) => setTimeout(r, 1500));
+    g.debug.client.input(1, { horn: 0 });
+    await new Promise((r) => setTimeout(r, 600));
+    g.hold = false;
+    return g.replay.state.end - 1.4;
+  });
 
   // replay: 1/4× → pitch 0.25^0.75, paused → world silent
   const entered = await page.evaluate(() => (window as unknown as { __crumple: G }).__crumple.replay.enter());
@@ -113,10 +122,9 @@ test('audio: boots, resumes on a gesture, voices run, a crash fires one-shots, r
   // the recorded horn plays back: seek into the honk, play
   await page.evaluate((t) => {
     const r = (window as unknown as { __crumple: G }).__crumple.replay;
-    r.seek(t - 1.6);
-    r.setSpeed(1);
-    r.play();
-  }, hornEnd);
+    r.seek(t);
+  }, hornAt);
+  await page.evaluate(() => (window as unknown as { __crumple: G }).__crumple.replay.play());
   await page.waitForFunction(() => (window as unknown as { __crumple: G }).__crumple.audio!.engine.horn, null, { timeout: 20_000 });
   await page.evaluate(() => (window as unknown as { __crumple: G }).__crumple.replay.exit());
   await page.waitForTimeout(1000);
