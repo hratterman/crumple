@@ -8,7 +8,8 @@
  * way as the sedan (defs/sedan.ts: four master surfaces, panels cut from
  * them with rounded intersections of cuts, real shut gaps), with the
  * coupe's own design language:
- *   - long, low hood with a raised V8 power bulge between two sharp creases;
+ *   - long, low hood with a raised V8 power bulge faired into the hood
+ *     surface (a soft S-shoulder each side, no step), narrowing toward the nose;
  *   - a knife-edge SHOULDER crease running from the headlamp tip over the
  *     front arch, along the long door and up onto a WIDE REAR HAUNCH (the
  *     body widens ~6 cm from the door to the rear arch), with a sculpted
@@ -249,8 +250,8 @@ const L = {
   /** Hood power-bulge lift (0..1): the V8 bulge on the hood only (the deck carries the ducktail). */
   dome: pchip([
     [-2.0, 1],
-    [-0.85, 1],
-    [-0.72, 0],
+    [-1.05, 1],
+    [-0.64, 0],
     [2.2, 0],
   ]),
   /** Centre crown above the shut-line height. */
@@ -266,18 +267,22 @@ const L = {
 };
 
 /**
- * Hood bulge creases: outer (lower) and inner (upper) x of the step, and its
- * lift. The two creases converge strongly toward the nose (a narrow, sharp
- * bulge over the V8) and the step is tall.
+ * Hood power bulge: centre line x of its shoulder, the shoulder's half width
+ * and the lift. The shoulder is an S from the hood surface (x = xc + w) up to
+ * the bulge top (x = xc − w), so the bulge is faired into the hood with no
+ * crease: at a 2–3 cm step it read as two hard lines down the hood and broke
+ * the nose highlight. It narrows toward the nose and fades out over the last
+ * 0.4 m before the windscreen.
  */
-const creaseX = (z: number): number => lerp(0.4, 0.24, smoothstep(-0.8, -2.0, z));
-const creaseW = (z: number): number => lerp(0.032, 0.022, smoothstep(-0.8, -1.9, z));
-const domeLift = (z: number): number => 0.011 * L.dome(z);
+const creaseX = (z: number): number => lerp(0.36, 0.22, smoothstep(-0.8, -2.0, z));
+const creaseW = (z: number): number => lerp(0.085, 0.06, smoothstep(-0.8, -1.9, z));
+const domeLift = (z: number): number => 0.013 * L.dome(z);
+/** Shoulder profile across x: 0 on the hood surface, 1 on the bulge top (C¹ smoothstep). */
+const bulgeT = (x: number, z: number): number => 1 - smoothstep(creaseX(z) - creaseW(z), creaseX(z) + creaseW(z), Math.abs(x));
 
 /** M1 top including the bulge lift (≈ the evaluated M1 deck), for parts that sit on it. */
 function m1Top(x: number, z: number): number {
-  const xc = creaseX(z);
-  return topY(x, z) + domeLift(z) * (1 - smoothstep(xc - creaseW(z), xc, Math.abs(x)));
+  return topY(x, z) + domeLift(z) * bulgeT(x, z);
 }
 
 /** M1 top surface height (hood / tonneau / deck) at (x, z). */
@@ -290,8 +295,8 @@ function topY(x: number, z: number): number {
 // ====================================================================== M1 body master
 /** M1 control-point indices of the feature lines. */
 const K = { skirt: 2, shoulder: 6, top: 9, hood: 10 } as const;
-const FRONT_BEND = [0, 0, 0, 0, 0, 0, 0, 0, -0.01, -0.04, -0.09, -0.145, -0.15, -0.178];
-const REAR_BEND = [0, 0, 0, 0, 0, 0, 0, 0, 0.01, 0.065, 0.13, 0.175, 0.178, 0.192];
+const FRONT_BEND = [0, 0, 0, 0, 0, 0, 0, 0, -0.01, -0.04, -0.09, -0.14, -0.148, -0.156, -0.178];
+const REAR_BEND = [0, 0, 0, 0, 0, 0, 0, 0, 0.01, 0.065, 0.13, 0.175, 0.177, 0.179, 0.192];
 const M1_FRONT = -1.95;
 const M1_REAR = 2.02;
 const M1_STATIONS = [
@@ -323,12 +328,13 @@ function m1Section(z: number): V3[] {
     [lerp(xs - 0.026, lerp(xs + 0.002, L.xTop(z), 0.5), fenderW(z)), lerp(ysh, yt, 0.55)],
     [L.xTop(z), yt],
     [L.xHood(z), L.yHood(z)],
-    // Bulge crease: a step that lifts the centre of the hood.
-    [creaseX(z), topY(creaseX(z), z)],
-    [creaseX(z) - creaseW(z), topY(creaseX(z) - creaseW(z), z) + domeLift(z)],
+    // Power bulge: foot, mid-shoulder and top of the S (see creaseX), then the centre line.
+    [creaseX(z) + creaseW(z), m1Top(creaseX(z) + creaseW(z), z)],
+    [creaseX(z), m1Top(creaseX(z), z)],
+    [creaseX(z) - creaseW(z), m1Top(creaseX(z) - creaseW(z), z)],
     [0, L.yHood(z) + L.crown(z) + domeLift(z)],
   ];
-  const wf = 1 - smoothstep(M1_FRONT, -1.72, z);
+  const wf = 1 - smoothstep(M1_FRONT, -1.6, z);
   const wr = smoothstep(1.74, M1_REAR, z);
   // Ducktail: the deck kicks up toward its rear edge.
   const kick = 0.034 * smoothstep(1.78, M1_REAR, z) ** 2.2;
@@ -763,7 +769,9 @@ export function buildCoupeVisual(opts: CoupeBuildOptions = { lod: 0 }): VehicleV
     add('hood', 'hood', 'paint', m.mesh, hoodBind, { detach: { attach: 'boundary', minBrokenFraction: 0.85, mode: 'follow' } });
     add('hoodSeal', 'trim', 'rubber', m.seal, hoodBind, { damageWeight: 0, castShadow: false });
     // Small part: a coarse LOD grid can miss it entirely, so it keeps a finer sheet of M1.
-    const S1v = opts.lod === 0 ? S1 : createSheet(loftSurface(m1Loft, { displace: flare }), { resolution: 0.09 * Math.sqrt(rs), maxAngleDeg: 14 * Math.sqrt(rs) });
+    // (LOD2's grid is capped at LOD1's: at its own 0.2 m the 14 cm vent fell between grid lines.)
+    const rv = Math.min(rs, 2.9);
+    const S1v = opts.lod === 0 ? S1 : createSheet(loftSurface(m1Loft, { displace: flare }), { resolution: 0.09 * Math.sqrt(rv), maxAngleDeg: 14 * Math.sqrt(rv) });
     const v = cutC(S1v, [{ fn: (p) => VENT(p[0], p[2]) + 0.008, edge: 'seam' }], { offset: -0.022, border: 'seam', where: (p) => p[2] < -1.0 && p[2] > -1.8 && p[1] > 0.55 });
     // Louvre blades across each vent.
     const blades: PanelMesh[] = [];
