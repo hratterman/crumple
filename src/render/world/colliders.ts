@@ -28,7 +28,9 @@ import {
   MeshStandardMaterial,
   RepeatWrapping,
   RGBAFormat,
+  ShapeUtils,
   SphereGeometry,
+  TorusGeometry,
   SRGBColorSpace,
   UnsignedByteType,
   Vector2,
@@ -265,7 +267,11 @@ class GeoBuilder {
   pos: number[] = [];
   nrm: number[] = [];
   uv: number[] = [];
+  col: number[] = [];
   idx: number[] = [];
+  /** Vertex colour of the next polygons (linear RGB); `colored` emits the attribute. */
+  color: [number, number, number] = [1, 1, 1];
+  colored = false;
 
   /** Planar polygon (convex, CCW seen from outside), uv = (p·uAxis, p·vAxis). */
   poly(pts: readonly V3[], uAxis: V3, vAxis: V3): void {
@@ -284,6 +290,7 @@ class GeoBuilder {
     const base = this.pos.length / 3;
     for (const p of pts) {
       this.pos.push(p[0], p[1], p[2]);
+      this.col.push(this.color[0], this.color[1], this.color[2]);
       this.nrm.push(nx, ny, nz);
       this.uv.push(p[0] * uAxis[0] + p[1] * uAxis[1] + p[2] * uAxis[2], p[0] * vAxis[0] + p[1] * vAxis[1] + p[2] * vAxis[2]);
     }
@@ -295,6 +302,7 @@ class GeoBuilder {
     g.setAttribute('position', new BufferAttribute(new Float32Array(this.pos), 3));
     g.setAttribute('normal', new BufferAttribute(new Float32Array(this.nrm), 3));
     g.setAttribute('uv', new BufferAttribute(new Float32Array(this.uv), 2));
+    if (this.colored) g.setAttribute('color', new BufferAttribute(new Float32Array(this.col), 3));
     g.setIndex(this.idx);
     g.computeBoundingBox();
     g.computeBoundingSphere();
@@ -380,6 +388,11 @@ interface Mats {
   target: MeshStandardMaterial;
   paint: MeshStandardMaterial;
   reflector: MeshStandardMaterial;
+  // P8 stunt park
+  corrugated: MeshStandardMaterial;
+  painted: MeshStandardMaterial;
+  rubber: MeshStandardMaterial;
+  plate: MeshStandardMaterial;
 }
 
 function createMaterials(maxAniso: number): { mats: Mats; textures: Texture[] } {
@@ -421,6 +434,27 @@ function createMaterials(maxAniso: number): { mats: Mats; textures: Texture[] } 
     }),
     paint: new MeshStandardMaterial({ name: 'collider-paint', color: 0xf0bf1a, roughness: 0.5, metalness: 0 }),
     reflector: new MeshStandardMaterial({ name: 'collider-reflector', color: 0xff8a1c, emissive: 0x401800, roughness: 0.25, metalness: 0.1 }),
+    // P8: shipping containers (vertex-coloured paint over vertical corrugation), painted parts (wrecks,
+    // seats, stripes), tyre rubber, diamond-plate steel (kickers).
+    corrugated: new MeshStandardMaterial({
+      name: 'collider-corrugated',
+      vertexColors: true,
+      map: tex(grimeTexture(51), 128, true, 1 / 3, 1 / 2.6),
+      normalMap: tex(corrugationNormal(), 64, false, 1 / 0.6, 1),
+      normalScale: new Vector2(1.2, 1.2),
+      roughness: 0.62,
+      metalness: 0.35,
+    }),
+    painted: new MeshStandardMaterial({ name: 'collider-painted', vertexColors: true, map: tex(grimeTexture(77), 128, true, 1 / 1.6, 1 / 1.6), roughness: 0.6, metalness: 0.25 }),
+    rubber: new MeshStandardMaterial({ name: 'collider-rubber', vertexColors: true, normalMap: tex(treadNormal(), 64, false, 1 / 0.35, 1 / 0.35), roughness: 0.92, metalness: 0 }),
+    plate: new MeshStandardMaterial({
+      name: 'collider-plate',
+      color: 0x5f666d,
+      normalMap: tex(diamondPlateNormal(), 64, false, 1 / 0.4, 1 / 0.4),
+      normalScale: new Vector2(0.9, 0.9),
+      roughness: 0.5,
+      metalness: 0.72,
+    }),
   };
   // The target texture shows one disc over the whole quad (UV 0..1).
   mats.target.map!.wrapS = ClampToEdgeWrapping;
@@ -517,6 +551,60 @@ function buildCollider(c: ResolvedCollider, M: Mats): Group {
       g.add(mesh(boxGeometry([-a, -0.05, -d], [a, 0, d]), M.steel));
       break;
     }
+    case 'container':
+      buildContainer(g, c, M);
+      break;
+    case 'wreck':
+      buildWreck(g, c, M);
+      break;
+    case 'tires':
+      buildTyreWall(g, c, M);
+      break;
+    case 'kicker': {
+      const w = rampGeometry(a, b, d);
+      g.add(mesh(w.body, M.steel));
+      g.add(mesh(w.deck, M.plate));
+      // hazard band along the lip (on the deck, 2 mm proud)
+      const L = Math.hypot(2 * d, 2 * b);
+      const at = (sDown: number): [number, number] => [b - (2 * b * sDown) / L + 0.003, -d + (2 * d * sDown) / L];
+      const [ya, za] = at(0.35);
+      const [yb, zb] = at(0.02);
+      const lb = new GeoBuilder();
+      lb.poly([[-a + 0.02, ya, za], [a - 0.02, ya, za], [a - 0.02, yb, zb], [-a + 0.02, yb, zb]], X, Z);
+      g.add(mesh(lb.build(), M.hazard, false));
+      break;
+    }
+    case 'deck': {
+      if (a < 0.3) {
+        g.add(mesh(boxGeometry([-a, -b, -d], [a, b, d]), M.steel));
+        break;
+      }
+      const top = new GeoBuilder();
+      top.poly([[-a, b, d], [a, b, d], [a, b, -d], [-a, b, -d]], X, NZ);
+      g.add(mesh(top.build(), M.deck));
+      const sides = new GeoBuilder();
+      sides.poly([[-a, -b, d], [a, -b, d], [a, b, d], [-a, b, d]], X, Y);
+      sides.poly([[a, -b, -d], [-a, -b, -d], [-a, b, -d], [a, b, -d]], NX, Y);
+      sides.poly([[a, -b, d], [a, -b, -d], [a, b, -d], [a, b, d]], NZ, Y);
+      sides.poly([[-a, -b, -d], [-a, -b, d], [-a, b, d], [-a, b, -d]], Z, Y);
+      sides.poly([[-a, -b, -d], [a, -b, -d], [a, -b, d], [-a, -b, d]], X, Z);
+      g.add(mesh(sides.build(), M.steel));
+      break;
+    }
+    case 'floodlight': {
+      // the mast (the lamp head above it is decoration: render/world/stuntpark.ts)
+      const mast = new CylinderGeometry(a * 0.55, a * 0.85, 2 * b - 0.6, 14, 1);
+      const mm = mesh(mast, M.steel);
+      mm.position.y = 0.3;
+      g.add(mm);
+      const plinth = mesh(new CylinderGeometry(a, a, 0.6, 16), M.concrete);
+      plinth.position.y = -b + 0.3;
+      g.add(plinth);
+      break;
+    }
+    case 'grandstand':
+      buildGrandstand(g, c, M);
+      break;
     default: {
       if (c.kind === 'sphere') g.add(mesh(new SphereGeometry(a, 32, 16), M.concrete));
       else if (c.kind === 'cylinder') g.add(mesh(new CylinderGeometry(a, a, 2 * b, 28), M.concrete));
@@ -528,6 +616,278 @@ function buildCollider(c: ResolvedCollider, M: Mats): Group {
     }
   }
   return g;
+}
+
+
+// ====================================================================== P8 stunt-park visuals
+/** sRGB hex → linear [r, g, b] (vertex colours are linear). */
+function lin(hex: number, k = 1): [number, number, number] {
+  const f = (v: number): number => {
+    const c = v / 255;
+    return (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)) * k;
+  };
+  return [f((hex >> 16) & 255), f((hex >> 8) & 255), f(hex & 255)];
+}
+
+/** Stable 32-bit hash of a collider id (colour picks, dents). */
+function idHash(id: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < id.length; i++) h = Math.imul(h ^ id.charCodeAt(i), 0x01000193);
+  return h >>> 0;
+}
+
+const CONTAINER_COLORS = [0x8f3324, 0x1f4f7a, 0x2f5f3b, 0xc2621f, 0x6f767c, 0x1d6b6e, 0xa8842a];
+
+function addBoxC(b: GeoBuilder, [x0, y0, z0]: V3, [x1, y1, z1]: V3): void {
+  addBox(b, [x0, y0, z0], [x1, y1, z1]);
+}
+
+/** 40 ft container: corrugated walls, door end with locking bars, end frames and corner castings. */
+function buildContainer(g: Group, c: ResolvedCollider, M: Mats): void {
+  const [a, b, d] = c.size;
+  const h = idHash(c.id);
+  const body = new GeoBuilder();
+  body.colored = true;
+  body.color = lin(CONTAINER_COLORS[h % CONTAINER_COLORS.length]!, 0.95);
+  const i = 0.05;
+  addBoxC(body, [-a + 0.12, -b + 0.12, -d + i], [a - 0.12, b - 0.08, d - i]);
+  g.add(mesh(body.build(), M.corrugated));
+  const fr = new GeoBuilder();
+  fr.colored = true;
+  fr.color = lin(CONTAINER_COLORS[h % CONTAINER_COLORS.length]!, 0.7);
+  // end frames + rails
+  for (const sx of [-1, 1]) {
+    addBoxC(fr, [sx > 0 ? a - 0.12 : -a, -b, -d], [sx > 0 ? a : -a + 0.12, b, d]);
+  }
+  addBoxC(fr, [-a, b - 0.08, -d], [a, b, -d + 0.1]);
+  addBoxC(fr, [-a, b - 0.08, d - 0.1], [a, b, d]);
+  addBoxC(fr, [-a, -b, -d], [a, -b + 0.12, -d + 0.1]);
+  addBoxC(fr, [-a, -b, d - 0.1], [a, -b + 0.12, d]);
+  // door locking bars on the +x end
+  fr.color = lin(0x9a9a92);
+  for (const z of [-0.75, -0.35, 0.35, 0.75]) addBoxC(fr, [a - 0.02, -b + 0.2, z * d - 0.025], [a, b - 0.2, z * d + 0.025]);
+  g.add(mesh(fr.build(), M.painted));
+}
+
+/** Crushed car hulk (length along local x): extruded side profile with dents, glassless cabin, flat tyres. */
+function buildWreck(g: Group, c: ResolvedCollider, M: Mats): void {
+  const [a, b, d] = c.size;
+  const h = idHash(c.id);
+  const rng = createRng(h);
+  const y0 = -b;
+  // side profile (x, y) front (−x) → rear (+x), clockwise from the bottom front
+  const roofDrop = rng.range(0.05, 0.25);
+  const prof: [number, number][] = [
+    [-a, y0 + 0.28],
+    [-a + 0.05, y0 + 0.62],
+    [-a + 0.95, y0 + 0.78],
+    [-0.55, y0 + 0.86],
+    [-0.15, b - roofDrop],
+    [0.85, b - 0.02],
+    [1.3, y0 + 0.86],
+    [a - 0.05, y0 + 0.74],
+    [a, y0 + 0.3],
+  ];
+  const paint = lin([0x6b2a22, 0x2f4a5c, 0x8a8a80, 0x4c5a3a, 0x7a5a2a, 0x24282c][h % 6]!, 0.9);
+  const rust = lin(0x5a3a22, 0.8);
+  const dark = lin(0x141414);
+  const N = 6; // segments across z
+  const b2 = new GeoBuilder();
+  b2.colored = true;
+  const dent = (x: number, y: number, z: number): number => 0.045 * Math.sin(x * 3.1 + (h % 7)) * Math.cos(z * 4.3 + y * 2);
+  const P = (x: number, y: number, z: number): V3 => {
+    const zz = z * (0.92 + 0.08 * Math.min(1, Math.max(0, (y0 + 0.86 - y) / 0.4 + 1)));
+    const yy = Math.min(b, y - Math.abs(dent(x, y, z)));
+    return [x, yy, Math.max(-d, Math.min(d, zz))];
+  };
+  const colAt = (x: number, y: number): [number, number, number] => {
+    if (y > y0 + 0.9 && x > -0.5 && x < 1.25) return dark; // windows (void)
+    const r = 0.5 + 0.5 * Math.sin(x * 5 + y * 7 + (h % 13));
+    return r > 0.82 ? rust : paint;
+  };
+  for (let k = 0; k < prof.length; k++) {
+    const p = prof[k]!;
+    const q = prof[(k + 1) % prof.length]!;
+    for (let j = 0; j < N; j++) {
+      const za = -d + (2 * d * j) / N;
+      const zb = -d + (2 * d * (j + 1)) / N;
+      b2.color = colAt((p[0] + q[0]) / 2, (p[1] + q[1]) / 2);
+      b2.poly([P(q[0], q[1], za), P(p[0], p[1], za), P(p[0], p[1], zb), P(q[0], q[1], zb)], X, Z);
+    }
+  }
+  // bottom + side faces
+  b2.color = paint;
+  // side faces: the profile is concave at the windscreen base, so triangulate it properly
+  const tris = ShapeUtils.triangulateShape(prof.map(([x, y]) => new Vector2(x, y)), []);
+  for (const sz of [-1, 1]) {
+    for (const t3 of tris) {
+      const pa = prof[t3[0]!]!;
+      const pb = prof[t3[1]!]!;
+      const pc = prof[t3[2]!]!;
+      const tri = [P(pa[0], pa[1], sz * d), P(pb[0], pb[1], sz * d), P(pc[0], pc[1], sz * d)];
+      // outward = sign(sz) along z
+      const cz = (tri[1]![0] - tri[0]![0]) * (tri[2]![1] - tri[0]![1]) - (tri[1]![1] - tri[0]![1]) * (tri[2]![0] - tri[0]![0]);
+      b2.poly(cz * sz > 0 ? tri : [tri[0]!, tri[2]!, tri[1]!], X, Y);
+    }
+  }
+  g.add(mesh(b2.build(), M.painted));
+  // flat tyres
+  const t = new GeoBuilder();
+  t.colored = true;
+  t.color = lin(0x1a1a1a);
+  for (const wx of [-a + 0.85, a - 0.8]) for (const wz of [-d + 0.12, d - 0.32]) addBoxC(t, [wx - 0.32, y0, wz], [wx + 0.32, y0 + 0.36, wz + 0.2]);
+  g.add(mesh(t.build(), M.rubber));
+}
+
+/** Stacked tyre wall filling the box: rows of tyre stacks (torus rings), every other stack with a painted band. */
+function buildTyreWall(g: Group, c: ResolvedCollider, M: Mats): void {
+  const [a, b, d] = c.size;
+  const h = idHash(c.id);
+  const pitch = 0.62;
+  const nx = Math.max(1, Math.floor((2 * a) / pitch));
+  const nz = Math.max(1, Math.floor((2 * d) / pitch));
+  const levels = Math.max(1, Math.round((2 * b) / 0.25));
+  const tyre = new TorusGeometry(0.19, 0.11, 5, 12);
+  tyre.rotateX(Math.PI / 2);
+  tyre.scale(1, (2 * b) / levels / 0.22, 1);
+  const tPos = tyre.getAttribute('position');
+  const tNrm = tyre.getAttribute('normal');
+  const tIdx = tyre.getIndex()!;
+  const pos: number[] = [];
+  const nrm: number[] = [];
+  const col: number[] = [];
+  const uvs: number[] = [];
+  const idx: number[] = [];
+  const rubber = lin(0x1c1c1c);
+  const bands = [lin(0xe8e8e2), lin(0xc8241c), lin(0xe8b818)];
+  const sx = (2 * a) / nx;
+  const sz = (2 * d) / nz;
+  const ty = (2 * b) / levels;
+  for (let ix = 0; ix < nx; ix++)
+    for (let iz = 0; iz < nz; iz++) {
+      const painted = (ix + iz + h) % 2 === 0;
+      const band = bands[(ix + h) % bands.length]!;
+      for (let l = 0; l < levels; l++) {
+        const cx = -a + sx * (ix + 0.5);
+        const cz = -d + sz * (iz + 0.5);
+        const cy = -b + ty * (l + 0.5);
+        const color = painted && l % 2 === 1 ? band : rubber;
+        const base = pos.length / 3;
+        for (let v = 0; v < tPos.count; v++) {
+          pos.push(cx + tPos.getX(v), cy + tPos.getY(v), cz + tPos.getZ(v));
+          nrm.push(tNrm.getX(v), tNrm.getY(v), tNrm.getZ(v));
+          col.push(color[0], color[1], color[2]);
+          uvs.push(tPos.getX(v) + cx, tPos.getY(v) + cy);
+        }
+        for (let k = 0; k < tIdx.count; k++) idx.push(base + tIdx.getX(k));
+      }
+    }
+  tyre.dispose();
+  const geo = new BufferGeometry();
+  geo.setAttribute('position', new BufferAttribute(new Float32Array(pos), 3));
+  geo.setAttribute('normal', new BufferAttribute(new Float32Array(nrm), 3));
+  geo.setAttribute('color', new BufferAttribute(new Float32Array(col), 3));
+  geo.setAttribute('uv', new BufferAttribute(new Float32Array(uvs), 2));
+  geo.setIndex(idx);
+  g.add(mesh(geo, M.rubber));
+}
+
+/**
+ * Grandstand on its ramp collider (wedge rising to local −Z): concrete
+ * terraces whose front edges straddle the wedge plane (± half a riser),
+ * coloured seat rows, side walls.
+ */
+function buildGrandstand(g: Group, c: ResolvedCollider, M: Mats): void {
+  const [a, b, d] = c.size;
+  const N = 8;
+  const run = (2 * d) / N;
+  const rise = (2 * b) / N;
+  const steps = new GeoBuilder();
+  const seats = new GeoBuilder();
+  seats.colored = true;
+  const seatCols = [lin(0x1d4e89), lin(0x1d4e89), lin(0xe9e7e1), lin(0xd8571c)];
+  for (let k = 0; k < N; k++) {
+    const zf = d - k * run;
+    const zb = d - (k + 1) * run;
+    const top = -b + (k + 0.5) * rise;
+    addBox(steps, [-a, -b, zb], [a, top, zf]);
+    // seat row: blocks of colour along the row (a pattern that reads as crowd seating from afar)
+    const n = Math.floor((2 * a) / 2.4);
+    for (let s = 0; s < n; s++) {
+      seats.color = seatCols[(s + k * 3 + (s % 5 === 0 ? 2 : 0)) % seatCols.length]!;
+      const x0 = -a + 0.3 + s * 2.4;
+      const sh = Math.min(0.42, b - top);
+      if (sh <= 0.02) continue;
+      addBox(seats, [x0, top, zb + 0.12], [x0 + 2.25, top + sh, zb + 0.55]);
+    }
+  }
+  g.add(mesh(steps.build(), M.concrete));
+  g.add(mesh(seats.build(), M.painted));
+}
+
+/** Vertical corrugation normal map (trapezoid ribs), one rib per tile. */
+function corrugationNormal(): Uint8Array {
+  const n = 64;
+  const hgt = new Float32Array(n * n);
+  for (let y = 0; y < n; y++)
+    for (let x = 0; x < n; x++) {
+      const u = x / n;
+      const t = Math.abs(u - 0.5) * 2; // 0 centre → 1 edge
+      hgt[y * n + x] = t < 0.45 ? 1 : t > 0.75 ? 0 : 1 - (t - 0.45) / 0.3;
+    }
+  return normalFromHeight(hgt, n, 6);
+}
+
+/** Diamond-plate normal map: raised lozenges in a staggered grid. */
+function diamondPlateNormal(): Uint8Array {
+  const n = 64;
+  const hgt = new Float32Array(n * n);
+  for (let y = 0; y < n; y++)
+    for (let x = 0; x < n; x++) {
+      let best = 0;
+      for (const [cx, cy, dir] of [[0.25, 0.25, 1], [0.75, 0.75, 1], [0.75, 0.25, -1], [0.25, 0.75, -1]] as const) {
+        let dx = x / n - cx;
+        let dy = y / n - cy;
+        dx -= Math.round(dx);
+        dy -= Math.round(dy);
+        const along = (dx + dir * dy) / Math.SQRT2;
+        const across = (dx - dir * dy) / Math.SQRT2;
+        const v = 1 - Math.min(1, Math.abs(along) / 0.17) - Math.min(1, Math.abs(across) / 0.035);
+        if (v > best) best = v;
+      }
+      hgt[y * n + x] = Math.max(0, best);
+    }
+  return normalFromHeight(hgt, n, 4);
+}
+
+/** Tyre tread / sidewall grain normal map. */
+function treadNormal(): Uint8Array {
+  const n = 64;
+  const f = tileableFbm(91, 8, 3);
+  const hgt = new Float32Array(n * n);
+  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) hgt[y * n + x] = 0.5 + 0.5 * f(x / n, y / n) + ((y >> 3) % 2 ? 0.2 : 0);
+  return normalFromHeight(hgt, n, 3);
+}
+
+/** Grime / weathering albedo multiplier (greyscale sRGB around 0.85–1). */
+function grimeTexture(seed: number): Uint8Array {
+  const n = 128;
+  const f = tileableFbm(seed, 4, 4);
+  const s = periodicNoise(seed + 5, 32);
+  const out = new Uint8Array(n * n * 4);
+  for (let y = 0; y < n; y++)
+    for (let x = 0; x < n; x++) {
+      const u = x / n;
+      const v = y / n;
+      const streak = Math.max(0, s(u, 0.1) * 1.4 - 0.4) * v;
+      const g = clampByte(255 * (0.9 + 0.08 * f(u, v) - 0.18 * streak));
+      const o = 4 * (y * n + x);
+      out[o] = g;
+      out[o + 1] = clampByte(g * 0.98);
+      out[o + 2] = clampByte(g * 0.95);
+      out[o + 3] = 255;
+    }
+  return out;
 }
 
 /** Every collider's visual group, placed in world space (one per collider, `collider:<id>`). */
@@ -575,7 +935,9 @@ export function createColliderRenderer(ctx: RenderContext, resolved: readonly Re
       let b = batches.get(key);
       if (!b) batches.set(key, (b = { material, casts: m.castShadow, parts: [] }));
       const part = (m.geometry.index ? m.geometry.toNonIndexed() : m.geometry.clone()).applyMatrix4(m.matrixWorld);
-      for (const name of Object.keys(part.attributes)) if (name !== 'position' && name !== 'normal' && name !== 'uv') part.deleteAttribute(name);
+      const vc = (material as MeshStandardMaterial).vertexColors === true;
+      for (const name of Object.keys(part.attributes)) if (name !== 'position' && name !== 'normal' && name !== 'uv' && !(vc && name === 'color')) part.deleteAttribute(name);
+      if (vc && !part.getAttribute('color')) part.setAttribute('color', new BufferAttribute(new Float32Array(part.getAttribute('position').count * 3).fill(1), 3));
       if (!part.getAttribute('normal')) part.computeVertexNormals();
       if (!part.getAttribute('uv')) part.setAttribute('uv', new BufferAttribute(new Float32Array(part.getAttribute('position').count * 2), 2));
       part.clearGroups();

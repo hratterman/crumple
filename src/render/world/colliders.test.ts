@@ -45,7 +45,7 @@ describe('createColliderRenderer', () => {
   it('batches the parts per (material, casts shadow): a handful of draws, all inside the colliders', () => {
     const meshes = r.object.children.filter((o) => (o as Mesh).isMesh) as Mesh[];
     expect(meshes.length).toBeGreaterThan(3);
-    expect(meshes.length).toBeLessThanOrEqual(14);
+    expect(meshes.length).toBeLessThanOrEqual(18);
     const boxes = resolved.map((c) => colliderWorldAabb(c, 0.12));
     for (const m of meshes) {
       const pos = m.geometry.getAttribute('position');

@@ -48,6 +48,7 @@
  * three R16 hairpins.
  */
 import { MaterialId } from '../protocol/messages';
+import { STUNT_PARK_COLLIDERS, STUNT_PARK_PROPS } from './stuntpark';
 import type { PropPlacement, WorldLayout } from './types';
 
 // ------------------------------------------------------------ props (P5)
@@ -121,7 +122,8 @@ const ARENA_PROPS: PropPlacement[] = [
 export const DEFAULT_LAYOUT: WorldLayout = {
   id: 'crumple-valley',
   name: 'Crumple Valley',
-  version: 4,
+  // v5 (P8): arena grown east + the stunt park / ski-jump colliders and props.
+  version: 5,
   seed: 0x5eed_c0de,
   size: 1408,
   terrain: {
@@ -207,8 +209,9 @@ export const DEFAULT_LAYOUT: WorldLayout = {
       id: 'arena',
       name: 'Crash Test Arena',
       kind: 'arena',
-      // 180 × 180 m flat concrete; the wall, poles, ramp and barriers are `colliders` below (P4).
-      shape: { type: 'rect', center: [360, 330], halfX: 90, halfZ: 90, blend: 30 },
+      // P8: 240 × 180 m flat concrete (x 270..510; was 180 × 180 at x 270..450): the P4 furniture
+      // (wall, poles, ramp, barriers) plus the stunt park (src/world/stuntpark.ts) are `colliders` below.
+      shape: { type: 'rect', center: [390, 330], halfX: 120, halfZ: 90, blend: 30 },
       params: { height: 10.5, material: MaterialId.concrete },
     },
   ],
@@ -562,8 +565,10 @@ export const DEFAULT_LAYOUT: WorldLayout = {
       material: MaterialId.concrete,
       visual: 'jersey' as const,
     })),
+    // P8 stunt park + Anvil ski jump.
+    ...STUNT_PARK_COLLIDERS,
   ],
-  props: ARENA_PROPS,
+  props: [...ARENA_PROPS, ...STUNT_PARK_PROPS],
 };
 
 /** Registry by id (saves, replays and the protocol name layouts by id). */

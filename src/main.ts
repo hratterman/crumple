@@ -57,6 +57,7 @@ import { createRoadRenderer } from './render/roads';
 import { createTerrainRenderer, prebuildTerrainArrays, terrainAnisotropy, terrainTextureSize } from './render/terrain';
 import { createFarLand, FARLAND_OUTER_M } from './render/terrain/farland';
 import { createColliderRenderer } from './render/world/colliders';
+import { createStuntParkRenderer } from './render/world/stuntpark';
 import type { FxSystem } from './render/fx/types';
 import type { PropRenderer } from './render/props/types';
 import { createStudio, type Studio } from './render/showroom/studio';
@@ -1319,6 +1320,14 @@ async function boot(): Promise<void> {
     patchMaterial,
   });
   scene.add(collidersR.object);
+  // P8: stunt-park decoration (markings, floodlight heads, grandstand roof, deck legs) over the same colliders.
+  const stuntParkR = createStuntParkRenderer(ctx, resolveColliders(LAYOUT.colliders, (x, z) => smp.heightAt(x, z)), {
+    lighting,
+    patchMaterial,
+    heightAt: (x, z) => smp.heightAt(x, z),
+  });
+  scene.add(stuntParkR.object);
+  Object.assign(crumple.debug, { stuntPark: stuntParkR });
   // P5 world layer (contracts: docs/CONTRACTS.md "P5 contracts"). Same pure inputs as the physics worker.
   const heightAt = (x: number, z: number): number => smp.heightAt(x, z);
   const waterBodies = resolveWater(LAYOUT, world);
