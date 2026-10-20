@@ -82,6 +82,14 @@ export interface TrafficController {
   onImpact(e: Readonly<ImpactEvent>): void;
   onBeamBreak(e: Readonly<BeamBreakEvent>): void;
   onSkid(e: Readonly<SkidEvent>): void;
+  /**
+   * P7 replay (additive): the controller's whole visual state (pool
+   * assignments + paints, each pooled visual's damage, hand-over / LOD /
+   * wheel-spin bookkeeping). Restoring it verbatim (replay exit) shows
+   * exactly what was there when it was saved; FX registrations follow.
+   */
+  saveReplayState(): unknown;
+  restoreReplayState(state: unknown): void;
   dispose(): void;
 }
 
@@ -117,6 +125,8 @@ interface PooledVisual {
   brokenTick: number;
   /** Sim time from which the object is registered with FX (see FX_DELAY_S); NaN once registered. */
   fxAt: number;
+  /** Palette index of the current assignment (replay restore re-applies it). */
+  paint: number;
 }
 
 /**
@@ -233,6 +243,7 @@ export function createTrafficController(ctx: RenderContext, deps: TrafficControl
       used: false,
       brokenTick: -1,
       fxAt: NaN,
+      paint: 0,
     };
   }
 
@@ -309,7 +320,8 @@ export function createTrafficController(ctx: RenderContext, deps: TrafficControl
     pv.objectId = a.objectId;
     pv.assignments++;
     pv.brokenTick = -1;
-    const palette = v.entry.palettes[a.paint % v.entry.palettes.length]!;
+    pv.paint = a.paint % v.entry.palettes.length;
+    const palette = v.entry.palettes[pv.paint]!;
     pv.handle.setPaint(palette.paint);
     pv.fxAt = simTime + FX_DELAY_S;
     return pv;
@@ -597,6 +609,88 @@ export function createTrafficController(ctx: RenderContext, deps: TrafficControl
       const pv = bound(e.objectId);
       pv?.handle.onSkid(e);
       if (pv && Number.isNaN(pv.fxAt)) deps.fx?.onSkid(e);
+    },
+
+    saveReplayState(): unknown {
+      return {
+        generation,
+        pools: variants.map((v) =>
+          v.pool.map((pv) => ({
+            pv,
+            agent: pv.agent,
+            objectId: pv.objectId,
+            assignments: pv.assignments,
+            brokenTick: pv.brokenTick,
+            fxAt: pv.fxAt,
+            paint: pv.paint,
+            visible: pv.handle.object.visible,
+            damage: pv.handle.damage.saveState(),
+          })),
+        ),
+        lodPrev: lodPrev.slice(),
+        spin: spin.slice(),
+        wasSoft: wasSoft.slice(),
+        lastMode: lastMode.slice(),
+        modeTick: modeTick.slice(),
+        lastSimTime,
+        promotions: stats.promotions,
+        demotions: stats.demotions,
+      };
+    },
+    restoreReplayState(state: unknown): void {
+      const st = state as ReturnType<typeof controller.saveReplayState> & {
+        generation: number;
+        pools: { pv: PooledVisual; agent: number; objectId: number; assignments: number; brokenTick: number; fxAt: number; paint: number; visible: boolean; damage: ReturnType<VehicleVisualHandle['damage']['saveState']> }[][];
+        lodPrev: Int8Array;
+        spin: Float64Array;
+        wasSoft: Uint8Array;
+        lastMode: Int8Array;
+        modeTick: Float64Array;
+        lastSimTime: number;
+        promotions: number;
+        demotions: number;
+      };
+      if (st.generation !== generation) return; // traffic restarted meanwhile
+      // FX registrations made while replaying go; the saved ones come back
+      for (const v of variants) for (const pv of v.pool) if (pv.objectId && pv.agent >= 0 && Number.isNaN(pv.fxAt)) deps.fx?.removeObject(pv.objectId);
+      st.pools.forEach((pool, vi) => {
+        const v = variants[vi];
+        if (!v) return;
+        for (const s of pool) {
+          const pv = s.pv;
+          if (!v.pool.includes(pv)) continue;
+          pv.agent = s.agent;
+          pv.objectId = s.objectId;
+          pv.assignments = s.assignments;
+          pv.brokenTick = s.brokenTick;
+          pv.fxAt = s.fxAt;
+          pv.paint = s.paint;
+          if (pv.agent >= 0) pv.handle.setPaint(v.entry.palettes[pv.paint % v.entry.palettes.length]!.paint);
+          pv.handle.object.visible = s.visible;
+          pv.handle.damage.restoreState(s.damage);
+          pv.handle.fx?.clear();
+          if (pv.objectId && pv.agent >= 0 && Number.isNaN(pv.fxAt)) deps.fx?.addVehicle(pv.objectId, v.assets.compiled);
+        }
+      });
+      // visuals built while replaying (pool growth) were not there: idle
+      variants.forEach((v, vi) => {
+        const saved = st.pools[vi] ?? [];
+        for (const pv of v.pool) {
+          if (saved.some((x) => x.pv === pv)) continue;
+          pv.agent = -1;
+          pv.objectId = 0;
+          pv.fxAt = NaN;
+          pv.handle.object.visible = false;
+        }
+      });
+      lodPrev.set(st.lodPrev);
+      spin.set(st.spin);
+      wasSoft.set(st.wasSoft);
+      lastMode.set(st.lastMode);
+      modeTick.set(st.modeTick);
+      lastSimTime = st.lastSimTime;
+      stats.promotions = st.promotions;
+      stats.demotions = st.demotions;
     },
 
     dispose(): void {

@@ -21,7 +21,7 @@ import { MaterialId, PROP_DYNAMIC_ID_BASE } from '../../protocol/messages';
 import { VehicleTelemetry, WHEEL_LOAD_SLOTS, WHEEL_OMEGA_SLOTS, WHEEL_SLIP_SLOTS, cornerFlag } from '../../protocol/telemetry';
 import type { CompiledVehicle } from '../../sim/vehicle/types';
 import type { SimObjectSlice, WorldFrame } from '../types';
-import { DebrisPool, createChunkGeometry, createDebrisMaterial, createFlakeGeometry } from './debris';
+import { DebrisPool, createChunkGeometry, createDebrisMaterial, createFlakeGeometry, type DebrisState } from './debris';
 import {
   ParticlePool,
   SceneDepthCopy,
@@ -79,6 +79,7 @@ import {
   FX_TYRE_CLASSIFY_MARGIN,
   FX_WAKE_SPEED,
   type CreateFxSystem,
+  type FxState,
   type FxStats,
   type FxSystem,
 } from './types';
@@ -244,6 +245,22 @@ export function debrisCaps(budget: number): [number, number] {
   return [a, Math.max(1, budget - a)];
 }
 
+/** P7 replay snapshot (FxSystem.saveState). */
+interface FxSnapshot extends FxState {
+  soft: ReturnType<ParticlePool['saveState']>;
+  bits: ReturnType<ParticlePool['saveState']>;
+  sparks: ReturnType<ParticlePool['saveState']>;
+  chunks: DebrisState;
+  flakes: DebrisState;
+  clocks: number[];
+  scr: Float64Array;
+  prevPos: Float32Array;
+  nearFrame: Int32Array;
+  wakeAcc: Float32Array;
+  vehicles: { id: number; vx: number; vy: number; vz: number; grounded: boolean; groundY: number; wheels: WheelFx[] }[];
+  debrisHidden: boolean;
+}
+
 export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
   const object = new Group();
   object.name = 'fx';
@@ -315,6 +332,8 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
   const nearFrame = new Int32Array(MAX_OBJECT_ID).fill(-10);
   const wakeAcc = new Float32Array(MAX_OBJECT_ID);
   let frameIndex = 0;
+  /** P7: debris hidden (reverse replay playback). */
+  let debrisHidden = false;
 
   const setSpawn = (px: number, py: number, pz: number, vx: number, vy: number, vz: number): void => {
     sp.px = px;
@@ -1286,8 +1305,8 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
       bits.mesh.visible = bits.drawn > 0 && t1 < lastDeathBits;
       sparks.mesh.visible = sparks.drawn > 0 && t1 < lastDeathSparks;
       skid.mesh.visible = skid.drawn > 0 && t1 - lastSkidBirth < 60;
-      chunks.mesh.visible = chunks.live > 0;
-      flakes.mesh.visible = flakes.live > 0;
+      chunks.mesh.visible = chunks.live > 0 && !debrisHidden;
+      flakes.mesh.visible = flakes.live > 0 && !debrisHidden;
     },
     setQuality(nq): void {
       q = nq;
@@ -1388,6 +1407,58 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
     },
     reseed(seed: number): void {
       rng = createRng(seed);
+    },
+    saveState(into?: FxState | null): FxState {
+      const prev = into as FxSnapshot | null | undefined;
+      const snap: FxSnapshot = {
+        kind: 'fx',
+        soft: soft.saveState(prev?.soft),
+        bits: bits.saveState(prev?.bits),
+        sparks: sparks.saveState(prev?.sparks),
+        chunks: chunks.saveState(prev?.chunks),
+        flakes: flakes.saveState(prev?.flakes),
+        clocks: [lastSim, prevLatest, lastDeathSoft, lastDeathBits, lastDeathSparks, lastSkidBirth, now, scrNext, frameIndex],
+        scr: scr.slice(),
+        prevPos: prevPos.slice(),
+        nearFrame: nearFrame.slice(),
+        wakeAcc: wakeAcc.slice(),
+        vehicles: vehicles.map((v) => ({ id: v.id, vx: v.vx, vy: v.vy, vz: v.vz, grounded: v.grounded, groundY: v.groundY, wheels: v.wheels.map((w) => ({ ...w })) })),
+        debrisHidden,
+      };
+      return snap;
+    },
+    restoreState(st: FxState): void {
+      const snap = st as FxSnapshot;
+      soft.restoreState(snap.soft);
+      bits.restoreState(snap.bits);
+      sparks.restoreState(snap.sparks);
+      chunks.restoreState(snap.chunks);
+      flakes.restoreState(snap.flakes);
+      [lastSim, prevLatest, lastDeathSoft, lastDeathBits, lastDeathSparks, lastSkidBirth, now, scrNext, frameIndex] = snap.clocks as [number, number, number, number, number, number, number, number, number];
+      scr.set(snap.scr);
+      if (prevPos.length !== snap.prevPos.length) prevPos = new Float32Array(snap.prevPos.length);
+      prevPos.set(snap.prevPos);
+      nearFrame.set(snap.nearFrame);
+      wakeAcc.set(snap.wakeAcc);
+      for (const sv of snap.vehicles) {
+        const v = vehicleById.get(sv.id);
+        if (!v || v.wheels.length !== sv.wheels.length) continue;
+        v.vx = sv.vx;
+        v.vy = sv.vy;
+        v.vz = sv.vz;
+        v.grounded = sv.grounded;
+        v.groundY = sv.groundY;
+        sv.wheels.forEach((w, k) => Object.assign(v.wheels[k]!, w));
+      }
+      impN = brkN = skN = 0;
+      sys.setDebrisHidden(snap.debrisHidden);
+    },
+    setDebrisHidden(hidden: boolean): void {
+      debrisHidden = hidden;
+      if (hidden) {
+        chunks.mesh.visible = false;
+        flakes.mesh.visible = false;
+      }
     },
     setSkidmarksFrozen(frozen: boolean): void {
       skid.frozen = frozen;

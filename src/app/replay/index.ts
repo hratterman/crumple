@@ -9,9 +9,18 @@
  * its normal path. Events: the frames the playhead passes moving forward are
  * decoded (event rings only) and captured for main's drain.
  *
- * Seek generations: every damage reset (settled seek, each reverse-play
- * frame) bumps `gen`; presented repair epochs carry `gen · EPOCH_STRIDE`, so
- * every damage visual resets and re-derives from the presented frame.
+ * Persistent visual state (P7 follow-up): `enter` snapshots the whole live
+ * visual state (hooks.saveLive) and `exit` restores it verbatim, so leaving
+ * the replay shows exactly what was there before. Seeks: each registered
+ * DOMAIN (player damage, prop scuffs) keeps CHECKPOINTS captured live
+ * (main reports the tick its visuals have consumed events up to; one every
+ * 2 s, every 0.25 s while hits are recorded); a settled seek restores the
+ * newest checkpoint at or before the target and re-plays that domain's hit
+ * frames after it on their own geometry, so damage from before the buffer
+ * (the checkpoint baseline) and inside it are both right. The buffer never
+ * evicts a frame newer than every domain's newest checkpoint. Traffic
+ * pooled visuals (re-assigned freely while replaying) reset through the
+ * seek generation in their presented repair epochs instead.
  */
 import { SnapshotWriter } from '../../protocol/codec';
 import { computeSnapshotLayout } from '../../protocol/layout';
@@ -21,7 +30,7 @@ import { createTrafficAgentFrame, isTrafficObjectId, TRAFFIC_ID_BASE, type Traff
 import { isPropObjectId } from '../../protocol/messages';
 import type { QualityLevel } from '../../render/types';
 import type { SimClient } from '../simClient';
-import { FRAME_BODY_HIT, ReplayBuffer, type WheelHubs } from './buffer';
+import { ReplayBuffer, type WheelHubs } from './buffer';
 import {
   REPLAY_BUFFER_PRESETS,
   REPLAY_FX_PRIME_S,
@@ -38,35 +47,61 @@ import {
 } from './types';
 
 export * from './types';
-export { ReplayBuffer } from './buffer';
+export { FRAME_BODY_HIT, FRAME_PROP_HIT, ReplayBuffer } from './buffer';
 
-/** Repair-epoch increment per seek generation (keeps generations apart from real repairs). */
+/** Repair-epoch increment per seek generation (traffic objects only; keeps generations apart from real repairs). */
 const EPOCH_STRIDE = 0x100000;
+/** Live checkpoint cadence, sim s (and while hits are being recorded). */
+const CHECKPOINT_S = 2;
+const CHECKPOINT_HIT_S = 0.25;
 
 /**
- * Main's visual pipeline during a settled seek (all optional; without them a
- * seek only presents frames). Order: present(first frame, no events) →
- * primeBegin(seed) → for every held frame up to the target that either lies
- * in the FX window (last REPLAY_FX_PRIME_S) or carries a vehicle body hit
- * (FRAME_BODY_HIT): present(k, events) + primeFrame(time, fx, damage) →
- * present(target bracket) → primeEnd().
+ * A persistent visual-state domain with live checkpoints (main registers the
+ * player's damage and the props). `hitFlag`: buffer frame flag (FRAME_*) of
+ * the frames whose events change it.
+ */
+export interface ReplayDomain {
+  key: string;
+  hitFlag: number;
+  save(into: unknown | null): unknown;
+  /** seed: re-derive strain from the next presented geometry (seeks). */
+  restore(state: unknown, seed: boolean): void;
+}
+
+/**
+ * Main's visual pipeline (all optional; without them a seek only presents
+ * frames). Settle order: every domain restored to its checkpoint →
+ * present(first frame, no events) → primeBegin(seed) → for every held frame
+ * up to the target that lies in the FX window (last REPLAY_FX_PRIME_S) or is
+ * a hit frame of a domain after its checkpoint: present(k, events) +
+ * primeFrame(time, fx, hits) → present(target bracket) → primeEnd().
  */
 export interface ReplayVisualHooks {
   /** Replay starts (freeze skidmarks, gate input, release keys). */
   enter?(): void;
   /** Replay ended; live view restored. */
   exit?(): void;
-  /** A settle starts on the presented first prime frame: reset damage (update visuals once), clear transient FX with `seed`, drop queued events. */
+  /** Snapshot of the whole live visual state (enter). */
+  saveLive?(): unknown;
+  /** Restore it verbatim (exit; the live view is presented again). */
+  restoreLive?(state: unknown): void;
+  /**
+   * A settle starts (domains already restored to their checkpoints, the
+   * first prime frame presented): update traffic once (its generation
+   * reset), clear transient FX and reseed them with `seed`, drop queued events.
+   */
   primeBegin?(seed: number): void;
   /**
    * One prime frame is presented (its events captured). fx: route events to
-   * the world FX and run the emitters to `time`. damage: the frame carries a
-   * vehicle body hit — route its impacts to the vehicle damage and update the
-   * vehicle visuals NOW (scuffs land on this frame's geometry). Events not
-   * routed are dropped.
+   * the world FX and run the emitters to `time`. hits: bitmask of domain
+   * indices (registration order) whose hit frame this is — route the events
+   * to that domain and update it NOW (scuffs land on this frame's geometry).
+   * Events not routed are dropped.
    */
-  primeFrame?(time: number, fx: boolean, damage: boolean): void;
+  primeFrame?(time: number, fx: boolean, hits: number): void;
   primeEnd?(): void;
+  /** Reverse playback started / stopped (hide debris while reversing). */
+  reverse?(on: boolean): void;
 }
 
 /** What main gives the controller. */
@@ -93,6 +128,16 @@ export interface ReplayDriver extends ReplayController {
   setQuality(level: QualityLevel): void;
   /** Late-bound hooks (main builds its renderers after the controller). */
   setVisuals(v: ReplayVisualHooks): void;
+  /** Registers a checkpointed domain; returns its index (bit in primeFrame's `hits`). */
+  registerDomain(d: ReplayDomain): number;
+  /**
+   * Main reports that domain `key`'s live visuals have consumed every event up
+   * to snapshot `tick`; a checkpoint is taken when one is due and `tick` is a
+   * recorded frame. No-op while replaying.
+   */
+  checkpoint(key: string, tick: number): void;
+  /** Record the debug strain section (main: while the beam view is shown). */
+  recordStrains: boolean;
   readonly buffer: ReplayBuffer;
   readonly debug: ReplayDebugApi;
   dispose(): void;
@@ -155,7 +200,9 @@ export function createReplayController(deps: ReplayDeps): ReplayDriver {
   client.setSnapshotSink((r) => {
     if (phase !== 'live') return;
     const t0 = performance.now();
+    updateEvictLimit();
     if (buf.record(r)) {
+      pruneCheckpoints();
       const ms = performance.now() - t0;
       stats.lastRecordMs = ms;
       stats.recordMs = stats.recordMs === 0 ? ms : stats.recordMs + 0.05 * (ms - stats.recordMs);
@@ -170,6 +217,60 @@ export function createReplayController(deps: ReplayDeps): ReplayDriver {
   let direction: 1 | -1 = 1;
   let playing = false;
   let gen = 0;
+  /** The live visual state saved on enter (restored verbatim on exit). */
+  let liveState: unknown = null;
+  let reversing = false;
+
+  // ---- checkpointed domains
+  interface Checkpoint {
+    tag: number;
+    time: number;
+    state: unknown;
+  }
+  interface DomainRt {
+    d: ReplayDomain;
+    cps: Checkpoint[];
+    spare: unknown[];
+    restored: Checkpoint | null;
+  }
+  const domains: DomainRt[] = [];
+  const updateEvictLimit = (): void => {
+    let lim = Infinity;
+    for (const r of domains) {
+      const last = r.cps.length > 0 ? r.cps[r.cps.length - 1]!.tag : -1;
+      if (last < lim) lim = last;
+    }
+    buf.evictLimitTick = lim;
+  };
+  /** Drops checkpoints no seek can need (a newer one also covers every held frame). */
+  const pruneCheckpoints = (): void => {
+    const ev = buf.lastEvictedTick;
+    for (const r of domains) {
+      while (r.cps.length >= 2 && r.cps[1]!.tag <= ev) {
+        const cp = r.cps.shift()!;
+        r.spare.push(cp.state);
+      }
+    }
+  };
+  /** Newest checkpoint at or before `tick` (the oldest when none is). */
+  const pickCheckpoint = (r: DomainRt, tick: number): Checkpoint | null => {
+    let best: Checkpoint | null = null;
+    for (const cp of r.cps) if (cp.tag <= tick) best = cp;
+    return best ?? r.cps[0] ?? null;
+  };
+  const restoreDomain = (r: DomainRt, cp: Checkpoint): boolean => {
+    try {
+      r.d.restore(cp.state, true);
+      r.restored = cp;
+      return true;
+    } catch (e) {
+      // the subject changed (vehicle swap): its checkpoints are void
+      console.warn(`[replay] ${r.d.key} checkpoint dropped:`, e);
+      r.cps.length = 0;
+      r.restored = null;
+      return false;
+    }
+  };
   /** FX / damage match the playhead (settled seek or forward play since). */
   let consistent = false;
   let pauseHash: { tick: number; hash: number } | null = null;
@@ -186,10 +287,11 @@ export function createReplayController(deps: ReplayDeps): ReplayDriver {
   let evWriter: SnapshotWriter | null = null;
   let layoutKey = '';
   const ensureSlots = (): void => {
-    const key = `${buf.maxObjects}|${buf.nodeCapacity}|${buf.beamCapacity}`;
+    const strains = buf.hasStrainFrames;
+    const key = `${buf.maxObjects}|${buf.nodeCapacity}|${buf.beamCapacity}|${strains}`;
     if (key === layoutKey) return;
     layoutKey = key;
-    const layout = computeSnapshotLayout(buf.maxObjects, buf.nodeCapacity, buf.beamCapacity, false);
+    const layout = computeSnapshotLayout(buf.maxObjects, buf.nodeCapacity, buf.beamCapacity, strains);
     slotBufs = [0, 1, 2].map(() => new ArrayBuffer(layout.totalBytes));
     slotWriters = slotBufs.map((b) => new SnapshotWriter(layout).attach(b));
     slotSeq.fill(-1);
@@ -248,21 +350,40 @@ export function createReplayController(deps: ReplayDeps): ReplayDriver {
 
   const clampTime = (t: number): number => (t < buf.startTime ? buf.startTime : t > buf.endTime ? buf.endTime : t);
 
-  /** Damage reset + deterministic FX re-run up to t (see ReplayVisualHooks). */
+  const fromTag: number[] = [];
+  /** Checkpoint restore + hit-frame re-play per domain, traffic reset, deterministic FX re-run up to t (see ReplayVisualHooks). */
   const settle = (t: number): void => {
     const t0 = performance.now();
     gen++;
+    if (reversing) {
+      reversing = false;
+      visuals.reverse?.(false);
+    }
     const target = buf.findFrame(t);
+    const T = buf.frameTick(target);
     const fxStart = buf.findFrame(t - REPLAY_FX_PRIME_S);
-    presentFrame(0, false);
+    let first = fxStart;
+    domains.forEach((r, k) => {
+      fromTag[k] = Infinity;
+      const cp = pickCheckpoint(r, T);
+      if (!cp || !restoreDomain(r, cp)) return;
+      fromTag[k] = cp.tag;
+      const i = buf.indexOfTick(cp.tag);
+      const from = i < 0 ? (cp.tag < buf.frameTick(0) ? 0 : target + 1) : i + 1;
+      if (from < first) first = from;
+    });
+    presentFrame(Math.min(first, target), false);
     client.discardEvents();
     visuals.primeBegin?.(hash32(buf.frameSeq(fxStart)));
-    for (let k = 0; k <= target; k++) {
+    for (let k = first; k <= target; k++) {
       const fx = k >= fxStart;
-      const hit = (buf.frameFlags(k) & FRAME_BODY_HIT) !== 0;
-      if (!fx && !hit) continue;
+      const flags = buf.frameFlags(k);
+      const tick = buf.frameTick(k);
+      let hits = 0;
+      for (let d = 0; d < domains.length; d++) if ((flags & domains[d]!.d.hitFlag) !== 0 && tick > fromTag[d]!) hits |= 1 << d;
+      if (!fx && hits === 0) continue;
       presentFrame(k, true);
-      visuals.primeFrame?.(buf.frameTime(k), fx, hit);
+      visuals.primeFrame?.(buf.frameTime(k), fx, hits);
       client.discardEvents();
     }
     // events of the bracket's frames up to t are already delivered: present without events
@@ -290,8 +411,14 @@ export function createReplayController(deps: ReplayDeps): ReplayDriver {
     level = l;
     const c = buf.config;
     if (c.seconds === cfg.seconds && c.recordHz === cfg.recordHz && c.budgetBytes === cfg.budgetBytes && c.keyframeEvery === cfg.keyframeEvery) return;
+    const strains = buf.recordStrains;
     buf = new ReplayBuffer(cfg);
+    buf.recordStrains = strains;
     bindBuffer();
+    for (const r of domains) {
+      for (const cp of r.cps) r.spare.push(cp.state);
+      r.cps.length = 0;
+    }
     layoutKey = '';
     refreshStats();
   };
@@ -437,29 +564,42 @@ export function createReplayController(deps: ReplayDeps): ReplayDriver {
       try {
         const p = await client.pauseSim(true);
         pauseHash = { tick: p.tick, hash: p.hash };
+        // everything the player sees now comes back verbatim on exit
+        liveState = visuals.saveLive ? visuals.saveLive() : null;
         // the buffer ends exactly at the live view
         const live = client.liveReader;
         if (live) buf.recordNow(live);
         if (buf.count < 2) {
           await client.pauseSim(false);
+          liveState = null;
           phase = 'live';
           return false;
         }
         ensureSlots();
+        // a fresh generation: the end frame presents the live epochs (no traffic reset at entry)
+        gen = 0;
+        slotSeq.fill(-1);
+        for (const r of domains) r.restored = null;
         client.beginReplay();
         phase = 'replay';
         visuals.enter?.();
         speed = opts?.speed ?? speed;
         direction = opts?.direction ?? 1;
         playing = false;
+        reversing = false;
         refreshStats();
         emit({ type: 'enter' });
-        seekTo(opts?.time ?? buf.endTime, true);
+        // the visuals already show the end (the live state): no settle needed there
+        time = buf.endTime;
+        presentAt(time, false);
+        consistent = true;
+        if (opts?.time !== undefined && opts.time < buf.endTime) seekTo(opts.time, true);
         if (opts?.play) ctl.play();
         return true;
       } catch (e) {
         console.error('[replay] enter failed', e);
         phase = 'live';
+        liveState = null;
         return false;
       }
     },
@@ -467,10 +607,16 @@ export function createReplayController(deps: ReplayDeps): ReplayDriver {
     async exit(): Promise<void> {
       if (phase !== 'replay') return;
       playing = false;
-      seekTo(buf.endTime, true);
+      time = buf.endTime;
       phase = 'exiting';
-      client.endReplay(gen * EPOCH_STRIDE);
+      client.endReplay(0);
+      client.discardEvents();
       visuals.exit?.();
+      // verbatim: damage, prop scuffs, traffic pool, FX exactly as when the replay was entered
+      if (liveState !== null) visuals.restoreLive?.(liveState);
+      liveState = null;
+      reversing = false;
+      for (const r of domains) r.restored = null;
       try {
         const r = await client.pauseSim(false);
         resumeHash = { tick: r.tick, hash: r.hash };
@@ -586,9 +732,19 @@ export function createReplayController(deps: ReplayDeps): ReplayDriver {
         passEvents(t0, t1);
         presentAt(t1, false);
       } else {
-        // reverse: damage re-derives every frame (no ratchet backwards), FX are not re-run
+        // reverse: traffic damage re-derives every frame, player / props step back through their
+        // checkpoints (no ratchet backwards); FX are not re-run and debris is hidden
+        if (!reversing) {
+          reversing = true;
+          visuals.reverse?.(true);
+        }
         gen++;
         consistent = false;
+        const T = buf.frameTick(buf.findFrame(t1));
+        for (const r of domains) {
+          const cp = pickCheckpoint(r, T);
+          if (cp && cp !== r.restored) restoreDomain(r, cp);
+        }
         presentAt(t1, false);
       }
       if (ended) {
@@ -605,6 +761,34 @@ export function createReplayController(deps: ReplayDeps): ReplayDriver {
     },
     setVisuals(v: ReplayVisualHooks): void {
       visuals = v;
+    },
+    registerDomain(d: ReplayDomain): number {
+      domains.push({ d, cps: [], spare: [], restored: null });
+      return domains.length - 1;
+    },
+    checkpoint(key: string, tick: number): void {
+      if (phase !== 'live') return;
+      const r = domains.find((x) => x.d.key === key);
+      if (!r) return;
+      const i = buf.indexOfTick(tick);
+      if (i < 0) return;
+      const t = buf.frameTime(i);
+      const last = r.cps.length > 0 ? r.cps[r.cps.length - 1]! : null;
+      if (last && tick <= last.tag) return;
+      let due = !last || t - last.time >= CHECKPOINT_S;
+      if (!due && last && t - last.time >= CHECKPOINT_HIT_S) {
+        for (let k = buf.indexOfTick(last.tag) + 1; k <= i && !due; k++) if (k >= 0 && (buf.frameFlags(k) & r.d.hitFlag) !== 0) due = true;
+      }
+      if (!due) return;
+      const state = r.d.save(r.spare.pop() ?? null);
+      r.cps.push({ tag: tick, time: t, state });
+      updateEvictLimit();
+    },
+    get recordStrains() {
+      return buf.recordStrains;
+    },
+    set recordStrains(v: boolean) {
+      buf.recordStrains = v;
     },
     dispose(): void {
       client.setSnapshotSink(null);

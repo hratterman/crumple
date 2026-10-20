@@ -77,6 +77,23 @@ export interface PropRenderer extends WorldLayerRenderer {
   readonly stats: PropRendererStats;
   /** For the near-caster / perf overlay. */
   readonly root: Object3D;
+  /**
+   * P7 replay (additive): copies the visual damage + node-texture state
+   * (scuffs, broken flags, strain persistence, written poses, the texture
+   * itself) into `into` (reused when it fits). Restoring reproduces the
+   * look exactly; the next update rewrites every prop present in the frame
+   * from its nodes WITHOUT the reset-jump damage clear (`rewrite`, seeks).
+   */
+  saveState(into?: PropVisualState | null): PropVisualState;
+  restoreState(s: PropVisualState, rewrite?: boolean): void;
+}
+/** Opaque PropRenderer.saveState snapshot. */
+export interface PropVisualState {
+  readonly ids: Int32Array;
+  readonly f32: Float32Array;
+  readonly f64: Float64Array;
+  readonly u8: Uint8Array;
+  readonly tex: Float32Array;
 }
 export interface PropRendererOptions {
   lighting: LightingStack;

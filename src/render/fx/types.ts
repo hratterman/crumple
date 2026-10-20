@@ -106,6 +106,21 @@ export interface FxSystem extends WorldLayerRenderer {
    * wheels' strips.
    */
   setSkidmarksFrozen(frozen: boolean): void;
+  /**
+   * P7 follow-up: the whole transient FX state (particle pools, debris,
+   * emitter accumulators, clocks) — replay entry snapshots it and exit
+   * restores it verbatim, so leaving the replay shows exactly the FX of the
+   * moment it was entered. Skidmarks are not part of it (frozen while
+   * replaying). Opaque; `into` is reused when it fits.
+   */
+  saveState(into?: FxState | null): FxState;
+  restoreState(s: FxState): void;
+  /** Hide the debris chunks (reverse playback: they cannot run backwards; a settled seek re-creates them). */
+  setDebrisHidden(hidden: boolean): void;
+}
+/** Opaque FxSystem.saveState snapshot. */
+export interface FxState {
+  readonly kind: 'fx';
 }
 export interface FxOptions {
   lighting: LightingStack;

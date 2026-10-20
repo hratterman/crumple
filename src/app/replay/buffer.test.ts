@@ -119,8 +119,8 @@ function realisticScene(awakeProps: number): SceneObject[] {
   return objs;
 }
 
-function decodeTo(buf: ReplayBuffer, i: number, epochOffset = 0): SnapshotReader {
-  const layout = computeSnapshotLayout(buf.maxObjects, buf.nodeCapacity, buf.beamCapacity, false);
+function decodeTo(buf: ReplayBuffer, i: number, epochOffset = 0, strains = false): SnapshotReader {
+  const layout = computeSnapshotLayout(buf.maxObjects, buf.nodeCapacity, buf.beamCapacity, strains);
   const out = new ArrayBuffer(layout.totalBytes);
   buf.decode(i, new SnapshotWriter(layout).attach(out), epochOffset);
   return new SnapshotReader().attach(out);
@@ -181,8 +181,9 @@ describe('replay buffer codec', () => {
     const buf = new ReplayBuffer(SMALL);
     const src = scene.write(500, { impacts: 3, breaks: 2, brokenFrom: 0 });
     expect(buf.record(src)).toBe(true);
+    // the seek-generation epoch offset applies to traffic objects only (none here)
     const out = decodeTo(buf, 0, 7);
-    const err = expectFrameEqual(out, src, 7);
+    const err = expectFrameEqual(out, src, 0);
     expect(err).toBeGreaterThan(0);
     expect(err).toBeLessThan(1e-4);
     expect(out.impactCount).toBe(3);
@@ -190,6 +191,34 @@ describe('replay buffer codec', () => {
     expect(out.skidCount).toBe(1);
     const e = out.readImpact(2, { objectId: 0, materialId: 0, px: 0, py: 0, pz: 0, nx: 0, ny: 0, nz: 0, impulse: 0 });
     expect(e).toEqual({ objectId: 1, materialId: 5, px: 2, py: 1, pz: 2, nx: 0, ny: 0, nz: 1, impulse: 5 });
+  });
+
+  it('records the debug strain section (i8 per beam) while recordStrains is on', () => {
+    const rng = createRng(11);
+    const objs = [makeObject(1, 40, 300, 4, false, true, rng), makeObject(4100, 20, 50, 1, true, false, rng)];
+    const layout = computeSnapshotLayout(CAP.maxObjects, CAP.nodeCapacity, CAP.beamCapacity, true);
+    const sbuf = new ArrayBuffer(layout.totalBytes);
+    const w = new SnapshotWriter(layout).attach(sbuf);
+    w.begin(100, 0.05, 1);
+    let g = 0;
+    for (const o of objs) {
+      const i = w.addObject(o.id, o.sleeping ? OBJECT_FLAG_SLEEPING : 0, o.nodes, o.beams);
+      for (let k = 0; k < o.nodes; k++) w.setNode(g + k, o.rest[3 * k]!, o.rest[3 * k + 1]!, o.rest[3 * k + 2]!);
+      g += o.nodes;
+      void i;
+    }
+    for (let b = 0; b < 350; b++) w.setStrain(b, b === 17 ? Number.NaN : Math.sin(b) * 0.9);
+    const src = new SnapshotReader().attach(sbuf);
+    const buf = new ReplayBuffer(SMALL);
+    buf.recordStrains = true;
+    buf.record(src);
+    expect(buf.hasStrainFrames).toBe(true);
+    const out = decodeTo(buf, 0, 0, true);
+    const a = out.strains!;
+    for (let b = 0; b < 350; b++) {
+      if (b === 17) expect(a[b]).toBeNaN();
+      else expect(Math.abs(a[b]! - Math.sin(b) * 0.9)).toBeLessThanOrEqual(0.5 / 127 + 1e-6);
+    }
   });
 
   it('decimates 120 Hz snapshots to the record rate and aggregates events + teleports', () => {

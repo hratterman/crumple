@@ -135,6 +135,32 @@ export interface VehicleDamageImpl extends VehicleDamage {
   glassGroupPatch(panelIndices: readonly number[]): ShaderPatch | null;
   /** Diagnostics: strain beams measured in the last snapshot step / snapshots in full-scan mode. */
   readonly scan: { lastBeams: number; activeSnapshots: number };
+  /**
+   * P7 replay: copies every piece of mutable damage state (channels, strain
+   * persistence, broken / event stamps, panels, glass + crack uniforms,
+   * queued events, panel visibility on the last skin) into `into` (reused
+   * when it fits, else a new one). Restoring it reproduces the visuals
+   * exactly (the skin's block B / flags / visibility are rewritten).
+   */
+  saveState(into?: DamageState | null): DamageState;
+  /**
+   * Restores a saveState() snapshot. `seed`: the next strain scan re-seeds
+   * the persistence filter from the presented geometry (replay seeks: the
+   * frame's crush shows at once).
+   */
+  restoreState(s: DamageState, seed?: boolean): void;
+}
+
+/** Opaque damage snapshot (VehicleDamageImpl.saveState). */
+export interface DamageState {
+  readonly f32: Float32Array;
+  readonly i32: Int32Array;
+  readonly u8: Uint8Array;
+  readonly f64: Float64Array;
+  /** Queued, unprocessed events (impact / skid / break records). */
+  imp: Float32Array;
+  skid: Float32Array;
+  brk: Float32Array;
 }
 
 export interface CrackUniforms {
@@ -1427,6 +1453,154 @@ export function createVehicleDamage(
 
     reset(): void {
       clearAll();
+    },
+
+    saveState(into?: DamageState | null): DamageState {
+      const G = glass.length;
+      const nf = 3 * N + K * S + P;
+      const ni = S + B;
+      const nu = 2 * N + B + 5 * P;
+      const nd = 32 + 15 * G;
+      const st: DamageState =
+        into && into.f32.length === nf && into.i32.length === ni && into.u8.length === nu && into.f64.length === nd
+          ? into
+          : { f32: new Float32Array(nf), i32: new Int32Array(ni), u8: new Uint8Array(nu), f64: new Float64Array(nd), imp: new Float32Array(0), skid: new Float32Array(0), brk: new Float32Array(0) };
+      const f = st.f32;
+      f.set(strain, 0);
+      f.set(scuff, N);
+      f.set(crack, 2 * N);
+      f.set(ehist, 3 * N);
+      for (let i = 0; i < P; i++) f[3 * N + K * S + i] = runtime[i]!.crack;
+      st.i32.set(ecount, 0);
+      st.i32.set(eventStamp, S);
+      const u = st.u8;
+      u.set(flags, 0);
+      u.set(broken, N);
+      const vis = lastSkin as (FlexSkin & { panelVisible?(i: number): boolean }) | null;
+      for (let i = 0; i < P; i++) {
+        const rt = runtime[i]!;
+        const o = N + B + 5 * i;
+        u[o] = rt.detached ? 1 : 0;
+        u[o + 1] = rt.free ? 1 : 0;
+        u[o + 2] = rt.shattered ? 1 : 0;
+        u[o + 3] = rt.hidden ? 1 : 0;
+        u[o + 4] = vis && vis.panelVisible ? (vis.panelVisible(i) ? 1 : 0) : rt.hidden ? 0 : 1;
+      }
+      // N..2N of u8 is spare (kept for layout symmetry)
+      const d = st.f64;
+      const sc = [
+        cursor, activeUntil, lastTelemetryDamage, snapshots, bitsetSeen ? 1 : 0, comTick, lastTick, epoch,
+        seedPersist ? 1 : 0, pendingShowAll ? 1 : 0, brokenEvents ? 1 : 0, pendingStamps ? 1 : 0, detachPending ? 1 : 0,
+        wheelVx, wheelVy, wheelVz, wheelPx, wheelPy, wheelPz, wheelPrevOk ? 1 : 0,
+        com[0]!, com[1]!, com[2]!, comVelocity[0]!, comVelocity[1]!, comVelocity[2]!, impN, skidN, brkN,
+      ];
+      for (let k = 0; k < sc.length; k++) d[k] = sc[k]!;
+      for (let g = 0; g < G; g++) {
+        const gs = glass[g]!;
+        const o = 32 + 15 * g;
+        const A = gs.uniforms.uCrackA.value;
+        const Bv = gs.uniforms.uCrackB.value;
+        d[o] = gs.hitImpulse;
+        d[o + 1] = gs.hx;
+        d[o + 2] = gs.hy;
+        d[o + 3] = gs.hz;
+        d[o + 4] = gs.cx;
+        d[o + 5] = gs.cy;
+        d[o + 6] = gs.cz;
+        d[o + 7] = A.x;
+        d[o + 8] = A.y;
+        d[o + 9] = A.z;
+        d[o + 10] = A.w;
+        d[o + 11] = Bv.x;
+        d[o + 12] = Bv.y;
+        d[o + 13] = Bv.z;
+        d[o + 14] = Bv.w;
+      }
+      st.imp = impN > 0 ? impQ.slice(0, impN * 4) : new Float32Array(0);
+      st.skid = skidN > 0 ? skidQ.slice(0, skidN * 4) : new Float32Array(0);
+      st.brk = brkN > 0 ? brkQ.slice(0, brkN * 4) : new Float32Array(0);
+      return st;
+    },
+
+    restoreState(st: DamageState, seed = false): void {
+      const G = glass.length;
+      if (st.f32.length !== 3 * N + K * S + P || st.f64.length !== 32 + 15 * G) throw new Error('damage.restoreState: snapshot of another vehicle');
+      const f = st.f32;
+      strain.set(f.subarray(0, N));
+      scuff.set(f.subarray(N, 2 * N));
+      crack.set(f.subarray(2 * N, 3 * N));
+      ehist.set(f.subarray(3 * N, 3 * N + K * S));
+      ecount.set(st.i32.subarray(0, S));
+      eventStamp.set(st.i32.subarray(S, S + B));
+      const u = st.u8;
+      flags.set(u.subarray(0, N));
+      broken.set(u.subarray(N, N + B));
+      for (let i = 0; i < P; i++) {
+        const rt = runtime[i]!;
+        const o = N + B + 5 * i;
+        rt.detached = u[o] === 1;
+        rt.free = u[o + 1] === 1;
+        rt.shattered = u[o + 2] === 1;
+        rt.hidden = u[o + 3] === 1;
+        rt.crack = f[3 * N + K * S + i]!;
+        if (lastSkin) lastSkin.setPanelVisible(i, u[o + 4] === 1);
+      }
+      const d = st.f64;
+      cursor = d[0]!;
+      activeUntil = d[1]!;
+      lastTelemetryDamage = d[2]!;
+      snapshots = d[3]!;
+      bitsetSeen = d[4] === 1;
+      comTick = d[5]!;
+      lastTick = d[6]!;
+      epoch = d[7]!;
+      seedPersist = d[8] === 1;
+      pendingShowAll = d[9] === 1;
+      brokenEvents = d[10] === 1;
+      pendingStamps = d[11] === 1;
+      detachPending = d[12] === 1;
+      wheelVx = d[13]!;
+      wheelVy = d[14]!;
+      wheelVz = d[15]!;
+      wheelPx = d[16]!;
+      wheelPy = d[17]!;
+      wheelPz = d[18]!;
+      wheelPrevOk = d[19] === 1;
+      com[0] = d[20]!;
+      com[1] = d[21]!;
+      com[2] = d[22]!;
+      comVelocity[0] = d[23]!;
+      comVelocity[1] = d[24]!;
+      comVelocity[2] = d[25]!;
+      impN = st.imp.length >> 2;
+      skidN = st.skid.length >> 2;
+      brkN = st.brk.length >> 2;
+      impQ.set(st.imp);
+      skidQ.set(st.skid);
+      brkQ.set(st.brk);
+      for (let g = 0; g < G; g++) {
+        const gs = glass[g]!;
+        const o = 32 + 15 * g;
+        gs.hitImpulse = d[o]!;
+        gs.hx = d[o + 1]!;
+        gs.hy = d[o + 2]!;
+        gs.hz = d[o + 3]!;
+        gs.cx = d[o + 4]!;
+        gs.cy = d[o + 5]!;
+        gs.cz = d[o + 6]!;
+        gs.uniforms.uCrackA.value.set(d[o + 7]!, d[o + 8]!, d[o + 9]!, d[o + 10]!);
+        gs.uniforms.uCrackB.value.set(d[o + 11]!, d[o + 12]!, d[o + 13]!, d[o + 14]!);
+      }
+      // force the merge / block B / flags rewrite on the next update
+      lastSrc = null;
+      bDirty = flagsDirty = true;
+      crackDirty = false;
+      writtenSkin = null;
+      if (seed) {
+        ecount.fill(0);
+        seedPersist = true;
+        lastTick = -1;
+      }
     },
 
     dispose(): void {

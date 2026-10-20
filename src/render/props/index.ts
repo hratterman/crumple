@@ -35,6 +35,7 @@ import {
 
 import { OBJECT_FLAG_SLEEPING } from '../../protocol/layout';
 import { isPropObjectId } from '../../protocol/messages';
+import type { PropVisualState } from './types';
 import type { PropInstance, PropKey } from '../../sim/props/types';
 import type { QualityLevel, QualityPreset, RenderContext, WorldFrame } from '../types';
 import { FLEX_TRIADS, NODE_TEX_FLAG_BROKEN, NODE_TEX_WIDTH, type BindingPanel } from '../vehicle/types';
@@ -524,6 +525,8 @@ export const createPropRenderer: CreatePropRenderer = (ctx: RenderContext, insta
   const sphere = new Sphere();
   let cullDistance = PROP_CULL_DISTANCE[ctx.quality.level];
   let lastTick = -1;
+  /** P7: after a replay restore the next update rewrites every prop present (no reset-jump clear). */
+  let forceRewrite = false;
 
   function update(frame: WorldFrame): void {
     const cam = frame.camera;
@@ -548,7 +551,7 @@ export const createPropRenderer: CreatePropRenderer = (ctx: RenderContext, insta
       if (!it || o.nodeCount !== it.batch.nodeCount || 3 * (o.nodeOffset + o.nodeCount) > src.length) continue;
       const sleeping = (o.flags & OBJECT_FLAG_SLEEPING) !== 0;
       if (!sleeping) awake++;
-      let write = !sleeping || it.wasAwake || !it.simWritten || originMoved;
+      let write = !sleeping || it.wasAwake || !it.simWritten || originMoved || forceRewrite;
       if (sleeping && !write) {
         // re-placed while asleep (resetProps): node 0 jumped
         const s0 = 3 * o.nodeOffset;
@@ -565,6 +568,7 @@ export const createPropRenderer: CreatePropRenderer = (ctx: RenderContext, insta
       it.wasAwake = !sleeping;
     }
     if (originMoved) for (const it of all) if (!it.simWritten && !it.removed) writeRest(it);
+    forceRewrite = false;
     stats.awake = awake;
 
     // per-instance culling + compaction
@@ -688,6 +692,73 @@ export const createPropRenderer: CreatePropRenderer = (ctx: RenderContext, insta
     },
     onBeamBreak(e) {
       scuffAt(e.objectId, e.px, e.py, e.pz, 0.25, NODE_TEX_FLAG_BROKEN);
+    },
+    saveState(into?: PropVisualState | null): PropVisualState {
+      let nf = 0;
+      let nu = 0;
+      for (const it of all) {
+        nf += 2 * it.batch.nodeCount;
+        nu += it.batch.nodeCount + 2;
+      }
+      const nd = all.length * 9 + 4;
+      const st: PropVisualState =
+        into && into.ids.length === all.length && into.f32.length === nf && into.u8.length === nu && into.f64.length === nd && into.tex.length === data.length
+          ? into
+          : { ids: new Int32Array(all.length), f32: new Float32Array(nf), f64: new Float64Array(nd), u8: new Uint8Array(nu), tex: new Float32Array(data.length) };
+      let f = 0;
+      let u = 0;
+      all.forEach((it, k) => {
+        const n = it.batch.nodeCount;
+        st.ids[k] = it.objectId;
+        st.f32.set(it.prevRaw, f);
+        st.f32.set(it.scuff, f + n);
+        f += 2 * n;
+        st.u8.set(it.flags, u);
+        st.u8[u + n] = it.simWritten ? 1 : 0;
+        st.u8[u + n + 1] = it.wasAwake ? 1 : 0;
+        u += n + 2;
+        st.f64.set(it.last, 9 * k);
+        st.f64.set(it.aabb, 9 * k + 3);
+      });
+      const g = 9 * all.length;
+      st.f64[g] = origin.x;
+      st.f64[g + 1] = origin.y;
+      st.f64[g + 2] = origin.z;
+      st.f64[g + 3] = lastTick;
+      st.tex.set(data);
+      return st;
+    },
+    restoreState(st: PropVisualState, rewrite = false): void {
+      if (st.ids.length !== all.length || st.tex.length !== data.length || all.some((it, k) => it.objectId !== st.ids[k])) {
+        console.warn('[props] restoreState: instance set changed since the snapshot; skipped');
+        return;
+      }
+      let f = 0;
+      let u = 0;
+      all.forEach((it, k) => {
+        const n = it.batch.nodeCount;
+        it.prevRaw.set(st.f32.subarray(f, f + n));
+        it.scuff.set(st.f32.subarray(f + n, f + 2 * n));
+        f += 2 * n;
+        it.flags.set(st.u8.subarray(u, u + n));
+        it.simWritten = st.u8[u + n] === 1;
+        it.wasAwake = st.u8[u + n + 1] === 1;
+        u += n + 2;
+        it.last.set(st.f64.subarray(9 * k, 9 * k + 3));
+        it.aabb.set(st.f64.subarray(9 * k + 3, 9 * k + 9));
+      });
+      const g = 9 * all.length;
+      origin.set(st.f64[g]!, st.f64[g + 1]!, st.f64[g + 2]!);
+      root.position.copy(origin);
+      root.updateMatrixWorld();
+      lastTick = st.f64[g + 3]!;
+      data.set(st.tex);
+      texDirty = true;
+      uniforms.uPropNodes.value.needsUpdate = true;
+      if (rewrite) {
+        forceRewrite = true;
+        lastTick = -1;
+      }
     },
     dispose() {
       root.removeFromParent();

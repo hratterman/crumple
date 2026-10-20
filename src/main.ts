@@ -28,7 +28,10 @@ import type { Mesh, Material } from 'three';
 import { FrameProfiler, gpuSyncFn, PassCounter, perfGpuSync, perfRequested } from './app/perf';
 import { anisotropyFor, createQualityControllerWith, isQualityLevel, isSoftwareRenderer, loadQualityLevel, SOFTWARE_GL_PIXEL_RATIO } from './app/quality';
 import { SimClient, type ObjectRange } from './app/simClient';
-import { createReplayController } from './app/replay';
+import { createReplayController, FRAME_BODY_HIT, FRAME_PROP_HIT } from './app/replay';
+import type { DamageState } from './render/vehicle/damage';
+import type { PropVisualState } from './render/props/types';
+import type { FxState } from './render/fx/types';
 import { createTrafficController, type TrafficController } from './app/traffic';
 import { placeOnGround, repairSpot, yawOf, yawOfQuat, type Aabb } from './app/spawn';
 import { chaseFramingFor, drivableEntry, hasStoredChoice, loadPlayerAssets, loadVehicleChoice, PlayerVehicle, saveVehicleChoice, speedoMax, type PlayerAssets } from './app/player';
@@ -195,6 +198,23 @@ const replay = createReplayController({
   paintOf: (id) => (id === 1 && player ? player.palette.id : null),
   wheelsOf: (id) => (id === 1 ? playerHubs() : null),
 });
+/** Replay checkpoint domains (registration order = bit in primeFrame's `hits`): the player's damage, then the props. */
+const REPLAY_DOMAIN_PLAYER_BIT = 1;
+const REPLAY_DOMAIN_PROPS_BIT = 2;
+replay.registerDomain({
+  key: 'player',
+  hitFlag: FRAME_BODY_HIT,
+  save: (into) => {
+    const pv = player ? player.visual : null;
+    return pv ? pv.damage.saveState(into as DamageState | null) : null;
+  },
+  restore: (st, seed) => {
+    const pv = player ? player.visual : null;
+    if (pv && st) pv.damage.restoreState(st as DamageState, seed);
+  },
+});
+/** Snapshot tick of the last event drain (the player's damage has consumed events up to it one frame later). */
+let lastDrainTick = -1;
 /** The player's wheel hubs (replay markers ignore tyre contacts), cached per player vehicle. */
 let hubsFor: { p: unknown; hubs: { hubs: Int32Array; radius: number } } | null = null;
 function playerHubs(): { hubs: Int32Array; radius: number } | null {
@@ -1413,6 +1433,7 @@ async function boot(): Promise<void> {
 
     // P7: the replay playhead advances and presents its frames through the client (no-op while live).
     replay.update(dt);
+    if (!replay.active) replay.recordStrains = beamView.visible;
     // Sim → interpolated nodes → beam view + camera subject.
     const need = client.nodeTotal * 3;
     if (positions.length < need) positions = new Float32Array(need);
@@ -1423,6 +1444,8 @@ async function boot(): Promise<void> {
       poseValid = updateVehiclePose();
       prof.lap('beamView+pose');
       updateVisuals(dt);
+      // P7: the player's damage has now processed every event up to the previous drain
+      if (!replay.active) replay.checkpoint('player', lastDrainTick);
       prof.lap('vehicle');
       const pv = playerVisual();
       if (prof.enabled && pv) {
@@ -1435,6 +1458,7 @@ async function boot(): Promise<void> {
       poseValid = false;
     }
     client.drainEvents(eventSink);
+    if (!replay.active) lastDrainTick = client.latestTick;
     prof.lap('events');
     // Commands apply at the next step boundary: two snapshots later the pose is the reset one.
     if (snapAfterTick >= 0 && poseValid && client.latestTick > snapAfterTick + 40) {
@@ -1472,6 +1496,8 @@ async function boot(): Promise<void> {
     trafficC.update(worldFrame);
     prof.lap('traffic');
     propsR.update(worldFrame);
+    // P7: props scuff on drain (same frame), so their checkpoint tag is this frame's drain
+    if (!replay.active && worldFrame.interpolated) replay.checkpoint('props', lastDrainTick);
     prof.lap('props');
     vegetationR.update(worldFrame);
     prof.lap('vegetation');
@@ -1506,7 +1532,7 @@ async function boot(): Promise<void> {
     if (input) replaySession?.frame(dt);
   };
 
-  // P7 replay: main's side of a settled seek (damage reset + deterministic FX re-run) and the mode switch.
+  // P7 replay: main's side — live snapshot / verbatim restore, damage checkpoint domains, settled-seek priming.
   const fillWorldFrame = (simTime: number): void => {
     const need = client.nodeTotal * 3;
     if (positions.length < need) positions = new Float32Array(need);
@@ -1518,32 +1544,98 @@ async function boot(): Promise<void> {
     worldFrame.tick = client.latestTick;
   };
   const noEvents = {};
-  /** Prime: FX only (vehicle damage gets impacts only on body-hit frames, processed on their own geometry). */
-  const fxOnlySink = {
+  /** Prime routing for the current frame: FX window and/or the domains whose hit frame it is. */
+  let primeFx = false;
+  let primeHits = 0;
+  const primeSink = {
     impact(e: Readonly<ImpactEvent>): void {
-      if (isPropObjectId(e.objectId)) props?.onImpact(e);
-      fxR.onImpact(e);
+      if (e.objectId === VEHICLE_ID) {
+        if (primeHits & REPLAY_DOMAIN_PLAYER_BIT) playerVisual()?.onImpact(e);
+      } else if (isPropObjectId(e.objectId)) {
+        if (primeHits & REPLAY_DOMAIN_PROPS_BIT) propsR.onImpact(e);
+      } else if (trafficC.owns(e.objectId)) {
+        if (primeFx) trafficC.onImpact(e);
+        return;
+      }
+      if (primeFx) fxR.onImpact(e);
     },
     beamBreak(e: Readonly<BeamBreakEvent>): void {
-      if (isPropObjectId(e.objectId)) props?.onBeamBreak(e);
-      fxR.onBeamBreak(e);
+      if (e.objectId === VEHICLE_ID) {
+        if (primeHits & REPLAY_DOMAIN_PLAYER_BIT) playerVisual()?.onBeamBreak(e);
+      } else if (isPropObjectId(e.objectId)) {
+        if (primeHits & REPLAY_DOMAIN_PROPS_BIT) propsR.onBeamBreak(e);
+      } else if (trafficC.owns(e.objectId)) {
+        if (primeFx) trafficC.onBeamBreak(e);
+        return;
+      }
+      if (primeFx) fxR.onBeamBreak(e);
     },
     skid(e: Readonly<SkidEvent>): void {
-      fxR.onSkid(e);
+      if (e.objectId === VEHICLE_ID) {
+        if (primeHits & REPLAY_DOMAIN_PLAYER_BIT) playerVisual()?.onSkid(e);
+      } else if (trafficC.owns(e.objectId)) {
+        if (primeFx) trafficC.onSkid(e);
+        return;
+      }
+      if (primeFx) fxR.onSkid(e);
     },
   };
-  /** Prime, body-hit frame outside the FX window: the player's damage only. */
-  const damageOnlySink = {
-    impact(e: Readonly<ImpactEvent>): void {
-      if (e.objectId === VEHICLE_ID) playerVisual()?.onImpact(e);
-    },
-    beamBreak(e: Readonly<BeamBreakEvent>): void {
-      if (e.objectId === VEHICLE_ID) playerVisual()?.onBeamBreak(e);
-    },
-    skid(e: Readonly<SkidEvent>): void {
-      if (e.objectId === VEHICLE_ID) playerVisual()?.onSkid(e);
-    },
+  const saveVisualState = () => {
+    const pv = playerVisual();
+    return { pv, player: pv ? pv.damage.saveState() : null, props: propsR.saveState(), traffic: trafficC.saveReplayState(), fx: fxR.saveState() };
   };
+  let lastSavedLive: unknown = null;
+  /** FNV-1a over every typed array / number of a saved visual state (object refs under `pv` skipped). */
+  const digest = (v: unknown): number => {
+    let h = 0x811c9dc5;
+    const seen = new Set<unknown>();
+    const walk = (x: unknown): void => {
+      if (x === null || x === undefined) return void (h = Math.imul(h ^ 1, 0x01000193));
+      if (typeof x === 'number' || typeof x === 'boolean') {
+        const f = new Float64Array([Number(x)]);
+        const u = new Uint32Array(f.buffer);
+        h = Math.imul(h ^ u[0]!, 0x01000193);
+        h = Math.imul(h ^ u[1]!, 0x01000193);
+        return;
+      }
+      if (ArrayBuffer.isView(x)) {
+        const b = new Uint8Array(x.buffer, x.byteOffset, x.byteLength);
+        for (let i = 0; i < b.length; i++) h = Math.imul(h ^ b[i]!, 0x01000193);
+        return;
+      }
+      if (typeof x !== 'object' || seen.has(x)) return;
+      seen.add(x);
+      if (Array.isArray(x)) return x.forEach(walk);
+      for (const k of Object.keys(x as object).sort()) if (k !== 'pv') walk((x as Record<string, unknown>)[k]);
+    };
+    walk(v);
+    return h >>> 0;
+  };
+  Object.assign(crumple.debug, {
+    /** P7 e2e: digest of the visual state now / of the one saved when the replay was entered. */
+    replayDigest: () => digest(saveVisualState()),
+    replayLiveDigest: () => (lastSavedLive ? digest(lastSavedLive) : 0),
+    /** Player damage totals (Σ strain, Σ scuff, hidden panels). */
+    damageSums: () => {
+      const pv = playerVisual();
+      if (!pv) return null;
+      let strain = 0;
+      let scuff = 0;
+      for (let i = 0; i < pv.damage.strain.length; i++) {
+        strain += pv.damage.strain[i]!;
+        scuff += pv.damage.scuff[i]!;
+      }
+      let hidden = 0;
+      for (let i = 0; i < pv.damage.panelCount; i++) if (!pv.skin.panelVisible(i)) hidden++;
+      return { strain, scuff, hidden };
+    },
+  });
+  replay.registerDomain({
+    key: 'props',
+    hitFlag: FRAME_PROP_HIT,
+    save: (into) => propsR.saveState(into as PropVisualState | null),
+    restore: (st, seed) => propsR.restoreState(st as PropVisualState, seed),
+  });
   replay.setVisuals({
     enter() {
       mapper.releaseAll();
@@ -1554,19 +1646,45 @@ async function boot(): Promise<void> {
       lastSent.gearSelect = NaN; // force a full input resend
       fxR.setSkidmarksFrozen(false);
     },
+    saveLive() {
+      lastSavedLive = saveVisualState();
+      return lastSavedLive;
+    },
+    restoreLive(state) {
+      const st = state as { pv: ReturnType<typeof playerVisual>; player: DamageState | null; props: PropVisualState; traffic: unknown; fx: FxState };
+      const pv = playerVisual();
+      if (pv && pv === st.pv && st.player) {
+        pv.damage.restoreState(st.player);
+        pv.fx?.clear();
+      }
+      propsR.restoreState(st.props);
+      trafficC.restoreReplayState(st.traffic);
+      fxR.restoreState(st.fx);
+    },
+    reverse(on) {
+      fxR.setDebrisHidden(on);
+    },
     primeBegin(seed) {
-      // the presented frame carries the new seek generation: every damage visual resets on this update
+      // traffic visuals see the new seek generation (their damage resets); FX restart from `seed`
       fillWorldFrame(client.renderTime());
-      if (worldFrame.interpolated) updateVisuals(0);
       trafficC.update(worldFrame);
       client.drainEvents(noEvents);
       fxR.clearTransient();
       fxR.reseed(seed);
     },
-    primeFrame(time, fx, damage) {
+    primeFrame(time, fx, hits) {
       fillWorldFrame(time);
-      client.drainEvents(fx ? (damage ? eventSink : fxOnlySink) : damageOnlySink);
-      if (damage && worldFrame.interpolated) updateVisuals(0);
+      primeFx = fx;
+      primeHits = hits;
+      // props scuff against the node texture: write this frame's poses first
+      if (hits & REPLAY_DOMAIN_PROPS_BIT) propsR.update(worldFrame);
+      const pv = playerVisual();
+      // crash frames outside the FX window must not throw fresh glass shards
+      const onFx = pv ? pv.damage.onFx : null;
+      if (pv && !fx) pv.damage.onFx = null;
+      client.drainEvents(primeSink);
+      if (hits & REPLAY_DOMAIN_PLAYER_BIT && worldFrame.interpolated) updateVisuals(0);
+      if (pv) pv.damage.onFx = onFx;
       if (fx) fxR.update(worldFrame);
     },
   });

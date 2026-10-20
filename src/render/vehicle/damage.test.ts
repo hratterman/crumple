@@ -552,6 +552,42 @@ describe('repair-epoch change seeds the strain persistence (replay seeks)', () =
   });
 });
 
+describe('saveState / restoreState (P7 replay exit)', () => {
+  it('restoring a snapshot reproduces every channel, the skin data, flags and panel visibility exactly', () => {
+    const f = fixture({ minBrokenFraction: 0.3, mode: 'hide' });
+    f.step(2);
+    // damage: a hit + stretch + broken lid beams (hide-mode detach) + a cracked pane
+    f.dmg.onImpact({ objectId: 1, materialId: 5, px: 700, py: 12.75, pz: -300, nx: 0, ny: 1, nz: 0, impulse: 600 });
+    for (let b = 0; b < f.rig.beamCount; b += 3) f.frame.broken[b] = 1;
+    f.step(5);
+    const save = f.dmg.saveState();
+    const before = { strain: f.dmg.strain.slice(), scuff: f.dmg.scuff.slice(), crack: f.dmg.crack.slice(), flags: f.skin.nodeFlags.slice(), data: f.skin.nodeData.slice(), vis: f.skin.visible.slice() };
+    expect(before.scuff.some((x) => x > 0)).toBe(true);
+    // replay-like divergence: a repair epoch reset and fresh, different damage
+    f.frame.repairEpoch++;
+    f.frame.broken.fill(0);
+    f.step(3);
+    f.dmg.onImpact({ objectId: 1, materialId: 5, px: 700.3, py: 12.5, pz: -300.2, nx: 0, ny: 1, nz: 0, impulse: 100 });
+    f.step(2);
+    expect(Array.from(f.dmg.scuff)).not.toEqual(Array.from(before.scuff));
+    // restore (the live frame is back) → identical
+    f.frame.repairEpoch--;
+    for (let b = 0; b < f.rig.beamCount; b += 3) f.frame.broken[b] = 1;
+    f.dmg.restoreState(save);
+    f.dmg.update(f.frame, f.skin);
+    expect(Array.from(f.dmg.strain)).toEqual(Array.from(before.strain));
+    expect(Array.from(f.dmg.scuff)).toEqual(Array.from(before.scuff));
+    expect(Array.from(f.dmg.crack)).toEqual(Array.from(before.crack));
+    expect(Array.from(f.skin.nodeFlags)).toEqual(Array.from(before.flags));
+    expect(Array.from(f.skin.nodeData)).toEqual(Array.from(before.data));
+    expect(f.skin.visible).toEqual(before.vis);
+    // a second save equals the first one byte for byte
+    const again = f.dmg.saveState();
+    expect(Array.from(again.f32)).toEqual(Array.from(save.f32));
+    expect(Array.from(again.u8)).toEqual(Array.from(save.u8));
+  });
+});
+
 // ---------------------------------------------------------------- allocation
 describe('incremental snapshot work (U6 perf)', () => {
   it('quiet: strain beams are measured round-robin (≤ STRAIN_SLICE per snapshot) and still catch lasting strain; damage activity → full scans', () => {

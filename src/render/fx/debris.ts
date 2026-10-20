@@ -76,6 +76,22 @@ function flatGeometry(v: readonly (readonly number[])[], faces: readonly (readon
   return g;
 }
 
+/** P7 replay snapshot of a DebrisPool. */
+export interface DebrisState {
+  st: Float64Array;
+  age: Float32Array;
+  life: Float32Array;
+  scale: Float32Array;
+  alive: Uint8Array;
+  asleep: Uint8Array;
+  ground: Float64Array;
+  colors: Float32Array;
+  matrices: Float32Array;
+  next: number;
+  liveN: number;
+  count: number;
+}
+
 export class DebrisPool {
   readonly mesh: InstancedMesh;
   private cap: number;
@@ -293,6 +309,50 @@ export class DebrisPool {
     if (this.liveN === 0) maxAlive = 0;
     this.mesh.count = maxAlive;
     if (moved) this.mesh.instanceMatrix.needsUpdate = true;
+    this.dirty = this.liveN > 0;
+  }
+
+  /** P7 replay: copy of every chunk (reused when it fits). */
+  saveState(into?: DebrisState | null): DebrisState {
+    const n = this.cap;
+    const st: DebrisState =
+      into && into.alive.length === n
+        ? into
+        : {
+            st: new Float64Array(n * STRIDE), age: new Float32Array(n), life: new Float32Array(n), scale: new Float32Array(n),
+            alive: new Uint8Array(n), asleep: new Uint8Array(n), ground: new Float64Array(n * 3),
+            colors: new Float32Array(n * 3), matrices: new Float32Array(n * 16), next: 0, liveN: 0, count: 0,
+          };
+    st.st.set(this.st);
+    st.age.set(this.age);
+    st.life.set(this.life);
+    st.scale.set(this.scale);
+    st.alive.set(this.alive);
+    st.asleep.set(this.asleep);
+    st.ground.set(this.ground);
+    st.colors.set(this.colors.array as Float32Array);
+    st.matrices.set(this.mesh.instanceMatrix.array as Float32Array);
+    st.next = this.next;
+    st.liveN = this.liveN;
+    st.count = this.mesh.count;
+    return st;
+  }
+  restoreState(st: DebrisState): void {
+    if (st.alive.length !== this.cap) return;
+    this.st.set(st.st);
+    this.age.set(st.age);
+    this.life.set(st.life);
+    this.scale.set(st.scale);
+    this.alive.set(st.alive);
+    this.asleep.set(st.asleep);
+    this.ground.set(st.ground);
+    (this.colors.array as Float32Array).set(st.colors);
+    this.colors.needsUpdate = true;
+    (this.mesh.instanceMatrix.array as Float32Array).set(st.matrices);
+    this.mesh.instanceMatrix.needsUpdate = true;
+    this.next = st.next;
+    this.liveN = st.liveN;
+    this.mesh.count = st.count;
     this.dirty = this.liveN > 0;
   }
 

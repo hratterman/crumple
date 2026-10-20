@@ -19,7 +19,9 @@
  *   16… object table, OBJ_W words per object (ascending id):
  *     id, flags (sim flags & 0xffff | REC_* bits), nodeCount, beamCount,
  *     epoch, nodes (byte offset in this frame, or SOURCE SEQ when REPEAT),
- *     telemetry (byte offset, 0 = none), broken (byte offset, 0 = none)
+ *     telemetry (byte offset, 0 = none), broken (byte offset, 0 = none),
+ *     strains (byte offset, 0 = none: i8 per beam = round(strain·127),
+ *     −128 = broken / NaN; only while `recordStrains`)
  *   then per object data, 4-aligned: nodes = min xyz f32, scale xyz f32,
  *     u16 × 3n (q = round((x − min)/scale), x' = min + q·scale);
  *     telemetry = 32 f32; broken = ⌈beamCount/32⌉ u32, OBJECT-LOCAL bits
@@ -41,6 +43,7 @@ import type { SnapshotReader, SnapshotWriter } from '../../protocol/codec';
 import { NODE_STRIDE, OBJECT_FLAG_SLEEPING, TELEMETRY_SLOTS } from '../../protocol/layout';
 import { PROP_LAYOUT_ID_BASE } from '../../protocol/messages';
 import { VehicleTelemetry } from '../../protocol/telemetry';
+import { isTrafficObjectId } from '../../protocol/traffic';
 import {
   TRAFFIC_FLAG_TELEPORTED,
   TRAFFIC_MAX_AGENTS,
@@ -67,7 +70,7 @@ import {
 } from './types';
 
 const HDR_WORDS = 16;
-const OBJ_W = 8;
+const OBJ_W = 9;
 const O_ID = 0;
 const O_FLAGS = 1;
 const O_NODES = 2;
@@ -76,9 +79,12 @@ const O_EPOCH = 4;
 const O_DATA = 5;
 const O_TEL = 6;
 const O_BROKEN = 7;
+const O_STRAIN = 8;
 const REC_REPEAT = 1 << 16;
 /** Frame flag: a non-tyre impact ≥ BODY_HIT_IMPULSE on a vehicle (replay settles replay these frames' damage). */
 export const FRAME_BODY_HIT = 1;
+/** Frame flag: an impact (≥ 1 N·s) or beam break on a prop. */
+export const FRAME_PROP_HIT = 2;
 const BODY_HIT_IMPULSE = 3;
 const SIM_FLAGS_MASK = 0xffff;
 const Q = 65535;
@@ -97,6 +103,7 @@ export interface WheelHubs {
 
 interface Chunk {
   u8: Uint8Array;
+  i8: Int8Array;
   u16: Uint16Array;
   u32: Uint32Array;
   f32: Float32Array;
@@ -105,7 +112,7 @@ interface Chunk {
 
 function makeChunk(bytes: number): Chunk {
   const b = new ArrayBuffer(bytes);
-  return { u8: new Uint8Array(b), u16: new Uint16Array(b), u32: new Uint32Array(b), f32: new Float32Array(b), f64: new Float64Array(b) };
+  return { u8: new Uint8Array(b), i8: new Int8Array(b), u16: new Uint16Array(b), u32: new Uint32Array(b), f32: new Float32Array(b), f64: new Float64Array(b) };
 }
 
 interface MutableMarker {
@@ -186,6 +193,19 @@ export class ReplayBuffer {
   private readonly skRec = createSkidEvent();
   private readonly trRec = createTrafficAgentFrame();
 
+  /** Record the debug strain section too (i8 per beam) while true (main: the beam view is shown). */
+  recordStrains = false;
+  /** Frames with a recorded strain section are held (decode writes strains). */
+  hasStrainFrames = false;
+  /**
+   * Time-window eviction never drops a frame newer than this tick (the
+   * replay's damage checkpoints must cover every evicted frame); space /
+   * index pressure ignores it. Infinity = no limit.
+   */
+  evictLimitTick = Infinity;
+  /** Tick of the newest evicted frame (−1 = none). */
+  lastEvictedTick = -1;
+
   // ---- capacities of the recorded snapshots (synthetic layout)
   maxObjects = 0;
   nodeCapacity = 0;
@@ -249,6 +269,23 @@ export class ReplayBuffer {
   }
   frameSeq(i: number): number {
     return this.headSeq + i;
+  }
+  /** Index of the held frame recorded at exactly `tick`, or −1. */
+  indexOfTick(tick: number): number {
+    let lo = 0;
+    let hi = this._count - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const t = this.fTick[this.ringIndex(mid)]!;
+      if (t === tick) return mid;
+      if (t < tick) lo = mid + 1;
+      else hi = mid - 1;
+    }
+    return -1;
+  }
+  /** Tick of the newest recorded frame (−1 before the first). */
+  get lastTick(): number {
+    return this.lastRecTick;
   }
   /** FRAME_BODY_HIT etc. of held frame i. */
   frameFlags(i: number): number {
@@ -413,6 +450,7 @@ export class ReplayBuffer {
     const n = r.objectCount;
     this.ensureScratch(n);
     const key = this.lastKeySeq < 0 || seq - this.lastKeySeq >= this.config.keyframeEvery;
+    const strains = this.recordStrains && r.hasStrains;
     // ---- pass 1: decisions + size
     let size = HDR_WORDS * 4 + n * OBJ_W * 4;
     const nodes = r.nodes;
@@ -456,6 +494,7 @@ export class ReplayBuffer {
           broken = r.readObjectBrokenBits(i, this.brokenScratch);
           if (broken > 0) size += words * 4;
         }
+        if (strains && bc > 0) size += (bc + 3) & ~3;
       }
       this.sBroken[i] = broken;
     }
@@ -500,6 +539,7 @@ export class ReplayBuffer {
       u32[t + O_EPOCH] = epoch;
       u32[t + O_TEL] = 0;
       u32[t + O_BROKEN] = 0;
+      u32[t + O_STRAIN] = 0;
       if (repeat) {
         u32[t + O_DATA] = this.dataSeq[id]!;
       } else {
@@ -514,6 +554,17 @@ export class ReplayBuffer {
           const bs = this.brokenScratch;
           for (let k = 0; k < words; k++) u32[w0 + k] = bs[k]!;
           off += words * 4;
+        }
+        if (strains && bc > 0) {
+          u32[t + O_STRAIN] = off - base;
+          const so = r.objectStrains(i);
+          const i8 = ch.i8;
+          for (let b = 0; b < bc; b++) {
+            const v = so ? so[b]! : 0;
+            i8[off + b] = v === v ? Math.round((v < -1 ? -1 : v > 1 ? 1 : v) * 127) : -128;
+          }
+          off += (bc + 3) & ~3;
+          this.hasStrainFrames = true;
         }
         if (id < ID_SPACE) this.dataSeq[id] = seq;
       }
@@ -535,10 +586,15 @@ export class ReplayBuffer {
     let fflags = 0;
     for (let e = 0; e < this.impN; e++) {
       const k = e * IMPACT_WORDS;
-      if (this.impTyre[e] === 0 && this.impStageU[k]! < PROP_LAYOUT_ID_BASE && this.impStage[k + 8]! >= BODY_HIT_IMPULSE) {
-        fflags |= FRAME_BODY_HIT;
-        break;
-      }
+      const id = this.impStageU[k]!;
+      const j = this.impStage[k + 8]!;
+      if (this.impTyre[e] === 0 && id < PROP_LAYOUT_ID_BASE && j >= BODY_HIT_IMPULSE) fflags |= FRAME_BODY_HIT;
+      else if (id >= PROP_LAYOUT_ID_BASE && j >= 1) fflags |= FRAME_PROP_HIT;
+    }
+    for (let e = 0; e < this.brkN; e++) {
+      const id = this.brkStageU[e * BEAM_BREAK_WORDS]!;
+      if (id >= PROP_LAYOUT_ID_BASE) fflags |= FRAME_PROP_HIT;
+      else fflags |= FRAME_BODY_HIT;
     }
     u32[bw + 13] = fflags;
     let w = off >>> 2;
@@ -652,7 +708,7 @@ export class ReplayBuffer {
   /** Finds room for `size` bytes (returns the chunk); evicts whole groups as needed. */
   private reserve(size: number, time: number): number {
     // time window: evict groups older than `seconds` before this frame
-    while (this._count > 0 && time - this.fTime[this.headIdx]! > this.config.seconds) this.evictGroup();
+    while (this._count > 0 && time - this.fTime[this.headIdx]! > this.config.seconds && this.headGroupEndTick() <= this.evictLimitTick) this.evictGroup();
     // index ring full
     while (this._count >= this.capFrames - 1) this.evictGroup();
     if (this.writeChunk < 0 || this.writeOff + size > REPLAY_CHUNK_BYTES) {
@@ -669,6 +725,13 @@ export class ReplayBuffer {
     return this.writeChunk;
   }
 
+  /** Tick of the last frame of the head keyframe group. */
+  private headGroupEndTick(): number {
+    let i = 1;
+    while (i < this._count && this.fKey[this.ringIndex(i)] !== 1) i++;
+    return this.fTick[this.ringIndex(i - 1)]!;
+  }
+
   /** Evicts the head frame, then every following non-key frame (one keyframe group). */
   private evictGroup(): void {
     do {
@@ -678,6 +741,7 @@ export class ReplayBuffer {
 
   private evictHead(): void {
     const i = this.headIdx;
+    this.lastEvictedTick = this.fTick[i]!;
     this._bytes -= this.fLen[i]!;
     if (this.fKey[i] === 1) this._keyframes--;
     this.headIdx = i + 1 === this.capFrames ? 0 : i + 1;
@@ -862,7 +926,8 @@ export class ReplayBuffer {
       const nc = u32[t + O_NODES]!;
       const bc = u32[t + O_BEAMS]!;
       const oi = w.addObject(id, flags & SIM_FLAGS_MASK, nc, bc);
-      w.setRepairEpoch(oi, (u32[t + O_EPOCH]! + epochOffset) >>> 0);
+      // the seek generation resets only traffic visuals (player / props restore damage checkpoints instead)
+      w.setRepairEpoch(oi, (u32[t + O_EPOCH]! + (isTrafficObjectId(id) ? epochOffset : 0)) >>> 0);
       // nodes + broken: here, or in the source frame for REPEAT
       let dch = ch;
       let dbase = base;
@@ -885,6 +950,19 @@ export class ReplayBuffer {
           const du = dch.u32;
           for (let b = 0; b < bc; b++) if (((du[w0 + (b >>> 5)]! >>> (b & 31)) & 1) !== 0) w.setBeamBroken(gb + b, true);
         }
+        if (w.layout.debugStrains) {
+          const so = dch.u32[dt + O_STRAIN]!;
+          if (so !== 0) {
+            const i8 = dch.i8;
+            const s0 = dbase + so;
+            for (let b = 0; b < bc; b++) {
+              const q = i8[s0 + b]!;
+              w.setStrain(gb + b, q === -128 ? Number.NaN : q / 127);
+            }
+          } else for (let b = 0; b < bc; b++) w.setStrain(gb + b, 0);
+        }
+      } else if (w.layout.debugStrains) {
+        for (let b = 0; b < bc; b++) w.setStrain(gb + b, 0);
       }
       const to = u32[t + O_TEL]!;
       if (to !== 0) {

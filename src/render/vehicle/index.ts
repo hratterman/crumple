@@ -13,7 +13,7 @@ import { Group } from 'three';
 import type { CompiledVehicle } from '../../sim/vehicle/types';
 import type { LightingStack, PatchMaterial, RenderContext } from '../types';
 import { applyFollowers, bindPanels } from './binder';
-import { createVehicleDamage } from './damage';
+import { createVehicleDamage, type VehicleDamageImpl } from './damage';
 import { createFlexSkin, type FlexSkinImpl } from './flexskin';
 import { tessellateVehicle } from './loft';
 import { visualExtras } from './lods';
@@ -52,6 +52,8 @@ export interface VehicleVisualOptions {
 }
 
 export interface VehicleVisualHandle extends VehicleVisual {
+  /** P7: the concrete damage (replay save / restore of its state). */
+  readonly damage: VehicleDamageImpl;
   readonly skin: FlexSkinImpl;
   readonly fx: DamageFxSystem | null;
   /** Bake timings, ms (tessellate, bind, LOD tessellate + bind, total incl. GPU resource creation). */

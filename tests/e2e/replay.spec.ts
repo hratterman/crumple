@@ -222,3 +222,165 @@ test('replay: wall hit at speed, seek to the impact, 1/4× slow-mo, scrub back, 
   await page.screenshot({ path: info.outputPath('replay-live-after-exit.png') });
   expect(errors.filter((e) => !/GPU stall|RGBELoader/.test(e))).toEqual([]);
 });
+
+/**
+ * P7 follow-up: leaving the replay restores the live visual state exactly.
+ * Crash, wait until that crash has left the buffer (low preset: 20 s), crash
+ * again, enter, seek to the start (the first crash's damage is the baseline
+ * there), play / reverse / step around, exit: the visual state digest equals
+ * the one saved on entry, the damage totals are identical and the picture
+ * matches the pre-entry screenshot.
+ */
+interface G2 extends G {
+  debug: G['debug'] & {
+    replayDigest(): number;
+    replayLiveDigest(): number;
+    damageSums(): { strain: number; scuff: number; hidden: number } | null;
+  };
+}
+const c2 = (page: Page) => page.evaluate(() => (window as unknown as { __crumple: G2 }).__crumple.debug.damageSums());
+
+/** Mean absolute RGB difference (0..255) of two PNG screenshots, decoded in the page. */
+type Png = { toString(encoding: "base64"): string };
+function pixelDiff(page: Page, a: Png, b: Png): Promise<number> {
+  return page.evaluate(
+    async ([x, y]) => {
+      const load = async (src: string) => {
+        const img = new Image();
+        img.src = src;
+        await img.decode();
+        const c = document.createElement('canvas');
+        c.width = img.width;
+        c.height = img.height;
+        const g = c.getContext('2d')!;
+        g.drawImage(img, 0, 0);
+        return g.getImageData(0, 0, c.width, c.height).data;
+      };
+      const p = await load(x!);
+      const q = await load(y!);
+      let s = 0;
+      for (let i = 0; i < p.length; i += 4) s += Math.abs(p[i]! - q[i]!) + Math.abs(p[i + 1]! - q[i + 1]!) + Math.abs(p[i + 2]! - q[i + 2]!);
+      return s / ((p.length / 4) * 3);
+    },
+    [`data:image/png;base64,${a.toString('base64')}`, `data:image/png;base64,${b.toString('base64')}`],
+  );
+}
+
+test('replay exit restores the live visual state exactly (damage older than the buffer included)', async ({ page }, info) => {
+  test.setTimeout(420_000);
+  const errors: string[] = [];
+  page.on('pageerror', (err) => errors.push(err.stack ?? String(err)));
+  page.on('console', (msg) => {
+    if (msg.type() === 'error') errors.push(msg.text());
+  });
+  await page.setViewportSize({ width: 640, height: 360 });
+  await page.goto('/crumple/?q=low&spawn=arena&traffic=0');
+  await page.waitForFunction(
+    () => {
+      const c = (window as unknown as { __crumple?: G2 }).__crumple;
+      return !!c && c.ready && c.vehicle !== null && c.position !== null;
+    },
+    null,
+    { timeout: 150_000 },
+  );
+  const input = (a: Record<string, number>) => page.evaluate((x) => (window as unknown as { __crumple: G2 }).__crumple.debug.client.input(1, x), a);
+  await page.evaluate(() => {
+    const c = (window as unknown as { __crumple: G2 }).__crumple;
+    c.debug.client.despawn(2);
+    c.place(360, 296, 0);
+  });
+  await page.waitForTimeout(1500);
+  // crash 1 from a 30 m run-up (the car must still drive for crash 2)
+  await input({ throttle: 1, brake: 0, gearSelect: 1 });
+  await page.waitForFunction(() => ((window as unknown as { __crumple: G2 }).__crumple.vehicle?.damage ?? 0) > 0.03, null, { timeout: 60_000, polling: 50 });
+  const crash1 = await page.evaluate(() => (window as unknown as { __crumple: G2 }).__crumple.replay.state.end);
+  await input({ throttle: 0, brake: 1 });
+  const d1 = (await g(page))!.damage;
+  // until crash 1 has left the buffer (20 s at low)
+  await page.waitForFunction((t) => (window as unknown as { __crumple: G2 }).__crumple.replay.state.start > t + 1, crash1, { timeout: 120_000, polling: 500 });
+  // crash 2: back off, then into the wall again
+  await input({ brake: 0, gearSelect: -1, throttle: 0.6 });
+  await page.waitForTimeout(3000);
+  await input({ gearSelect: 1, throttle: 1 });
+  await page.waitForFunction((d) => ((window as unknown as { __crumple: G2 }).__crumple.vehicle?.damage ?? 0) > d + 0.003, d1, { timeout: 30_000, polling: 50 });
+  await input({ throttle: 0, brake: 1 });
+  await page.waitForTimeout(3000);
+  const d2 = (await g(page))!.damage;
+  console.log(`[e2e] crash 1 at ${crash1.toFixed(1)} s (damage ${(d1 * 100).toFixed(1)} %), crash 2 → ${(d2 * 100).toFixed(1)} %`);
+
+  // the pre-entry picture: HUD off, a fixed camera on the car
+  await page.addStyleTag({ content: '.hud { display: none !important; }' });
+  await page.evaluate(() => {
+    const c = (window as unknown as { __crumple: G2 }).__crumple;
+    const p = c.position!;
+    c.pinCamera([p[0] + 5, p[1] + 2, p[2] + 6], [p[0], p[1], p[2]]);
+    c.hold = true;
+    c.renderOnce();
+    c.renderOnce();
+  });
+  const pre = await page.screenshot({ path: info.outputPath('restore-pre.png') });
+  const sumsPre = (await c2(page))!;
+
+  expect(await page.evaluate(() => (window as unknown as { __crumple: G2 }).__crumple.replay.enter())).toBe(true);
+  const liveDigest = await page.evaluate(() => (window as unknown as { __crumple: G2 }).__crumple.debug.replayLiveDigest());
+  const st = await state(page);
+  expect(st.start).toBeGreaterThan(crash1);
+
+  // the buffer start: the first crash's damage is there (checkpoint baseline), the second's not yet
+  await page.evaluate((t) => {
+    const c = (window as unknown as { __crumple: G2 }).__crumple;
+    c.replay.seek(t);
+    c.renderOnce();
+  }, st.start);
+  const sumsStart = (await c2(page))!;
+  console.log(`[e2e] damage sums pre ${JSON.stringify(sumsPre)} / at the buffer start ${JSON.stringify(sumsStart)}`);
+  expect(sumsStart.scuff).toBeGreaterThan(0);
+  expect(sumsStart.strain).toBeGreaterThan(0);
+  expect(sumsStart.scuff).toBeLessThanOrEqual(sumsPre.scuff + 1e-6);
+  await page.screenshot({ path: info.outputPath('restore-start.png') });
+
+  // move around: play, reverse, steps, seeks
+  await page.evaluate(async () => {
+    const c = (window as unknown as { __crumple: G2 }).__crumple;
+    const r = c.replay;
+    const s = r.state;
+    r.seek(s.start + 0.6 * s.duration);
+    r.setSpeed(0.5);
+    r.play();
+    for (let i = 0; i < 4; i++) {
+      await new Promise((res) => setTimeout(res, 120));
+      c.renderOnce();
+    }
+    (r as unknown as { setDirection(d: number): void }).setDirection(-1);
+    for (let i = 0; i < 4; i++) {
+      await new Promise((res) => setTimeout(res, 120));
+      c.renderOnce();
+    }
+    (r as unknown as { setDirection(d: number): void }).setDirection(1);
+    r.pause();
+    r.step(-2);
+    r.step(1);
+    r.seek(s.end - 1);
+    c.renderOnce();
+  });
+
+  // exit: the restored state is the one saved on entry, bit for bit
+  // (no frame runs between the pre measurement and the entry, nor between the exit and this check)
+  const { after, sumsPost } = await page.evaluate(async () => {
+    const c = (window as unknown as { __crumple: G2 }).__crumple;
+    await c.replay.exit();
+    return { after: c.debug.replayDigest(), sumsPost: c.debug.damageSums()! };
+  });
+  expect(after).toBe(liveDigest);
+  expect(sumsPost).toEqual(sumsPre);
+  await page.evaluate(() => {
+    const c = (window as unknown as { __crumple: G2 }).__crumple;
+    c.renderOnce();
+    c.renderOnce();
+  });
+  const post = await page.screenshot({ path: info.outputPath('restore-post.png') });
+  const diff = await pixelDiff(page, pre, post);
+  console.log(`[e2e] restore: digest 0x${after.toString(16)}, mean pixel diff pre/post ${diff.toFixed(3)} / 255`);
+  expect(diff).toBeLessThan(1.5);
+  expect(errors.filter((e) => !/GPU stall|RGBELoader/.test(e))).toEqual([]);
+});

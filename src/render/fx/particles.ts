@@ -804,6 +804,26 @@ export class ParticlePool {
     return false;
   }
 
+  /** P7 replay: copy of the records (reused when it fits). */
+  saveState(into?: { data: Float32Array; death: Float32Array; next: number; used: number } | null): { data: Float32Array; death: Float32Array; next: number; used: number } {
+    const st = into && into.data.length === this.data.length ? into : { data: new Float32Array(this.data.length), death: new Float32Array(this.death.length), next: 0, used: 0 };
+    st.data.set(this.data);
+    st.death.set(this.death);
+    st.next = this.next;
+    st.used = this.used;
+    return st;
+  }
+  /** Restores saveState() (same capacity, else ignored); the whole buffer re-uploads at the next flush. */
+  restoreState(st: { data: Float32Array; death: Float32Array; next: number; used: number }): void {
+    if (st.data.length !== this.data.length) return;
+    this.data.set(st.data);
+    this.death.set(st.death);
+    this.next = st.next;
+    this.used = st.used;
+    this.dirtyStart = 0;
+    this.dirtyCount = this.capacityN;
+  }
+
   clear(): void {
     this.data.fill(0);
     this.death.fill(0);

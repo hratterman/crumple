@@ -153,3 +153,38 @@ describe('prop shaders', () => {
     }
   }, 60_000);
 });
+
+describe('prop renderer replay state (P7)', () => {
+  it('saveState / restoreState: scuffs, broken flags and the node texture come back exactly; a seek restore does not clear them', () => {
+    const list = [inst(0, 'cone', -1, 0), inst(1, 'barrel', 1, 0)];
+    const { r, frame, place } = setup(list);
+    r.update(frame);
+    const p0 = list[1]!.transform.pos;
+    r.onImpact({ objectId: 4097, materialId: 6, px: p0[0], py: 0.5, pz: p0[2], nx: 0, ny: 0, nz: 1, impulse: 200 });
+    r.onBeamBreak({ objectId: 4097, beamIndex: 3, px: p0[0], py: 0.3, pz: p0[2] });
+    place(1, 0, 0, 0, 0.9);
+    frame.tick++;
+    r.update(frame);
+    const tex = nodeTexture(r);
+    const before = tex.data.slice();
+    const st = r.saveState();
+    // a later state: knocked away (a sleeping jump would clear damage), more scuff
+    place(1, 3, 0, 0);
+    frame.objects[1]!.flags = OBJECT_FLAG_SLEEPING;
+    frame.tick++;
+    r.update(frame);
+    r.onImpact({ objectId: 4096, materialId: 6, px: -1, py: 0.3, pz: 0, nx: 0, ny: 0, nz: 1, impulse: 300 });
+    expect(Array.from(nodeTexture(r).data)).not.toEqual(Array.from(before));
+    r.restoreState(st);
+    expect(Array.from(nodeTexture(r).data)).toEqual(Array.from(before));
+    // seek restore (rewrite): the next update rewrites poses from the frame without clearing the scuffs
+    r.restoreState(st, true);
+    frame.tick++;
+    r.update(frame);
+    const d = nodeTexture(r);
+    const blockB = 4 * NODE_TEX_WIDTH * d.rows;
+    let scuff = 0;
+    for (let i = 0; i < compilePropRig('barrel').nodeCount; i++) scuff += d.data[blockB + 4 * (compilePropRig('cone').nodeCount + i) + 1]!;
+    expect(scuff).toBeGreaterThan(0);
+  });
+});
