@@ -21,9 +21,11 @@
  */
 import { Vector2, Vector3, type Object3D, type PerspectiveCamera, type WebGLRenderer } from 'three';
 import { REPLAY_SPEEDS, createReplayTarget, type ReplayController, type ReplayEvent, type ReplayMarker, type ReplayTarget } from '../../app/replay/types';
+import type { DirectorMarker } from '../../render/cameras/autoDirector';
 import { pickDistance } from '../../render/cameras/pick';
 import { PhotoFx } from '../../render/cameras/photoFx';
 import { ReplayCameraRig, REPLAY_CAMERA_MODES, type ReplayCameraMode } from '../../render/cameras/replayRig';
+import type { HoodMount } from '../../render/cameras/shots';
 import { applyPose, subjectRadius, type CameraPose, type CameraWorld } from '../../render/cameras/rig';
 import type { PostStack } from '../../render/types';
 import { capturePhoto } from './capture';
@@ -51,6 +53,8 @@ export interface ReplaySessionDeps {
   onExitToLive(smooth: boolean): void;
   /** Short message when there is nothing to replay. */
   toast(title: string, sub: string): void;
+  /** Hood-camera mount of a subject (metres from its frame origin along up / forward), null = guess from its size. */
+  hoodMount?(objectId: number): HoodMount | null;
   /** Display name of a subject (player vehicle name, traffic). */
   subjectName?(t: Readonly<ReplayTarget>): string;
   units?(): 'kmh' | 'mph';
@@ -94,6 +98,8 @@ export interface ReplaySessionDebug {
 const MOVE_CODES = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'ShiftLeft', 'ShiftRight']);
 const PASS_CODES = new Set(['Backquote', 'F5', 'F11', 'F12']);
 const CURTAIN_MS = 230;
+/** Most severe markers whose first contact is scanned on entering a replay. */
+const CONTACT_SCAN_MAX = 6;
 const DRAG_PX = 4;
 
 function wait(ms: number): Promise<void> {
@@ -124,7 +130,13 @@ export class ReplaySession {
   private photoPrevMode: ReplayCameraMode = 'follow';
   /** The user's camera choice for manual replays (the crash cam always directs). */
   private preferredMode: ReplayCameraMode = 'follow';
-  private highlight: { markerId: number; time: number; severity: number; startedWall: number; impactSpeed: number } | null = null;
+  /** time = the first contact (see scanContacts), peak = the marker's peak frame. */
+  private highlight: { markerId: number; time: number; peak: number; severity: number; startedWall: number; impactSpeed: number } | null = null;
+  /** First contact + approach speed per marker id (scanContacts); the director cuts to these times. */
+  private readonly contacts = new Map<number, { time: number; speed: number }>();
+  private readonly directorMarkers: DirectorMarker[] = [];
+  private readonly directorMarkerPool = new Map<number, { id: number; time: number; severity: number; objectId: number; pos: readonly [number, number, number] }>();
+  private readonly scanTarget: ReplayTarget = createReplayTarget();
   private transitioning = false;
   private readonly held = new Set<string>();
   private drag: { id: number; x: number; y: number; moved: boolean; button: number } | null = null;
@@ -303,6 +315,7 @@ export class ReplaySession {
     c.addEventListener('contextmenu', this.onContext);
     this.padPrev.length = 0;
     this.refreshSubjects();
+    this.scanContacts();
     this.d.onActiveChange(true);
   }
 
@@ -388,10 +401,10 @@ export class ReplaySession {
     this.captureLivePose();
     this.setCurtain(true);
     await wait(CURTAIN_MS);
-    const start = Math.max(this.replay.start, time - CRASH_CAM_PREROLL_S);
     let ok = false;
     try {
-      ok = await this.replay.enter({ time: start, play: true, speed: CRASH_CAM_SPEED, direction: 1 });
+      // Enter paused well before the peak: the first contact is found first (behind the curtain).
+      ok = await this.replay.enter({ time: Math.max(this.replay.start, time - CRASH_CAM_PREROLL_S - 1.5), play: false, speed: CRASH_CAM_SPEED, direction: 1 });
     } catch (err) {
       console.warn('[replay] crash cam enter failed', err);
     }
@@ -401,7 +414,12 @@ export class ReplaySession {
       this.transitioning = false;
       return false;
     }
-    this.highlight = { markerId, time, severity, startedWall: this.wallClock, impactSpeed: -1 };
+    this.scanContacts();
+    const contact = this.contacts.get(markerId) ?? { time, speed: -1 };
+    this.highlight = { markerId, time: contact.time, peak: time, severity, startedWall: this.wallClock, impactSpeed: contact.speed };
+    this.replay.seek(Math.max(this.replay.start, contact.time - CRASH_CAM_PREROLL_S));
+    this.replay.setSpeed(CRASH_CAM_SPEED);
+    this.replay.play();
     this.openUi('auto');
     this.rig.setMode('auto', false);
     this.rig.director.reset(markerId * 7919);
@@ -444,6 +462,74 @@ export class ReplaySession {
     this.overlay.poke();
   }
 
+  /**
+   * A marker carries its burst's PEAK frame, which can sit well into the crush (up to ~0.8 s after the
+   * first contact at speed). Each severe marker's first contact is found once, on entering the replay,
+   * by scanning its subject's speed over the 1.5 s before the peak with cheap unsettled seeks (≈ 2
+   * decodes each): the first frame that sheds more than 6 % of its speed (a brake never does) or drops below 80 % of the approach. The playhead is
+   * restored with a settled seek. The director cuts to, and the crash cam plays around, the contact.
+   */
+  private scanContacts(): void {
+    const r = this.replay;
+    if (!r.active) return;
+    // Markers evicted from the buffer are gone for good (ids are monotonic).
+    const oldest = r.markers().length > 0 ? r.markers()[0]!.id : Infinity;
+    for (const id of this.contacts.keys()) if (id < oldest) this.contacts.delete(id);
+    for (const id of this.directorMarkerPool.keys()) if (id < oldest) this.directorMarkerPool.delete(id);
+    const todo = r
+      .markers()
+      .filter((m) => !this.contacts.has(m.id) && m.severity >= 0.2)
+      .sort((a, b) => b.severity - a.severity)
+      .slice(0, CONTACT_SCAN_MAX);
+    if (todo.length === 0) return;
+    const t0 = r.time;
+    const playing = r.playing;
+    if (playing) r.pause();
+    const step = Math.max(r.frameDuration, 1 / 120);
+    const tg = this.scanTarget;
+    for (const m of todo) {
+      let best: { time: number; speed: number } | null = null;
+      for (const id of m.objectId === r.playerObjectId ? [m.objectId] : [m.objectId, r.playerObjectId]) {
+        let vmax = 0;
+        let prev = -1;
+        let prevV = 0;
+        let found = -1;
+        for (let t = Math.max(r.start, m.time - 1.5); t <= m.time + 1e-6; t += step) {
+          r.seek(t, { settle: false });
+          if (!r.target(id, tg)) continue;
+          const v = Math.hypot(tg.velocity[0], tg.velocity[1], tg.velocity[2]);
+          // A crash sheds speed far faster than any brake (> 6 % per frame), or 20 % of the approach.
+          if (prev >= 0 && prevV > 3 && (prevV - v > Math.max(0.06 * prevV, 1) || v < vmax * 0.8)) {
+            found = prev;
+            break;
+          }
+          vmax = Math.max(vmax, v);
+          prev = t;
+          prevV = v;
+        }
+        if (found >= 0 && (!best || vmax > best.speed)) best = { time: found, speed: vmax };
+      }
+      this.contacts.set(m.id, best ?? { time: m.time, speed: -1 });
+    }
+    for (const m of r.markers()) if (!this.contacts.has(m.id)) this.contacts.set(m.id, { time: m.time, speed: -1 });
+    r.seek(t0, { settle: true });
+    if (playing) r.play();
+  }
+
+  /** The markers with their contact times (what the director cuts on). */
+  private markersForDirector(): readonly DirectorMarker[] {
+    const out = this.directorMarkers;
+    out.length = 0;
+    for (const m of this.replay.markers()) {
+      let d = this.directorMarkerPool.get(m.id);
+      if (!d) this.directorMarkerPool.set(m.id, (d = { id: m.id, time: m.time, severity: m.severity, objectId: m.objectId, pos: m.pos }));
+      d.time = this.contacts.get(m.id)?.time ?? m.time;
+      d.severity = m.severity;
+      out.push(d);
+    }
+    return out;
+  }
+
   private setCurtain(on: boolean): void {
     this.curtain.classList.toggle('rp-curtain--on', on);
   }
@@ -466,8 +552,9 @@ export class ReplaySession {
       speed: r.speed,
       direction: r.direction,
       subject,
-      markers: r.markers(),
+      markers: this.markersForDirector(),
       world: this.d.world,
+      hoodMount: subject && this.d.hoodMount ? this.d.hoodMount(subject.objectId) : null,
     });
     applyPose(this.d.camera, pose);
     if (this.photoOn && this.photo.settings.autofocus && subject) {
@@ -502,13 +589,13 @@ export class ReplaySession {
       return;
     }
     if (this.highlight && !this.transitioning) {
-      if (r.time >= this.highlight.time + CRASH_CAM_POSTROLL_S || (!r.playing && r.time >= r.end - 1e-3)) void this.finishHighlight();
       const hl = this.highlight;
+      const until = Math.max(hl.time + CRASH_CAM_POSTROLL_S, hl.peak + 0.6);
+      if (r.time >= until || (!r.playing && r.time >= r.end - 1e-3)) void this.finishHighlight();
       if (this.target.valid) {
-        // Live speed on the approach; from the impact on, the speed it hit at.
+        // Live speed on the approach; from the first contact on, the speed it hit at.
         const v = Math.hypot(this.target.velocity[0], this.target.velocity[1], this.target.velocity[2]);
-        if (r.time <= hl.time) hl.impactSpeed = v;
-        const impact = r.time > hl.time && hl.impactSpeed >= 0;
+        const impact = r.time > hl.time && hl.impactSpeed > 0;
         this.overlay.setHighlightSpeed(this.speedText(impact ? hl.impactSpeed : v), impact ? 'Impact speed' : 'Speed');
       }
     }

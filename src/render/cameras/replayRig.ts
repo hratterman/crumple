@@ -17,7 +17,7 @@ import { Vector3 } from 'three';
 import { AutoDirector, type CutDecision, type DirectorMarker } from './autoDirector';
 import { FreeCamera, createFreeCamInput, type FreeCamInput } from './freecam';
 import { copyPose, createPose, spring1, subjectPosition, type CameraPose, type CameraSubject, type CameraWorld, type ShotFrame, type Spring1 } from './rig';
-import { createShot, FollowShot, ImpactShot, TracksideShot, type Shot, type ShotKind } from './shots';
+import { createShot, FollowShot, HoodShot, ImpactShot, TracksideShot, type HoodMount, type Shot, type ShotKind } from './shots';
 
 export type ReplayCameraMode = 'auto' | 'follow' | 'bumper' | 'trackside' | 'hood' | 'heli' | 'free';
 export const REPLAY_CAMERA_MODES: readonly ReplayCameraMode[] = ['auto', 'follow', 'bumper', 'trackside', 'hood', 'heli', 'free'];
@@ -48,6 +48,8 @@ export interface ReplayCameraFrame {
   subject: CameraSubject | null;
   markers: readonly DirectorMarker[];
   world: CameraWorld;
+  /** The subject's hood-camera mount (vehicle geometry), when known. */
+  hoodMount?: HoodMount | null;
 }
 
 export class ReplayCameraRig {
@@ -157,6 +159,9 @@ export class ReplayCameraRig {
       }
     }
 
+    const mount = f.hoodMount ?? null;
+    (this.shot('hood') as HoodShot).mount = mount;
+    (this.probe('hood') as HoodShot).mount = mount;
     if (this._mode === 'auto') {
       this.filterMarkers(f, s);
       const probe = (kind: ShotKind, variant: number): boolean => {

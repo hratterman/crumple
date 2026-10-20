@@ -39,6 +39,12 @@ import {
 
 export type ShotKind = 'follow' | 'bumper' | 'trackside' | 'hood' | 'heli' | 'impact';
 
+/** Where a hood camera sits on a subject: metres from its frame origin along its up / forward axes. */
+export interface HoodMount {
+  up: number;
+  forward: number;
+}
+
 export interface Shot {
   readonly kind: ShotKind;
   readonly pose: CameraPose;
@@ -52,6 +58,8 @@ export interface Shot {
 const _a = new Vector3();
 const _b = new Vector3();
 const _c = new Vector3();
+const _d = new Vector3();
+const _e = new Vector3();
 const _up = new Vector3();
 
 /** Unit horizontal vector for yaw (0 = +Z). */
@@ -336,6 +344,8 @@ export class HoodShot implements Shot {
   readonly kind = 'hood';
   readonly pose = createPose();
   healthy = true;
+  /** The subject's real mount point (vehicle geometry), else a radius-scaled guess. */
+  mount: HoodMount | null = null;
   private readonly fwd = new Vector3(0, 0, -1);
   private readonly fwdVel = new Vector3();
   private readonly upS = new Vector3(0, 1, 0);
@@ -366,7 +376,8 @@ export class HoodShot implements Shot {
     up.addScaledVector(fwd, -up.dot(fwd)).normalize();
     if (!(up.lengthSq() > 0.5)) up.set(0, 1, 0);
     const p = subjectPosition(f.subject, this.pose.position);
-    p.addScaledVector(up, 0.78 * k).addScaledVector(fwd, 0.62 * k);
+    const m = this.mount;
+    p.addScaledVector(up, m ? m.up : 0.78 * k).addScaledVector(fwd, m ? m.forward : 0.62 * k);
     this.pose.look.copy(p).addScaledVector(fwd, 20).addScaledVector(up, -1.4);
     // Roll: the car's up vector against the un-rolled camera up.
     const right = _b.copy(fwd).cross(_c.set(0, 1, 0));
@@ -447,8 +458,9 @@ export function bestImpactAnchor(
   const dists = [10 + radius * 0.8, 7 + radius * 0.6, 14 + radius];
   let best = -Infinity;
   let bestAngle = heading;
-  const target = _c.copy(point);
-  target.y += 0.6;
+  // Frame the car at the contact, not the contact point itself (often ON the wall face): a little back
+  // along the travel direction.
+  const target = _c.set(point.x - Math.sin(heading) * radius * 0.5, point.y + 0.6, point.z - Math.cos(heading) * radius * 0.5);
   const cand = _a;
   for (let k = 0; k < 12; k++) {
     const rel = (k / 12) * Math.PI * 2;
@@ -460,6 +472,32 @@ export function bestImpactAnchor(
       if (!lineOfSight(world, cand, target, 0.1)) continue;
       // Side-on shows the crumple; a little ahead sees the face coming in; nearer is more dramatic.
       let score = Math.abs(Math.sin(rel)) * 2 + Math.cos(rel) * 0.9 - di * 0.25;
+      // A clear FOREGROUND across the frame, not just a clear centre: rays toward either side of the
+      // subject, stopping short of its depth (a wall end filling half the picture loses; the wall the
+      // car hit, seen behind it, is background and does not).
+      const px = -(target.z - cand.z);
+      const pz = target.x - cand.x;
+      const pl = Math.hypot(px, pz) || 1;
+      const side = radius * 1.3 + 1;
+      for (const k2 of [-1, 1]) {
+        _b.set(target.x + (px / pl) * side * k2, target.y + 0.4, target.z + (pz / pl) * side * k2);
+        _b.lerp(cand, 0.3);
+        if (!lineOfSight(world, cand, _b, 0.05)) score -= 2.4;
+      }
+      _b.set(target.x, target.y + 2.6, target.z);
+      if (!lineOfSight(world, cand, _b, 0.05)) score -= 0.8;
+      // Foreground clutter: the nearest occluder lies between the camera and the car, inside the view
+      // cone (a wall end filling half the picture, a camera looking along a wall face).
+      if (world.nearestOccluder) {
+        const dn = world.nearestOccluder(cand.x, cand.y, cand.z, _d);
+        const dt = cand.distanceTo(target);
+        if (dn < dt * 0.85) {
+          _d.sub(cand);
+          _e.copy(target).sub(cand);
+          const cos = _d.dot(_e) / Math.max(1e-6, _d.length() * _e.length());
+          if (cos > 0.82 || dn < 1.5) score -= 3;
+        }
+      }
       // Deterministic variety between equally good angles.
       score += ((Math.sin((k + 1) * 12.9898 + variant * 78.233) * 43758.5453) % 1 + 1) % 1 * 0.35;
       if (score > best) {

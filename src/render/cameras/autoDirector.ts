@@ -7,7 +7,7 @@
  * Editorial rules (all shot lengths in WALL seconds: what the viewer feels):
  *  1. Never cut within MIN_SHOT_S (1.5 s) of the previous cut. No exceptions.
  *  2. Cut on impact: playing forward, an upcoming marker (severity ≥
- *     IMPACT_MIN_SEVERITY) is cut to IMPACT_LEAD_S of viewing time before it,
+ *     IMPACT_MIN_SEVERITY) is cut to IMPACT_LEAD_S (0.7 s) of viewing time before it,
  *     to the best static angle on its crash point ('impact' shot). If rule 1
  *     blocks that moment, the cut lands as soon as it is legal while still
  *     within IMPACT_LATE_S of sim time after the impact (cut on the action).
@@ -24,7 +24,7 @@ import { createRng, type Rng } from '../../core/rng';
 import type { ShotKind } from './shots';
 
 export const MIN_SHOT_S = 1.5;
-export const IMPACT_LEAD_S = 0.55;
+export const IMPACT_LEAD_S = 0.7;
 export const IMPACT_LATE_S = 0.45;
 export const IMPACT_MIN_SEVERITY = 0.2;
 

@@ -35,9 +35,44 @@ export function segmentHitsAabb(ax: number, ay: number, az: number, bx: number, 
   );
 }
 
+function inside(x: number, y: number, z: number, b: Aabb6): boolean {
+  return x >= b[0] && x <= b[3] && y >= b[1] && y <= b[4] && z >= b[2] && z <= b[5];
+}
+
+/**
+ * Boxes that contain an end point are skipped: a prop's spawn box the crashed car now sits in (the
+ * props moved) must not hide the car from every camera.
+ */
 export function createAabbOccluder(boxes: readonly Aabb6[]): (ax: number, ay: number, az: number, bx: number, by: number, bz: number) => boolean {
   return (ax, ay, az, bx, by, bz) => {
-    for (const b of boxes) if (segmentHitsAabb(ax, ay, az, bx, by, bz, b)) return true;
+    for (const b of boxes) {
+      if (inside(ax, ay, az, b) || inside(bx, by, bz, b)) continue;
+      if (segmentHitsAabb(ax, ay, az, bx, by, bz, b)) return true;
+    }
     return false;
+  };
+}
+
+/**
+ * Nearest point of the nearest box to (x, y, z) written to `out` [x, y, z]; returns its distance
+ * (0 inside a box, Infinity when there are none). A camera's nearest occluder in its view cone is
+ * foreground clutter.
+ */
+export function createAabbNearest(boxes: readonly Aabb6[]): (x: number, y: number, z: number, out: { x: number; y: number; z: number }) => number {
+  return (x, y, z, out) => {
+    let best = Infinity;
+    for (const b of boxes) {
+      const nx = x < b[0] ? b[0] : x > b[3] ? b[3] : x;
+      const ny = y < b[1] ? b[1] : y > b[4] ? b[4] : y;
+      const nz = z < b[2] ? b[2] : z > b[5] ? b[5] : z;
+      const d = Math.hypot(nx - x, ny - y, nz - z);
+      if (d < best) {
+        best = d;
+        out.x = nx;
+        out.y = ny;
+        out.z = nz;
+      }
+    }
+    return best;
   };
 }

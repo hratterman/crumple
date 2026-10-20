@@ -29,6 +29,8 @@ export interface CameraWorld {
   groundHeight(x: number, z: number): number;
   /** Static geometry between a and b (colliders); terrain is tested separately. */
   occluded?(ax: number, ay: number, az: number, bx: number, by: number, bz: number): boolean;
+  /** The nearest static occluder point to (x, y, z) into `out`; returns its distance, m (Infinity when none). */
+  nearestOccluder?(x: number, y: number, z: number, out: Vector3): number;
   /**
    * A roadside point near (x, z): the nearest road edge + `offset` m beyond
    * its shoulder on side `side` (+1 right of travel, −1 left), written to out

@@ -300,9 +300,9 @@ describe('auto director', () => {
         }
       }
       expect(impactCutAt).toBeGreaterThan(0);
-      // ~0.55 s of viewing time ahead of the impact.
-      expect((10 - impactCutAt) / speed).toBeGreaterThan(0.3);
-      expect((10 - impactCutAt) / speed).toBeLessThan(0.6);
+      // ~0.7 s of viewing time ahead of the impact.
+      expect((10 - impactCutAt) / speed).toBeGreaterThan(0.45);
+      expect((10 - impactCutAt) / speed).toBeLessThan(0.75);
     }
   });
 
@@ -405,5 +405,30 @@ describe('occluder', () => {
     const world: CameraWorld = { groundHeight: () => 0, occluded: occ };
     expect(lineOfSight(world, new Vector3(0, 1, -5), new Vector3(0, 1, 5))).toBe(false);
     expect(lineOfSight(world, new Vector3(0, 1, -5), new Vector3(8, 1, -2))).toBe(true);
+    // An end point inside a box (a crashed car in a moved prop's spawn box) ignores that box.
+    expect(occ(0, 1, -5, 0, 1, 0)).toBe(false);
+  });
+});
+
+describe('impact angle vs walls', () => {
+  it('stays on the car side of the wall it hit, without the wall in the foreground', async () => {
+    const { createAabbNearest, createAabbOccluder } = await import('./occluder');
+    // Driving −Z into a 20 m wall at z ∈ [−1.6, −0.4] (face at −0.4); impact point on the face.
+    const wall = [-10, 0, -1.6, 10, 2, -0.4] as const;
+    const world: CameraWorld = { groundHeight: () => 0, occluded: createAabbOccluder([wall]), nearestOccluder: createAabbNearest([wall]) };
+    for (let v = 0; v < 6; v++) {
+      const out = new Vector3();
+      const r = bestImpactAnchor(world, new Vector3(0, 0.5, -0.4), Math.PI, 2.5, v, out);
+      expect(r.score).toBeGreaterThan(-Infinity);
+      expect(out.z).toBeGreaterThan(-0.4);
+      // The car (just back from the wall) in clear view.
+      expect(lineOfSight(world, out, new Vector3(0, 1.1, 0.85))).toBe(true);
+      // Not looking along the wall face from beside its end.
+      const n = new Vector3();
+      world.nearestOccluder!(out.x, out.y, out.z, n);
+      const toWall = n.sub(out).normalize();
+      const toCar = new Vector3(0, 1.1, 0.85).sub(out).normalize();
+      expect(toWall.dot(toCar)).toBeLessThan(0.82);
+    }
   });
 });

@@ -47,7 +47,7 @@ import { GAME_CAPACITY, isPropObjectId, type ActionState, type Transform } from 
 import { VehicleTelemetry } from './protocol/telemetry';
 import { DEFAULT_CHASE_OPTIONS, vehiclePoseFromNodes, type ChaseTarget } from './render/cameras/chase';
 import { CameraDirector } from './render/cameras/director';
-import { createAabbOccluder } from './render/cameras/occluder';
+import { createAabbNearest, createAabbOccluder } from './render/cameras/occluder';
 import { createRoadside } from './render/cameras/roadside';
 import { BeamView } from './render/debug/beamview';
 import { createLightingStack, setNearCasters } from './render/lighting';
@@ -399,6 +399,22 @@ const mapper = createInputMapper({ transmission });
 let hud: Hud | null = null;
 /** P7 (R2): replay UI, replay cameras, crash cam and photo mode (ui/replay/session.ts); null until boot. */
 let replaySession: ReplaySession | null = null;
+/** The player's hood-camera mount: on the bonnet just ahead of the windscreen, from the rig's rest pose + catalog extent. */
+let hoodFor: { p: PlayerVehicle; mount: { up: number; forward: number } } | null = null;
+function playerHoodMount(): { up: number; forward: number } | null {
+  if (!player) return null;
+  if (hoodFor?.p !== player) {
+    const c = player.assets.compiled;
+    const o = Math.max(0, c.frameNodes[0] ?? 0);
+    const P = c.rig.nodePos;
+    const ex = player.assets.entry.extent;
+    // Rig frame: up +Y, forward −Z (extent.min z = the front bumper).
+    const camY = ex.max[1] * 0.71;
+    const camZ = ex.min[2] * 0.48;
+    hoodFor = { p: player, mount: { up: camY - P[3 * o + 1]!, forward: -(camZ - P[3 * o + 2]!) } };
+  }
+  return hoodFor.mount;
+}
 let paused = false;
 let slowMo = false;
 /** Traction control (X); P6: every spawn starts with the settings' default. */
@@ -1374,6 +1390,11 @@ async function boot(): Promise<void> {
   // player's setting; automation (navigator.webdriver) keeps it off unless ?crashcam=1.
   const crashCamParam = params.get('crashcam');
   const cameraHeight = (x: number, z: number): number => smp.heightAt(x, z);
+  // Camera occluders: static colliders + the bulky layout props at their spawn poses (blocks, barrels, crates; not cones).
+  const occluderBoxes = [
+    ...resolveColliders(LAYOUT.colliders, cameraHeight).map((c) => colliderWorldAabb(c)),
+    ...propBoxes.filter((b) => b[4] - b[1] > 0.7 && Math.max(b[3] - b[0], b[5] - b[2]) > 0.7),
+  ];
   replaySession = createReplaySession({
     replay,
     camera,
@@ -1381,7 +1402,8 @@ async function boot(): Promise<void> {
     post: postStack,
     world: {
       groundHeight: cameraHeight,
-      occluded: createAabbOccluder(resolveColliders(LAYOUT.colliders, cameraHeight).map((c) => colliderWorldAabb(c))),
+      occluded: createAabbOccluder(occluderBoxes),
+      nearestOccluder: createAabbNearest(occluderBoxes),
       roadside: createRoadside(world.roads, cameraHeight),
     },
     pickMeshes: () => [collidersR.object],
@@ -1398,6 +1420,7 @@ async function boot(): Promise<void> {
       else director.snap();
     },
     toast: (title, sub) => hudView.showToast(title, sub, 1800),
+    hoodMount: (id) => (id === VEHICLE_ID ? playerHoodMount() : null),
     subjectName: (t) => (t.objectId === VEHICLE_ID && player ? player.assets.entry.stats.name : t.kind === 'traffic' ? 'Traffic' : 'Object'),
     units: () => settings.units,
   });
