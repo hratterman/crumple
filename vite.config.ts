@@ -28,6 +28,8 @@ export default defineConfig({
             { name: 'three-core', test: /node_modules[\\/]three[\\/]build[\\/]three\.core\.js/, priority: 4 },
             { name: 'three', test: /node_modules[\\/]three[\\/]build[\\/]/, priority: 3 },
             { name: 'vendor', test: /node_modules[\\/](three[\\/]examples|postprocessing|n8ao)[\\/]/, priority: 2 },
+            // P7: the replay recorder / playback, its UI and the camera rigs (static imports, own chunk).
+            { name: 'replay', test: /src[\\/](app[\\/]replay|ui[\\/]replay|render[\\/]cameras)[\\/]/, priority: 1 },
           ],
         },
       },
