@@ -14,7 +14,7 @@
  * flying the camera there.
  */
 import { Vector3 } from 'three';
-import { AutoDirector, type CutDecision, type DirectorMarker } from './autoDirector';
+import { AutoDirector, type CurrentShot, type CutDecision, type DirectorFrame, type DirectorMarker } from './autoDirector';
 import { FreeCamera, createFreeCamInput, type FreeCamInput } from './freecam';
 import { copyPose, createPose, spring1, subjectPosition, type CameraPose, type CameraSubject, type CameraWorld, type ShotFrame, type Spring1 } from './rig';
 import { createShot, FollowShot, HoodShot, ImpactShot, TracksideShot, type HoodMount, type Shot, type ShotKind } from './shots';
@@ -74,6 +74,14 @@ export class ReplayCameraRig {
   private readonly nearMarkers: DirectorMarker[] = [];
   private readonly tmp = new Vector3();
   private subjectId = -1;
+  // Reused per frame (no allocation while replaying).
+  private readonly dFrame: DirectorFrame = { wallDt: 0, time: 0, playing: false, speed: 1, direction: 1, subjectSpeed: 0, subjectId: 0, markers: [] };
+  private readonly cur: CurrentShot = { kind: 'follow', healthy: true, wantsCut: false };
+  private readonly probeFn = (kind: ShotKind, variant: number): boolean => {
+    const p = this.probe(kind);
+    p.reset(this.frame, variant);
+    return p.healthy;
+  };
 
   constructor(seed = 0x5eed) {
     this.director = new AutoDirector(seed);
@@ -164,25 +172,23 @@ export class ReplayCameraRig {
     (this.probe('hood') as HoodShot).mount = mount;
     if (this._mode === 'auto') {
       this.filterMarkers(f, s);
-      const probe = (kind: ShotKind, variant: number): boolean => {
-        const p = this.probe(kind);
-        p.reset(sf, variant);
-        return p.healthy;
-      };
-      const cut = this.director.decide(
-        {
-          wallDt: sf.wallDt,
-          time: f.time,
-          playing: f.playing,
-          speed: f.speed,
-          direction: f.direction,
-          subjectSpeed: Math.hypot(s.velocity[0]!, s.velocity[2]!),
-          subjectId: s.objectId,
-          markers: this.nearMarkers,
-        },
-        this.needsFrame || !this.current ? null : { kind: this.current.kind, healthy: this.current.healthy, wantsCut: this.wantsCut(this.current) },
-        probe,
-      );
+      const df = this.dFrame;
+      df.wallDt = sf.wallDt;
+      df.time = f.time;
+      df.playing = f.playing;
+      df.speed = f.speed;
+      df.direction = f.direction;
+      df.subjectSpeed = Math.hypot(s.velocity[0]!, s.velocity[2]!);
+      df.subjectId = s.objectId;
+      df.markers = this.nearMarkers;
+      let cur: CurrentShot | null = null;
+      if (!this.needsFrame && this.current) {
+        cur = this.cur;
+        cur.kind = this.current.kind;
+        cur.healthy = this.current.healthy;
+        cur.wantsCut = this.wantsCut(this.current);
+      }
+      const cut = this.director.decide(df, cur, this.probeFn);
       if (cut) {
         this.lastCut = cut;
         const shot = this.shot(cut.kind);

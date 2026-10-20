@@ -1553,6 +1553,7 @@ async function boot(): Promise<void> {
     perfOverlay?.update(perfData);
     // P7 (R2): replay UI, crash cam (after the frame is drawn).
     if (input) replaySession?.frame(dt);
+    prof.lap('replayUi');
   };
 
   // P7 replay: main's side — live snapshot / verbatim restore, damage checkpoint domains, settled-seek priming.
