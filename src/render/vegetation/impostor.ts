@@ -94,7 +94,9 @@ void main() {
   vec4 a = texture(tAlbedo, vUv);
   if (a.a < 0.42) discard;
   // Premultiplied by coverage (alpha 1 here, 0 where cleared): mips and the 4-frame blend divide it back out.
-  if (uMode == 0) outColor = vec4(a.rgb * mix(0.3, 1.0, vVeg.y), 1.0);
+  // crown self-shadowing as in the mesh LODs (shader.ts)
+  float occ = vVeg.x > 0.5 ? mix(0.14, 1.0, vVeg.y * vVeg.y) : mix(0.3, 1.0, vVeg.y);
+  if (uMode == 0) outColor = vec4(a.rgb * occ, 1.0);
   else outColor = vec4(normalize(vN) * 0.5 + 0.5, 1.0);
 }
 `;
@@ -315,7 +317,13 @@ ${VEG_DITHER_GLSL}`,
   vec4 impN = texture2D(tImpNormal, impUv) * impW.x + texture2D(tImpNormal, impUv + vec2(impCw.x, 0.0)) * impW.y
     + texture2D(tImpNormal, impUv + vec2(0.0, impCw.y)) * impW.z + texture2D(tImpNormal, impUv + impCw) * impW.w;
   float seed = vImpRot.z;
-  vec3 impTint = vec3(1.0 + (seed - 0.5) * 0.28, 1.0 + (fract(seed * 7.1) - 0.5) * 0.16, 1.0 - (seed - 0.5) * 0.3);
+  // per-tree colour draws: the same as the mesh LODs (shader.ts)
+  float hW = fract(seed * 7.13) - 0.5;
+  vec3 impTint = vec3(1.0 + hW * 0.42, 1.0 + (fract(seed * 5.3) - 0.5) * 0.14, 1.0 - hW * 0.5) * (0.74 + 0.42 * fract(seed * 13.37));
+  {
+    float l = dot(impA.rgb, vec3(0.2126, 0.7152, 0.0722));
+    impA.rgb = mix(vec3(l), impA.rgb, 0.85 + 0.35 * fract(seed * 3.71));
+  }
   // Both atlases are coverage-premultiplied (cleared to 0): un-premultiply after filtering + blending.
   diffuseColor *= vec4(impA.rgb / max(impA.a, 1e-3) * impTint * 0.9, impA.a * 1.15);
   vec3 impNl = normalize(impN.xyz / max(impN.a, 1e-3) * 2.0 - 1.0);
@@ -332,7 +340,18 @@ ${VEG_DITHER_GLSL}`,
       f = f.replace(
         '#include <roughnessmap_fragment>',
         `#include <roughnessmap_fragment>
-  roughnessFactor = mix(0.9, 0.78, impLeaf);`,
+  roughnessFactor = mix(0.9, 0.82, impLeaf);`,
+      );
+      // same dim aggregate crown sheen as the mesh LODs (shader.ts)
+      f = f.replace(
+        '#include <lights_physical_fragment>',
+        `#include <lights_physical_fragment>
+  {
+    float vegSpec = mix(1.0, 0.3, impLeaf);
+    material.specularColor *= vegSpec;
+    material.specularColorBlended *= vegSpec;
+    material.specularF90 *= vegSpec;
+  }`,
       );
       f = f.replace(
         '#include <emissivemap_fragment>',

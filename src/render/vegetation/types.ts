@@ -30,7 +30,11 @@ import type { TerrainData, TerrainSampler, VegetationScatter } from '../../world
 import type { LightingStack, PatchMaterial, RenderContext, WorldLayerRenderer } from '../types';
 
 export const VEG_TREE_MAX_TRIS = 1800;
-export const VEG_LOD_FADE_M = 12;
+/**
+ * Dithered LOD cross-fade band, m. Without TAA the dither reads as grain on every
+ * tree inside the band (12 m stippled a third of the trees in a typical low-preset view).
+ */
+export const VEG_LOD_FADE_M = 7;
 export const VEG_DRAW_BUDGET = 14;
 
 export interface VegetationStats {

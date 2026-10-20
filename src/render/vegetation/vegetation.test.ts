@@ -7,6 +7,7 @@ import { QUALITY_PRESETS, QUALITY_LEVELS } from '../types';
 import { ATLAS_PX, ATLAS_SIZE, atlasRect, type AtlasRegion } from './atlas';
 import { buildBroadleaf, buildConifer, buildRock, buildShrubs, type VegMeshData } from './geometry';
 import { buildTuft, fillGrassTile, GRASS_STRIDE } from './grass';
+import { ATLAS_MIP_LEVELS, atlasMips } from './textures';
 import { impostorPatch, type ImpostorAtlas } from './impostor';
 import { vegetationBands } from './index';
 import { createVegUniforms, vegPatch } from './shader';
@@ -116,6 +117,45 @@ describe('atlas layout', () => {
       }
     }
   });
+});
+
+describe('atlas mips', () => {
+  it('never bleed across regions and keep alpha-test coverage', () => {
+    const S = ATLAS_SIZE;
+    const l0 = new Uint8Array(S * S * 4);
+    // rows stored bottom-up: canvas region (x, y, w, h) → stored rows S − (y + h) … S − y
+    const fill = (k: AtlasRegion, f: (x: number, y: number) => [number, number, number, number]): void => {
+      const p = ATLAS_PX[k];
+      for (let y = S - (p.y + p.h); y < S - p.y; y++) for (let x = p.x; x < p.x + p.w; x++) l0.set(f(x, y), (y * S + x) * 4);
+    };
+    for (const k of Object.keys(ATLAS_PX) as AtlasRegion[]) fill(k, () => [40, 90, 30, 0]);
+    fill('barkBirch', () => [230, 225, 215, 255]);
+    // leaves: random 8-px blocks (~40 % coverage) on a transparent mean colour
+    const hash = (x: number, y: number): number => (((Math.imul(x, 73856093) ^ Math.imul(y, 19349663)) >>> 0) % 1000) / 1000;
+    fill('leaves', (x, y) => (hash(x >> 3, y >> 3) < 0.4 ? [50, 100, 30, 255] : [50, 100, 30, 0]));
+    const mips = atlasMips(l0, S, 'albedo');
+    expect(mips.length).toBe(ATLAS_MIP_LEVELS);
+    const p = ATLAS_PX.leaves;
+    const cov = (L: number): number => {
+      const m = mips[L]!;
+      let c = 0;
+      let n = 0;
+      for (let y = (S - (p.y + p.h)) >> L; y < (S - p.y) >> L; y++) {
+        for (let x = p.x >> L; x < (p.x + p.w) >> L; x++) {
+          const o = (y * m.width + x) * 4;
+          expect(m.data[o]!).toBeLessThan(120); // no white birch bark in a leaf texel
+          if (m.data[o + 3]! >= 128) c++;
+          n++;
+        }
+      }
+      return c / n;
+    };
+    const c0 = cov(0);
+    for (let L = 1; L < ATLAS_MIP_LEVELS; L++) expect(Math.abs(cov(L) - c0)).toBeLessThan(0.15); // 4-step alpha quantisation of the blocky test pattern
+    // card UVs stay ≥ half a coarsest-level-but-one texel inside their region
+    const r = atlasRect('leaves');
+    expect(r.u * S - p.x).toBeGreaterThanOrEqual(8);
+  }, 30_000);
 });
 
 describe('grass', () => {

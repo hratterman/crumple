@@ -218,10 +218,21 @@ function applyColor(shader: WebGLProgramParametersWithUniforms, o: VegPatchOptio
   {
     float leaf = vVeg.x;
     float seed = vVeg.z;
+    // Per-tree foliage colour: a warm (olive / yellow-green) ↔ cool (blue-green) axis, a
+    // saturation and a brightness draw, so a stand never reads as one cloned green.
+    float hW = fract(seed * 7.13) - 0.5;
+    float hB = fract(seed * 13.37);
+    float hS = fract(seed * 3.71);
     vec3 tint = leaf > 0.5
-      ? vec3(1.0 + (seed - 0.5) * 0.28, 1.0 + (fract(seed * 7.1) - 0.5) * 0.16, 1.0 - (seed - 0.5) * 0.3)
+      ? vec3(1.0 + hW * 0.42, 1.0 + (fract(seed * 5.3) - 0.5) * 0.14, 1.0 - hW * 0.5) * (0.74 + 0.42 * hB)
       : vec3(1.0 + (fract(seed * 3.3) - 0.5) * 0.2);
-    diffuseColor.rgb *= tint * mix(0.3, 1.0, vVeg.y);
+    if (leaf > 0.5) {
+      float l = dot(diffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722));
+      diffuseColor.rgb = mix(vec3(l), diffuseColor.rgb, 0.85 + 0.35 * hS);
+    }
+    // crown self-shadowing: inner and lower clusters sit in the crown's own shade
+    float occ = leaf > 0.5 ? mix(0.14, 1.0, vVeg.y * vVeg.y) : mix(0.3, 1.0, vVeg.y);
+    diffuseColor.rgb *= tint * occ;
   }`,
     );
     // Foliage: never flip normals on back faces (spherical crown normals light both sides alike).
@@ -229,7 +240,20 @@ function applyColor(shader: WebGLProgramParametersWithUniforms, o: VegPatchOptio
     frag = frag.replace(
       '#include <roughnessmap_fragment>',
       `#include <roughnessmap_fragment>
-  roughnessFactor = mix(0.9, 0.74, vVeg.x);`,
+  roughnessFactor = mix(0.9, 0.82, vVeg.x);`,
+    );
+    // A crown is thousands of differently tilted leaves: its aggregate sheen is broad and dim.
+    // Full dielectric F0 on cards whose normals are bent toward the sky lit the crown tops as
+    // pale, near-white patches (sky reflection at grazing view angles).
+    frag = frag.replace(
+      '#include <lights_physical_fragment>',
+      `#include <lights_physical_fragment>
+  {
+    float vegSpec = mix(1.0, 0.3, vVeg.x);
+    material.specularColor *= vegSpec;
+    material.specularColorBlended *= vegSpec;
+    material.specularF90 *= vegSpec;
+  }`,
     );
     // Leaf translucency: sun shining through the crown toward the viewer.
     frag = frag.replace(
@@ -240,6 +264,8 @@ function applyColor(shader: WebGLProgramParametersWithUniforms, o: VegPatchOptio
     float bl = max(dot(normalize(-vViewPosition), sunV), 0.0);
     bl = bl * bl * bl;
     totalEmissiveRadiance += diffuseColor.rgb * uVegSunCol * (bl * 0.28 + 0.035) * vVeg.x * (0.35 + 0.65 * vVeg.y);
+    // bark: bounce + sky fill (sun-averted trunks under the crown went pitch black)
+    totalEmissiveRadiance += diffuseColor.rgb * uVegSunCol * 0.045 * (1.0 - vVeg.x);
   }`,
     );
   }

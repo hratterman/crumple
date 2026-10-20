@@ -466,6 +466,154 @@ function flipRows(src: Uint8Array | Uint8ClampedArray, w: number, h: number): Ui
   return out;
 }
 
+/** Mip levels of the foliage atlas (0 … ATLAS_MIP_LEVELS − 1; the last is 32 px per texel, still aligned to every region). */
+export const ATLAS_MIP_LEVELS = 6;
+
+export interface MipLevel {
+  data: Uint8Array;
+  width: number;
+  height: number;
+}
+
+/**
+ * Region-aware mip chain of the atlas (rows stored bottom-up). GL's
+ * generateMipmap filters across region borders: from ~8 px per texel the
+ * leaf and needle cards picked up the opaque white birch bark next to them,
+ * and distant crowns showed whole cream-white cards. Here every region is
+ * downsampled on its own (all borders are multiples of 32 px, so levels up
+ * to ATLAS_MIP_LEVELS − 1 never straddle one) and the chain stops there:
+ * the texture holds no coarser level to straddle. Albedo: colour averaged in
+ * linear light weighted by alpha (transparent texels keep the region mean),
+ * and alpha re-scaled per region and level so the coverage above the 0.5
+ * alpha test matches level 0 (alpha-tested crowns otherwise thin out with
+ * distance). Normal: averaged and renormalised.
+ */
+export function atlasMips(level0: Uint8Array, size: number, kind: 'albedo' | 'normal', levels = ATLAS_MIP_LEVELS): MipLevel[] {
+  const out: MipLevel[] = [{ data: level0, width: size, height: size }];
+  const regions = Object.values(PX);
+  const lin = (v: number): number => SRGB_LIN[v]!;
+  const enc = (x: number): number => {
+    const c = Math.min(Math.max(x, 0), 1);
+    return Math.round((c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055) * 255);
+  };
+  for (let L = 1; L < levels; L++) {
+    const prev = out[L - 1]!;
+    const pw = prev.width;
+    const w = size >> L;
+    const d = new Uint8Array(w * w * 4);
+    const src = prev.data;
+    for (const r of regions) {
+      const x0 = r.x >> L;
+      const x1 = (r.x + r.w) >> L;
+      // stored rows are bottom-up: canvas y → size − (y + h)
+      const y0 = (size - (r.y + r.h)) >> L;
+      const y1 = (size - r.y) >> L;
+      let covered = 0;
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
+          const o = (y * w + x) * 4;
+          let a = 0;
+          let cr = 0;
+          let cg = 0;
+          let cb = 0;
+          let pr = 0;
+          let pg = 0;
+          let pb = 0;
+          for (let k = 0; k < 4; k++) {
+            const i = ((2 * y + (k >> 1)) * pw + 2 * x + (k & 1)) * 4;
+            const sa = src[i + 3]!;
+            a += sa;
+            if (kind === 'albedo') {
+              const wgt = sa / 255;
+              const r0 = lin(src[i]!);
+              const g0 = lin(src[i + 1]!);
+              const b0 = lin(src[i + 2]!);
+              cr += r0 * wgt;
+              cg += g0 * wgt;
+              cb += b0 * wgt;
+              pr += r0;
+              pg += g0;
+              pb += b0;
+            } else {
+              cr += src[i]! / 127.5 - 1;
+              cg += src[i + 1]! / 127.5 - 1;
+              cb += src[i + 2]! / 127.5 - 1;
+            }
+          }
+          if (kind === 'albedo') {
+            const wa = a / 255;
+            if (wa > 1e-4) {
+              d[o] = enc(cr / wa);
+              d[o + 1] = enc(cg / wa);
+              d[o + 2] = enc(cb / wa);
+            } else {
+              d[o] = enc(pr / 4);
+              d[o + 1] = enc(pg / 4);
+              d[o + 2] = enc(pb / 4);
+            }
+          } else {
+            const l = Math.hypot(cr, cg, cb) || 1;
+            d[o] = Math.round((cr / l) * 127.5 + 127.5);
+            d[o + 1] = Math.round((cg / l) * 127.5 + 127.5);
+            d[o + 2] = Math.round((cb / l) * 127.5 + 127.5);
+          }
+          d[o + 3] = Math.round(a / 4);
+          if (d[o + 3]! >= 128) covered++;
+        }
+      }
+      if (kind !== 'albedo' || r.x < PX.sprig.x) continue; // bark is opaque
+      // alpha-test coverage preservation: scale alpha so ≥ 0.5 covers what level 0 covers
+      const target = regionCoverage(level0, size, r);
+      const n = (x1 - x0) * (y1 - y0);
+      if (n === 0 || Math.abs(covered / n - target) < 0.5 / n) continue;
+      // smallest scale whose coverage reaches the target (coverage grows with the scale)
+      let lo = 0.25;
+      let hi = 4;
+      for (let it = 0; it < 12; it++) {
+        const sc = 0.5 * (lo + hi);
+        let c = 0;
+        for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) if (d[(y * w + x) * 4 + 3]! * sc >= 128) c++;
+        if (c / n < target) lo = sc;
+        else hi = sc;
+      }
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
+          const o = (y * w + x) * 4 + 3;
+          d[o] = Math.min(255, Math.round(d[o]! * hi));
+        }
+      }
+    }
+    out.push({ data: d, width: w, height: w });
+  }
+  return out;
+}
+
+const SRGB_LIN = /* @__PURE__ */ (() => {
+  const t = new Float32Array(256);
+  for (let i = 0; i < 256; i++) {
+    const c = i / 255;
+    t[i] = c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  }
+  return t;
+})();
+
+/** Fraction of a region's level-0 texels at alpha ≥ 0.5 (rows stored bottom-up). */
+function regionCoverage(level0: Uint8Array, size: number, r: PxRect): number {
+  let c = 0;
+  const ys = size - (r.y + r.h);
+  for (let y = ys; y < ys + r.h; y++) for (let x = r.x; x < r.x + r.w; x++) if (level0[(y * size + x) * 4 + 3]! >= 128) c++;
+  return c / (r.w * r.h);
+}
+
+/** A DataTexture carrying an explicit mip chain (no GL mip generation; sampling clamps at its last level). */
+function mippedTex(levels: MipLevel[], srgb: boolean, aniso: number): DataTexture {
+  const l0 = levels[0]!;
+  const t = dataTex(l0.data, l0.width, l0.height, srgb, false, true, aniso);
+  t.mipmaps = levels as unknown as typeof t.mipmaps;
+  t.generateMipmaps = false;
+  return t;
+}
+
 function dataTex(data: Uint8Array, w: number, h: number, srgb: boolean, wrapS: boolean, wrapT: boolean, aniso: number): DataTexture {
   const t = new DataTexture(data, w, h, RGBAFormat, UnsignedByteType);
   t.colorSpace = srgb ? SRGBColorSpace : '';
@@ -559,9 +707,9 @@ export function createVegetationTextures(anisotropy = 4): VegetationTextures {
   const nrm = new Uint8Array(S * S * 4);
   heightToNormal(height, S, S, nrm, 4, false);
   const aniso = Math.max(1, anisotropy);
-  const albedo = dataTex(flipRows(img, S, S), S, S, true, false, true, aniso);
+  const albedo = mippedTex(atlasMips(flipRows(img, S, S), S, 'albedo'), true, aniso);
   albedo.name = 'veg-atlas';
-  const normal = dataTex(flipRows(nrm, S, S), S, S, false, false, true, aniso);
+  const normal = mippedTex(atlasMips(flipRows(nrm, S, S), S, 'normal'), false, aniso);
   normal.name = 'veg-atlas-normal';
   const RS = 256;
   const rs = rockSet(RS);

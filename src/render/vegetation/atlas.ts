@@ -44,10 +44,19 @@ export type AtlasRegion =
   | 'reeds'
   | 'fern';
 
-/** UV rect of a region (half-texel inset on card regions so mips do not bleed across). */
+/**
+ * Card regions' UV inset, px: the atlas mips are region-aware up to 32 px
+ * per texel (textures.ts atlasMips), but bilinear filtering still reaches
+ * half a texel across a border; 12 px keeps a neighbour (the opaque white
+ * birch bark beside the leaf and sprig cards) out below 16 px texels and
+ * ≤ 1/8 at the coarsest level.
+ */
+export const ATLAS_CARD_INSET_PX = 12;
+
+/** UV rect of a region (card regions inset by ATLAS_CARD_INSET_PX so mips do not bleed across). */
 export function atlasRect(r: AtlasRegion): UvRect {
   const p = ATLAS_PX[r];
-  const inset = r.startsWith('bark') ? 0 : 1;
+  const inset = r.startsWith('bark') ? 0 : ATLAS_CARD_INSET_PX;
   return {
     u: (p.x + inset) / ATLAS_SIZE,
     v: 1 - (p.y + p.h - inset) / ATLAS_SIZE,
