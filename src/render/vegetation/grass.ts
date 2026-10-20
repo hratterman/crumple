@@ -178,7 +178,7 @@ export function grassGeometry(capacity: number): { geometry: InstancedBufferGeom
 /** Grass patch (color only: grass never casts). uGrass = (radius, 0, 0, 0). */
 export function grassPatch(u: VegUniforms, radius: { value: number }): ShaderPatch {
   return {
-    key: 'veggrass1',
+    key: 'veggrass2',
     targets: ['color'],
     apply(shader: WebGLProgramParametersWithUniforms) {
       shader.uniforms.uVegWind = u.uVegWind;
@@ -214,13 +214,18 @@ varying float vGrassT;`,
   float flick = sin(tw * 5.3 + gSeed * 40.0 + gb.z * 9.0) * 0.06;
   lp.xz += (wd * (uVegWind.z * gust * 0.42 + 0.05) + vec2(-wd.y, wd.x) * flick) * t * t * h * 1.6;
   vec3 transformed = lp + iA.xyz;
-  vGrassCol = iB.rgb * mix(0.62, 1.2, t) * mix(1.0, 1.1, gb.z);
+  // × 0.9: the turf under the tufts carries texture AO, cavity and mid-scale darkening; bare
+  // blade colour read paler than the ground it grows from
+  vGrassCol = iB.rgb * 0.9 * mix(0.78, 1.06, t) * mix(1.0, 1.06, gb.z);
   vGrassT = t;`,
         )
         .replace(
           '#include <defaultnormal_vertex>',
           `float gA0 = iB.w * 81.681;
-  vec3 gN = normalize(vec3(cos(gA0) * normal.x - sin(gA0) * normal.z, normal.y * 1.8, sin(gA0) * normal.x + cos(gA0) * normal.z));
+  // Mostly the ground's up normal: a field of thin, translucent blades lights about like the
+  // turf under it. Blade-tilted normals (y × 1.8) lit sun-facing blades at twice the ground's
+  // N·L and sun-averted ones at ~0, a salt-and-pepper of pale and near-black specks.
+  vec3 gN = normalize(vec3(cos(gA0) * normal.x - sin(gA0) * normal.z, normal.y * 5.0, sin(gA0) * normal.x + cos(gA0) * normal.z));
   objectNormal = gN;
   #include <defaultnormal_vertex>`,
         );
@@ -238,6 +243,15 @@ varying float vGrassT;`,
         `float faceDirection = 1.0;
   vec3 normal = normalize(vNormal);
   vec3 nonPerturbedNormal = normal;`,
+      );
+      // rough, matte blades: terrain-level sheen (full dielectric F0 at grazing view angles paled
+      // every blade toward the sky colour)
+      f = f.replace(
+        '#include <lights_physical_fragment>',
+        `#include <lights_physical_fragment>
+  material.specularColor *= 0.3;
+  material.specularColorBlended *= 0.3;
+  material.specularF90 *= 0.3;`,
       );
       f = f.replace(
         '#include <emissivemap_fragment>',
