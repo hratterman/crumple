@@ -444,6 +444,32 @@ export interface ReplayFileRequestMsg {
   requestId: number;
 }
 
+// ---------------------------------------------------------------- autopilot (P8, additive; docs/CONTRACTS.md "P8 contracts")
+/**
+ * Worker-side driver for a main-spawned vehicle (challenge opponents). Mode
+ * 'ram': every TRAFFIC_AI_TICKS (100 Hz) at the START of a tick, before
+ * phase 1, the worker writes the object's throttle / brake / steer /
+ * handbrake / gearSelect from sim state only (its frame nodes and COM, the
+ * target's COM + velocity): pursue the target's predicted position, reverse
+ * out when stuck or overshot, never trig (sim numerics, src/sim/traffic/
+ * autopilot.ts). Deterministic: a pure function of (state, command log).
+ * 'off' releases the object (actions zeroed). Main `input` for an
+ * autopiloted object is accepted but overwritten at the next AI tick.
+ * Unknown / non-vehicle objectId → `error`. Despawn / reset keep the
+ * autopilot (reset clears its internal timers); despawn removes it.
+ */
+export interface SetAutopilotMsg {
+  type: 'setAutopilot';
+  objectId: number;
+  mode: 'off' | 'ram';
+  /** The object to ram (default 1, the player). */
+  targetObjectId?: number;
+  /** 0..1 (default 0.7): target speed 9 + 16·a m/s, lead time, commitment. */
+  aggression?: number;
+  /** Per-car rng seed (reaction jitter, reverse lengths); default objectId. */
+  seed?: number;
+}
+
 export type MainToWorker =
   | InitMsg
   | GroundMsg
@@ -463,6 +489,7 @@ export type MainToWorker =
   | ResetPropsMsg
   | SetTrafficMsg
   | SetTrafficDensityMsg
+  | SetAutopilotMsg
   | SetBubbleMsg
   | KeyframeRequestMsg
   | ReplaySeekMsg

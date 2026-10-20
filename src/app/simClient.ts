@@ -167,6 +167,8 @@ export class SimClient {
 
   // ---- P7 replay seam (app/replay): recorder sink, presentation of recorded frames, worker requests
   private snapshotSink: ((r: SnapshotReader) => void) | null = null;
+  /** P8: additional live-snapshot listeners (addSnapshotListener). */
+  private readonly snapshotListeners: ((r: SnapshotReader) => void)[] = [];
   private replaying = false;
   private replayTime = 0;
   private livePrev: SnapshotReader | null = null;
@@ -324,6 +326,25 @@ export class SimClient {
   /** Retunes density without a restart (quality change, governor). */
   setTrafficDensity(density: TrafficDensity): void {
     this.post({ type: 'setTrafficDensity', density: { ...density } });
+  }
+
+  /** P8: worker-side driver for a spawned vehicle (protocol `setAutopilot`; challenge opponents). */
+  setAutopilot(objectId: number, cfg: { mode: 'off' | 'ram'; targetObjectId?: number; aggression?: number; seed?: number }): void {
+    this.post({ type: 'setAutopilot', objectId, ...cfg });
+  }
+
+  /**
+   * P8: called with EVERY live snapshot as it arrives (120 Hz, independent of
+   * the render loop; after the replay recorder's sink; never with replay
+   * frames, which do not arrive while a replay is shown). The reader is only
+   * valid during the call. Returns the unsubscribe function.
+   */
+  addSnapshotListener(fn: (r: SnapshotReader) => void): () => void {
+    this.snapshotListeners.push(fn);
+    return () => {
+      const i = this.snapshotListeners.indexOf(fn);
+      if (i >= 0) this.snapshotListeners.splice(i, 1);
+    };
   }
 
   /** The latest `trafficReady` (null before traffic is configured). */
@@ -905,6 +926,8 @@ export class SimClient {
     this.captureEvents(reader);
     this.rebuildRanges(reader);
     this.snapshotSink?.(reader);
+    // P8: live snapshot listeners (challenge runtime), after the replay recorder; never replay frames.
+    for (let i = 0; i < this.snapshotListeners.length; i++) this.snapshotListeners[i]!(reader);
 
     const now = performance.now();
     if (this.lastArrivalMs >= 0) {

@@ -213,7 +213,22 @@ export interface PadDef {
  */
 export type ColliderKind = 'box' | 'cylinder' | 'sphere' | 'plane' | 'ramp';
 /** Render style hint (the sim ignores it). Default by kind: box 'block', cylinder 'pole', sphere 'block', plane 'plate', ramp 'ramp'. */
-export type ColliderVisual = 'wall' | 'jersey' | 'pole' | 'ramp' | 'block' | 'plate' | 'none';
+export type ColliderVisual =
+  | 'wall'
+  | 'jersey'
+  | 'pole'
+  | 'ramp'
+  | 'block'
+  | 'plate'
+  | 'none'
+  // P8 stunt park (additive; docs/CONTRACTS.md "P8 contracts"):
+  | 'container' //  corrugated shipping container (box)
+  | 'wreck' //      static crushed car hulk (box collider, car-shaped visual)
+  | 'tires' //      static stacked tyre wall (box)
+  | 'kicker' //     steel kicker ramp (ramp)
+  | 'deck' //       steel-framed deck plate: ski-jump in-run / landing hill, quarter-pipe staves (box)
+  | 'floodlight' // floodlight tower (cylinder = the mast base; the lattice + lamp head are drawn above it)
+  | 'grandstand'; // stepped grandstand (box = its bulk)
 export interface ColliderDef {
   id: string;
   kind: ColliderKind;
