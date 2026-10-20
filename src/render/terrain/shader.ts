@@ -96,6 +96,9 @@ uniform vec4 uTBlend;      // height-blend depth, height scale, far-detail start
 uniform vec3 uTConcrete;   // concrete colour (linear)
 uniform float uTSpec;      // specular intensity (F0 and F90 scale); rough ground under a bright dawn sky
 uniform float uTDebug;     // 0 off, 1 albedo, 2 normal, 3 roughness, 4 splat, 5 AO
+uniform vec4 uTCut;        // steep cuts (render only): N.y where rock starts, N.y where it is full, rock share of the moved weight, jitter
+uniform vec3 uTFill;       // bounce from sunlit terrain + sky multiple scattering (linear radiance at full weight)
+uniform vec2 uTSunH;       // horizontal unit vector toward the sun (x, z)
 
 vec2 tHash22(vec2 p) {
   vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
@@ -245,12 +248,12 @@ vec3 tGrade(vec3 c, int l, float macro) {
 
 #ifdef TERRAIN_LITE
 // One lite layer: graded colour (+ concrete on the paved layer), planar normal, roughness.
-void tLayerLite(int l, vec4 alb, vec4 srf, vec3 N, float nFade, float macro, float concrete, float slabTone, float slabJoint,
+// tOff: the projection plane's tangent frame (u axis, v axis) in world space, for the normal map.
+void tLayerLite(int l, vec4 alb, vec4 srf, vec3 N, mat2x3 tOff, float nFade, float macro, float concrete, float slabTone, float slabJoint,
                 out vec3 col, out vec3 n, out float rough) {
   float nStr = uTNormalStr[l] * nFade;
-  vec3 tn = vec3(srf.xy * nStr, 1.0);
-  tn = vec3(tn.xy + N.xz, tn.z * N.y);
-  n = normalize(tn.xzy);
+  vec2 d = srf.xy * nStr;
+  n = normalize(N + tOff[0] * d.x + tOff[1] * d.y);
   col = tGrade(alb.rgb, l, macro);
   if (l == 0 && concrete > 0.0) {
     float rl = dot(alb.rgb / max(uTMean[0], vec3(1e-4)), vec3(0.2126, 0.7152, 0.0722));
@@ -287,6 +290,18 @@ float tSpec = uTSpec;
   float w[5];
   w[0] = sp.r; w[1] = sp.g; w[2] = sp.b; w[3] = sp.a;
   w[4] = max(1.0 - (sp.r + sp.g + sp.b + sp.a), 0.0);
+  // Steep cuts and embankments read as rock / bare dirt (render only: materialAt keeps the
+  // generator's splat). Grass painted on a 45° road cut lit only by the violet dawn sky went
+  // near-black purple; turf and loose gravel do not hold on slopes that steep anyway.
+  {
+    float cut = smoothstep(uTCut.x, uTCut.y, N.y + (nzA.r - 0.5) * uTCut.w);
+    float mv = (w[4] + 0.6 * w[3]) * cut;
+    w[4] *= 1.0 - cut;
+    w[3] *= 1.0 - 0.6 * cut;
+    float rockShare = uTCut.z * mix(0.75, 1.15, nzC.r);
+    w[2] += mv * clamp(rockShare, 0.0, 1.0);
+    w[1] += mv * (1.0 - clamp(rockShare, 0.0, 1.0));
+  }
   float concrete = texture(tTConcrete, gridUv).r;
   // Concrete cast slabs (6 m): per-slab tone + antialiased saw-cut joints
   // (derivatives taken here, in uniform control flow).
@@ -299,7 +314,31 @@ float tSpec = uTSpec;
 
 #ifdef TERRAIN_LITE
   vec3 tw = vec3(0.0, 1.0, 0.0);
+  // One tap per layer, but steep faces project onto the side plane they face (a planar XZ tap
+  // smeared into long streaks down road cuts). The switch contour is jittered by noise.
   vec2 pY = P.xz;
+  vec2 lDx = dPdx.xz;
+  vec2 lDy = dPdy.xz;
+  mat2x3 lFrame = mat2x3(vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0));
+  {
+    float ax = abs(N.x);
+    float az = abs(N.z);
+    if (max(ax, az) > N.y + (nzA.b - 0.5) * 0.2) {
+      if (ax > az) {
+        float sx = N.x >= 0.0 ? 1.0 : -1.0;
+        pY = vec2(P.z * sx, P.y) + 31.0;
+        lDx = vec2(dPdx.z * sx, dPdx.y);
+        lDy = vec2(dPdy.z * sx, dPdy.y);
+        lFrame = mat2x3(vec3(0.0, 0.0, sx), vec3(0.0, 1.0, 0.0));
+      } else {
+        float sz = N.z >= 0.0 ? 1.0 : -1.0;
+        pY = vec2(-P.x * sz, P.y) + 57.0;
+        lDx = vec2(-dPdx.x * sz, dPdx.y);
+        lDy = vec2(-dPdy.x * sz, dPdy.y);
+        lFrame = mat2x3(vec3(-sz, 0.0, 0.0), vec3(0.0, 1.0, 0.0));
+      }
+    }
+  }
 #else
   // Projection weights: XZ plane always; side planes fade in on steep slopes.
   vec3 tw = pow(abs(N), vec3(4.0));
@@ -353,14 +392,14 @@ float tSpec = uTSpec;
   float hgt = 0.0;
   {
     vec4 a0, s0, a1, s1;
-    tSamplePlain(pY, dPdx.xz, dPdy.xz, float(i0), uTTileInv[i0], footprint, a0, s0);
+    tSamplePlain(pY, lDx, lDy, float(i0), uTTileInv[i0], footprint, a0, s0);
     bool two = w1 >= 0.003;
-    if (two) tSamplePlain(pY, dPdx.xz, dPdy.xz, float(i1), uTTileInv[i1], footprint, a1, s1);
+    if (two) tSamplePlain(pY, lDx, lDy, float(i1), uTTileInv[i1], footprint, a1, s1);
     else { a1 = a0; s1 = s0; }
     vec3 c0, c1, n0, n1;
     float r0, r1, h0, h1;
-    tLayerLite(i0, a0, s0, N, nFade, macro, concrete, slabTone, slabJoint, c0, n0, r0);
-    tLayerLite(i1, a1, s1, N, nFade, macro, concrete, slabTone, slabJoint, c1, n1, r1);
+    tLayerLite(i0, a0, s0, N, lFrame, nFade, macro, concrete, slabTone, slabJoint, c0, n0, r0);
+    tLayerLite(i1, a1, s1, N, lFrame, nFade, macro, concrete, slabTone, slabJoint, c1, n1, r1);
     h0 = w0 + uTBlend.y * a0.a * min(w0 * 4.0, 1.0);
     h1 = two ? w1 + uTBlend.y * a1.a * min(w1 * 4.0, 1.0) : -1.0;
     float hmax = max(h0, h1);
@@ -547,6 +586,9 @@ export function createTerrainUniforms(): TerrainUniforms {
     uTConcrete: { value: new Vector3(0.2, 0.195, 0.185) },
     uTDebug: { value: 0 },
     uTSpec: { value: 0.3 },
+    uTCut: { value: new Vector4(0.84, 0.66, 0.85, 0.14) },
+    uTFill: { value: new Vector3(0, 0, 0) },
+    uTSunH: { value: new Vector2(1, 0) },
   };
 }
 
@@ -580,7 +622,18 @@ export function applyTerrainColorPatch(shader: WebGLProgramParametersWithUniform
   fs = replaceOnce(
     fs,
     '#include <aomap_fragment>',
-    '#include <aomap_fragment>\nreflectedLight.indirectDiffuse *= tAO;\nreflectedLight.indirectSpecular *= mix(1.0, tAO, 0.7);',
+    `#include <aomap_fragment>
+reflectedLight.indirectDiffuse *= tAO;
+reflectedLight.indirectSpecular *= mix(1.0, tAO, 0.7);
+// Bounce from sunlit terrain + sky multiple scattering. The HDRI's lower hemisphere is the
+// photographer's dark ground, so a face turned from the sun saw only the dim violet anti-sun
+// sky (≈ 4 % of a sunlit slope: road cuts went black-purple). Sun-averted, steep faces look at
+// the sunlit (sun-facing) terrain across from them, so they get the most.
+{
+  float tAway = 0.5 - 0.45 * dot(tNormalW.xz, uTSunH);
+  float tSide = clamp(1.15 - tNormalW.y, 0.1, 1.0);
+  reflectedLight.indirectDiffuse += diffuseColor.rgb * uTFill * (tAway * tSide) * mix(1.0, tAO, 0.6);
+}`,
   );
   shader.fragmentShader = fs;
 }

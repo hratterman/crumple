@@ -70,6 +70,13 @@ const EVICT_AFTER_S = 8;
  * summit / lakeshore views had 140–210 LOD-3 chunk draws).
  */
 export const SUPER_CHUNK = 4;
+/**
+ * Terrain fill (bounce from sunlit terrain + sky multiple scattering) as a
+ * fraction of the key light's colour × intensity. The shader weights it by
+ * how far a face turns from the sun (horizontally) and how steep it is, so
+ * sun-averted cuts get the most and flat ground ≈ a tenth of it.
+ */
+export const TERRAIN_FILL = 0.11;
 
 /**
  * Per-layer look. `mean` is the target mean albedo (linear) the texture is
@@ -87,10 +94,12 @@ interface LayerLook {
   macroA: [number, number, number];
   macroB: [number, number, number];
 }
+// dirt sat is low on purpose: Ground037's mean is mossy green, so re-centred on a brown target
+// its bare-soil patches (red/blue above that mean, green below) came out as pink-violet speckles.
 const LOOK: Readonly<Record<string, LayerLook>> = {
   asphalt: { mean: [0.045, 0.045, 0.043], contrast: 0.9, sat: 0.5, normal: 0.9, rough: [0.62, 0.98], macroA: [0.88, 0.88, 0.88], macroB: [1.12, 1.1, 1.06] },
-  dirt: { mean: [0.12, 0.092, 0.064], contrast: 1.3, sat: 0.7, normal: 1.25, rough: [0.7, 1.0], macroA: [1.1, 0.98, 0.85], macroB: [0.88, 0.9, 0.92] },
-  rock: { mean: [0.085, 0.076, 0.066], contrast: 0.85, sat: 0.35, normal: 1.15, rough: [0.55, 0.95], macroA: [1.12, 1.02, 0.92], macroB: [0.8, 0.82, 0.86] },
+  dirt: { mean: [0.12, 0.092, 0.064], contrast: 1.3, sat: 0.3, normal: 1.25, rough: [0.7, 1.0], macroA: [1.1, 0.98, 0.85], macroB: [0.88, 0.9, 0.92] },
+  rock: { mean: [0.1, 0.088, 0.074], contrast: 0.85, sat: 0.35, normal: 1.15, rough: [0.55, 0.95], macroA: [1.12, 1.02, 0.92], macroB: [0.8, 0.82, 0.86] },
   gravel: { mean: [0.14, 0.126, 0.108], contrast: 0.9, sat: 0.5, normal: 1.0, rough: [0.62, 0.98], macroA: [1.06, 1.0, 0.92], macroB: [0.85, 0.85, 0.86] },
   grass: { mean: [0.085, 0.105, 0.035], contrast: 1.0, sat: 1.0, normal: 0.9, rough: [0.68, 1.0], macroA: [1.2, 1.02, 0.7], macroB: [0.8, 1.0, 0.85] },
 };
@@ -343,6 +352,13 @@ export function createTerrainRenderer(
     camera.updateMatrixWorld();
     camPos.setFromMatrixPosition(camera.matrixWorld);
     (uniforms.uTCam!.value as Vector3).copy(camPos);
+    const sun = opts.lighting.sun;
+    (uniforms.uTFill!.value as Vector3).set(sun.color.r, sun.color.g, sun.color.b).multiplyScalar(sun.intensity * TERRAIN_FILL);
+    {
+      const d = opts.lighting.sunDirection;
+      const h = Math.hypot(d.x, d.z) || 1;
+      (uniforms.uTSunH!.value as Vector2).set(d.x / h, d.z / h);
+    }
     projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     frustum.setFromProjectionMatrix(projView, camera.coordinateSystem);
     const shadows = opts.lighting.csm !== null || opts.lighting.sun.castShadow;
