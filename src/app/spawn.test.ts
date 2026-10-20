@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { quatRotateVec3, type Vec3 } from '../core/math';
-import { clearOfBoxes, placeOnGround, repairSpot, SPAWN_DROP_MAX_M, yawOf, yawOfQuat, type RestPose } from './spawn';
+import { clearOfBoxes, placeOnGround, repairSpot, SPAWN_DROP_MAX_M, SPAWN_MAX_TILT_RAD, yawOf, yawOfQuat, type RestPose } from './spawn';
 
 const box: RestPose = {
   nodeCount: 4,
@@ -30,6 +30,32 @@ describe('placeOnGround', () => {
       expect(t.pos[2]).toBe(-3);
       expect(minGap(box, ground, t)).toBeCloseTo(0.06, 9);
     }
+  });
+
+  it('aligns the rig to the ground plane under its footprint: every corner the same gap, up = the plane normal', () => {
+    const ground = (x: number, z: number): number => 10 + 0.2 * x - 0.1 * z;
+    const n = [-0.2, 1, 0.1].map((v) => v / Math.hypot(0.2, 1, 0.1));
+    for (const yaw of [0, 0.7, Math.PI / 2, 2.5, -1.2]) {
+      const t = placeOnGround(box, { heightAt: ground }, 5, -3, yaw, 0.06);
+      const up = quatRotateVec3([0, 0, 0] as Vec3, t.quat, [0, 1, 0]);
+      for (let k = 0; k < 3; k++) expect(up[k]).toBeCloseTo(n[k]!, 9);
+      // all four nodes clear the plane by the same vertical gap (to the plane's cos tilt)
+      for (let i = 0; i < 4; i++) {
+        const one: RestPose = { nodeCount: 1, nodePos: Array.from(box.nodePos).slice(3 * i, 3 * i + 3), nodeRadius: [0.3] };
+        expect(minGap(one, ground, t)).toBeCloseTo(0.06, 2);
+      }
+      // the heading is kept: forward projects onto the yaw direction
+      const f = quatRotateVec3([0, 0, 0] as Vec3, t.quat, [0, 0, -1]);
+      expect(Math.atan2(Math.sin(yawOf(f[0], f[2]) - yaw), Math.cos(yawOf(f[0], f[2]) - yaw))).toBeCloseTo(0, 1);
+    }
+  });
+
+  it('caps the tilt on very steep ground and still clears it', () => {
+    const cliff = (x: number): number => 2 * x; // 63°
+    const t = placeOnGround(box, { heightAt: cliff }, 0, 0, 0);
+    const up = quatRotateVec3([0, 0, 0] as Vec3, t.quat, [0, 1, 0]);
+    expect(Math.acos(up[1])).toBeCloseTo(SPAWN_MAX_TILT_RAD, 9);
+    expect(minGap(box, cliff, t)).toBeCloseTo(0.06, 9);
   });
 
   it('clamps the drop height', () => {

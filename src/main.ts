@@ -33,7 +33,7 @@ import type { DamageState } from './render/vehicle/damage';
 import type { PropVisualState } from './render/props/types';
 import type { FxState } from './render/fx/types';
 import { createTrafficController, type TrafficController } from './app/traffic';
-import { placeOnGround, repairSpot, yawOf, yawOfQuat, type Aabb } from './app/spawn';
+import { placeOnGround, repairSpot, yawOf, yawOfQuat, type Aabb, type RestPose } from './app/spawn';
 import { chaseFramingFor, drivableEntry, hasStoredChoice, loadPlayerAssets, loadVehicleChoice, PlayerVehicle, saveVehicleChoice, speedoMax, type PlayerAssets } from './app/player';
 import { chaseScale, loadSettings, saveSettings, trafficDensityFor, type GameSettings } from './app/settings';
 import { DEFAULT_VEHICLE_ID, getVehicleEntry, PLAYER_VEHICLE_IDS, type VehicleChoice } from './game/catalog';
@@ -43,7 +43,7 @@ import { quatFromAxisAngle, quatRotateVec3, vec3Normalize, type Quat, type Vec3 
 import { createInputMapper } from './input/actions';
 import { attachInputDevices } from './input/devices';
 import type { BeamBreakEvent, ImpactEvent, SkidEvent } from './protocol/events';
-import { GAME_CAPACITY, isPropObjectId, type ActionState, type Transform } from './protocol/messages';
+import { GAME_CAPACITY, isPropObjectId, SPAWN_SETTLE_S, type ActionState, type Transform } from './protocol/messages';
 import { VehicleTelemetry } from './protocol/telemetry';
 import { DEFAULT_CHASE_OPTIONS, vehiclePoseFromNodes, type ChaseTarget } from './render/cameras/chase';
 import { CameraDirector } from './render/cameras/director';
@@ -503,7 +503,31 @@ function playerRest() {
 
 function spawnTransformAt(i: number, rest = playerRest()): Transform {
   const s = terrain!.spawns[i]!;
-  return placeOnGround(rest, sampler!, s.pos[0], s.pos[2], s.yaw);
+  return clearSpawnAt(rest, s.pos[0], s.pos[2], s.yaw);
+}
+
+/** Obstacles a spawn must clear: every other object of the latest snapshot near (x, z) (props where they lie now, the cube, awake traffic) as a bounding-sphere box. */
+function liveObstacles(x: number, z: number): Aabb[] {
+  const out: Aabb[] = [];
+  const b = [0, 0, 0, 0];
+  for (const r of client.objectRanges()) {
+    if (r.objectId === VEHICLE_ID || !client.objectBounds(r.objectId, b)) continue;
+    const [cx, cy, cz, rad] = b as [number, number, number, number];
+    if (Math.abs(cx - x) > rad + 15 || Math.abs(cz - z) > rad + 15) continue;
+    out.push([cx - rad, cy - rad, cz - rad, cx + rad, cy + rad, cz + rad]);
+  }
+  return out;
+}
+
+/**
+ * Spawn / teleport pose at (x, z) facing `yaw`: on the ground plane under the
+ * whole footprint (placeOnGround), moved back (then forward) along the
+ * heading until it clears every other object where it lies now
+ * (repairSpot); the spot itself when nothing within reach is clear.
+ */
+function clearSpawnAt(rest: RestPose, x: number, z: number, yaw: number): Transform {
+  const boxes = liveObstacles(x, z);
+  return (boxes.length > 0 ? repairSpot(rest, sampler!, x, z, yaw, boxes) : null) ?? placeOnGround(rest, sampler!, x, z, yaw);
 }
 
 /** Teleport (full repair) to layout spawn point `i` (keys 1–8). */
@@ -511,7 +535,7 @@ function teleport(i: number): void {
   if (!terrain || i < 0 || i >= terrain.spawns.length) return;
   spawnIndex = i;
   lastSpawn = spawnTransformAt(i);
-  client.reset(VEHICLE_ID, lastSpawn);
+  client.reset(VEHICLE_ID, lastSpawn, SPAWN_SETTLE_S);
   lastSent.gearSelect = NaN; // force a full input resend
   snapAfterTick = client.latestTick;
   replaySession?.quietCrashCam(); // P7: the drop onto the spawn is not a crash
@@ -522,7 +546,7 @@ function teleport(i: number): void {
 function placeVehicle(x: number, z: number, yaw: number): void {
   if (!sampler) return;
   lastSpawn = placeOnGround(playerRest(), sampler, x, z, yaw);
-  client.reset(VEHICLE_ID, lastSpawn);
+  client.reset(VEHICLE_ID, lastSpawn, SPAWN_SETTLE_S);
   lastSent.gearSelect = NaN;
   snapAfterTick = client.latestTick;
   replaySession?.quietCrashCam();
@@ -538,7 +562,7 @@ function repairVehicle(): void {
     // Props return to their spawn poses at the same time: never repair the car inside one's spawn box.
     t = propBoxes.length > 0 ? (repairSpot(sedanRig, sampler, pose.position.x, pose.position.z, yaw, propBoxes) ?? lastSpawn) : placeOnGround(sedanRig, sampler, pose.position.x, pose.position.z, yaw);
   }
-  client.reset(VEHICLE_ID, t);
+  client.reset(VEHICLE_ID, t, SPAWN_SETTLE_S);
   lastSent.gearSelect = NaN;
   snapAfterTick = client.latestTick;
   replaySession?.quietCrashCam();
@@ -789,10 +813,10 @@ async function swapVehicle(choice: VehicleChoice, spawnAt: number | null): Promi
     spawnIndex = spawnAt;
     lastSpawn = spawnTransformAt(spawnAt, assets.rest);
   } else {
-    lastSpawn = placeOnGround(assets.rest, sampler, lastSpawn.pos[0], lastSpawn.pos[2], yawOfQuat(lastSpawn.quat));
+    lastSpawn = clearSpawnAt(assets.rest, lastSpawn.pos[0], lastSpawn.pos[2], yawOfQuat(lastSpawn.quat));
   }
   applyPlayerSpec(assets);
-  client.spawnVehicle(VEHICLE_ID, assets.sim, lastSpawn, transmission, entry.id);
+  client.spawnVehicle(VEHICLE_ID, assets.sim, lastSpawn, transmission, entry.id, SPAWN_SETTLE_S);
   replaySession?.quietCrashCam();
   tractionControl = settings.tractionControl;
   if (!tractionControl) client.setAssists(VEHICLE_ID, { tractionControl: false });
@@ -1469,7 +1493,7 @@ async function boot(): Promise<void> {
   const wanted = params.get('spawn') ?? DEFAULT_SPAWN;
   spawnIndex = Math.max(0, world.spawns.findIndex((s) => s.id === wanted));
   lastSpawn = spawnTransformAt(spawnIndex);
-  client.spawnVehicle(VEHICLE_ID, bootAssets.sim, lastSpawn, transmission, bootAssets.entry.id);
+  client.spawnVehicle(VEHICLE_ID, bootAssets.sim, lastSpawn, transmission, bootAssets.entry.id, SPAWN_SETTLE_S);
   if (!tractionControl) client.setAssists(VEHICLE_ID, { tractionControl: false });
   spawnCube();
   // P6 traffic: ?traffic=0 (perf comparisons) or the 'off' setting disables it; the stub resolves false until T2 lands.
@@ -1605,7 +1629,7 @@ async function boot(): Promise<void> {
     swapVehicle: (choice) => swapVehicle(choice, null),
     placePlayer: (t) => {
       lastSpawn = t;
-      client.reset(VEHICLE_ID, t);
+      client.reset(VEHICLE_ID, t, SPAWN_SETTLE_S);
       lastSent.gearSelect = NaN;
       snapAfterTick = client.latestTick;
       replaySession?.quietCrashCam();

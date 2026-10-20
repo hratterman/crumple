@@ -212,11 +212,24 @@ export interface InputMsg {
   objectId: number;
   actions: Partial<ActionState>;
 }
+/** Spawn settle window main sends with player spawns / teleports / repairs, sim s (`settle` on reset / spawnVehicle). */
+export const SPAWN_SETTLE_S = 0.4;
+/** Upper bound of a settle window, sim s (larger values are clamped). */
+export const SPAWN_SETTLE_MAX_S = 2;
 /** Full repair: rest pose at `transform`, zero velocity, beams restored (restLen0/k0, active). */
 export interface ResetMsg {
   type: 'reset';
   objectId: number;
   transform: Transform;
+  /**
+   * Spawn-settle additive: sim seconds (clamped to [0, SPAWN_SETTLE_MAX_S],
+   * rounded to ticks; omitted / 0 = none) during which the object drops onto
+   * its suspension without damage: its beams neither yield nor break and its
+   * impact / skid events are dropped. Part of the logged command, so replay
+   * and resimulate reproduce it. Main sends SPAWN_SETTLE_S for player spawns,
+   * teleports and repairs.
+   */
+  settle?: number;
 }
 /** Sim-time scale, clamped by the worker to [0.05, 1] (0 pauses). */
 export interface TimescaleMsg {
@@ -251,6 +264,15 @@ export interface SpawnVehicleMsg {
    * never looks a def up by id. Omitted = unknown / ad-hoc def.
    */
   catalogId?: string;
+  /**
+   * Spawn-settle additive: sim seconds (clamped to [0, SPAWN_SETTLE_MAX_S],
+   * rounded to ticks; omitted / 0 = none) during which the object drops onto
+   * its suspension without damage: its beams neither yield nor break and its
+   * impact / skid events are dropped. Part of the logged command, so replay
+   * and resimulate reproduce it. Main sends SPAWN_SETTLE_S for player spawns,
+   * teleports and repairs.
+   */
+  settle?: number;
 }
 /**
  * Switch a vehicle between automatic and manual shifting. gearSelect

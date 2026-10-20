@@ -52,7 +52,7 @@ import type { RouteNetwork, WorldLayout } from '../world/types';
 import { clampDensity, TrafficSim } from './traffic/traffic';
 import { buildVariant, type TrafficVariant } from './traffic/templates';
 import { AutopilotSet } from './traffic/autopilot';
-import type { SetAutopilotMsg } from '../protocol/messages';
+import { SPAWN_SETTLE_MAX_S, type SetAutopilotMsg } from '../protocol/messages';
 import { createTerrainSampler, type HeightfieldSampler } from '../world/sampler';
 import type { TerrainData } from '../world/types';
 import {
@@ -68,6 +68,13 @@ import { setWheelGround } from './vehicle/wheels';
 
 /** Fixed physics step, s. */
 export const SIM_DT = 1 / 2000;
+
+/** Validates a spawnVehicle / reset `settle` (sim s) into ticks: clamped to SPAWN_SETTLE_MAX_S, rounded. */
+function settleTicksOf(settle: number | undefined, objectId: number): number {
+  if (settle === undefined) return 0;
+  if (typeof settle !== 'number' || !Number.isFinite(settle) || settle < 0) throw new SimCommandError('settle must be a finite number ≥ 0', objectId);
+  return Math.round((settle < SPAWN_SETTLE_MAX_S ? settle : SPAWN_SETTLE_MAX_S) / SIM_DT);
+}
 export const SIM_HZ = 2000;
 
 export interface EngineConfig {
@@ -96,6 +103,8 @@ export class PendingEvents implements EventSink {
   impactOverflow = 0;
   breakOverflow = 0;
   skidOverflow = 0;
+  /** Objects in a spawn-settle window: their impact / skid events are dropped (SimEngine.startSettle). */
+  readonly muted = new Set<number>();
 
   constructor(private readonly arena: SimArena) {}
 
@@ -110,6 +119,7 @@ export class PendingEvents implements EventSink {
     nz: number,
     impulse: number,
   ): void {
+    if (this.muted.size > 0 && this.muted.has(objectId)) return;
     if (this.impactCount >= IMPACT_CAPACITY) {
       this.impactOverflow++;
       return;
@@ -155,6 +165,7 @@ export class PendingEvents implements EventSink {
     slip: number,
     load: number,
   ): void {
+    if (this.muted.size > 0 && this.muted.has(objectId)) return;
     if (this.skidCount >= SKID_CAPACITY) {
       this.skidOverflow++;
       return;
@@ -242,6 +253,16 @@ export class SimEngine {
   water: WaterBody[] = [];
   /** Repair epoch per objectId (+1 per reset; snapshot OBJ_REPAIR_EPOCH). */
   private readonly repairEpochs = new Map<number, number>();
+  /**
+   * Last epoch of each despawned objectId: a respawn of the same id continues
+   * from it (+1), so main sees the new body as a new epoch (no interpolation
+   * from the old car, fresh damage) even when the node count matches.
+   */
+  private readonly retiredEpochs = new Map<number, number>();
+  /** Spawn-settle windows: objectId → the first tick after its window (see startSettle). */
+  private readonly settles = new Map<number, number>();
+  /** Earliest end tick in `settles` (Infinity = none): step() checks only this. */
+  private nextSettleEnd = Infinity;
   /** Compiled rig per objectId (needed for reset/repair). */
   private readonly rigs = new Map<number, CompiledRig>();
   /** Vehicle runtime per objectId. */
@@ -412,7 +433,8 @@ export class SimEngine {
     // Ranges from here on shifted; per-node contact bookkeeping restarts.
     resetGroundContactState(this.state, obj.nodeStart, this.state.nodeCount - obj.nodeStart);
     resetColliderContactState(this.state, obj.nodeStart, this.state.nodeCount - obj.nodeStart);
-    this.repairEpochs.set(objectId, 0);
+    const retired = this.retiredEpochs.get(objectId);
+    this.repairEpochs.set(objectId, retired === undefined ? 0 : (retired + 1) >>> 0);
     this.syncVehicles();
     // Global node indices shifted: drop the pair list.
     this.contacts.clear();
@@ -425,9 +447,10 @@ export class SimEngine {
    * map snapshot nodes) → arena insert → vehicle runtime. `transmission`
    * overrides the def's initial mode.
    */
-  spawnVehicle(objectId: number, def: VehicleDef, transform: Transform, transmission?: TransmissionMode, catalogId?: string): SimObject {
+  spawnVehicle(objectId: number, def: VehicleDef, transform: Transform, transmission?: TransmissionMode, catalogId?: string, settle?: number): SimObject {
     if (isTrafficObjectId(objectId)) throw new SimCommandError(`objectId ${objectId} is in the traffic range (worker-owned)`, objectId);
     if (catalogId !== undefined && typeof catalogId !== 'string') throw new SimCommandError('catalogId must be a string', objectId);
+    const settleTicks = settleTicksOf(settle, objectId);
     let compiled: CompiledVehicle;
     try {
       compiled = compileVehicle(def);
@@ -436,6 +459,7 @@ export class SimEngine {
     }
     const obj = this.spawnCompiledVehicle(objectId, compiled, transform, transmission);
     if (catalogId !== undefined) this.catalogIds.set(objectId, catalogId);
+    if (settleTicks > 0) this.startSettle(objectId, settleTicks);
     return obj;
   }
 
@@ -710,8 +734,12 @@ export class SimEngine {
     this.vehicles.delete(objectId);
     this.props.delete(objectId);
     this.floods.delete(objectId);
+    const epoch = this.repairEpochs.get(objectId);
+    if (epoch !== undefined) this.retiredEpochs.set(objectId, epoch);
     this.repairEpochs.delete(objectId);
     this.catalogIds.delete(objectId);
+    this.settles.delete(objectId);
+    this.events.muted.delete(objectId);
     resetGroundContactState(this.state, start, this.state.nodeCount + n - start);
     resetColliderContactState(this.state, start, this.state.nodeCount + n - start);
     this.syncVehicles();
@@ -719,9 +747,10 @@ export class SimEngine {
     this.contactsDirty = true;
   }
 
-  reset(objectId: number, transform: Transform): void {
+  reset(objectId: number, transform: Transform, settle?: number): void {
     const rig = this.rigs.get(objectId);
     if (!rig) throw new SimCommandError(`unknown objectId ${objectId}`, objectId);
+    const settleTicks = settleTicksOf(settle, objectId);
     let obj: SimObject;
     try {
       obj = this.arena.reset(objectId, rig, transform);
@@ -739,6 +768,63 @@ export class SimEngine {
     // A sleeping object stays asleep at the new pose: refresh its broadphase box.
     if ((obj.flags & SIM_OBJECT_FLAG_SLEEPING) !== 0) this.setAsleep(obj, true);
     this.contactsDirty = true;
+    // The beams were just reloaded from the rig: a window still open ends here (or restarts).
+    this.settles.delete(objectId);
+    this.events.muted.delete(objectId);
+    if (settleTicks > 0) this.startSettle(objectId, settleTicks);
+  }
+
+  /**
+   * Spawn settle (spawnVehicle / reset `settle`): for `ticks` steps the
+   * object's beams neither yield nor break (deform / break thresholds lifted
+   * to Infinity) and its impact / skid events are dropped, while it drops
+   * the last centimetres onto its suspension and the preloaded shocks /
+   * rest-pose sag find their equilibrium. The thresholds come back from the
+   * compiled rig when the window ends (nothing yields meanwhile, so they are
+   * the rig's values). Deterministic: the window is part of the logged
+   * command and ends at a fixed tick.
+   */
+  private startSettle(objectId: number, ticks: number): void {
+    const obj = this.arena.get(objectId);
+    if (!obj) return;
+    const s = this.state;
+    for (let b = obj.beamStart, e = obj.beamStart + obj.beamCount; b < e; b++) {
+      s.deform[b] = Infinity;
+      s.breakF[b] = Infinity;
+    }
+    const end = this.tick + ticks;
+    this.settles.set(objectId, end);
+    this.events.muted.add(objectId);
+    if (end < this.nextSettleEnd) this.nextSettleEnd = end;
+  }
+
+  /** Ends every settle window due at this tick (restores the rig's thresholds). */
+  private expireSettles(): void {
+    let next = Infinity;
+    for (const [id, end] of this.settles) {
+      if (end > this.tick) {
+        if (end < next) next = end;
+        continue;
+      }
+      this.settles.delete(id);
+      this.events.muted.delete(id);
+      const obj = this.arena.get(id);
+      const rig = this.rigs.get(id);
+      if (!obj || !rig) continue;
+      const s = this.state;
+      for (let i = 0; i < rig.beamCount; i++) {
+        const b = obj.beamStart + i;
+        s.deform[b] = rig.beamDeform[i]!;
+        s.breakF[b] = rig.beamBreakF[i]!;
+      }
+    }
+    this.nextSettleEnd = next;
+  }
+
+  /** Remaining settle ticks of `objectId` (0 = not settling). */
+  settleTicksLeft(objectId: number): number {
+    const end = this.settles.get(objectId);
+    return end === undefined ? 0 : Math.max(0, end - this.tick);
   }
 
   /** Merges named actions (clamped to ACTION_RANGES; gearSelect rounded). */
@@ -811,6 +897,7 @@ export class SimEngine {
    * hydro drive → beams → ground → static colliders → integrate.
    */
   step(): void {
+    if (this.tick >= this.nextSettleEnd) this.expireSettles();
     // P6: traffic driver model + scheduler at the START of every TRAFFIC_AI_TICKS-th tick (may spawn/despawn).
     if (this.traffic !== null && this.tick % TRAFFIC_AI_TICKS === 0) this.traffic.update(this);
     if (this.autopilots.size > 0 && this.tick % TRAFFIC_AI_TICKS === 0) this.autopilots.update(this);

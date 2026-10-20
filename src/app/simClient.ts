@@ -279,7 +279,7 @@ export class SimClient {
    * canonical order the worker compiles; MINIMASS never changes topology) to
    * keep beam pairs and frame-node indices. Returns false if the def is invalid.
    */
-  spawnVehicle(objectId: number, vehicle: VehicleDef, transform: Transform, transmission?: TransmissionMode, catalogId?: string): boolean {
+  spawnVehicle(objectId: number, vehicle: VehicleDef, transform: Transform, transmission?: TransmissionMode, catalogId?: string, settle?: number): boolean {
     let rig: RigDef;
     let compiled;
     try {
@@ -301,6 +301,7 @@ export class SimClient {
     const msg: MainToWorker = { type: 'spawnVehicle', objectId, vehicle, transform: cloneTransform(transform) };
     if (transmission) msg.transmission = transmission;
     if (catalogId !== undefined) msg.catalogId = catalogId;
+    if (settle !== undefined && settle > 0) msg.settle = settle;
     this.post(msg);
     return true;
   }
@@ -443,8 +444,11 @@ export class SimClient {
     this.post({ type: 'input', objectId, actions });
   }
 
-  reset(objectId: number, transform: Transform): void {
-    this.post({ type: 'reset', objectId, transform: cloneTransform(transform) });
+  /** Full repair at `transform`; `settle` > 0 = a damage-free spawn-settle window (sim s, see ResetMsg). */
+  reset(objectId: number, transform: Transform, settle?: number): void {
+    const msg: MainToWorker = { type: 'reset', objectId, transform: cloneTransform(transform) };
+    if (settle !== undefined && settle > 0) msg.settle = settle;
+    this.post(msg);
   }
 
   setTimescale(value: number): void {
@@ -582,7 +586,7 @@ export class SimClient {
     const prev = this.prev;
     const pi = prev ? prev.findObject(objectId) : -1;
     const span = prev ? cur.simTime - prev.simTime : 0;
-    if (!prev || pi < 0 || prev.objectNodeCount(pi) !== cur.objectNodeCount(ci) || !(span > 0)) {
+    if (!prev || pi < 0 || prev.objectNodeCount(pi) !== cur.objectNodeCount(ci) || prev.objectRepairEpoch(pi) !== cur.objectRepairEpoch(ci) || !(span > 0)) {
       out[0] = cn[c]!;
       out[1] = cn[c + 1]!;
       out[2] = cn[c + 2]!;
@@ -672,6 +676,13 @@ export class SimClient {
    * between the two held snapshots at `renderSimTime` into `out`. Objects
    * missing from the previous snapshot (or whose node count changed) take the
    * current positions. Returns the number of nodes written.
+   *
+   * Objects whose repair epoch changed between the two snapshots (reset /
+   * teleport / respawn: the worker bumps the epoch, also on a respawn of the
+   * same objectId) take the current positions too: a lerp from the old pose
+   * to a new one with another heading squeezes the body (at 180° it passes
+   * through a point), and the damage visuals measured that squeeze as
+   * plastic strain and shattered glass on a freshly repaired car.
    */
   interpolate(renderSimTime: number, out: Float32Array): number {
     const cur = this.cur;
@@ -694,7 +705,7 @@ export class SimClient {
       const off = cur.objectNodeOffset(i) * NODE_STRIDE;
       const len = cur.objectNodeCount(i) * NODE_STRIDE;
       const p = prev.findObject(cur.objectId(i));
-      if (p < 0 || prev.objectNodeCount(p) * NODE_STRIDE !== len) {
+      if (p < 0 || prev.objectNodeCount(p) * NODE_STRIDE !== len || prev.objectRepairEpoch(p) !== cur.objectRepairEpoch(i)) {
         out.set(curNodes.subarray(off, off + len), off);
         continue;
       }

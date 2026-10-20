@@ -183,7 +183,7 @@ export class WorkerHost {
           this.dirty = true;
           return;
         case 'reset':
-          engine.reset(msg.objectId, msg.transform);
+          engine.reset(msg.objectId, msg.transform, msg.settle);
           this.dirty = true;
           return;
         case 'input': {
@@ -194,7 +194,7 @@ export class WorkerHost {
           return;
         }
         case 'spawnVehicle':
-          engine.spawnVehicle(msg.objectId, msg.vehicle, msg.transform, msg.transmission, msg.catalogId);
+          engine.spawnVehicle(msg.objectId, msg.vehicle, msg.transform, msg.transmission, msg.catalogId, msg.settle);
           this.dirty = true;
           return;
         case 'setTraffic': {
