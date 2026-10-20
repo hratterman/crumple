@@ -322,12 +322,23 @@ describe('replay buffer memory + cost (realistic scene)', () => {
     const { PerformanceObserver } = (await import(/* @vite-ignore */ perfHooks)) as {
       PerformanceObserver: new (cb: (list: { getEntries(): unknown[] }) => void) => Obs;
     };
+    // start from a collected heap (garbage of the earlier tests must not be blamed on this loop)
+    const v8m = 'node:v8';
+    const vmm = 'node:vm';
+    const v8 = (await import(/* @vite-ignore */ v8m)) as { setFlagsFromString(f: string): void };
+    const vm = (await import(/* @vite-ignore */ vmm)) as { runInNewContext(code: string): unknown };
+    v8.setFlagsFromString('--expose-gc');
+    const gc = vm.runInNewContext('gc') as () => void;
+    gc();
+    gc();
     const obs = new PerformanceObserver((list) => {
       scavenges += list.getEntries().length;
     });
     obs.observe({ entryTypes: ['gc'] });
     // the tick rewrite above allocates a view per frame; measure with a pre-made view table instead
     const tickViews = sceneBufs.map((b) => new Uint32Array(b, 8, 1));
+    await new Promise((r) => setTimeout(r, 20));
+    scavenges = 0;
     const t0 = performance.now();
     for (let i = 0; i < 40000; i++) {
       tick += 34;

@@ -41,6 +41,7 @@ import type { RigDef } from '../sim/rig/types';
 import { buildVehicleRig } from '../sim/vehicle/builder';
 import type { TransmissionMode, VehicleDef } from '../sim/vehicle/types';
 import type { ColliderDef, WorldLayout } from '../world/types';
+import type { ReplayFile } from '../protocol/replay';
 
 export interface SimClientOptions {
   seed: number;
@@ -163,6 +164,25 @@ export class SimClient {
   private _ready = false;
   private _fatal: string | null = null;
   private disposed = false;
+
+  // ---- P7 replay seam (app/replay): recorder sink, presentation of recorded frames, worker requests
+  private snapshotSink: ((r: SnapshotReader) => void) | null = null;
+  private replaying = false;
+  private replayTime = 0;
+  private livePrev: SnapshotReader | null = null;
+  private liveCur: SnapshotReader | null = null;
+  private livePrevBuffer: ArrayBuffer | null = null;
+  private liveCurBuffer: ArrayBuffer | null = null;
+  /** The newest live snapshot that arrived while replaying (applied on endReplay). */
+  private pendingLive: ArrayBuffer | null = null;
+  private readonly replayReaders = [new SnapshotReader(), new SnapshotReader()];
+  private readonly replayEventReader = new SnapshotReader();
+  /** Added to every LIVE repair epoch (replay seeks reset damage visuals; the offset keeps the live view continuous after exit). */
+  private epochOffset = 0;
+  private nextRequestId = 1;
+  private readonly pendingPause: { resolve(v: { paused: boolean; tick: number; hash: number }): void; reject(e: Error): void }[] = [];
+  private readonly pendingHash = new Map<number, { resolve(v: { tick: number; hash: number }): void; reject(e: Error): void }>();
+  private readonly pendingFile = new Map<number, { resolve(f: ReplayFile): void; reject(e: Error): void }>();
 
   readonly stats: SimClientStats;
 
@@ -410,6 +430,178 @@ export class SimClient {
     this.post({ type: 'timescale', value });
   }
 
+  // ------------------------------------------------------------ replay (P7)
+  /** The live recorder: called with every live snapshot reader right after it becomes `cur` (not while replaying). */
+  setSnapshotSink(fn: ((r: SnapshotReader) => void) | null): void {
+    this.snapshotSink = fn;
+  }
+
+  /** True while recorded frames are presented instead of live snapshots. */
+  get replayActive(): boolean {
+    return this.replaying;
+  }
+
+  /** The live `cur` reader (the newest snapshot; null before the first). Valid until the next snapshot. */
+  get liveReader(): SnapshotReader | null {
+    return this.replaying ? this.liveCur : this.cur;
+  }
+
+  /**
+   * Freezes the live view: the held live buffers are parked (not returned)
+   * and every query answers from frames given to `presentReplay`. Live
+   * snapshots arriving meanwhile are parked too (newest kept).
+   */
+  beginReplay(): void {
+    if (this.replaying) return;
+    this.replaying = true;
+    this.livePrev = this.prev;
+    this.liveCur = this.cur;
+    this.livePrevBuffer = this.prevBuffer;
+    this.liveCurBuffer = this.curBuffer;
+    this.prev = null;
+    this.prevBuffer = null;
+    this.replayTime = this.liveCur ? this.liveCur.simTime : 0;
+  }
+
+  /**
+   * Presents two decoded recorded frames (snapshot-layout buffers owned by
+   * the caller; `prev` may be null) as the interpolation pair, with the
+   * render clock at `time`. `events`: capture `cur`'s event rings (they are
+   * delivered by the next drainEvents).
+   */
+  presentReplay(prev: ArrayBuffer | null, cur: ArrayBuffer, time: number, events: boolean): void {
+    if (!this.replaying) throw new Error('presentReplay outside beginReplay/endReplay');
+    const [a, b] = this.replayReaders as [SnapshotReader, SnapshotReader];
+    this.cur = b.attach(cur);
+    this.curBuffer = null;
+    this.prev = prev ? a.attach(prev) : null;
+    this.prevBuffer = null;
+    this.replayTime = time;
+    if (events) this.captureEvents(b);
+    this.rebuildRanges(b);
+  }
+
+  /** Captures the event rings of a decoded frame the playhead passed (delivered by the next drainEvents). */
+  pushReplayEvents(frame: ArrayBuffer): void {
+    this.captureEvents(this.replayEventReader.attach(frame));
+  }
+
+  /** Drops every captured, undrained event. */
+  discardEvents(): void {
+    this.impacts.count = 0;
+    this.breaks.count = 0;
+    this.skids.count = 0;
+  }
+
+  /**
+   * Restores the parked live view (then applies a live snapshot that arrived
+   * meanwhile, if any). `epochOffset` is added to live repair epochs from now
+   * on (the last presented frame's offset: no damage reset at the switch).
+   */
+  endReplay(epochOffset: number): void {
+    if (!this.replaying) return;
+    this.replaying = false;
+    this.epochOffset = epochOffset >>> 0;
+    this.prev = this.livePrev;
+    this.cur = this.liveCur;
+    this.prevBuffer = this.livePrevBuffer;
+    this.curBuffer = this.liveCurBuffer;
+    // the spare reader may be one of the parked ones' predecessors: keep a fresh one
+    if (this.spare === this.prev || this.spare === this.cur) this.spare = new SnapshotReader();
+    this.livePrev = this.liveCur = null;
+    this.livePrevBuffer = this.liveCurBuffer = null;
+    if (this.cur) this.rebuildRanges(this.cur);
+    this.discardEvents();
+    const p = this.pendingLive;
+    this.pendingLive = null;
+    if (p) this.onSnapshot(p);
+  }
+
+  /** Freeze / resume worker stepping (`replayPause`); resolves with the worker's tick + state hash. */
+  pauseSim(paused: boolean): Promise<{ paused: boolean; tick: number; hash: number }> {
+    if (this.disposed || this._fatal) return Promise.reject(new Error('[sim] pauseSim: worker gone'));
+    return new Promise((resolve, reject) => {
+      this.pendingPause.push({ resolve, reject });
+      this.post({ type: 'replayPause', paused });
+    });
+  }
+
+  /** hashSimState() of the worker now. */
+  stateHash(): Promise<{ tick: number; hash: number }> {
+    if (this.disposed || this._fatal) return Promise.reject(new Error('[sim] stateHash: worker gone'));
+    const requestId = this.nextRequestId++;
+    return new Promise((resolve, reject) => {
+      this.pendingHash.set(requestId, { resolve, reject });
+      this.post({ type: 'stateHashRequest', requestId });
+    });
+  }
+
+  /** The worker's ReplayFile of the run so far (build / paint not stamped). */
+  requestReplayFile(): Promise<ReplayFile> {
+    if (this.disposed || this._fatal) return Promise.reject(new Error('[sim] requestReplayFile: worker gone'));
+    const requestId = this.nextRequestId++;
+    return new Promise((resolve, reject) => {
+      this.pendingFile.set(requestId, { resolve, reject });
+      this.post({ type: 'replayFileRequest', requestId });
+    });
+  }
+
+  /**
+   * Node `local` of `objectId` interpolated at `time` between the held pair
+   * (current snapshot when the object is missing from the previous one) into
+   * out[0..2]. False when absent.
+   */
+  objectNode(objectId: number, local: number, time: number, out: { [i: number]: number }): boolean {
+    const cur = this.cur;
+    if (!cur) return false;
+    const ci = cur.findObject(objectId);
+    if (ci < 0 || local < 0 || local >= cur.objectNodeCount(ci)) return false;
+    const cn = cur.nodes;
+    const c = (cur.objectNodeOffset(ci) + local) * NODE_STRIDE;
+    const prev = this.prev;
+    const pi = prev ? prev.findObject(objectId) : -1;
+    const span = prev ? cur.simTime - prev.simTime : 0;
+    if (!prev || pi < 0 || prev.objectNodeCount(pi) !== cur.objectNodeCount(ci) || !(span > 0)) {
+      out[0] = cn[c]!;
+      out[1] = cn[c + 1]!;
+      out[2] = cn[c + 2]!;
+      return true;
+    }
+    let t = (time - prev.simTime) / span;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const pn = prev.nodes;
+    const p = (prev.objectNodeOffset(pi) + local) * NODE_STRIDE;
+    for (let k = 0; k < 3; k++) out[k] = pn[p + k]! + (cn[c + k]! - pn[p + k]!) * t;
+    return true;
+  }
+
+  /** Bounding sphere of `objectId`'s nodes in the current snapshot: out = [cx, cy, cz, r]; false when absent. */
+  objectBounds(objectId: number, out: { [i: number]: number }): boolean {
+    const cur = this.cur;
+    if (!cur) return false;
+    const i = cur.findObject(objectId);
+    if (i < 0) return false;
+    const n = cur.objectNodeCount(i);
+    if (n === 0) return false;
+    const nodes = cur.nodes;
+    const o = cur.objectNodeOffset(i) * NODE_STRIDE;
+    let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+    for (let k = 0; k < n; k++) {
+      const x = nodes[o + 3 * k]!, y = nodes[o + 3 * k + 1]!, z = nodes[o + 3 * k + 2]!;
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+      if (z < z0) z0 = z;
+      if (z > z1) z1 = z;
+    }
+    out[0] = (x0 + x1) / 2;
+    out[1] = (y0 + y1) / 2;
+    out[2] = (z0 + z1) / 2;
+    out[3] = 0.5 * Math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2 + (z1 - z0) ** 2);
+    return true;
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
@@ -445,6 +637,7 @@ export class SimClient {
    * arrival interval, so interpolation always has both endpoints.
    */
   renderTime(nowMs: number = performance.now()): number {
+    if (this.replaying) return this.replayTime;
     const cur = this.cur;
     if (!cur) return 0;
     const prev = this.prev;
@@ -555,7 +748,9 @@ export class SimClient {
     const cur = this.cur;
     if (!cur) return 0;
     const i = cur.findObject(objectId);
-    return i < 0 ? 0 : cur.objectRepairEpoch(i);
+    if (i < 0) return 0;
+    // presented replay frames already carry their offset
+    return this.replaying ? cur.objectRepairEpoch(i) : (cur.objectRepairEpoch(i) + this.epochOffset) >>> 0;
   }
 
   /** P4: the latest snapshot carries the broken-beam bitset section. */
@@ -607,6 +802,11 @@ export class SimClient {
     this._fatal = message;
     this.rejectTerrain(`[sim] worker fatal: ${message}`);
     for (const p of this.pendingTraffic.splice(0)) p.reject(new Error(`[sim] worker fatal: ${message}`));
+    for (const p of this.pendingPause.splice(0)) p.reject(new Error(`[sim] worker fatal: ${message}`));
+    for (const p of this.pendingHash.values()) p.reject(new Error(`[sim] worker fatal: ${message}`));
+    for (const p of this.pendingFile.values()) p.reject(new Error(`[sim] worker fatal: ${message}`));
+    this.pendingHash.clear();
+    this.pendingFile.clear();
     console.error(`[sim] fatal: ${message}${stack ? `\n${stack}` : ''}`);
     this.onFatal?.(message);
   }
@@ -650,8 +850,24 @@ export class SimClient {
         req?.resolve(info);
         break;
       }
+      case 'replayPaused':
+        this.pendingPause.shift()?.resolve({ paused: msg.paused, tick: msg.tick, hash: msg.stateHash >>> 0 });
+        break;
+      case 'stateHash': {
+        const p = this.pendingHash.get(msg.requestId);
+        this.pendingHash.delete(msg.requestId);
+        p?.resolve({ tick: msg.tick, hash: msg.hash >>> 0 });
+        break;
+      }
+      case 'replayFile': {
+        const p = this.pendingFile.get(msg.requestId);
+        this.pendingFile.delete(msg.requestId);
+        p?.resolve(msg.file);
+        break;
+      }
       case 'unimplemented':
         console.warn(`[sim] worker: '${msg.command}' not implemented yet`);
+        if (msg.command === 'replayPause') this.pendingPause.shift()?.reject(new Error('replayPause not implemented by the worker'));
         if (msg.command === 'setTraffic') this.pendingTraffic.shift()?.reject(new Error('setTraffic not implemented by the worker'));
         break;
       case 'fatal':
@@ -662,6 +878,12 @@ export class SimClient {
 
   private onSnapshot(buffer: ArrayBuffer): void {
     if (this.disposed) return;
+    if (this.replaying) {
+      // parked: the newest live snapshot waits for endReplay, older ones go straight back
+      if (this.pendingLive) this.returnBuffer(this.pendingLive);
+      this.pendingLive = buffer;
+      return;
+    }
     const reader = this.spare;
     try {
       reader.attach(buffer);
@@ -682,6 +904,7 @@ export class SimClient {
 
     this.captureEvents(reader);
     this.rebuildRanges(reader);
+    this.snapshotSink?.(reader);
 
     const now = performance.now();
     if (this.lastArrivalMs >= 0) {

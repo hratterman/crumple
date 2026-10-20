@@ -162,7 +162,10 @@ export class ReplayBuffer {
   // ---- staged events (aggregated across decimated snapshots)
   private readonly impStage = new Float32Array(IMPACT_STAGE * IMPACT_WORDS);
   private readonly impStageU = new Uint32Array(this.impStage.buffer);
+  /** 1 = tyre contact (classified against the snapshot that carried the event). */
+  private readonly impTyre = new Uint8Array(IMPACT_STAGE);
   private impN = 0;
+  private lastStageTime = Number.NaN;
   private readonly brkStage = new Float32Array(BREAK_STAGE * BEAM_BREAK_WORDS);
   private readonly brkStageU = new Uint32Array(this.brkStage.buffer);
   private brkN = 0;
@@ -287,6 +290,7 @@ export class ReplayBuffer {
     this.impN = this.brkN = this.skN = 0;
     this.teleported.fill(0);
     this.lastRecTick = -1;
+    this.lastStageTime = Number.NaN;
     this.markerPool.push(...this.markerList.splice(0));
     this.lastDamage.fill(Number.NaN);
   }
@@ -301,6 +305,21 @@ export class ReplayBuffer {
     this.stageEvents(r);
     const tick = r.tick;
     if (this.lastRecTick >= 0 && tick - this.lastRecTick < this.intervalTicks) return false;
+    return this.commit(r);
+  }
+
+  /**
+   * Records `r` now if its tick is newer than the last recorded frame,
+   * ignoring the decimation interval (replay entry: the buffer ends exactly
+   * at the live state). Its events must already have been staged by record().
+   */
+  recordNow(r: SnapshotReader): boolean {
+    if (this.lastRecTick >= 0 && r.tick <= this.lastRecTick) return false;
+    return this.commit(r);
+  }
+
+  private commit(r: SnapshotReader): boolean {
+    const tick = r.tick;
     if (this.maxObjects === 0) {
       this.maxObjects = r.maxObjects;
       this.nodeCapacity = r.nodeCapacity;
@@ -319,6 +338,7 @@ export class ReplayBuffer {
         break;
       }
       const e = r.readImpact(i, this.impRec);
+      this.impTyre[this.impN] = this.isTyre(r, e.objectId, e.px, e.py, e.pz) ? 1 : 0;
       const w = this.impN++ * IMPACT_WORDS;
       this.impStageU[w] = e.objectId;
       this.impStageU[w + 1] = e.materialId;
@@ -362,6 +382,7 @@ export class ReplayBuffer {
       f[w + 5] = e.slip;
       f[w + 6] = e.load;
     }
+    this.lastStageTime = r.simTime;
     for (let i = 0, n = r.trafficCount; i < n; i++) {
       if ((r.trafficFlags(i) & TRAFFIC_FLAG_TELEPORTED) !== 0) {
         const a = r.trafficAgent(i);
@@ -657,8 +678,7 @@ export class ReplayBuffer {
     for (let e = 0; e < this.impN; e++) {
       const w = e * IMPACT_WORDS;
       const id = impU[w]!;
-      if (id >= ID_SPACE) continue;
-      if (this.isTyre(r, id, imp[w + 2]!, imp[w + 3]!, imp[w + 4]!)) continue;
+      if (id >= ID_SPACE || this.impTyre[e] === 1) continue;
       if (this.impulseBy[id] === 0 && touched < this.touched.length) this.touched[touched++] = id;
       this.impulseBy[id] = this.impulseBy[id]! + imp[w + 8]!;
     }
@@ -702,7 +722,7 @@ export class ReplayBuffer {
     let wsum = 0;
     for (let e = 0; e < this.impN; e++) {
       const w = e * IMPACT_WORDS;
-      if (impU[w] !== objectId) continue;
+      if (impU[w] !== objectId || this.impTyre[e] === 1) continue;
       const j = imp[w + 8]!;
       px += imp[w + 2]! * j;
       py += imp[w + 3]! * j;
@@ -761,11 +781,23 @@ export class ReplayBuffer {
     this.onMarker?.(m);
   }
 
+  /**
+   * Tyre contact: within (tyre radius + 0.15 m) of the segment a hub midpoint
+   * swept back along the vehicle's COM velocity over the time since the
+   * previous staged snapshot (events accumulate over skipped snapshots: at
+   * speed the contact lies metres behind the hubs of the carrying snapshot).
+   */
   private isTyre(r: SnapshotReader, id: number, px: number, py: number, pz: number): boolean {
     const wh = this.wheelsOf ? this.wheelsOf(id) : null;
     if (!wh) return false;
     const oi = r.findObject(id);
     if (oi < 0) return false;
+    let back = this.lastStageTime === this.lastStageTime ? r.simTime - this.lastStageTime : 0.02;
+    back = (back < 0 ? 0 : back > 0.25 ? 0.25 : back) + 0.01;
+    const sx = -r.telemetry(oi, VehicleTelemetry.velX) * back;
+    const sy = -r.telemetry(oi, VehicleTelemetry.velY) * back;
+    const sz = -r.telemetry(oi, VehicleTelemetry.velZ) * back;
+    const ss = sx * sx + sy * sy + sz * sz;
     const nodes = r.nodes;
     const base = r.objectNodeOffset(oi) * 3;
     const lim = wh.radius + 0.15;
@@ -777,7 +809,12 @@ export class ReplayBuffer {
       const dx = px - 0.5 * (nodes[a]! + nodes[b]!);
       const dy = py - 0.5 * (nodes[a + 1]! + nodes[b + 1]!);
       const dz = pz - 0.5 * (nodes[a + 2]! + nodes[b + 2]!);
-      if (dx * dx + dy * dy + dz * dz < lim2) return true;
+      let u = ss > 1e-12 ? (dx * sx + dy * sy + dz * sz) / ss : 0;
+      u = u < 0 ? 0 : u > 1 ? 1 : u;
+      const ex = dx - u * sx;
+      const ey = dy - u * sy;
+      const ez = dz - u * sz;
+      if (ex * ex + ey * ey + ez * ez < lim2) return true;
     }
     return false;
   }
@@ -872,6 +909,24 @@ export class ReplayBuffer {
       tr.path = u32[e + TR_PATH]!;
       w.pushTrafficAgent(tr);
     }
+  }
+
+  /** Header + the event rings of held frame `i` only (no objects): for events of frames the playhead passes. */
+  decodeEvents(i: number, w: SnapshotWriter): void {
+    const slot = this.ringIndex(i);
+    const ch = this.chunks[this.fChunk[slot]!]!;
+    const base = this.fOff[slot]!;
+    const bw = base >>> 2;
+    const u32 = ch.u32;
+    const f32 = ch.f32;
+    w.begin(u32[bw + 2]!, ch.f64[(base >>> 3) + 2]!, f32[bw + 6]!);
+    let e = (base + u32[bw + 12]!) >>> 2;
+    const ni = u32[bw + 8]!;
+    const nb = u32[bw + 9]!;
+    const ns = u32[bw + 10]!;
+    for (let k = 0; k < ni; k++, e += IMPACT_WORDS) w.pushImpact(u32[e]!, u32[e + 1]!, f32[e + 2]!, f32[e + 3]!, f32[e + 4]!, f32[e + 5]!, f32[e + 6]!, f32[e + 7]!, f32[e + 8]!);
+    for (let k = 0; k < nb; k++, e += BEAM_BREAK_WORDS) w.pushBeamBreak(u32[e]!, u32[e + 1]!, f32[e + 2]!, f32[e + 3]!, f32[e + 4]!);
+    for (let k = 0; k < ns; k++, e += SKID_WORDS) w.pushSkid(u32[e]!, u32[e + 1]!, f32[e + 2]!, f32[e + 3]!, f32[e + 4]!, f32[e + 5]!, f32[e + 6]!);
   }
 
   private readNodes(ch: Chunk, off: number, n: number, w: SnapshotWriter, g: number): void {

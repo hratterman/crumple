@@ -190,7 +190,23 @@ const replay = createReplayController({
   level: startLevel,
   build: __BUILD_HASH__,
   paintOf: (id) => (id === 1 && player ? player.palette.id : null),
+  wheelsOf: (id) => (id === 1 ? playerHubs() : null),
 });
+/** The player's wheel hubs (replay markers ignore tyre contacts), cached per player vehicle. */
+let hubsFor: { p: unknown; hubs: { hubs: Int32Array; radius: number } } | null = null;
+function playerHubs(): { hubs: Int32Array; radius: number } | null {
+  if (!player) return null;
+  if (hubsFor?.p !== player) {
+    const w = player.assets.compiled.wheels;
+    const hubs = new Int32Array(w.length * 2);
+    w.forEach((x, k) => {
+      hubs[2 * k] = x.hubI;
+      hubs[2 * k + 1] = x.hubO;
+    });
+    hubsFor = { p: player, hubs: { hubs, radius: Math.max(...w.map((x) => x.radius)) } };
+  }
+  return hubsFor.hubs;
+}
 
 const cubeRig = compileRig(softCube());
 /** ?view=body|body+beams|beams|nodes picks the first debug view (B cycles them). */
@@ -530,9 +546,29 @@ function handleCommands(): void {
   }
 }
 
+/** P7: discrete commands while the replay is shown (nothing may reach the paused worker). */
+function handleReplayCommands(): void {
+  for (const c of mapper.drainCommands()) {
+    switch (c) {
+      case 'cameraCycle':
+        director.cycle();
+        break;
+      case 'toggleBeamView':
+        cycleDebugView();
+        break;
+      case 'pause':
+        // P / Escape / Start leave the replay (R2's UI may rebind)
+        void replay.exit();
+        break;
+      default:
+        break;
+    }
+  }
+}
+
 // Spawn menu (1–8) and quality cycling (L); the driving keys go through the mapper.
 window.addEventListener('keydown', (e) => {
-  if (!running || mode !== 'drive' || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (!running || mode !== 'drive' || replay.active || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
   const m = /^(?:Digit|Numpad)([1-9])$/.exec(e.code);
   if (m) {
     teleport(Number(m[1]) - 1);
@@ -1303,7 +1339,10 @@ async function boot(): Promise<void> {
   const frame = (dt: number, input = true): void => {
     prof.begin();
     // Input → worker.
-    if (input) {
+    if (input && replay.active) {
+      devices.poll();
+      handleReplayCommands();
+    } else if (input) {
       devices.poll();
       const tel = client.telemetry(VEHICLE_ID);
       const speed = tel ? (tel[VehicleTelemetry.speed] ?? 0) : 0;
@@ -1364,7 +1403,7 @@ async function boot(): Promise<void> {
     worldFrame.dtS = dt;
     worldFrame.time = (performance.now() - bootTime) / 1000;
     worldFrame.simTime = client.renderTime();
-    worldFrame.timeScale = paused ? 0 : slowMo ? SLOW_MO_SCALE : 1;
+    worldFrame.timeScale = paused || replay.active ? 0 : slowMo ? SLOW_MO_SCALE : 1;
     worldFrame.nodes = positions;
     worldFrame.interpolated = interpolated;
     worldFrame.objects = client.objectRanges();
@@ -1403,6 +1442,44 @@ async function boot(): Promise<void> {
     prof.lap('hud');
     perfOverlay?.update(perfData);
   };
+
+  // P7 replay: main's side of a settled seek (damage reset + deterministic FX re-run) and the mode switch.
+  const fillWorldFrame = (simTime: number): void => {
+    const need = client.nodeTotal * 3;
+    if (positions.length < need) positions = new Float32Array(need);
+    worldFrame.interpolated = client.interpolate(simTime, positions) > 0;
+    worldFrame.nodes = positions;
+    worldFrame.simTime = simTime;
+    worldFrame.timeScale = 0;
+    worldFrame.objects = client.objectRanges();
+    worldFrame.tick = client.latestTick;
+  };
+  const noEvents = {};
+  replay.setVisuals({
+    enter() {
+      mapper.releaseAll();
+      fxR.setSkidmarksFrozen(true);
+    },
+    exit() {
+      mapper.releaseAll();
+      lastSent.gearSelect = NaN; // force a full input resend
+      fxR.setSkidmarksFrozen(false);
+    },
+    primeBegin(seed) {
+      // the presented frame carries the new seek generation: every damage visual resets on this update
+      fillWorldFrame(client.renderTime());
+      if (worldFrame.interpolated) updateVisuals(0);
+      trafficC.update(worldFrame);
+      client.drainEvents(noEvents);
+      fxR.clearTransient();
+      fxR.reseed(seed);
+    },
+    primeFrame(time) {
+      fillWorldFrame(time);
+      client.drainEvents(eventSink);
+      fxR.update(worldFrame);
+    },
+  });
 
   // One real frame under the overlay (shadow + post programs), then fade into the scene.
   frame(0);

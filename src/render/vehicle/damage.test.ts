@@ -533,6 +533,25 @@ describe('scuff + node texture', () => {
   });
 });
 
+// ---------------------------------------------------------------- P7 replay seek
+describe('repair-epoch change seeds the strain persistence (replay seeks)', () => {
+  it('a frame presented with a new epoch shows its lasting strain after ONE snapshot', () => {
+    const rig = compileRig(softCube({ seg: 6, deform: 1 }));
+    const f = fixture({ rig });
+    f.step(3);
+    const top = Array.from({ length: 49 }, (_, k) => 6 * 49 + k);
+    f.restPose();
+    for (const i of top) f.set(i, rig.nodePos[i * 3]!, rig.nodePos[i * 3 + 1]! * 1.15, rig.nodePos[i * 3 + 2]!);
+    // live: one snapshot of a fresh stretch shows nothing yet (persistence filter)
+    f.step(1);
+    expect(f.dmg.strain[top[24]!]).toBe(0);
+    // a seek: new epoch, one snapshot (paused playhead)
+    f.frame.repairEpoch += 0x100000;
+    f.step(1);
+    expect(f.dmg.strain[top[24]!]).toBeGreaterThan(0);
+  });
+});
+
 // ---------------------------------------------------------------- allocation
 describe('incremental snapshot work (U6 perf)', () => {
   it('quiet: strain beams are measured round-robin (≤ STRAIN_SLICE per snapshot) and still catch lasting strain; damage activity → full scans', () => {

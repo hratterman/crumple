@@ -537,6 +537,13 @@ export function createVehicleDamage(
 
   let lastTick = -1;
   let epoch = -1;
+  /**
+   * P7: the first strain scan after a repair-epoch change fills every beam's
+   * persistence history with that measurement, so a replay seek (which bumps
+   * the presented epochs) shows the frame's crush at once, even paused. Live,
+   * a repair snapshot is at rest (≈ 0 strain), so nothing changes there.
+   */
+  let seedPersist = false;
   let pendingShowAll = false;
   let lastSkin: FlexSkin | null = null;
   /** The skin block B / flags were last written to (a new skin gets a full write). */
@@ -994,7 +1001,11 @@ export function createVehicleDamage(
       e -= strainSlack[k]!;
       if (!(e < 10)) e = 10; // NaN-safe
       measured++;
-      const cnt = ecount[k]!;
+      let cnt = ecount[k]!;
+      if (seedPersist && cnt === 0) {
+        for (let h = 0; h < K; h++) ehist[k * K + h] = e;
+        cnt = K - 1;
+      }
       ehist[k * K + (cnt % K)] = e;
       ecount[k] = cnt < 0x3fffffff ? cnt + 1 : K; // capped: only "≥ K measured" matters past K
       if (cnt + 1 < K) continue;
@@ -1105,8 +1116,9 @@ export function createVehicleDamage(
     // ---- plastic strain (ratchet): round-robin slice while quiet, everything while active
     const active = snapshots < activeUntil;
     if (active) scan.activeSnapshots++;
-    const n = active || S <= STRAIN_SLICE ? S : STRAIN_SLICE;
+    const n = active || seedPersist || S <= STRAIN_SLICE ? S : STRAIN_SLICE;
     const measured = scanStrain(n);
+    seedPersist = false;
     scan.lastBeams = measured;
 
     // ---- body centroid + velocity
@@ -1327,6 +1339,7 @@ export function createVehicleDamage(
         // events drained together with the repair snapshot may predate the repair
         impN = skidN = brkN = 0;
         epoch = frame.repairEpoch;
+        seedPersist = true;
       }
       if (pendingShowAll) {
         pendingShowAll = false;
