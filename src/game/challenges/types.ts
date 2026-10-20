@@ -240,6 +240,8 @@ export interface ChallengeSample {
   valid: boolean;
   tick: number;
   simTime: number;
+  /** Frame-origin node (VehicleDef frame; the ghost is posed by it). */
+  origin: [number, number, number];
   /** Centre of mass and its velocity (telemetry). */
   pos: [number, number, number];
   vel: [number, number, number];
