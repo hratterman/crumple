@@ -149,7 +149,7 @@ const REAR_BAY_FACTOR = 10;
  * of the sedan's members per gap, and at the sedan's floors the 50 km/h
  * frontal crushed 98 cm (peak 118).
  */
-const CRUMPLE_FLOOR_FACTOR = 1.6;
+const CRUMPLE_FLOOR_FACTOR = 2.2;
 const CLASSES = {
   bumper: { w: 1.0, zeta: 0.4, yieldStrain: 0.025, minDeform: 1.5e3 * CRUMPLE_FLOOR_FACTOR, breakRatio: 5 },
   crash: { w: 1.0, zeta: 0.4, yieldStrain: 0.018, minDeform: 3e3 * CRUMPLE_FLOOR_FACTOR, breakRatio: 6 },
@@ -192,13 +192,24 @@ const BULKHEAD_REACH = 0.6;
  * (compliance steer, cf. the sedan's REAR_LINK_FACTOR note).
  */
 const FULL_BULKHEADS: readonly number[] = [9];
-const FULL_BULKHEAD_REACH = 0.85;
+const FULL_BULKHEAD_REACH = 0.7;
 /** Non-bulkhead stations braced in-plane at BULKHEAD_REACH (traffic): the rear axle ring s10 (rear subframe anchors, toe stiffness). */
 const BRACED_STATIONS: readonly number[] = [10];
 /** Bumper faces (s0, s13): rigid beams of their own, triangulated at this reach. */
 const BUMPER_REACH = 0.5;
+/** Bulkheads aft of the B-pillar and the rear bumper face (traffic: ≈ 1300 beams; the front keeps its reach for the crush). */
+const REAR_BULKHEAD_REACH = 0.45;
+const REAR_BUMPER_REACH = 0.4;
 const reachOf = (station: number): number =>
-  FULL_BULKHEADS.includes(station) ? FULL_BULKHEAD_REACH : station === 0 || station === 13 ? BUMPER_REACH : BULKHEAD_REACH;
+  FULL_BULKHEADS.includes(station)
+    ? FULL_BULKHEAD_REACH
+    : station === 0
+      ? BUMPER_REACH
+      : station === 13
+        ? REAR_BUMPER_REACH
+        : station >= 7
+          ? REAR_BULKHEAD_REACH
+          : BULKHEAD_REACH;
 /**
  * Extra cage members: the B-pillar hoop's roof centre s7_rf (the frame top)
  * to the pillar tops. Without the door stations' roof centres it hung on two
@@ -215,7 +226,24 @@ const EXTRA_CAGE: readonly (readonly [string, string])[] = [
  * theirs) and the roof-centre nodes of the door stations (the B-pillar
  * hoop's s7_rf is the frame top and stays).
  */
-const OMIT: ReadonlySet<string> = new Set(['s6_fl_R', 's6_fl_L', 's7_fl_R', 's7_fl_L', 's8_fl_R', 's8_fl_L', 's6_rf', 's8_rf']);
+const OMIT: ReadonlySet<string> = new Set(['s7_fl_R', 's7_fl_L']);
+/**
+ * Stations the traffic rig leaves out entirely (≈ 1300-beam target): the two door stations either side of
+ * the B-pillar. The cage runs s5 (A-pillar / firewall) → s7 (B-pillar hoop) → s9 (rear-seat bulkhead), one
+ * 0.6–0.7 m bay each, and those bays link station to station like any other gap; the doors bind to the
+ * pillars and sills (T2 re-points their panels). A traffic car is struck in the doors by the player only.
+ */
+export const SKIP_STATIONS: ReadonlySet<number> = new Set([6, 8, 11, 12]);
+/**
+ * CRUSH CANS (traffic rig): one plastic member per front rail flange from the crash-can tips (s1) back to
+ * the rail at the towers (s3), at a low crush force. Without them the bay folded over the firewall in a
+ * frontal, so how much of the fold stayed after the rebound decided the crush: 25–95 cm from ±5 % speed or
+ * a 10 % offset. The cans tie the front rails into one column that crushes progressively: 50 km/h frontal
+ * 40.4–41.7 cm from 47.5 to 52.5 km/h, 40.8 cm at 90 % overlap (sedanTraffic.test.ts).
+ */
+const K_CRUSH_CAN = 4e5;
+const CRUSH_CAN_YIELD = 5e3;
+const CRUSH_CAN_TO = 3;
 /** Per-node (Σd/m)·dt target of the generator (validator limit 1). */
 const DAMP_BUDGET = 0.95;
 /** Open (bay) sections: cross-car braces between the two sides up to this length, m. */
@@ -269,7 +297,7 @@ const STATIONS: readonly Station[] = [
   { z: -1.06, closed: false, bulkhead: false, cls: 'bay', mass: { rl: RAIL_BASE, rh: RAIL_BASE, fd: 5 },
     ring: [['rl', 0.43, 0.26], ['rh', 0.44, 0.54], ['fd', 0.84, 0.88]] },
   // 5 firewall / cowl / A-pillar base (bulkhead)
-  { z: -0.8, closed: true, bulkhead: true, cls: 'cage', mass: { tn: 8, fl: 9, sl: 9, hp: 7, cw: 7, fw: 6 },
+  { z: -0.8, closed: true, bulkhead: true, cls: 'cage', mass: { tn: 16, fl: 22, sl: 18, hp: 12, cw: 9, fw: 16 },
     ring: [['tn', 0, 0.34], ['fl', 0.42, 0.2], ['sl', 0.86, 0.22], ['hp', 0.87, 0.62], ['cw', 0.74, 0.98], ['cw', 0, 1.0]],
     extra: [['fw', 0.4, 0.68]] },
   // 6 front door / A-pillar top (windshield header)
@@ -324,9 +352,14 @@ const SHEAR_FORCE_SHARE = 0.6;
 const IN_STATION_YIELD_FACTOR = 3;
 /** Window glass breaks (shatters) at this strain; elastic below. */
 const GLASS_BREAK_STRAIN = 0.03;
-/** Door skins/frames (nodes s6/s8 dm, bt): yield strain, so a side impact dents them plastically. */
+/**
+ * Door skins/frames: the bays either side of the B-pillar's door-mid and belt nodes (s7 dm / bt to the
+ * A- and C-pillar stations: the door stations are SKIP_STATIONS) yield at this strain, so a side impact
+ * dents the doors plastically.
+ */
 const DOOR_YIELD_STRAIN = 0.05;
 const DOOR_MIN_DEFORM = 4e3;
+const DOOR_NODES = /^s7_(dm|bt)_/;
 /**
  * Firewall panel node (s5_fw_*, the engine side of the bulkhead): its
  * links yield like the bay. As part of the never-yielding cell bulkhead it
@@ -334,8 +367,6 @@ const DOOR_MIN_DEFORM = 4e3;
  * elastically and it threw the whole front forward again (springback).
  */
 const FIREWALL_PANEL = /^s5_fw_/;
-const DOOR_NODES = /^s[68]_(dm|bt|sl|fl)_/;
-const isDoor = (a: string, b: string): boolean => DOOR_NODES.test(a) || DOOR_NODES.test(b);
 /**
  * Bumper beam ↔ crash-can links (the boundary of the s0 / s13 bulkheads):
  * brittle relative to their yield, so a hard hit tears the bumper off.
@@ -376,7 +407,6 @@ const CABIN_SPANS: readonly (readonly [number, string, number, string])[] = [
   [7, 'fl', 9, 'fl'],
   [5, 'tn', 7, 'tn'],
   [7, 'tn', 9, 'tn'],
-  [6, 'rf', 8, 'rf'],
   [5, 'cw', 7, 'rf'],
   [7, 'rf', 9, 'dk'],
   [5, 'sl', 7, 'bt'],
@@ -706,7 +736,7 @@ function buildSedanTraffic(): { def: VehicleDef; design: SedanTrafficDesign } {
       if (m === undefined) throw new Error(`sedanTraffic: station ${i} has no mass for tag ${tag}`);
       const sides: (Side | undefined)[] = x === 0 ? [undefined] : ['R', 'L'];
       for (const s of sides) {
-        if (OMIT.has(sid(i, tag, s))) continue;
+        if (OMIT.has(sid(i, tag, s)) || SKIP_STATIONS.has(i)) continue;
         const id = addNode(sid(i, tag, s), [s ? x * sideSign(s) : 0, y, st.z], m, 'body');
         ids.push(id);
         tagOf.set(id, tag);
@@ -921,6 +951,7 @@ function buildSedanTraffic(): { def: VehicleDef; design: SedanTrafficDesign } {
   };
 
   STATIONS.forEach((st, i) => {
+    if (SKIP_STATIONS.has(i)) return;
     const paths = stationRing[i]!;
     const ring = paths.flat();
     // Ring edges.
@@ -949,12 +980,14 @@ function buildSedanTraffic(): { def: VehicleDef; design: SedanTrafficDesign } {
       }
     }
     // Links to the next station: nearest LINKS_PER_NODE both ways.
-    const next = stationIds[i + 1];
+    let ni = i + 1;
+    while (SKIP_STATIONS.has(ni)) ni++;
+    const next = stationIds[ni];
     if (next === undefined) return;
     // The firewall gap (bay → cage) belongs to the crumple zone: its rails
     // fold onto the firewall instead of loading the cell.
-    const fw = st.cls !== 'cage' && STATIONS[i + 1]!.cls === 'cage';
-    const cls: BeamClass = !fw && (STATIONS[i + 1]!.cls === 'cage' || st.cls === 'cage') ? 'cage' : st.cls;
+    const fw = st.cls !== 'cage' && STATIONS[ni]!.cls === 'cage';
+    const cls: BeamClass = !fw && (STATIONS[ni]!.cls === 'cage' || st.cls === 'cage') ? 'cage' : st.cls;
     const pairs: [string, string][] = [];
     const nl = GAP_LINKS[i] ?? LINKS_PER_NODE;
     for (const a of ids) for (const b of nearest(a, next, nl)) pairs.push([a, b]);
@@ -1181,13 +1214,24 @@ function buildSedanTraffic(): { def: VehicleDef; design: SedanTrafficDesign } {
   // elastic, snap at 15 kN like the hood rests. k is a small share of
   // s11_ld's budget (fixed k: the auto beams there shrink to fit).
   for (const side of ['L', 'R'] as const) {
-    const a = sid(11, 'ld');
-    const b = sid(11, 'rh', side);
+    const st = SKIP_STATIONS.has(11) ? 10 : 11;
+    const a = sid(st, 'ld');
+    const b = sid(st, 'rh', side);
     const k = TRUNK_REST_K;
     const ma = massOf.get(a)!;
     const mb = massOf.get(b)!;
     fix({ a, b, type: 'support', k, d: sig3(2 * REST.zeta * Math.sqrt((k * ma * mb) / (ma + mb))), deform: 0, breakF: REST.restBreak });
   }
+
+  // ---- crush cans (see CRUSH CANS)
+  for (const side of ['L', 'R'] as const)
+    for (const t of ['rl', 'rh']) {
+      const a = sid(1, t, side);
+      const b = sid(CRUSH_CAN_TO, t, side);
+      const ma = massOf.get(a)!;
+      const mb = massOf.get(b)!;
+      fix({ a, b, type: 'normal', k: K_CRUSH_CAN, d: sig3(2 * 0.3 * Math.sqrt((K_CRUSH_CAN * ma * mb) / (ma + mb))), deform: CRUSH_CAN_YIELD, breakF: 0 });
+    }
 
   // ---- auto stiffness: split each node's budget by class weight
   /*
@@ -1228,8 +1272,11 @@ function buildSedanTraffic(): { def: VehicleDef; design: SedanTrafficDesign } {
   const gapOf = (a: string, b: string): number => {
     const sa = stationOf.get(a);
     const sb = stationOf.get(b);
-    if (sa === undefined || sb === undefined || Math.abs(sa - sb) !== 1) return -1;
-    return Math.min(sa, sb);
+    if (sa === undefined || sb === undefined || sa === sb) return -1;
+    const [lo, hi] = sa < sb ? [sa, sb] : [sb, sa];
+    // Consecutive KEPT stations (a skipped station between them does not break the gap).
+    for (let k = lo + 1; k < hi; k++) if (!SKIP_STATIONS.has(k)) return -1;
+    return lo;
   };
   const czOf = (a: string, b: string): number => Math.abs(pos.get(a)![2] - pos.get(b)![2]) / dist(a, b);
   const gapK = new Float64Array(STATIONS.length);
@@ -1270,7 +1317,7 @@ function buildSedanTraffic(): { def: VehicleDef; design: SedanTrafficDesign } {
       const deform = sig3(Math.max(REAR_BAY_FACTOR * CLASSES.bay.yieldStrain * k * dist(a, b), CLASSES.bay.minDeform));
       return { a, b, type: 'normal', k, d, deform, breakF: sig3(CLASSES.bay.breakRatio * deform) };
     }
-    if (isDoor(a, b)) {
+    if ((DOOR_NODES.test(a) || DOOR_NODES.test(b)) && stationOf.get(a) !== stationOf.get(b)) {
       const deform = sig3(Math.max(DOOR_YIELD_STRAIN * k * dist(a, b), DOOR_MIN_DEFORM));
       return { a, b, type: 'normal', k, d, deform, breakF: sig3(spec.breakRatio * deform) };
     }
@@ -1448,11 +1495,11 @@ export const SEDAN_TRAFFIC_CRASH_PROBES: CrashProbes = {
   firewall: ['s5_fl_*', 's5_sl_*', 's5_hp_*', 's5_cw_*'],
   cellRear: ['s9_*'],
   cellFront: ['s5_*'],
-  doorMid: ['s6_dm_*'],
-  doorR: 's6_dm_R',
-  doorL: 's6_dm_L',
-  sillR: 's6_sl_R',
-  sillL: 's6_sl_L',
+  doorMid: ['s7_dm_*'],
+  doorR: 's7_dm_R',
+  doorL: 's7_dm_L',
+  sillR: 's7_sl_R',
+  sillL: 's7_sl_L',
   exemptPrefixes: ['s0_', 's13_'],
   latch: [],
   bumperPrefix: 's0_',
