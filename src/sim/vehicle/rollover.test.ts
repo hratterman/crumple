@@ -20,7 +20,9 @@ describe('rollover harness', { timeout: 300_000 }, () => {
 
   it('a roll rate to the right reads positive and a big one rolls the car over; finite throughout', () => {
     const small = runRollover(SEDAN, { speedKmh: 30, rollRate: 1.5, durationS: 0.15, probes: { roof: ROOF } });
-    expect(small.samples[small.samples.length - 1]!.rollDeg).toBeGreaterThan(5);
+    // > 4° (was > 5°): the frame nodes the roll is read from no longer flex with the imposed roll (rigid
+    // shell, feel pass): 4.8° is the body's true roll after 0.15 s.
+    expect(small.samples[small.samples.length - 1]!.rollDeg).toBeGreaterThan(4);
     const big = runRollover(SEDAN, { speedKmh: 50, rollRate: -14, durationS: 2.5, probes: { roof: ROOF } });
     expect(big.finite).toBe(true);
     expect(big.maxRollDeg).toBeGreaterThan(60);

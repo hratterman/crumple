@@ -83,4 +83,22 @@ describe('SEDAN crash harness', () => {
     expect(f100.bumperBrokenFraction).toBeGreaterThanOrEqual(0.5);
     expect(f100.windscreenBrokenFraction).toBeGreaterThanOrEqual(0.5);
   });
+
+  /*
+   * Feel pass: the SAFETY CELL keeps its shape (rigid shell cluster, shell.ts). Cell = the body nodes from
+   * the firewall ring to the rear-seat bulkhead (door apertures, sills, pillars, roof rails); deviation from
+   * its rigid best fit, and the rippling of the side skins (CrashResult.cellDev / doorWave). Before (beam
+   * lattice alone): 50 km/h 4.8 cm final / 29.7 cm peak, 17 mm ripple; 100 km/h 27 / 47 cm, 80 mm; pole
+   * (outside the dent) 11 / 24 cm, 16 mm — the "crinkled foil" cabins.
+   */
+  it('safety cell: straight after a 50 km/h frontal, only moderately bent at 100 km/h, a pole dent stays local', () => {
+    expect(f50.cellDev).toBeLessThan(0.03);
+    expect(f50.cellDevMax).toBeLessThan(0.08);
+    expect(f50.doorWave).toBeLessThan(0.006);
+    expect(f30.cellDevMax).toBeLessThan(0.05);
+    expect(f100.cellDev).toBeLessThan(0.18);
+    expect(f100.doorWave).toBeLessThan(0.06);
+    expect(pole.cellDev).toBeLessThan(0.05);
+    expect(pole.doorWave).toBeLessThan(0.005);
+  });
 });

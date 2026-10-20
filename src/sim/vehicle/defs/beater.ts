@@ -290,7 +290,9 @@ const GLASS_BREAK_STRAIN = 0.03;
  * — they dent deep in a side hit (sedan 5 % / 4 kN); the cage spans behind
  * them carry the cell.
  */
-const DOOR_YIELD_STRAIN = 0.025;
+// Feel pass 0.025 → 0.015: the sedan's rigid safety cell now dents deeper locally at the pole (21 → 31 cm),
+// so the beater's skins yield earlier to stay ≥ 1.4× it (45 cm).
+const DOOR_YIELD_STRAIN = 0.015;
 const DOOR_MIN_DEFORM = 2e3;
 /**
  * Firewall panel node (s5_fw_*, the engine side of the bulkhead): its
@@ -1439,6 +1441,10 @@ function buildBeater(): { def: VehicleDef; design: BeaterDesign } {
     aero: { dragCoeffArea: 0.68, liftCoeffArea: 0.1 },
     steering: { maxWheelAngleDeg: round((BEATER_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
     frame: { origin: sid(7, 'tn'), front: sid(2, 'rs'), top: sid(7, 'rf') },
+    // Feel pass: rigid shell cluster (shellDefs.ts). The beater folds like paper: rigid while driving, but
+    // any real impact (a 1 cm dent or 2 m/s at a node) hands the WHOLE body back to its tired beams, so it
+    // crashes exactly as tuned (no safety cell).
+    shell: { zones: [{ ids: ['*'], release: { lo: 0.01, hi: 0.02, vLo: 2, vHi: 3 }, whole: true, yield: true }] },
   };
   const design: BeaterDesign = {
     totalMass,

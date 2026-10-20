@@ -28,6 +28,8 @@
  */
 import type { CompiledRig, RigBeamDef, RigDef, RigNodeDef, RigStats, StabilityReport } from '../rig/types';
 import type { SimState } from '../types';
+import type { CompiledShell, ShellDef } from './shellDefs';
+import type { ShellRuntime } from './shell';
 
 export type Vec3Tuple = [number, number, number];
 
@@ -313,6 +315,12 @@ export interface VehicleDef {
   aero: AeroDef;
   steering: SteeringDef;
   frame: VehicleFrameDef;
+  /**
+   * Feel pass (additive, optional): the rigid shell cluster (shell.ts) over
+   * the body shell groups; false disables it. Default: SHELL_GROUPS with the
+   * shell.ts defaults.
+   */
+  shell?: ShellDef | readonly ShellDef[] | false;
 }
 
 // ====================================================================== compiled
@@ -429,6 +437,8 @@ export interface CompiledVehicle {
   totalMass: number;
   /** MINIMASS mass increase, % of declared. */
   massDriftPct: number;
+  /** Feel pass: rigid shell clusters (empty = none). */
+  shell: CompiledShell[];
 }
 
 /** Validator output (sedan agent). ok ⇔ errors.length === 0. */
@@ -558,6 +568,8 @@ export interface VehicleRuntime {
   drivetrain: DrivetrainState;
   /** TELEMETRY_SLOTS f32 (protocol/telemetry.ts indices), copied into each snapshot record. */
   telemetry: Float32Array;
+  /** Feel pass (additive): rigid shell cluster runtimes (absent / empty = none). */
+  shell?: ShellRuntime[];
 }
 
 /**

@@ -26,6 +26,7 @@
  * bumper < crash cans / tail < engine bay < safety cell, so the ends fold
  * first; brittle glass beams in the window strips; a physical hood sub-rig.
  */
+import { shellLayout } from '../shellDefs';
 import type { RigBeamDef, RigNodeDef } from '../../rig/types';
 import type { CrashProbes } from '../crash';
 import { wheelNodeId, type DrivetrainDef, type VehicleDef, type WheelDef } from '../types';
@@ -1315,6 +1316,13 @@ function buildCoupe(): { def: VehicleDef; design: CoupeDesign } {
     aero: { dragCoeffArea: 0.68, liftCoeffArea: -0.12 },
     steering: { maxWheelAngleDeg: round((COUPE_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
     frame: { origin: sid(7, 'tn'), front: sid(2, 'rs'), top: sid(7, 'rf') },
+    // Feel pass: rigid shell cluster (shell.ts) — crumple zones released whole on impact, firewall, safety cell.
+    shell: shellLayout({
+      front: ['s0_*', 's1_*', 's2_*', 's3_*', 's4_*', 'hood_*', 'FL_*', 'FR_*'],
+      rear: ['s9_*', 's10_*', 's11_*', 's12_*', 'RL_*', 'RR_*'],
+      firewall: ['s5_*'],
+      cell: ['s5_hp_*', 's5_sl_*', 's6_*', 's7_*', 's8_*'],
+    }),
   };
   const design: CoupeDesign = {
     totalMass,

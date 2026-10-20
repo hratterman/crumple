@@ -47,6 +47,7 @@
  * and rear (`arb{F|R}_*`, ARB_SPEC) carry most of the roll stiffness and the
  * leaf packs' roll damping.
  */
+import { SHELL_RELEASE_DENT, shellLayout } from '../shellDefs';
 import type { RigBeamDef, RigNodeDef } from '../../rig/types';
 import { wheelNodeId, type DrivetrainDef, type VehicleDef, type WheelDef } from '../types';
 
@@ -1853,6 +1854,25 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
     aero: { dragCoeffArea: 5.6, liftCoeffArea: 0 },
     steering: { maxWheelAngleDeg: round((BOXTRUCK_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
     frame: { origin: 'f7_x', front: 'f3_x', top: sid('c3', 'rf') },
+    // Feel pass: rigid shell clusters (shell.ts). Body-on-frame: the cab and the box are each a rigid
+    // body on their breakable mounts; the ladder frame (+ its front horns) stays a beam lattice so it still
+    // twists like a truck frame (the rollover targets depend on it).
+    shell: [
+      shellLayout({
+        ids: ['c0_*', 'c1_*', 'c2_*', 'c3_*', 's0_*', 's1_*', 's2_*', 'hood_*'],
+        front: ['s0_*', 's1_*', 's2_*', 'hood_*'],
+        rear: [],
+        firewall: ['c0_*'],
+        cell: ['c1_*', 'c2_*', 'c3_*'],
+      }),
+      {
+        ids: ['b0_*', 'b1_*', 'b2_*', 'b3_*', 'b4_*', 'b5_*', 'b6_*', 'b7_*'],
+        // floor runners / centre ride on the (flexible) frame rails: they stay in the beam lattice as the mount layer
+        exclude: [0, 1, 2, 3, 4, 5, 6, 7].flatMap((i) => [`b${i}_fi_*`, `b${i}_fc`]),
+        zones: [{ ids: ['*'], release: SHELL_RELEASE_DENT, whole: true }],
+        freqHz: 60,
+      },
+    ],
   };
   const design: BoxtruckDesign = {
     totalMass,

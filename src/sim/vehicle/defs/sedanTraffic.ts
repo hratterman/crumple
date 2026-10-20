@@ -44,6 +44,7 @@
  * Vehicle frame: up +Y, forward −Z, right +X. Ground at y = 0 with the tyres
  * just touching in the rest pose (wheel centres at y = WHEEL_RADIUS).
  */
+import { shellLayout } from '../shellDefs';
 import type { RigBeamDef, RigNodeDef } from '../../rig/types';
 import { wheelNodeId, type DrivetrainDef, type VehicleDef, type WheelDef } from '../types';
 import type { CrashProbes } from '../crash';
@@ -1393,6 +1394,13 @@ function buildSedanTraffic(): { def: VehicleDef; design: SedanTrafficDesign } {
     aero: { dragCoeffArea: 0.65, liftCoeffArea: 0.08 },
     steering: { maxWheelAngleDeg: round((SEDAN_TRAFFIC_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
     frame: { origin: sid(7, 'tn'), front: sid(2, 'rs'), top: sid(7, 'rf') },
+    // Feel pass: rigid shell cluster (shell.ts) — crumple zones released whole on impact, firewall, safety cell.
+    shell: shellLayout({
+      front: ['s0_*', 's1_*', 's2_*', 's3_*', 's4_*', 'FL_*', 'FR_*'],
+      rear: ['s10_*', 's13_*', 'RL_*', 'RR_*'],
+      firewall: ['s5_*'],
+      cell: ['s5_hp_*', 's5_sl_*', 's7_*', 's9_*'],
+    }),
   };
   const design: SedanTrafficDesign = {
     totalMass,

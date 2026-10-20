@@ -3,6 +3,7 @@
  * step. Worker-only. Commands (spawn/despawn/reset/input/ground) must be
  * called between steps; step() itself is allocation-free.
  */
+import { applyShell } from './vehicle/shell';
 import type { Vec3 } from '../core/math';
 import { createRng, type Rng } from '../core/rng';
 import type { SnapshotWriter } from '../protocol/codec';
@@ -972,6 +973,9 @@ export class SimEngine {
       if (cw !== null) {
         applyColliderContacts(s, obj.nodeStart, obj.nodeCount, cw, this.materials, SIM_DT, obj.objectId, sink, gx, gy, gz);
       }
+      // Feel pass: the rigid shell cluster sees every force of the tick (last pass before integration).
+      const vsh = vslots[o]?.shell;
+      if (vsh) for (let c = 0; c < vsh.length; c++) applyShell(s, vsh[c]!, SIM_DT, gx, gy, gz);
       integrateNodes(s, obj.nodeStart, obj.nodeCount, SIM_DT, gx, gy, gz);
     }
     this.tick++;

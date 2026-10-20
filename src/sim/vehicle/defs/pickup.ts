@@ -36,6 +36,7 @@
  * leaf springs' front eyes) and a Panhard rod; coil-over "leaf" springs
  * from the brackets to the frame spring towers.
  */
+import { SHELL_RELEASE_FRAME, shellLayout } from '../shellDefs';
 import type { RigBeamDef, RigNodeDef } from '../../rig/types';
 import { wheelNodeId, type DrivetrainDef, type VehicleDef, type WheelDef } from '../types';
 
@@ -103,8 +104,11 @@ export const PICKUP_TIRE = {
  * stable; (2) the CG sits 57 % forward, so the front must not out-corner the rear
  * (C_f·a ≤ C_r·b): at 9e4 front the truck weaved and spun coasting at 170 km/h. Equal-ish
  * soft brushes make it a stable understeerer (the sedan is near neutral).
+ * Feel pass: 4.5e4 → 3.3e4 front. With the rigid shell cluster the frame no longer twists away
+ * load transfer and the truck held R40 at 0.947 g (target 0.75–0.92); a softer front brush
+ * (more understeer at the limit) brings it back to 0.91 g.
  */
-const FRONT_BRUSH = 4.5e4;
+const FRONT_BRUSH = 3.3e4;
 const REAR_BRUSH = 4e4;
 const WHEEL_RADIUS = PICKUP_TIRE.radius;
 const Y_W = WHEEL_RADIUS;
@@ -420,7 +424,8 @@ const HOOD = {
   breakRatio: 8,
   hingeDeform: 1.6e4,
   hingeBreak: 4e4,
-  latchBreak: 5e3,
+  // Feel pass 5e3 → 4e3: with the rigid cab + frame rails the 100 km/h frontal's latch load peaked just under 5 kN.
+  latchBreak: 4e3,
   restBreak: 2e4,
 } as const;
 const TG_X = 0.93;
@@ -1444,6 +1449,16 @@ function buildPickup(): { def: VehicleDef; design: PickupDesign } {
     aero: { dragCoeffArea: 1.45, liftCoeffArea: 0.1 },
     steering: { maxWheelAngleDeg: round((PICKUP_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
     frame: { origin: sid('c2', 'tn'), front: sid('s0', 'rs'), top: sid('c2', 'rf') },
+    // Feel pass: rigid shell cluster (shell.ts) — crumple zones released whole on impact, firewall, safety cell.
+    shell: shellLayout({
+      front: ['f0_*', 'f1_*', 'f2_*', 'f3_*', 's0_*', 's1_*', 's2_*', 'bf_*', 'hood_*', 'FL_*', 'FR_*'],
+      rear: ['b0_*', 'b1_*', 'b2_*', 'b3_*', 'br_*', 'tg_*', 'hitch*', 'f8_*', 'f9_*', 'f10_*', 'f11_*', 'RL_*', 'RR_*'],
+      firewall: ['c0_*'],
+      cell: ['c1_*', 'c2_*', 'c3_*', 'c4_*'],
+      cellWhole: true,
+      // frame rails under the cab: rigid while driving, bend (plastically) in a big crash
+      extra: [{ ids: ['f4_*', 'f5_*', 'f6_*', 'f7_*'], release: SHELL_RELEASE_FRAME, yield: true }],
+    }),
   };
   const design: PickupDesign = {
     totalMass,

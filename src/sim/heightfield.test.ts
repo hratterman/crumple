@@ -161,9 +161,11 @@ describe('heightfield ground', () => {
         `${held.jitter.toFixed(3)} m/s (flat: ${flat.jitter.toFixed(3)}); unbraked ${free.speed.toFixed(2)} m/s after 5 s`,
     );
     expect(held.creep).toBeLessThan(1e-3);
-    // The parked sedan's body nodes carry ~0.14 m/s of residual vibration on
-    // flat ground too (plane == flat heightfield, see the bit-identity test).
-    expect(held.jitter).toBeLessThan(1.5 * flat.jitter);
+    // Before the rigid shell cluster (feel pass) the parked sedan's body nodes
+    // carried ~0.14 m/s of residual vibration on flat ground too (plane == flat
+    // heightfield, see the bit-identity test); now they sit at a few mm/s, where
+    // the ratio is noise: the grade may not add more than 1.5× or 2 cm/s.
+    expect(held.jitter).toBeLessThan(Math.max(1.5 * flat.jitter, 0.02));
     expect(free.speed).toBeGreaterThan(0.5); // the grade is real
   }, 60_000);
 

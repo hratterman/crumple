@@ -38,6 +38,7 @@ import {
   type WheelDef,
 } from './types';
 import { buildWheelRig } from './wheelrig';
+import { compileShells } from './shellDefs';
 
 /** Beam budgets (CLAUDE.md physics budgets). */
 export const PLAYER_BEAM_BUDGET = 3500;
@@ -438,6 +439,7 @@ export const compileVehicle: CompileVehicle = (def) => {
     frameNodes,
     totalMass: total,
     massDriftPct: declared > 0 ? ((total - declared) / declared) * 100 : 0,
+    shell: compileShells(rig, bodyNodeCount, def.shell),
   };
 };
 

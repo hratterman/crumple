@@ -25,6 +25,7 @@ import type { SimObject } from '../types';
 import { SEDAN } from './defs/sedan';
 import { setMotion, type HandlingSim } from './handling';
 import type { CompiledVehicle, VehicleDef, VehicleRuntime } from './types';
+import { polar3 } from './shell';
 
 export type CrashKind = 'frontal' | 'offset' | 'pole';
 
@@ -132,6 +133,19 @@ export interface CrashResult {
   fastestLateNode: string;
   /** Crush (m) sampled every 5 ms after contact (diagnostics). */
   crushTrace: number[];
+  /**
+   * Feel pass (additive): SAFETY-CELL shape. Cell = 'body' nodes between the
+   * cellFront and cellRear rings (rest z); deviation = distance from the
+   * rigid best fit of the pre-impact cell (max over the nodes; side pole:
+   * nodes within 0.8 m of the pole axis excluded — the local dent), final /
+   * peak; `doorWave` = RMS residual of the side-skin cell nodes after an
+   * affine fit of their residual over (y, z) per side (rippling), final.
+   */
+  cellDev: number;
+  cellDevMax: number;
+  /** Node id of the final cellDev. */
+  cellWorst: string;
+  doorWave: number;
 }
 
 const G = 9.81;
@@ -242,6 +256,16 @@ export function runCrash(spec: CrashSpec): CrashResult {
 
   eng.setInput(1, { gearSelect: 0, throttle: 0, brake: 0, handbrake: 0 });
   for (let t = 0; t < SETTLE_S * SIM_HZ; t++) eng.step();
+  // Safety cell (feel pass): body nodes between the cell rings, pre-impact reference shape.
+  const zF = restMean(cellFront)[2]!;
+  const zR = restMean(cellRear)[2]!;
+  const bodyGroup = cv.rig.groups.indexOf('body');
+  const cell: number[] = [];
+  for (let i = 0; i < cv.bodyNodeCount; i++) {
+    const z = cv.rig.nodePos[3 * i + 2]!;
+    if (cv.rig.nodeGroup[i] === bodyGroup && z >= Math.min(zF, zR) - 0.02 && z <= Math.max(zF, zR) + 0.02) cell.push(i);
+  }
+  const cellRef = cell.map((i) => P(i));
 
   // Body extent after settling (vehicle frame = world here: identity spawn).
   let minZ = Infinity;
@@ -340,6 +364,10 @@ export function runCrash(spec: CrashSpec): CrashResult {
     }
     return vd / m;
   };
+  let cellDevMax = 0;
+  // side pole: the dent region (pre-impact positions within 0.8 m of the pole axis) is not the cell's shape
+  const keepSet = new Set(cell.filter((_, k) => spec.kind !== 'pole' || Math.hypot(cellRef[k]![0]! - poleX, cellRef[k]![2]! - barrier.pos[2]) > 0.8));
+  const cellKeep = (i: number): boolean => keepSet.has(i);
   const hardCap = maxSteps + SIM_HZ; // contact must start within 1 s
   for (let t = 0; t < hardCap; t++) {
     eng.step();
@@ -367,6 +395,7 @@ export function runCrash(spec: CrashSpec): CrashResult {
     if (intr > intrMax) intrMax = intr;
     if (door > doorMax) doorMax = door;
     if (since % 10 === 0) crushTrace.push(crush);
+    if (since % 20 === 0 && cell.length > 3) cellDevMax = Math.max(cellDevMax, cellFit(cell, cellRef, P, cellKeep).max);
     if (contactEnded) rebound = Math.max(rebound, -comVel());
     if (since >= SIM_HZ) {
       // Body nodes and wheel hubs (a free-spinning wheel's rim/tyre nodes legitimately exceed the car's speed).
@@ -427,8 +456,13 @@ export function runCrash(spec: CrashSpec): CrashResult {
   const ws = pr.windscreen;
   const windscreen = ws ? beamsWhere((a, c) => a.startsWith(ws[0]) && c.startsWith(ws[1])) : [];
 
+  const fit = cell.length > 3 ? cellFit(cell, cellRef, P, cellKeep) : { max: 0, wave: 0, worst: -1 };
   return {
     spec,
+    cellDev: fit.max,
+    cellWorst: fit.worst >= 0 ? cv.rig.nodeIds[fit.worst]! : '',
+    cellDevMax: Math.max(cellDevMax, fit.max),
+    doorWave: fit.wave,
     crush: crushNow(),
     springback: crushMax > 0 ? (crushMax - crushNow()) / crushMax : 0,
     crushMax,
@@ -457,6 +491,80 @@ export function runCrash(spec: CrashSpec): CrashResult {
   };
 }
 
+/**
+ * Rigid best fit (polar decomposition) of `ref` to the current positions of
+ * `ids`: max residual over the nodes passing `keep`, and the side-skin
+ * waviness (see CrashResult.doorWave).
+ */
+function cellFit(ids: number[], ref: number[][], P: (i: number) => [number, number, number], keep: (i: number) => boolean): { max: number; wave: number; worst: number } {
+  const n = ids.length;
+  const cur = ids.map(P);
+  const c = [0, 0, 0];
+  const r = [0, 0, 0];
+  for (let k = 0; k < n; k++) for (let d = 0; d < 3; d++) {
+    c[d]! += cur[k]![d]! / n;
+    r[d]! += ref[k]![d]! / n;
+  }
+  const A = new Float64Array(9);
+  for (let k = 0; k < n; k++) for (let u = 0; u < 3; u++) for (let v = 0; v < 3; v++) A[3 * u + v]! += (cur[k]![u]! - c[u]!) * (ref[k]![v]! - r[v]!);
+  const R = new Float64Array(9);
+  if (!polar3(A, R)) return { max: Infinity, wave: Infinity, worst: -1 };
+  const res: number[][] = [];
+  let max = 0;
+  let worst = -1;
+  for (let k = 0; k < n; k++) {
+    const q = [ref[k]![0]! - r[0]!, ref[k]![1]! - r[1]!, ref[k]![2]! - r[2]!];
+    const e = [0, 1, 2].map((d) => cur[k]![d]! - (c[d]! + R[3 * d]! * q[0]! + R[3 * d + 1]! * q[1]! + R[3 * d + 2]! * q[2]!));
+    res.push(e);
+    if (keep(ids[k]!) && Math.hypot(e[0]!, e[1]!, e[2]!) > max) {
+      max = Math.hypot(e[0]!, e[1]!, e[2]!);
+      worst = ids[k]!;
+    }
+  }
+  // side skins: |x| ≥ 0.8·max|x| of the reference, per side; affine fit of each residual component over (1, y, z)
+  let xMax = 0;
+  for (const p of ref) xMax = Math.max(xMax, Math.abs(p[0]!));
+  let sum = 0;
+  let cnt = 0;
+  for (const side of [-1, 1]) {
+    const sel: number[] = [];
+    for (let k = 0; k < n; k++) if (ref[k]![0]! * side >= 0.8 * xMax && keep(ids[k]!)) sel.push(k);
+    if (sel.length < 4) continue;
+    for (let d = 0; d < 3; d++) {
+      // normal equations 3×3
+      const M = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+      const b = [0, 0, 0];
+      for (const k of sel) {
+        const f = [1, ref[k]![1]!, ref[k]![2]!];
+        for (let u = 0; u < 3; u++) {
+          b[u]! += f[u]! * res[k]![d]!;
+          for (let v = 0; v < 3; v++) M[3 * u + v]! += f[u]! * f[v]!;
+        }
+      }
+      const x = solve3(M, b);
+      for (const k of sel) {
+        const e = res[k]![d]! - (x[0]! + x[1]! * ref[k]![1]! + x[2]! * ref[k]![2]!);
+        sum += e * e;
+        cnt++;
+      }
+    }
+  }
+  return { max, wave: cnt > 0 ? Math.sqrt((3 * sum) / cnt) : 0, worst };
+}
+
+function solve3(m: number[], b: number[]): number[] {
+  const det = (a: number[]): number => a[0]! * (a[4]! * a[8]! - a[5]! * a[7]!) - a[1]! * (a[3]! * a[8]! - a[5]! * a[6]!) + a[2]! * (a[3]! * a[7]! - a[4]! * a[6]!);
+  const d = det(m);
+  if (Math.abs(d) < 1e-12) return [0, 0, 0];
+  const out: number[] = [];
+  for (let c = 0; c < 3; c++) {
+    const t = m.slice();
+    for (let r = 0; r < 3; r++) t[3 * r + c] = b[r]!;
+    out.push(det(t) / d);
+  }
+  return out;
+}
+
 /** One-line summary (reports). */
 export function formatCrash(r: CrashResult): string {
   const f = (x: number, d = 1): string => (Number.isFinite(x) ? x.toFixed(d) : String(x));
@@ -471,7 +579,7 @@ export function formatCrash(r: CrashResult): string {
     `broken ${r.brokenBeams}, plastic ${f(r.plasticFraction * 100)} %, wheels ${r.wheelsDetached}, ` +
     `latch ${r.latchBroken ? 'broken' : 'held'}, bumper ${f(r.bumperBrokenFraction * 100, 0)} %, ` +
     `windscreen ${f(r.windscreenBrokenFraction * 100, 0)} %, KE ${f(r.keRatio * 100)} %, ` +
-    `vLate ${f(r.maxSpeedLate, 2)}/${f(r.initialSpeed, 2)} (${r.fastestLateNode})`+(r.poleViolator ? ` poleViolator ${r.poleViolator}` : '')+`, span ${f(r.maxSpan, 2)} m, finite ${r.finite}`
+    `cell ${cm(r.cellDev)} cm ${r.cellWorst} (max ${cm(r.cellDevMax)}), doorWave ${f(r.doorWave * 1000)} mm, vLate ${f(r.maxSpeedLate, 2)}/${f(r.initialSpeed, 2)} (${r.fastestLateNode})`+(r.poleViolator ? ` poleViolator ${r.poleViolator}` : '')+`, span ${f(r.maxSpan, 2)} m, finite ${r.finite}`
   );
 }
 

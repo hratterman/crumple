@@ -25,6 +25,7 @@
  * crash rails / trunk < engine bay < safety cell (cage), so crashes crumple
  * the ends first.
  */
+import { shellLayout } from '../shellDefs';
 import type { RigBeamDef, RigNodeDef } from '../../rig/types';
 import { wheelNodeId, type DrivetrainDef, type VehicleDef, type WheelDef } from '../types';
 import { WHEEL_TUNING_205_55R16 } from '../wheelrig';
@@ -105,9 +106,12 @@ const SHELL_BUDGET_PER_KG = (SHELL_OMEGA_DT_TARGET / DT) ** 2;
  * yields at this multiple of the bay class strain: the front zone (bumper,
  * crash cans, s2→s3) folds first and the rear bay + firewall stop the
  * engine/wheel stack. Without it a 50 km/h hit crushed the whole bay into
- * the firewall (peak ~95 cm).
+ * the firewall (peak ~95 cm). Feel pass 10 → 8: with the rigid safety
+ * cell (shell.ts) nothing behind the firewall flexes any more, so the
+ * front takes a little more of the crush plastically (50 km/h
+ * spring-back 26.5 % → 24 %, crush 45 → 48 cm).
  */
-const REAR_BAY_FACTOR = 10;
+const REAR_BAY_FACTOR = 8;
 const CLASSES = {
   bumper: { w: 1.0, zeta: 0.4, yieldStrain: 0.025, minDeform: 1.5e3, breakRatio: 5 },
   crash: { w: 1.0, zeta: 0.4, yieldStrain: 0.018, minDeform: 3e3, breakRatio: 6 },
@@ -1369,6 +1373,13 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
     aero: { dragCoeffArea: 0.65, liftCoeffArea: 0.08 },
     steering: { maxWheelAngleDeg: round((SEDAN_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
     frame: { origin: sid(7, 'tn'), front: sid(2, 'rs'), top: sid(7, 'rf') },
+    // Feel pass: rigid shell cluster (shell.ts) — crumple zones released whole on impact, firewall, safety cell.
+    shell: shellLayout({
+      front: ['s0_*', 's1_*', 's2_*', 's3_*', 's4_*', 'hood_*', 'FL_*', 'FR_*'],
+      rear: ['s10_*', 's11_*', 's12_*', 's13_*', 'RL_*', 'RR_*'],
+      firewall: ['s5_*'],
+      cell: ['s5_hp_*', 's5_sl_*', 's6_*', 's7_*', 's8_*', 's9_*'],
+    }),
   };
   const design: SedanDesign = {
     totalMass,

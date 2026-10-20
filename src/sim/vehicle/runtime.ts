@@ -9,6 +9,7 @@
  * Hot paths (vehiclePreStep, applyAero) use only + − × ÷ sqrt, fixed order,
  * no allocation. Spawn/recover/reset/telemetry helpers are not per-tick hot.
  */
+import { createShellRuntime, rebaseShell, resetShell, type ShellRuntime } from './shell';
 import type { Vec3 } from '../../core/math';
 import { TELEMETRY_SLOTS } from '../../protocol/layout';
 import {
@@ -65,6 +66,8 @@ export interface VehicleRuntimeEx extends VehicleRuntime {
   damageBeams: Int32Array;
   /** Free (unpinned) body-node mass, kg (aero distribution). */
   bodyMass: number;
+  /** Feel pass: rigid shell cluster runtimes (one per cluster). */
+  shell: ShellRuntime[];
 }
 
 // ------------------------------------------------------------ create / rebase
@@ -135,6 +138,7 @@ export function createVehicleRuntime(
     telemetry: new Float32Array(TELEMETRY_SLOTS),
     damageBeams: Int32Array.from(dmg),
     bodyMass,
+    shell: vehicle.shell.map((c) => createShellRuntime(c, rig)),
   };
   rebaseVehicle(rt, nodeStart, beamStart);
   return rt;
@@ -144,6 +148,8 @@ export function createVehicleRuntime(
 export const rebaseVehicle: RebaseVehicle = (vehicle, nodeStart, beamStart) => {
   vehicle.nodeStart = nodeStart;
   vehicle.beamStart = beamStart;
+  const sh = (vehicle as VehicleRuntimeEx).shell;
+  if (sh) for (const c of sh) rebaseShell(c, nodeStart, beamStart);
   for (const w of vehicle.wheels) {
     const cw = w.wheel;
     w.hubI = nodeStart + cw.hubI;
@@ -171,6 +177,8 @@ export function resetVehicleRuntime(vehicle: VehicleRuntime): void {
   }
   resetDrivetrainState(vehicle.drivetrain as DrivetrainStateEx, vehicle.vehicle.drivetrain);
   vehicle.telemetry.fill(0);
+  const sh = (vehicle as VehicleRuntimeEx).shell;
+  if (sh) for (const c of sh) resetShell(c);
 }
 
 // ------------------------------------------------------------ per tick

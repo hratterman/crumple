@@ -40,11 +40,12 @@ describe('setAutopilot (ram driver)', () => {
       host.runSteps(1000); // settle 0.5 s
       host.handle({ type: 'setAutopilot', objectId: 10, mode: 'ram', targetObjectId: 1, aggression: 0.8, seed: 5 });
       let hitAt = -1;
-      for (let k = 0; k < 28 && hitAt < 0; k++) {
-        host.runSteps(1000);
+      // sampled every 50 ms: a stiff (rigid-shell) car pair is within 4.2 m only briefly at the hit
+      for (let k = 0; k < 280 && hitAt < 0; k++) {
+        host.runSteps(100);
         const a = framePos(host, 1);
         const b = framePos(host, 10);
-        if (Math.hypot(a[0] - b[0], a[2] - b[2]) < 4.2) hitAt = (k + 1) * 0.5;
+        if (Math.hypot(a[0] - b[0], a[2] - b[2]) < 4.2) hitAt = (k + 1) * 0.05;
       }
       return { hash: hashSimState(host.engine!), hitAt, host };
     };
