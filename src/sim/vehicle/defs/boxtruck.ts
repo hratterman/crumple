@@ -23,11 +23,13 @@
  *          door per side (c1 hinge pillar … c3), on 4 + 4 + 4 cab mounts.
  *   box    `b{i}_*` b0 front wall … b7 rear portal (roller door frame): floor
  *          (centre fc, runners fi on the frame rails, sills fl), walls (wl, wm),
- *          roof (rail rl, centre rc). Aluminium posts + skin: the wall bays
- *          are triangulated shear panels that dent, crush and tear; the box
- *          sits on the frame on 4 breakable mounts per station side.
- *   guards `gd{i}_{L|R}` side underrun guard rails hung from the box sills
- *          between the axles.
+ *          roof (rail rl, centre rc), floor at 1.24 m. Aluminium posts and a
+ *          skin node `bp{i}_{cell}_{L|R}` in the middle of every wall panel
+ *          (the skin dents between the posts); the box sits on the frame on
+ *          breakable mounts at every station.
+ *   guards `gd{i}_{lo|hi}_{L|R}` side underride guards between the axles:
+ *          two steel rails on four posts hung from the box sills, braced to
+ *          the frame rails.
  * plus the hood sub-rig `hood_{r}{L|C|R}` (sedan contract layout, latched to
  * the radiator support), the front bumper `bf_*` and rear underride bar
  * `br_*` on the frame ends, the I6 block `eng_*` / gearbox `gbx_*` on frame
@@ -41,7 +43,9 @@
  * (`RA_*`) carrying DUAL wheels per side (outer RL / RR = telemetry corners,
  * inner RLi / RRi), located like the front; each dual pair is bolted together
  * by crossed rim-to-rim beams, so the pair spins as one. Spring/dampers run
- * from the axles' spring seats to frame towers.
+ * from the axles' spring seats to frame towers; torsion anti-roll bars front
+ * and rear (`arb{F|R}_*`, ARB_SPEC) carry most of the roll stiffness and the
+ * leaf packs' roll damping.
  */
 import type { RigBeamDef, RigNodeDef } from '../../rig/types';
 import { wheelNodeId, type DrivetrainDef, type VehicleDef, type WheelDef } from '../types';
@@ -53,19 +57,19 @@ export const BOXTRUCK_TARGETS = {
   totalMass: 6500,
   wheelbase: 4.7,
   /** Front tyre centre track. */
-  trackFront: 2.0,
+  trackFront: 2.04,
   /** Rear dual-pair centre track (mid-way between the inner and outer tyre centres). */
-  trackRear: 1.8,
+  trackRear: 1.86,
   /** Rear dual spacing (inner ↔ outer tyre centre). */
   dualSpacing: 0.33,
   /** Static front axle share (loaded). */
-  frontAxleShare: 0.33,
+  frontAxleShare: 0.35,
   /** CG height in the REST pose (contract ≥ 1.35 m). */
   cgHeightMin: 1.35,
   rideHzFront: 2.6,
   rideHzRear: 1.6,
-  dampingRatio: 0.32,
-  maxWheelAngleRad: 0.62,
+  dampingRatio: 0.6,
+  maxWheelAngleRad: 0.87,
   powerKw: 180,
   torqueNm: 900,
   /** Governed top speed (rev limiter in 6th), km/h. */
@@ -77,12 +81,16 @@ const Z_R = Z_F + BOXTRUCK_TARGETS.wheelbase;
 const HALF_TRACK_F = BOXTRUCK_TARGETS.trackFront / 2;
 const X_DUAL_IN = (BOXTRUCK_TARGETS.trackRear - BOXTRUCK_TARGETS.dualSpacing) / 2;
 const X_DUAL_OUT = (BOXTRUCK_TARGETS.trackRear + BOXTRUCK_TARGETS.dualSpacing) / 2;
+const X_DUAL_MID = BOXTRUCK_TARGETS.trackRear / 2;
 
 /**
  * 245/70R19.5-class regional truck tyre on a 19.5" steel disc wheel (0.43 m
  * radius, 10 rays). Derived from the pickup tuning (LT 0.39 m, 5 kN) with the
  * carcass springs scaled ×2.4 for an ≈ 11 kN wheel load; a heavy rim
  * (steel disc + brake drum) carries the stiff sidewall within ω·dt.
+ * Grip: one μ on every tyre, steer and drive alike. 0.65 is a loaded
+ * regional-haul tyre on dry asphalt (heavy truck tyres run high contact
+ * pressure and peak well below a car tyre's ≈ 0.9–1.0); 80–0 in ≈ 41 m.
  */
 export const BOXTRUCK_TIRE = {
   radius: 0.43,
@@ -105,22 +113,12 @@ export const BOXTRUCK_TIRE = {
   hubMass: 50,
   rimMass: 88,
   tireMass: 52,
-  friction: 0.95,
+  friction: 0.65,
 } as const satisfies Partial<WheelDef>;
 
 /** Lateral tread-brush stiffness per tread node, N/m, per axle (the rear has four tyres). */
-const FRONT_BRUSH = 5e4;
+const FRONT_BRUSH = 1.2e5;
 const REAR_BRUSH = 3e5;
-/**
- * Steer-axle grip cap (μ, single tyres carrying a third of the truck). The
- * lower cap is the plough a loaded truck's steer axle shows at full lock: the
- * front saturates at ≈ 0.44 g, below the ≈ 0.55 g at which all inside wheels
- * leave the ground, so a 40 km/h full-lock J-turn ploughs wide on its outside
- * wheels instead of rolling (rollover.ts J-turn: 0.95 and 0.55 rolled it). At 60–70 km/h the yaw overshoot of a fast input carries the lateral
- * past the threshold and it goes over. Braking is barely affected: the rears
- * (μ 0.95, four tyres) do most of the stopping.
- */
-const FRONT_FRICTION = 0.5;
 const WHEEL_RADIUS = BOXTRUCK_TIRE.radius;
 const Y_W = WHEEL_RADIUS;
 
@@ -155,18 +153,24 @@ const FA = {
   up: [0.86, 0.62, Z_F - 0.6] as [number, number, number],
   pan: [0.42, 0.62, Z_F + 0.22] as [number, number, number],
 };
-/** Rear live axle (right side; mirrored). */
+/** Rear hub spacing (hubI ↔ hubO). */
+const REAR_HUB_SPACING = 0.36;
+/**
+ * Rear live axle (right side; mirrored). The axle end carries the dual pair: the end node ae over the
+ * outer dual, the brackets ab / af below the pair centre (with them inboard at the inner dual, the outer
+ * dual cantilevered off the end and carried a quarter less than the inner one).
+ */
 const RA = {
   /** Spring seat (wide, over the inner dual). */
   kU: [0.62, 0.62, Z_R] as [number, number, number],
   /** Axle end (top of the tube by the hubs): the duals' upright reference. */
-  ae: [0.98, 0.58, Z_R] as [number, number, number],
+  ae: [X_DUAL_OUT, 0.58, Z_R] as [number, number, number],
   /** Brackets under the tube, behind / ahead. */
-  ab: [0.74, 0.28, Z_R + 0.2] as [number, number, number],
-  af: [0.74, 0.28, Z_R - 0.2] as [number, number, number],
+  ab: [X_DUAL_MID, 0.28, Z_R + 0.2] as [number, number, number],
+  af: [X_DUAL_MID, 0.28, Z_R - 0.2] as [number, number, number],
   D: [0, 0.42, Z_R - 0.25] as [number, number, number],
   /** Trailing links forward to the hangers, parallel to the long axis and level with their axle ends (sloped or converging links make roll / compliance steer: the axle steered 0.7° out of a 0.5 g turn). */
-  lp: [0.74, 0.28, Z_R - 0.78] as [number, number, number],
+  lp: [X_DUAL_MID, 0.28, Z_R - 0.78] as [number, number, number],
   up: [0.62, 0.62, Z_R - 0.66] as [number, number, number],
   pan: [0.42, 0.66, Z_R + 0.12] as [number, number, number],
 };
@@ -184,13 +188,24 @@ const CLASSES = {
   cage: { w: 1.3, zeta: 0.3, yieldStrain: 0.1, minDeform: 2.5e4, breakRatio: 5 },
   glass: { w: 0.4, zeta: 0.25, yieldStrain: 0.06, minDeform: 0, breakRatio: 1.7 },
   /** Box posts, bows and skin shear panels (aluminium: dents early, tears at 6× yield). */
-  box: { w: 1.0, zeta: 0.35, yieldStrain: 0.012, minDeform: 4e3, breakRatio: 6 },
-  /** Box floor (crossmembers, runners, sills): carries the cargo. */
+  box: { w: 1.0, zeta: 0.35, yieldStrain: 0.006, minDeform: 2e3, breakRatio: 6 },
+  /** Box floor runners and sills (one row, station to station): carry the cargo's fore-aft load into the mounts. */
   boxFloor: { w: 1.6, zeta: 0.35, yieldStrain: 0.03, minDeform: 1.5e4, breakRatio: 6 },
+  /**
+   * Box floor crossmembers (within a station) and floor diagonals (station to station): a side hit folds the
+   * sill in between the posts. At boxFloor's yield they shoved the whole wall in elastically and it sprang
+   * back out (sedan into the side at 50 km/h: 15 cm at the peak, 2 cm left); with the crossmembers at 1 kN
+   * and the diagonals at 5 kN the wall keeps ≈ 18 cm. The diagonals also carry the walls' fore-aft load
+   * onto the runners: at 4 kN a 50 km/h frontal racked the box 31 cm forward (column ≤ 30).
+   */
+  boxFloorX: { w: 1.6, zeta: 0.35, yieldStrain: 0.003, minDeform: 1e3, breakRatio: 6 },
+  boxFloorD: { w: 1.6, zeta: 0.35, yieldStrain: 0.006, minDeform: 5e3, breakRatio: 6 },
   /** Freight ↔ box (spokes from the cargo node): stiff enough to brace the walls, yields early in a crash. */
   cargo: { w: 2.0, zeta: 0.4, yieldStrain: 0.02, minDeform: 6e3, breakRatio: 5 },
-  /** Side underrun guards. */
-  guard: { w: 1.0, zeta: 0.4, yieldStrain: 0.02, minDeform: 6e3, breakRatio: 6 },
+  /** Side underride guards (steel rails, posts and braces): bend at a car's bumper load, tear only far beyond it. */
+  guard: { w: 1.0, zeta: 0.4, yieldStrain: 0.005, minDeform: 3e3, breakRatio: 12 },
+  /** Box side skin (1 mm aluminium between the posts): dents early, tears at 6× yield. */
+  skin: { w: 1.0, zeta: 0.35, yieldStrain: 0.006, minDeform: 2e3, breakRatio: 6 },
   /** Cab mounts: rubber-bushed bolts that shear in a hard crash. */
   mount: { w: 3, zeta: 0.35, yieldStrain: 0.02, minDeform: 1.5e4, breakRatio: 8 },
   /** Box U-bolts / shear plates onto the frame: hold a loaded box in a 50 km/h frontal, tear in bigger hits. */
@@ -226,7 +241,14 @@ interface Station {
  * sedan's P4 engine, so the rails get the stiffness budget a frontal needs);
  * f5..f7 carry the fuel tank, batteries and air tanks.
  */
-const ENGINE_RAIL = 40;
+/**
+ * Frame node base masses per station (before the solve). The engine / gearbox
+ * ride on f1–f4; the spring hangers, towers, link brackets and box mounts load
+ * f8–f11 with fixed-stiffness joints, which come off those nodes' budgets
+ * first (at 18 kg the rear hanger nodes had ≈ 1e5 N/m left for the rail
+ * chords: the rear frame sheared 7° under the box in a 0.45 g turn).
+ */
+const FRAME_BASE_MASS = [50, 66, 76, 66, 40, 32, 32, 30, 28, 30, 30, 28, 22, 22] as const;
 const RAIL_X = 0.43;
 const RAIL_LO = 0.7;
 const RAIL_HI = 0.98;
@@ -236,17 +258,16 @@ const rail = (x = RAIL_X): Pt[] => [
 ];
 const FRAME_Z = [-3.62, -3.2, Z_F, -2.32, -1.75, -1.18, -0.6, 0.0, 0.62, 1.28, Z_R, 2.6, 3.15, 3.7] as const;
 const FRAME: readonly Station[] = FRAME_Z.map((z, i): Station => {
-  const engine = i >= 1 && i <= 4;
-  const base = engine ? ENGINE_RAIL : i === 0 ? 16 : 18;
+  const base = FRAME_BASE_MASS[i]!;
   const st: Station = {
     id: `f${i}`,
     part: 'frame',
     z,
     ring: rail(),
     closed: true,
-    bulkhead: i % 2 === 0 || i === 3 || i === 7 || i === 13,
+    bulkhead: i !== 1,
     cls: i <= 1 ? 'horn' : 'frame',
-    mass: { lo: base, hi: base, tw: 48, x: 14 },
+    mass: { lo: base, hi: base, tw: 106, x: 14 },
   };
   if (i === 2) return { ...st, extra: [['tw', FA.kT[0], 1.06]] };
   if (i === 10) return { ...st, extra: [['tw', RA.kU[0], 1.0]] };
@@ -295,15 +316,17 @@ const CAB: readonly Station[] = [
  * nodes (`CARGO`), the box structure on all of them.
  */
 const BOX_Z = [-0.6, 0.0, 0.62, 1.28, Z_R, 2.6, 3.15, 3.7] as const;
-export const BOX_DIMS = { halfWidth: 1.24, floorY: 1.14, roofY: 3.38, front: BOX_Z[0], rear: BOX_Z[BOX_Z.length - 1]! } as const;
+/** Box floor height (the runners sit on 0.08 m sub-frame sills over the rails). */
+const BOX_FLOOR_Y = 1.24;
+export const BOX_DIMS = { halfWidth: 1.24, floorY: BOX_FLOOR_Y, roofY: BOX_FLOOR_Y + 2.24, front: BOX_Z[0], rear: BOX_Z[BOX_Z.length - 1]!, stations: BOX_Z.length } as const;
 const BOX_RING: Pt[] = [
-  ['fc', 0, 1.14],
-  ['fi', RAIL_X, 1.06],
-  ['fl', 1.22, 1.14],
-  ['wl', 1.24, 1.8],
-  ['wm', 1.24, 2.58],
-  ['rl', 1.22, 3.36],
-  ['rc', 0, 3.4],
+  ['fc', 0, BOX_FLOOR_Y],
+  ['fi', RAIL_X, BOX_FLOOR_Y - 0.08],
+  ['fl', 1.22, BOX_FLOOR_Y],
+  ['wl', 1.24, BOX_FLOOR_Y + 0.66],
+  ['wm', 1.24, BOX_FLOOR_Y + 1.44],
+  ['rl', 1.22, BOX_FLOOR_Y + 2.22],
+  ['rc', 0, BOX_FLOOR_Y + 2.26],
 ];
 /**
  * Base box structure masses per node (kg) + cargo per node (loaded). The load
@@ -314,9 +337,11 @@ const BOX_RING: Pt[] = [
  * buckles under its own wall weight), and in a crash or rollover the spokes
  * yield, so the freight shifts and the box crushes and racks around it.
  */
-const BOX_MASS = { fc: 6, fi: 14, fl: 12, wl: 9, wm: 8, rl: 8, rc: 7, cg: 0 } as const;
-const CARGO = { fc: 0, fi: 6, fl: 6, wl: 6, wm: 8, rl: 6, rc: 3, cg: 262 } as const;
-const CARGO_Y = 3.05;
+/** Chassis / cab / box base masses → kg (the freight nodes take the remainder of the 6.5 t). */
+const STRUCTURE_MASS_SCALE = 0.448;
+const BOX_MASS = { fc: 6, fi: 14, fl: 11, wl: 7, wm: 6, rl: 7, rc: 7, cg: 0 } as const;
+const CARGO = { fc: 0, fi: 6, fl: 6, wl: 6, wm: 8, rl: 6, rc: 3, cg: 560 } as const;
+const CARGO_Y = BOX_FLOOR_Y + 2.06;
 /** Spokes from the freight node to the roof row (rl, rc): yield force, N (elastic in driving; a rollover crushes the roof). */
 const CARGO_TOP = /^b\d_(rl_[LR]|rc)$/;
 const CARGO_TOP_YIELD = 2.5e3;
@@ -328,11 +353,13 @@ const BOX: readonly Station[] = BOX_Z.map((z, i): Station => {
 
 const BUMPERS: readonly Station[] = [
   {
-    id: 'bf', part: 'bumperF', z: -3.76, closed: true, bulkhead: true, cls: 'bumper', mass: { bl: 12, bo: 9, bu: 12 },
+    id: 'bf', part: 'bumperF', z: -3.76, closed: true, bulkhead: true, cls: 'bumper', mass: { bl: 12, bo: 9, bu: 12, bk: 12, bh: 12 },
     ring: [['bl', 0, 0.5], ['bl', 0.55, 0.5], ['bo', 1.12, 0.6], ['bu', 0.55, 0.88], ['bu', 0, 0.88]],
+    // Bracket feet on the bar's back face, square in front of the rail's lower and upper flange lines.
+    extra: [['bk', RAIL_X, RAIL_LO], ['bh', RAIL_X, 0.88]],
   },
   {
-    id: 'br', part: 'bumperR', z: 3.78, closed: true, bulkhead: true, cls: 'bumper', mass: { bl: 8, bo: 6, bu: 8 },
+    id: 'br', part: 'bumperR', z: 3.78, closed: true, bulkhead: true, cls: 'bumper', mass: { bl: 22, bo: 10, bu: 22 },
     ring: [['bl', 0, 0.44], ['bl', 0.6, 0.44], ['bo', 1.1, 0.48], ['bu', 0.6, 0.6], ['bu', 0, 0.6]],
   },
 ];
@@ -344,16 +371,28 @@ const STRUCTURES: readonly (readonly Station[])[] = [FRAME, CLIP, CAB, BOX, BUMP
  * zone is the frame horns ahead of the front axle (f0 → f2) and the clip;
  * f2 → f3 yields late, the frame behind never in a frontal.
  */
-const FRAME_GAP_YIELD: readonly number[] = [7e5, 1.3e6, 3.2e6, 1.2e7, 1.2e7, 1.2e7, 1.2e7, 1.2e7, 1.2e7, 1.2e7, 1e7, 8e6, 6e6];
+const FRAME_GAP_YIELD: readonly number[] = [2.4e5, 3.6e5, 1.4e6, 1.2e7, 1.2e7, 1.2e7, 1.2e7, 1.2e7, 1.2e7, 1.2e7, 1e7, 8e6, 6e6];
 /** Cab gaps (safety cell): never yield in a frontal. */
 const CAB_GAP_YIELD: readonly number[] = [1.4e6, 1.4e6, 1.2e6];
 const SHEAR_YIELD_FLOOR = 0.8;
 const SHEAR_FORCE_SHARE = 0.6;
 const FRAME_SHEAR_FORCE_SHARE = 1.2;
+/** Frame web diagonals yield at this multiple of a chord's share of the gap's section force. */
+const FRAME_WEB_DIAG_FACTOR = 2.5;
 const FRAME_MIN_BREAK = 8e5;
+/** In-station frame members (rail webs, crossmembers): yield floor, N. */
+const FRAME_SECTION_MIN_YIELD = 1.5e6;
 const IN_STATION_YIELD_FACTOR = 3;
 const LONGITUDINAL_W = 4;
 const FRAME_LONGITUDINAL_W = 24;
+/**
+ * Horn chords (f0 → f2 flanges): a larger share of the horn nodes' budget than the frame's 1-bay chords.
+ * The horns crush progressively at the FRAME_GAP_YIELD section forces and spring back by their elastic
+ * part: at the frame's weight (24) a 50 km/h hit peaked at 46 cm and left 22 (springback 52 %); at 72 the
+ * crush is 26–30 cm permanent from 47.5 to 52.5 km/h. Pushed past ≈ 50 cm the horns fold under onto the
+ * front tyres (≈ 60 cm, the 64 km/h case).
+ */
+const HORN_CHORD_W = 72;
 /**
  * Web diagonals (lo_i ↔ hi_i+1) carry the rail's vertical shear. At weight 4
  * a bay's shear stiffness was ≈ 80 kN/m: in a 50 km/h frontal the horns
@@ -372,7 +411,8 @@ const FRAME_SPANS: readonly (readonly [number, number])[] = [
   [9, 11],
   [10, 12],
 ];
-const FRAME_SHEAR_W = 12;
+const FRAME_SHEAR_W = 40;
+const FRAME_XMEMBER_W = 16;
 /**
  * 3–4-bay frame spans (cab section → box): axial stiffness of a line of
  * beams is Σ k·L, so the long ones carry far more per unit of the node
@@ -428,6 +468,16 @@ const CROSS_CABIN: readonly (readonly [number, string, string])[] = [
   [3, 'qm', 'fl'],
   [3, 'rf', 'fl'],
 ];
+/** Side underride guard: rail line just inside the box wall, rail heights, node mass, rail weight, contact radius. */
+const GUARD_X = 1.17;
+const GUARD_LO_Y = 0.48;
+const GUARD_HI_Y = 0.84;
+const GUARD_NODE_MASS = 12;
+const GUARD_RAIL_W = 3;
+const GUARD_OBJ_RADIUS = 0.2;
+/** Box side skin nodes (one per wall panel): base mass, contact radius. */
+const SKIN_NODE_MASS = 4;
+const SKIN_OBJ_RADIUS = 0.24;
 /** Box wall / roof nodes get a big object-contact sphere (node spacing ≈ 0.65 m): no gap for a car's nodes to slip through. */
 const BOX_OBJ_RADIUS = 0.3;
 
@@ -435,17 +485,36 @@ const BOX_OBJ_RADIUS = 0.3;
 const FRONT_SHOCK_TRAVEL = 0.1;
 const REAR_SHOCK_TRAVEL = 0.1;
 const FRONT_HUB_SPACING = 0.32;
-const REAR_HUB_SPACING = 0.24;
 const FRONT_HUB_MASS = 64;
-const REAR_HUB_MASS = 55;
-const FA_NODE_MASS = { kT: 37, kB: 30, sp: 22, c: 26, st: 24, arm: 21 } as const;
-const RA_NODE_MASS = { kU: 34, ae: 34, ab: 30, af: 30, D: 60 } as const;
+const REAR_HUB_MASS = 58;
+const FA_NODE_MASS = { kT: 37, kB: 30, sp: 24, c: 26, st: 24, arm: 21 } as const;
+const RA_NODE_MASS = { kU: 56, ae: 40, ab: 47, af: 47, D: 60 } as const;
 const K_AXLE = 1.4e6;
+/**
+ * Rear axle housing (the live axle's end tetrahedra + cross members): it carries two thirds of the truck
+ * from spring seats 0.31 m inboard of the inner duals. At K_AXLE it bent 17 mm under the static load, the
+ * hub line cambered 1.1° and the outer duals carried 25 % less than the inner ones (the inside outer dual
+ * left the ground at 0.2 g).
+ */
+const K_REAR_AXLE = 2.5e6;
 /** Fixed joints onto the frame (fixedLink). */
 const K_TOWER = 1.5e6;
 const K_CAB_MOUNT = 1.2e6;
 const K_BOX_MOUNT = 1.6e6;
 const K_BUMPER_MOUNT = 1.4e6;
+/**
+ * Engine / gearbox block: 10 nodes carrying the 6.7 L I6 and the gearbox (the rest of the drivetrain mass rides
+ * on the front rails), on fixed-stiffness mounts that yield at ENG_MOUNT_YIELD each — in a frontal the block
+ * stacks against the radiator and pushes on the frame through them instead of sliding back loose.
+ */
+const ENGINE_BLOCK_NODE_MASS = 12;
+const K_ENG_MOUNT = 8e5;
+const ENG_MOUNT_YIELD = 1.2e5;
+/** Radiator / fan stack (radiator support → engine front, compression only): stiffness, crush force per member. */
+const K_RAD_STACK = 6e5;
+const RAD_STACK_YIELD = 8e4;
+/** Front bumper crush-bracket axial yield, N per square bracket member (≈ 0.45 MN for the bar). */
+const BUMPER_BRACKET_YIELD = 1.4e5;
 const K_ANCHOR = 1.2e6;
 const K_BELLY = 2.6e6;
 /**
@@ -458,7 +527,7 @@ const BELLY_YIELD = 2.5e6;
 /** Belly truss nodes (z = f5, f8 stations), height, mass (tank + batteries). */
 const BELLY_Z = [-1.18, 0.62] as const;
 const BELLY_Y = 0.45;
-const BELLY_MASS = 60;
+const BELLY_MASS = 44;
 const K_KNUCKLE = 1.8e6;
 const K_STUB = 2.0e6;
 const K_TIE_ROD = 3.0e6;
@@ -471,8 +540,44 @@ const D_ARM = 900;
 const DAMPER_CALIBRATION = 1.6;
 /** Dual-pair coupling (crossed rim-to-rim beams per ray: the two wheels are bolted together). */
 const K_DUAL = 6e4;
-const PIVOT_BUDGET_SHARE = 0.7;
+const PIVOT_BUDGET_SHARE = 0.97;
 const pivotMass = (fixedK: number): number => round(fixedK / (BUDGET_PER_KG * PIVOT_BUDGET_SHARE), 2);
+
+/**
+ * ANTI-ROLL BARS (`arb{F|R}_{A|T|U}_{L|R}`): a torsion bar across the frame
+ * in two bushings (A, on the rail bottoms), each half a rigid body {A_L, A_R,
+ * arm tip T, offset U} that can only turn about the A_L–A_R line; the arm
+ * tips drop-link to the axle. The halves are coupled by two crossed beams
+ * T_L–U_R / U_L–T_R: turning both halves together (heave) leaves them at
+ * length, twisting one against the other (axle roll) stretches one and
+ * compresses the other — pure roll stiffness, no heave rate. Rated as axle
+ * roll stiffness about the axle's centre line, N·m/rad.
+ *
+ * Laden, the rear axle carries two thirds of the truck on leaf-spring seats
+ * only 1.24 m apart (≈ 1.6e5 N·m/rad): without a bar the rear rolled ≈ 8° on
+ * its springs at 0.45 g, twisted the frame against the stiffer front and
+ * swung the box's CG 0.2 m outboard, so the inside rear duals left the
+ * ground at 0.26 g and the truck tipped at 0.58 g on a tilt table.
+ *
+ * `rollC` (N·m·s/rad) is roll damping on the same torsion beams: a leaf-spring
+ * truck's roll is damped mostly by the inter-leaf friction of its spring
+ * packs, lumped here so it acts in roll only and leaves the ride (heave)
+ * damping at its calibrated ζ. Without it the laden box's roll was damped at
+ * ζ ≈ 0.3 by the shocks alone (seats 1.2–1.7 m apart under a 2.5 m box) and
+ * a 40 km/h full-lock J-turn tipped at 0.47 g lateral, 75 % of the 0.62 g it
+ * takes on a tilt table: the roll overshoot did the rest. The bar ends (T, U)
+ * carry the leaf packs' mass so the damping stays within (Σd/m)·dt.
+ */
+const ARB_SPEC = {
+  front: { tag: 'arbF', xArm: 0.62, axis: [0.6, Z_F + 0.42], tip: [0.84, Z_F], drop: 'FA_sp', rollK: 2.5e5, rollC: 6e4 },
+  rear: { tag: 'arbR', xArm: RA.kU[0], axis: [0.62, Z_R - 0.5], tip: [0.9, Z_R - 0.1], drop: 'RA_kU', rollK: 4e5, rollC: 1e5 },
+} as const;
+/** Bushing x (under the rails), offset-node radius, rigid half-body / drop-link stiffness. */
+const ARB_BUSH_X = RAIL_X;
+const ARB_U_R = 1.4;
+const K_ARB_BODY = 2e6;
+const K_ARB_LINK = 2e6;
+const D_ARB = 2000;
 
 // ====================================================================== hood
 const HOOD_Z = [-3.5, -3.1, -2.76, -2.46] as const;
@@ -654,19 +759,42 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
       stationRing.set(st.id, st.closed ? [[...bottom, ...right, ...top, ...left.reverse()]] : [[...bottom, ...right], [...(bottom.length ? bottom : []), ...left]]);
     }
   }
-  // Side underrun guards: a rail at bumper height between the axles, hung from the box sills.
+  // Side underride guards (between the axles, under the box): two steel rails per side on posts at the box
+  // stations b0–b3, braced to the box floor and to the frame rail (see the GUARD_* constants).
   const GUARD_STATIONS = [0, 1, 2, 3];
-  const guards = new Map<Side, string[]>();
+  const guards = new Map<Side, { lo: string[]; hi: string[] }>();
   for (const s of SIDES) {
-    guards.set(
-      s,
-      GUARD_STATIONS.map((i) => {
-        const id = addNode(`gd${i}_${s}`, [1.16 * sideSign(s), 0.6, BOX_Z[i]!], 7, 'body', true, true, 0.25);
+    const lo: string[] = [];
+    const hi: string[] = [];
+    for (const i of GUARD_STATIONS) {
+      for (const [row, y, list] of [
+        ['lo', GUARD_LO_Y, lo],
+        ['hi', GUARD_HI_Y, hi],
+      ] as const) {
+        const id = addNode(`gd${i}_${row}_${s}`, [GUARD_X * sideSign(s), y, BOX_Z[i]!], GUARD_NODE_MASS, 'body', true, true, GUARD_OBJ_RADIUS);
         tagOf.set(id, 'gd');
-        return id;
-      }),
-    );
+        list.push(id);
+      }
+    }
+    guards.set(s, { lo, hi });
   }
+  // Box side skin: a node at the middle of every wall panel (between two posts and two wall rows), so a hit
+  // between the posts dents the aluminium skin there instead of shoving two whole posts.
+  const SKIN_CELLS = [
+    ['fl', 'wl'],
+    ['wl', 'wm'],
+    ['wm', 'rl'],
+  ] as const;
+  const skin: { id: string; corners: [string, string, string, string] }[] = [];
+  for (let i = 0; i + 1 < BOX.length; i++)
+    for (const s of SIDES)
+      SKIN_CELLS.forEach(([r0, r1], c) => {
+        const corners: [string, string, string, string] = [sid(BOX[i]!.id, r0, s), sid(BOX[i]!.id, r1, s), sid(BOX[i + 1]!.id, r0, s), sid(BOX[i + 1]!.id, r1, s)];
+        const p = [0, 1, 2].map((k) => corners.reduce((a, id) => a + pos.get(id)![k]!, 0) / 4);
+        const id = addNode(`bp${i}_${c}_${s}`, [BOX_DIMS.halfWidth * sideSign(s), p[1]!, p[2]!], SKIN_NODE_MASS, 'body', true, true, SKIN_OBJ_RADIUS);
+        tagOf.set(id, 'bp');
+        skin.push({ id, corners });
+      });
 
   // Belly truss nodes (fuel tank / battery box carriers), group 'body' (shell budget).
   const belly = new Map<Side, string[]>();
@@ -681,7 +809,7 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
     );
 
   // ---- engine (I6, longitudinal) + gearbox: light nodes (the mass is in the front rails)
-  const ENGINE_NODE_MASS = 8;
+  const ENGINE_NODE_MASS = ENGINE_BLOCK_NODE_MASS;
   const engine: string[] = [];
   for (const z of [-3.3, -2.35])
     for (const y of [0.82, 1.36])
@@ -729,9 +857,60 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
     addNode(fa('lp', s), mirror(FA.lp, s), linkPivotMass, 'subframe', true, false);
     addNode(fa('up', s), mirror(FA.up, s), linkPivotMass, 'subframe', true, false);
     addNode(fa('pan', s), mirror(FA.pan, s), panPivotMass, 'subframe', true, false);
-    addNode(ra('lp', s), mirror(RA.lp, s), linkPivotMass, 'subframe', true, false);
+    // The rear spring hangers sit 0.45 m under the rails on long anchors: at the stiffness-sized mass the one
+    // that the rear slammed onto after a 50 km/h nose-stand whipped to 18 m/s (crash.ts vLate); twice the mass
+    // (≈ a forged hanger + the spring eye) keeps it with the frame.
+    addNode(ra('lp', s), mirror(RA.lp, s), 2 * linkPivotMass, 'subframe', true, false);
     addNode(ra('up', s), mirror(RA.up, s), linkPivotMass, 'subframe', true, false);
     addNode(ra('pan', s), mirror(RA.pan, s), panPivotMass, 'subframe', true, false);
+  }
+
+  // ---- anti-roll bars: geometry, torsion-beam stiffness from the rated roll stiffness, node masses from Σk
+  interface ArbBuilt {
+    tag: string;
+    A: Record<Side, string>;
+    T: Record<Side, string>;
+    U: Record<Side, string>;
+    drop: string;
+    kT: number;
+    dT: number;
+  }
+  const arbs: ArbBuilt[] = [];
+  for (const spec of [ARB_SPEC.front, ARB_SPEC.rear].filter((x) => x.rollK > 0)) {
+    const [ya, za] = spec.axis;
+    const [yt, zt] = spec.tip;
+    const arm = [yt - ya, zt - za];
+    const armLen = Math.hypot(arm[0]!, arm[1]!);
+    // Offset node: perpendicular to the arm in the y–z plane, on the upper side.
+    let perp = [-arm[1]! / armLen, arm[0]! / armLen];
+    if (perp[0]! < 0) perp = [-perp[0]!, -perp[1]!];
+    const P = (s: Side, k: 'T' | 'U'): V3 => {
+      const x = spec.xArm * sideSign(s);
+      return k === 'T' ? [x, yt, zt] : [x, ya + ARB_U_R * perp[0]!, za + ARB_U_R * perp[1]!];
+    };
+    // Torsion lever λ = ∂|T_L − U_R| / ∂(θ_L − θ_R) (rotation about the bar axis, numerically).
+    const rotX = (p: V3, th: number): V3 => {
+      const y = p[1] - ya;
+      const z = p[2] - za;
+      return [p[0], ya + y * Math.cos(th) - z * Math.sin(th), za + y * Math.sin(th) + z * Math.cos(th)];
+    };
+    const eps = 1e-6;
+    const lam = Math.abs(len(sub(rotX(P('L', 'T'), eps), P('R', 'U'))) - len(sub(P('L', 'T'), P('R', 'U')))) / eps;
+    // Axle roll φ moves the drop links ±xArm·φ vertically: arm turn ±xArm·φ/ℓ (ℓ = arm's fore-aft length).
+    const gear = (2 * spec.xArm) / Math.abs(zt - za);
+    const kT = sig3(spec.rollK / (2 * lam * lam * gear * gear));
+    const dT = sig3(spec.rollC / (2 * lam * lam * gear * gear));
+    const dampMass = (sumD: number): number => (sumD * DT) / 0.95;
+    const mT = round(Math.max((3 * K_ARB_BODY + kT + K_ARB_LINK) / (SHELL_BUDGET_PER_KG * 0.97), dampMass(5 * D_ARB + dT)), 2);
+    const mU = round(Math.max((3 * K_ARB_BODY + kT) / (SHELL_BUDGET_PER_KG * 0.97), dampMass(3 * D_ARB + dT)), 2);
+    const mA = round((5 * K_ARB_BODY + 4 * K_ANCHOR) / (SHELL_BUDGET_PER_KG * 0.97), 2);
+    const b: ArbBuilt = { tag: spec.tag, A: { L: '', R: '' }, T: { L: '', R: '' }, U: { L: '', R: '' }, drop: spec.drop, kT, dT };
+    for (const s of SIDES) {
+      b.A[s] = addNode(`${spec.tag}_A_${s}`, [spec.xArm * sideSign(s), ya, za], mA, 'body', false, false);
+      b.T[s] = addNode(`${spec.tag}_T_${s}`, P(s, 'T'), mT, 'body', false, false);
+      b.U[s] = addNode(`${spec.tag}_U_${s}`, P(s, 'U'), mU, 'body', false, false);
+    }
+    arbs.push(b);
   }
 
   // ---- hood sub-rig (appended after the structure; sedan contract layout)
@@ -762,14 +941,14 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
       braked: true,
       brakeTorqueMax: 3150,
       treadBrushStiffness: front ? FRONT_BRUSH : REAR_BRUSH,
-      friction: front ? FRONT_FRICTION : BOXTRUCK_TIRE.friction,
+      friction: BOXTRUCK_TIRE.friction,
       handbrake: !front,
       // No WheelDef.attach: the hub links are body beams (kingpin / axle-end below). The tread brush puts a
       // wheel's overturning moment as a lateral force pair between the attach node and the hubs, F = M/h;
       // on these axles the only node above the hubs is 0.15–0.19 m up, and that pair (2.3× the tyre's side
       // force, onto the rigid axle) pumped a 5 Hz axle tramp. Without it the moment is a hub couple, which
       // the kingpin knuckle and the axle-end brackets carry.
-      attach: [],
+      attach: front ? [] : [`RA_ae_${id.includes('L') ? 'L' : 'R'}`],
       attachSpring: ATTACH_SPRING,
       attachDamp: ATTACH_DAMP,
       attachBreakF: 3e5,
@@ -779,16 +958,25 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
   const axleBody = (prefix: string): number => nodes.filter((n) => n.id.startsWith(prefix) && n.group === 'axle').reduce((a, n) => a + n.mass, 0);
   const unsprungAxle = { front: 2 * unsprungWheel(true) + axleBody('FA_'), rear: 4 * unsprungWheel(false) + axleBody('RA_') };
 
-  // ---- mass distribution solve: structure masses m_i = b_i·(s + a·(z − z̄)) — total mass and the
-  // static axle split; the CG height is what the base masses give (asserted by boxtruck.test.ts).
+  // ---- mass distribution: the chassis, cab and box structure take their base masses × STRUCTURE_MASS_SCALE;
+  // the FREIGHT nodes take the rest, m_i = b_i·(s + a·(z − z̄)), solved for the total mass and the static
+  // axle split — the load's fore-aft position sets the split. (A solve over every node rescaled the whole
+  // chassis whenever one part changed: the frame, towers and box lost a quarter of their stiffness budget
+  // to a heavier engine block and the truck rolled softer.) The CG height follows (asserted by the test).
   {
     const M = BOXTRUCK_TARGETS.totalMass;
     const zcg = Z_R - BOXTRUCK_TARGETS.frontAxleShare * BOXTRUCK_TARGETS.wheelbase;
-    const isStruct = new Set(structure);
+    const payload = (id: string): boolean => /^b\d+_cg$/.test(id);
+    for (const id of structure) {
+      if (payload(id)) continue;
+      const n = nodes.find((q) => q.id === id)!;
+      n.mass = round(massOf.get(id)! * STRUCTURE_MASS_SCALE, 3);
+      massOf.set(id, n.mass);
+    }
     let fm = 0;
     let fz = 0;
     for (const n of nodes) {
-      if (isStruct.has(n.id)) continue;
+      if (payload(n.id)) continue;
       fm += n.mass;
       fz += n.mass * n.pos[2];
     }
@@ -797,30 +985,27 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
       fm += uw;
       fz += uw * w.hubInner[2];
     }
+    const cargo = nodes.filter((n) => payload(n.id));
     let bSum = 0;
     let zBar = 0;
-    for (const id of structure) {
-      const b = massOf.get(id)!;
-      bSum += b;
-      zBar += b * pos.get(id)![2];
+    for (const n of cargo) {
+      bSum += n.mass;
+      zBar += n.mass * n.pos[2];
     }
     zBar /= bSum;
     const A = [
       [0, 0],
       [0, 0],
     ];
-    for (const id of structure) {
-      const b = massOf.get(id)!;
-      const z = pos.get(id)![2];
+    for (const n of cargo) {
+      const z = n.pos[2];
       const basis = [1, z - zBar];
       const wts = [1, z];
-      for (let r = 0; r < 2; r++) for (let k = 0; k < 2; k++) A[r]![k]! += b * wts[r]! * basis[k]!;
+      for (let r = 0; r < 2; r++) for (let k = 0; k < 2; k++) A[r]![k]! += n.mass * wts[r]! * basis[k]!;
     }
     const coef = solveN(A, [M - fm, M * zcg - fz]);
-    for (const n of nodes) {
-      if (!isStruct.has(n.id)) continue;
-      const b = massOf.get(n.id)!;
-      const m = b * (coef[0]! + coef[1]! * (n.pos[2] - zBar));
+    for (const n of cargo) {
+      const m = n.mass * (coef[0]! + coef[1]! * (n.pos[2] - zBar));
       if (!(m > 0.5)) throw new Error(`boxtruck: mass solve gave ${m} kg for ${n.id}`);
       n.mass = round(m, 3);
       massOf.set(n.id, n.mass);
@@ -924,17 +1109,23 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
     const t = tagOf.get(id);
     return t === 'fc' || t === 'fi' || t === 'fl';
   };
-  const boxCls = (a: string, b: string): BeamClass => (boxFloorTag(a) && boxFloorTag(b) ? 'boxFloor' : 'box');
+  // Floor runners (one row, station to station) carry the fore-aft load; the crossmembers (boxFloorX) and
+  // the floor's diagonals (boxFloorD) are what a side hit folds.
+  const floorRow = (id: string): string => id.split('_').slice(1).join('_');
+  const boxCls = (a: string, b: string): BeamClass =>
+    boxFloorTag(a) && boxFloorTag(b) ? (floorRow(a) === floorRow(b) ? 'boxFloor' : a.split('_')[0] === b.split('_')[0] ? 'boxFloorX' : 'boxFloorD') : 'box';
 
+  /** Rail web diagonals (lo_i ↔ hi_i+1): the bay's shear members, rated apart from the crushing chords. */
+  const webDiagonals = new Set<string>();
   // FRAME: an explicit two-sided Pratt truss per rail (chords lo / hi, web diagonals, verticals) + crossmembers.
   FRAME.forEach((st, i) => {
     const cls = st.cls;
     for (const s of SIDES) link(sid(st.id, 'lo', s), sid(st.id, 'hi', s), cls, FRAME_WEB_W);
     if (st.bulkhead) {
-      link(sid(st.id, 'lo', 'L'), sid(st.id, 'lo', 'R'), cls);
-      link(sid(st.id, 'hi', 'L'), sid(st.id, 'hi', 'R'), cls);
-      link(sid(st.id, 'lo', 'L'), sid(st.id, 'hi', 'R'), cls, 0.7);
-      link(sid(st.id, 'hi', 'L'), sid(st.id, 'lo', 'R'), cls, 0.7);
+      link(sid(st.id, 'lo', 'L'), sid(st.id, 'lo', 'R'), cls, FRAME_XMEMBER_W);
+      link(sid(st.id, 'hi', 'L'), sid(st.id, 'hi', 'R'), cls, FRAME_XMEMBER_W);
+      link(sid(st.id, 'lo', 'L'), sid(st.id, 'hi', 'R'), cls, FRAME_XMEMBER_W);
+      link(sid(st.id, 'hi', 'L'), sid(st.id, 'lo', 'R'), cls, FRAME_XMEMBER_W);
     }
     for (const e of st.extra ?? []) {
       if (e[1] === 0) {
@@ -952,10 +1143,13 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
     if (nx === undefined) return;
     const c: BeamClass = cls === 'horn' || nx.cls === 'horn' ? 'horn' : cls;
     for (const s of SIDES) {
-      link(sid(st.id, 'lo', s), sid(nx.id, 'lo', s), c, FRAME_LONGITUDINAL_W);
-      link(sid(st.id, 'hi', s), sid(nx.id, 'hi', s), c, FRAME_LONGITUDINAL_W);
+      const chordW = c === 'horn' ? HORN_CHORD_W : FRAME_LONGITUDINAL_W;
+      link(sid(st.id, 'lo', s), sid(nx.id, 'lo', s), c, chordW);
+      link(sid(st.id, 'hi', s), sid(nx.id, 'hi', s), c, chordW);
       link(sid(st.id, 'lo', s), sid(nx.id, 'hi', s), c, FRAME_WEB_W);
       link(sid(st.id, 'hi', s), sid(nx.id, 'lo', s), c, FRAME_WEB_W);
+      webDiagonals.add(key(sid(st.id, 'lo', s), sid(nx.id, 'hi', s)));
+      webDiagonals.add(key(sid(st.id, 'hi', s), sid(nx.id, 'lo', s)));
     }
   });
   for (const chain of STRUCTURES) {
@@ -1051,16 +1245,10 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
       link(sid(a, 'fc'), sid(b, 'fi', s), 'boxFloor');
       link(sid(a, 'rl', s), sid(b, 'rc'), 'box');
       link(sid(a, 'rc'), sid(b, 'rl', s), 'box');
-      for (const [t0, t1] of [
-        ['fl', 'wl'],
-        ['wl', 'wm'],
-        ['wm', 'rl'],
-      ] as const) {
-        link(sid(a, t0, s), sid(b, t1, s), 'box');
-        link(sid(a, t1, s), sid(b, t0, s), 'box');
-      }
     }
   }
+  // Wall panels: skin spokes from each panel's middle node to its four corners (the panel's shear web).
+  for (const { id, corners } of skin) for (const c of corners) link(id, c, 'skin');
   // Safety-cell chords + cross-cabin diagonals.
   const cabKey = (i: number, t: string, s: Side): string => (pos.has(sid(`c${i}`, t, s)) ? sid(`c${i}`, t, s) : sid(`c${i}`, t));
   const spanKeys = new Set<string>();
@@ -1182,32 +1370,31 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
     }
   });
   for (const [a, b] of boxMounts) fixedLink(a, b, 'boxMount', K_BOX_MOUNT);
-  // Side guards: brackets to the sill and runner above, rail between the brackets.
+  // Side guards: posts, two rails, bay diagonals; each post hung from the box sill and floor runner and its
+  // foot braced inboard to the frame rail's lower flange (the guard catches a car's bumper and hood, instead
+  // of the 1.24 m box floor riding over them and onto the windscreen).
   for (const s of SIDES) {
-    const g = guards.get(s)!;
-    g.forEach((id, k) => {
-      const st = BOX[GUARD_STATIONS[k]!]!.id;
-      link(id, sid(st, 'fl', s), 'guard');
-      link(id, sid(st, 'fi', s), 'guard');
-      link(id, sid(st, 'wl', s), 'guard', 0.5);
-      const nx = g[k + 1];
-      if (nx === undefined) return;
-      const st1 = BOX[GUARD_STATIONS[k + 1]!]!.id;
-      link(id, nx, 'guard', 2);
-      link(id, sid(st1, 'fl', s), 'guard');
-      link(nx, sid(st, 'fl', s), 'guard');
+    const { lo, hi } = guards.get(s)!;
+    GUARD_STATIONS.forEach((i, k) => {
+      const st = BOX[i]!.id;
+      const fr = `f${i + 6}`;
+      link(lo[k]!, hi[k]!, 'guard', 2);
+      link(hi[k]!, sid(st, 'fl', s), 'guard', 2);
+      link(hi[k]!, sid(st, 'fi', s), 'guard', 1.5);
+      link(lo[k]!, sid(st, 'fi', s), 'guard', 1);
+      link(lo[k]!, sid(fr, 'lo', s), 'guard', 1.5);
+      link(hi[k]!, sid(fr, 'lo', s), 'guard', 1);
+      if (k + 1 >= GUARD_STATIONS.length) return;
+      link(lo[k]!, lo[k + 1]!, 'guard', GUARD_RAIL_W);
+      link(hi[k]!, hi[k + 1]!, 'guard', GUARD_RAIL_W);
+      link(lo[k]!, hi[k + 1]!, 'guard', 1);
+      link(hi[k]!, lo[k + 1]!, 'guard', 1);
     });
   }
   // Bumpers: brackets onto the frame ends.
   const bumperMounts: [string, string][] = [];
   for (const s of SIDES) {
     bumperMounts.push(
-      [sid('bf', 'bl', s), sid('f0', 'lo', s)],
-      [sid('bf', 'bl', s), sid('f0', 'hi', s)],
-      [sid('bf', 'bu', s), sid('f0', 'hi', s)],
-      [sid('bf', 'bu', s), sid('f0', 'lo', s)],
-      [sid('bf', 'bo', s), sid('f0', 'lo', s)],
-      [sid('bf', 'bo', s), sid('f0', 'hi', s)],
       [sid('br', 'bl', s), sid('f13', 'lo', s)],
       [sid('br', 'bl', s), sid('f12', 'lo', s)],
       [sid('br', 'bu', s), sid('f13', 'lo', s)],
@@ -1215,12 +1402,34 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
       [sid('br', 'bo', s), sid('f13', 'lo', s)],
     );
   }
-  bumperMounts.push(['bf_bl', 'f0_lo_L'], ['bf_bl', 'f0_lo_R'], ['bf_bu', 'f0_hi_L'], ['bf_bu', 'f0_hi_R']);
   bumperMounts.push(['br_bl', 'f13_lo_L'], ['br_bl', 'f13_lo_R'], ['br_bu', 'f13_lo_L'], ['br_bu', 'f13_lo_R']);
   // The underride bar hangs 0.3 m below the rails: struts forward to f12 as well (it sagged 10 cm on f13 alone).
   bumperMounts.push(['br_bl', 'f12_lo_L'], ['br_bl', 'f12_lo_R'], ['br_bu', 'f12_lo_L'], ['br_bu', 'f12_lo_R']);
   for (const s of SIDES) bumperMounts.push([sid('br', 'bu', s), sid('f12', 'lo', s)], [sid('br', 'bo', s), sid('f12', 'lo', s)]);
   for (const [a, b] of bumperMounts) fixedLink(a, b, 'bumperMount', K_BUMPER_MOUNT);
+  // Front bumper: a deep steel channel on two crush brackets per horn. The brackets run square along the rail
+  // (bk → lower flange, bh → upper) with crossed webs; they crush first at BUMPER_BRACKET_YIELD and fold up
+  // solid (the compression floor), then the bar bears on the horn tips. Diagonal brackets from the bar ends
+  // let it slide back past the horns (the horn tips then hit the wall bare and folded under).
+  const bumperFront: [string, string, number][] = [];
+  for (const s of SIDES) {
+    bumperFront.push(
+      [sid('bf', 'bk', s), sid('f0', 'lo', s), BUMPER_BRACKET_YIELD],
+      [sid('bf', 'bh', s), sid('f0', 'hi', s), BUMPER_BRACKET_YIELD],
+      [sid('bf', 'bk', s), sid('f0', 'hi', s), 0.6 * BUMPER_BRACKET_YIELD],
+      [sid('bf', 'bh', s), sid('f0', 'lo', s), 0.6 * BUMPER_BRACKET_YIELD],
+      // Bar-end and centre stays (they hold the bar's own modes still; the square brackets carry the crush).
+      [sid('bf', 'bo', s), sid('f0', 'lo', s), 0.4 * BUMPER_BRACKET_YIELD],
+      [sid('bf', 'bl', s), sid('f0', 'lo', s), 0.4 * BUMPER_BRACKET_YIELD],
+      [sid('bf', 'bu', s), sid('f0', 'hi', s), 0.4 * BUMPER_BRACKET_YIELD],
+      ['bf_bl', sid('f0', 'lo', s), 0.4 * BUMPER_BRACKET_YIELD],
+      ['bf_bu', sid('f0', 'hi', s), 0.4 * BUMPER_BRACKET_YIELD],
+    );
+  }
+  for (const [a, b, y] of bumperFront) {
+    fixedLink(a, b, 'bumperMount', K_BUMPER_MOUNT, y);
+    bumperMounts.push([a, b]);
+  }
 
   // ---- engine: rigid block + mounts to the frame
   const block = [...engine, ...gearbox];
@@ -1232,8 +1441,24 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
       if (gbxPair && !(gearbox.includes(a) && gearbox.includes(b)) && (pos.get(a)![2] < -2.8 || pos.get(b)![2] < -2.8)) continue;
       link(a, b, 'engine');
     }
-  const framePool = ['f0', 'f1', 'f2', 'f3', 'f4', 'f5'].flatMap((s) => stationIds.get(s)!).filter((id) => !id.includes('_tw_'));
-  for (const e of block) for (const n of nearest(e, framePool, 3)) link(e, n, 'engMount');
+  const framePool = ['f0', 'f1', 'f2', 'f3', 'f4', 'f5'].flatMap((s) => stationIds.get(s)!).filter((id) => !id.includes('_tw_') && !id.endsWith('_x'));
+  for (const e of block) for (const n of nearest(e, framePool, 3)) fixedLink(e, n, 'engMount', K_ENG_MOUNT, ENG_MOUNT_YIELD);
+  // Radiator / fan stack: once the clip has crushed back onto the engine, the radiator support bears on the block
+  // (compression only), so the engine and its mounts join the load path at grille height.
+  for (const [a, b] of [
+    ['s0_rl_L', 'eng_flo_L'],
+    ['s0_rl_R', 'eng_flo_R'],
+    ['s0_rh_L', 'eng_fhi_L'],
+    ['s0_rh_R', 'eng_fhi_R'],
+    ['s0_rs', 'eng_flo_L'],
+    ['s0_rs', 'eng_flo_R'],
+    ['s0_rt', 'eng_fhi_L'],
+    ['s0_rt', 'eng_fhi_R'],
+  ] as const) {
+    const ma = massOf.get(a)!;
+    const mb = massOf.get(b)!;
+    fix({ a, b, type: 'support', k: K_RAD_STACK, d: sig3(0.6 * Math.sqrt((K_RAD_STACK * ma * mb) / (ma + mb))), deform: RAD_STACK_YIELD, breakF: 0 });
+  }
 
   // ---- suspension pivots → frame anchors (4 of the 8 nearest spanning space best)
   const anchors = (p: string, pool: readonly string[]): string[] => {
@@ -1279,10 +1504,10 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
    * Rigid axle body from two 4-node ends [top, end, low-rear, low-front]: each end all pairs (a
    * tetrahedron), joined by seven cross beams (two rigid bodies need six; seven keep it mirror-symmetric), plus a centre node.
    */
-  const rigidBody = (ends: readonly (readonly [string, string, string, string])[], centre: string, centreLinks: readonly number[]): void => {
+  const rigidBody = (ends: readonly (readonly [string, string, string, string])[], centre: string, centreLinks: readonly number[], k = K_AXLE): void => {
     const L = ends[0]!;
     const R = ends[1]!;
-    for (const e of [L, R]) for (let p = 0; p < 4; p++) for (let q = p + 1; q < 4; q++) rigid(e[p]!, e[q]!);
+    for (const e of [L, R]) for (let p = 0; p < 4; p++) for (let q = p + 1; q < 4; q++) rigid(e[p]!, e[q]!, k);
     // Mirror-symmetric cross bracing (one-way diagonals made the axle body chiral: it toed under side load).
     for (const [p, q] of [
       [0, 0],
@@ -1293,8 +1518,8 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
       [0, 3],
       [3, 0],
     ] as const)
-      rigid(L[p]!, R[q]!);
-    for (const k of centreLinks) for (const e of [L, R]) rigid(centre, e[k]!);
+      rigid(L[p]!, R[q]!, k);
+    for (const c of centreLinks) for (const e of [L, R]) rigid(centre, e[c]!, k);
   };
   const hydroTravel = { L: 0, R: 0 };
   {
@@ -1336,16 +1561,15 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
   }
   const dualLinks: [string, string][] = [];
   {
-    rigidBody(SIDES.map((s) => [ra('kU', s), ra('ae', s), ra('ab', s), ra('af', s)] as const), ra('D'), [0, 2]);
+    rigidBody(SIDES.map((s) => [ra('kU', s), ra('ae', s), ra('ab', s), ra('af', s)] as const), ra('D'), [0, 2], K_REAR_AXLE);
     for (const s of SIDES) {
       for (const inner of [false, true]) {
         const w = dualId(s, inner);
         // Hub on the axle end (attach: ae) + the brackets fore / aft below the tube (non-coplanar) + a stub axle.
         rigid(wheelNodeId(w, 'hubI'), wheelNodeId(w, 'hubO'), K_STUB);
-        for (const h of ['hubI', 'hubO'] as const) fix({ a: wheelNodeId(w, h), b: ra('ae', s), type: 'normal', k: ATTACH_SPRING, d: ATTACH_DAMP, deform: 0, breakF: 3e5 });
         for (const h of ['hubI', 'hubO'] as const) {
-          rigid(wheelNodeId(w, h), ra('ab', s), K_AXLE * 0.6);
-          rigid(wheelNodeId(w, h), ra('af', s), K_AXLE * 0.6);
+          rigid(wheelNodeId(w, h), ra('ab', s), K_AXLE);
+          rigid(wheelNodeId(w, h), ra('af', s), K_AXLE);
         }
         rigid(wheelNodeId(w, 'hubI'), ra('kU', s), K_AXLE * 0.5);
       }
@@ -1397,6 +1621,21 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
   };
   spring('front');
   spring('rear');
+
+  // ---- anti-roll bars: half-bodies, torsion, drop links, bushings on the frame
+  for (const b of arbs) {
+    const rb = (x: string, y: string): void => fix({ a: x, b: y, type: 'normal', k: K_ARB_BODY, d: D_ARB, deform: 0, breakF: 0 });
+    rb(b.A.L, b.A.R);
+    for (const s of SIDES) {
+      for (const n of [b.T[s], b.U[s]]) for (const a of SIDES) rb(n, b.A[a]);
+      rb(b.T[s], b.U[s]);
+      const sd = s === 'L' ? 'R' : 'L';
+      fix({ a: b.T[s], b: b.U[sd], type: 'normal', k: b.kT, d: b.dT, deform: 0, breakF: 0 });
+      fix({ a: b.T[s], b: `${b.drop}_${s}`, type: 'normal', k: K_ARB_LINK, d: D_ARB, deform: 0, breakF: 0 });
+      const pool = frameNodes.filter((id) => !id.includes('_tw_') && !id.endsWith('_x') && Math.abs(pos.get(id)![2] - pos.get(b.A[s])![2]) < 0.8);
+      for (const n of anchors(b.A[s], pool)) fixedLink(b.A[s], n, 'subframe', K_ANCHOR);
+    }
+  }
 
   // ---- hood beams (skin grid, hinges at the clip's rear apron, latch on the radiator support, rests on the fenders)
   const subBeams: RigBeamDef[] = [];
@@ -1468,7 +1707,7 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
     W.set(b.a, (W.get(b.a) ?? 0) + b.w);
     W.set(b.b, (W.get(b.b) ?? 0) + b.w);
   }
-  const isShell = (id: string): boolean => stationOf.has(id) || id.startsWith('gd') || id.startsWith('kb');
+  const isShell = (id: string): boolean => stationOf.has(id) || id.startsWith('gd') || id.startsWith('kb') || id.startsWith('bp');
   const share = (id: string): number => {
     const perKg = isShell(id) ? SHELL_BUDGET_PER_KG : BUDGET_PER_KG;
     const budget = perKg * massOf.get(id)! - (fixedK.get(id) ?? 0);
@@ -1496,7 +1735,7 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
   };
   const gapYield = (g: string): number => (g[0] === 'f' ? FRAME_GAP_YIELD[Number(g.slice(1))]! : CAB_GAP_YIELD[Number(g.slice(1))]!);
   const czOf = (a: string, b: string): number => Math.abs(pos.get(a)![2] - pos.get(b)![2]) / dist(a, b);
-  const isLong = (i: number): boolean => auto[i]!.w > CLASSES[auto[i]!.cls].w * 1.01;
+  const isLong = (i: number): boolean => auto[i]!.w > CLASSES[auto[i]!.cls].w * 1.01 && !webDiagonals.has(key(auto[i]!.a, auto[i]!.b));
   const gapLongCz = new Map<string, number>();
   auto.forEach(({ a, b, cls }, i) => {
     const g = gapOf(a, b);
@@ -1538,7 +1777,11 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
     }
     const g = gapOf(a, b);
     let section = 0;
-    if ((cls === 'cage' || cls === 'frame' || cls === 'horn') && g !== null && gapLongCz.has(g)) {
+    if ((cls === 'frame' || cls === 'horn') && g !== null && gapLongCz.has(g) && webDiagonals.has(key(a, b))) {
+      // Web diagonals keep the bay square while its chords crush: at the chords' share the horn bays sheared
+      // into a parallelogram, the horn tip tucked under the next station and the horns folded instead of crushing.
+      section = FRAME_WEB_DIAG_FACTOR * longDeform(g);
+    } else if ((cls === 'cage' || cls === 'frame' || cls === 'horn') && g !== null && gapLongCz.has(g)) {
       section = isLong(i)
         ? longDeform(g)
         : Math.max(k * gapTravel(g) * Math.max(czOf(a, b), SHEAR_YIELD_FLOOR), (cls === 'cage' ? SHEAR_FORCE_SHARE : FRAME_SHEAR_FORCE_SHARE) * longDeform(g));
@@ -1553,12 +1796,15 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
         for (let g = lo; g < hi; g++) if (gapLongCz.has(`f${g}`)) m = Math.min(m, longDeform(`f${g}`));
         if (Number.isFinite(m)) section = m;
       }
-    } else if ((cls === 'cage' || cls === 'frame') && g === null) {
+    } else if ((cls === 'cage' || cls === 'frame' || cls === 'horn') && g === null) {
       const st = stationOf.get(a);
       if (st !== undefined && st === stationOf.get(b) && (st[0] === 'f' || st[0] === 'c')) {
         const n = Number(st.slice(1));
         const near = Math.max(gapTravel(`${st[0]}${n - 1}`), gapTravel(`${st[0]}${n}`));
         section = k * near * IN_STATION_YIELD_FACTOR;
+        // A rail's web and the crossmembers keep the section's shape while its chords crush: at the gap-travel
+        // rule the horn webs yielded in tension at 60 kN, the flanges peeled apart and the horns folded under.
+        if (st[0] === 'f') section = Math.max(section, FRAME_SECTION_MIN_YIELD);
       }
     }
     if (section === 0 && spanKeys.has(key(a, b))) section = CABIN_SPAN_YIELD_STRAIN * k * dist(a, b);

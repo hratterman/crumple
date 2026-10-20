@@ -2,16 +2,7 @@
  * BOX TRUCK (P6 F3) definition, handling, tip-over and crash acceptance
  * (docs/CONTRACTS.md "Fleet targets": the boxtruck column). Every scenario runs
  * once (beforeAll) and the table is printed, so the file doubles as the
- * truck's tuning report.
- *
- * Measured against the column, two targets are NOT met and are asserted at
- * what the rig does (see the report): the 50 km/h frontal leaves ≈ 0.8 m of
- * permanent crush (column: 25–50 cm) — a 6.5 t truck needs ≈ 1.5 MN through a
- * ladder frame built from 12–40 kg nodes at dt 1/2000, and the horns fold
- * rather than crush, so the result swings between ≈ 0.4 and 0.8 m with small
- * changes — and a sedan into the box side at 50 km/h ducks under the 1.14 m
- * box floor onto the side guard and frame rail, so the box wall itself is
- * barely touched (column: ≥ 15 cm local dent; measured ≈ 1–3 cm).
+ * truck's tuning report. Every assertion is at the column's target.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { MaterialId } from '../../protocol/messages';
@@ -183,6 +174,19 @@ const CAB_ROOF: CrushProbe[] = [
   },
 ];
 
+/** Lowest 0.1 s-mean corner load over the step steer, as a share of the corner's static load. */
+function stepMinMeanShare(): number {
+  const S = step.samples;
+  let lo = Infinity;
+  for (let w = 0; w < S[0]!.load.length; w++)
+    for (let i = 9; i < S.length; i++) {
+      let m = 0;
+      for (let j = i - 9; j <= i; j++) m += S[j]!.load[w]! / 10;
+      lo = Math.min(lo, m / S[0]!.load[w]!);
+    }
+  return lo;
+}
+
 // ====================================================================== crash
 let f50: CrashResult;
 let f64: CrashResult;
@@ -267,7 +271,12 @@ function boxFrontal(kmh: number): BoxFrontal {
 }
 
 interface SideHit {
-  /** Struck-side wall nodes: max inward offset from their row neighbours' mean (a local dent), m — max and final. */
+  /**
+   * Local dent of the struck wall, m (max over time, and final): the largest inward displacement of a
+   * struck-side wall node (posts, rails and the panel-centre skin nodes) beyond the displacement of the
+   * box's own end frames (bilinear in z and y between the b0 and b7 corner posts), so the box sliding,
+   * yawing or leaning away from the hit is not counted as a dent.
+   */
   dentMax: number;
   dent: number;
   /** Box width (struck wall to far wall) lost, any station / row, m — max over time. */
@@ -291,14 +300,29 @@ function sedanIntoBox(kmh: number): SideHit {
   for (let t = 0; t < 0.5 * SIM_HZ; t++) eng.step();
   expect(kinematics(sedan).fx).toBeLessThan(-0.9);
   const rows = ['fl', 'wl', 'wm', 'rl'];
-  const local = (): number => {
+  const last = BOX_DIMS.stations - 1;
+  const wall = [
+    ...rows.flatMap((r) => Array.from({ length: last - 1 }, (_, i) => `b${i + 1}_${r}_R`)),
+    ...ids.filter((n) => /^bp\d+_\d_R$/.test(n)),
+  ].map(id);
+  // End-frame corners: [front low, front high, rear low, rear high].
+  const corners = [`b0_fl_R`, `b0_rl_R`, `b${last}_fl_R`, `b${last}_rl_R`].map(id);
+  const X0 = (i: number): number => s.posX[i]!;
+  const rest = { x: wall.map(X0), y: wall.map((i) => s.posY[i]!), z: wall.map((i) => s.posZ[i]!), cx: corners.map(X0) };
+  const [zF, zR] = [s.posZ[corners[0]!]!, s.posZ[corners[2]!]!];
+  const [yLo, yHi] = [s.posY[corners[0]!]!, s.posY[corners[1]!]!];
+  const dentNow = (): number => {
+    const d = corners.map((c, k) => s.posX[c]! - rest.cx[k]!);
     let best = -Infinity;
-    for (const r of rows)
-      for (let i = 1; i < 7; i++) best = Math.max(best, (s.posX[id(`b${i - 1}_${r}_R`)]! + s.posX[id(`b${i + 1}_${r}_R`)]!) / 2 - s.posX[id(`b${i}_${r}_R`)]!);
+    wall.forEach((n, k) => {
+      const u = (rest.z[k]! - zF) / (zR - zF);
+      const v = (rest.y[k]! - yLo) / (yHi - yLo);
+      const ref = (1 - u) * ((1 - v) * d[0]! + v * d[1]!) + u * ((1 - v) * d[2]! + v * d[3]!);
+      best = Math.max(best, ref - (s.posX[n]! - rest.x[k]!));
+    });
     return best;
   };
-  const width = (): number[] => rows.flatMap((r) => [0, 1, 2, 3, 4, 5, 6, 7].map((i) => Math.hypot(s.posX[id(`b${i}_${r}_R`)]! - s.posX[id(`b${i}_${r}_L`)]!, s.posY[id(`b${i}_${r}_R`)]! - s.posY[id(`b${i}_${r}_L`)]!)));
-  const l0 = local();
+  const width = (): number[] => rows.flatMap((r) => Array.from({ length: last + 1 }, (_, i) => Math.hypot(s.posX[id(`b${i}_${r}_R`)]! - s.posX[id(`b${i}_${r}_L`)]!, s.posY[id(`b${i}_${r}_R`)]! - s.posY[id(`b${i}_${r}_L`)]!)));
   const w0 = width();
   setMotion(sedan, kmh / 3.6, 0);
   let dentMax = 0;
@@ -306,10 +330,10 @@ function sedanIntoBox(kmh: number): SideHit {
   for (let t = 0; t < 2.5 * SIM_HZ; t++) {
     eng.step();
     if (t % 20 !== 0) continue;
-    dentMax = Math.max(dentMax, local() - l0);
+    dentMax = Math.max(dentMax, dentNow());
     width().forEach((w, i) => (widthLossMax = Math.max(widthLossMax, w0[i]! - w)));
   }
-  return { dentMax, dent: local() - l0, widthLossMax, boxMountsBroken: brokenCount(truck, BOXTRUCK_DESIGN.boxMounts), finite: finite(truck), sedanFinite: finite(sedan) };
+  return { dentMax, dent: dentNow(), widthLossMax, boxMountsBroken: brokenCount(truck, BOXTRUCK_DESIGN.boxMounts), finite: finite(truck), sedanFinite: finite(sedan) };
 }
 
 beforeAll(() => {
@@ -339,7 +363,7 @@ afterAll(() => {
     `static: sag ${f(st.sag * 100, 1)} cm, creep ${f(st.creep * 1000, 1)} mm/s, jitter ${f(st.jitter, 3)} m/s, CG at rest ${f(cgRest, 3)} m`,
     `launch: 0–80 ${f(t80, 1)} s, 0–100 ${f(launch.t100, 1)} s, drift ${f(launch.headingDrift100, 1)}°; physics ${f(launchMsPerSimS, 0)} ms/sim-s`,
     `brake 80–0: ${f(brake.dist, 1)} m, drift ${f(brake.drift, 1)}°`,
-    `step 0.06 @ 60: overshoot ${f(step.overshoot)}, latG ${f(step.latG)}, spun ${step.spun}, min corner load ${f(Math.min(...step.samples.map((s) => Math.min(...s.load))), 0)} N`,
+    `step 0.06 @ 60: overshoot ${f(step.overshoot)}, latG ${f(step.latG)}, spun ${step.spun}, min corner load ${f(Math.min(...step.samples.map((s) => Math.min(...s.load))), 0)} N (0.1 s mean ≥ ${f(stepMinMeanShare() * 100, 0)} % of static)`,
     `governed: max ${f(gov.vmax, 1)} km/h, after 30 s ${f(gov.vEnd, 1)} km/h, |yaw| > 100 km/h ≤ ${f(gov.yawMax, 3)} rad/s`,
     formatTurn('ramp-steer 60', ramp),
     formatTurn('J-turn 40', j40),
@@ -374,9 +398,21 @@ describe('BOXTRUCK handling (fleet targets)', () => {
     expect(brake.drift).toBeLessThanOrEqual(5);
   });
 
-  it('step steer 0.06 at 60 km/h: no spin, no wheel lift', () => {
+  it('step steer 0.06 at 60 km/h: no spin, no wheel lift (every corner keeps ≥ 20 % of its load over any 0.1 s, never 0)', () => {
     expect(step.spun).toBe(false);
-    for (const s of step.samples) for (const l of s.load) expect(l).toBeGreaterThan(500);
+    // Lift is judged over rollover.ts's 0.1 s window: the solid rear axle's tramp makes the inside outer
+    // dual's load chatter ±2–3 kN at 15–30 Hz, so a single 100 Hz sample says little about lift.
+    const S = step.samples;
+    for (let w = 0; w < S[0]!.load.length; w++) {
+      const st = S[0]!.load[w]!;
+      for (let i = 0; i < S.length; i++) {
+        expect(S[i]!.load[w]!).toBeGreaterThan(0);
+        if (i < 9) continue;
+        let m = 0;
+        for (let j = i - 9; j <= i; j++) m += S[j]!.load[w]! / 10;
+        expect(m / st).toBeGreaterThanOrEqual(0.2);
+      }
+    }
   });
 
   it('governed at 105–115 km/h, no weave at 100+', () => {
@@ -415,13 +451,13 @@ describe('BOXTRUCK tips (rollover.ts)', () => {
 });
 
 describe('BOXTRUCK crash', () => {
-  it('50 km/h frontal: cab intrusion < 12 cm, box shifts ≤ 30 cm and stays on, nothing explodes', () => {
+  it('50 km/h frontal: 25–50 cm permanent crush, cab intrusion < 12 cm, box shifts ≤ 30 cm and stays on, nothing explodes', () => {
     expect(f50.finite).toBe(true);
     expect(f50.intrusion).toBeLessThan(0.12);
     expect(f50.crushMax).toBeLessThan(1.3);
-    // Column 25–50 cm (see the file header): measured ≈ 0.8 m.
-    expect(f50.crush).toBeGreaterThan(0.25);
-    expect(f50.crush).toBeLessThan(0.9);
+    // Column: 25–50 cm (horn tips to the cab floor, after the rebound).
+    expect(f50.crush).toBeGreaterThanOrEqual(0.25);
+    expect(f50.crush).toBeLessThanOrEqual(0.5);
     expect(f50.keRatio).toBeLessThan(0.05);
     expect(f50.maxSpeedLate).toBeLessThanOrEqual(f50.initialSpeed);
     expect(box50.finite).toBe(true);
@@ -434,11 +470,11 @@ describe('BOXTRUCK crash', () => {
     expect(f64.intrusion).toBeLessThan(0.2);
   });
 
-  it('sedan into the box side at 50 km/h: both finite, the box stays on', () => {
+  it('sedan into the box side at 50 km/h: the wall keeps a ≥ 15 cm dent, both finite, the box stays on', () => {
     expect(side.finite).toBe(true);
     expect(side.sedanFinite).toBe(true);
     expect(side.boxMountsBroken).toBeLessThan(BOXTRUCK_DESIGN.boxMounts.length / 4);
-    // Column ≥ 15 cm local dent (see the file header): the sedan ducks under the box floor.
-    expect(side.widthLossMax).toBeGreaterThan(0.03);
+    // Column: ≥ 15 cm local dent, permanent (after the rebound), not just at the peak.
+    expect(side.dent).toBeGreaterThanOrEqual(0.15);
   });
 });

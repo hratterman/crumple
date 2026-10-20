@@ -70,9 +70,11 @@ import { setFinishExtras } from '../weathering';
 export const BOXTRUCK_DIMS = {
   axleFrontZ: -2.75,
   axleRearZ: 1.95,
-  halfTrackFront: 1.0,
-  dualInnerX: 0.735,
-  dualOuterX: 1.065,
+  halfTrackFront: 1.02,
+  dualInnerX: 0.765,
+  dualOuterX: 1.095,
+  /** Box floor (rig BOX_DIMS.floorY): raised over the side guards and the frame-mounted floor runners. */
+  boxFloorY: 1.24,
   hubY: 0.43,
   tyreRadius: 0.43,
   /** Visual tyre half width (wheels.ts wheelDims: rowHalf 0.1 × 1.36). */
@@ -106,8 +108,13 @@ const ZR = BOXTRUCK_DIMS.axleRearZ;
 const ARCH_Y = BOXTRUCK_DIMS.hubY + BOXTRUCK_DIMS.archLift;
 const ARCH_R = BOXTRUCK_DIMS.archRadius;
 
-/** Box body (rig: BOX_DIMS): walls at |x| 1.24, floor 1.14, roof 3.40, z −0.60 … 3.70. */
+/**
+ * Box body (rig: BOX_DIMS): walls at |x| 1.24, z −0.60 … 3.70. The BOX section below is drawn on a
+ * reference floor at BOX.floor (roof BOX.roof) and lifted by BOX_LIFT as a whole onto the rig's floor
+ * (BOXTRUCK_DIMS.boxFloorY), so every rail, lamp, decal and door slat keeps its place on the box.
+ */
 const BOX = { x: 1.24, floor: 1.14, roof: 3.4, z0: -0.6, z1: 3.7 } as const;
+const BOX_LIFT = BOXTRUCK_DIMS.boxFloorY - BOX.floor;
 const BOX_ST = [-0.6, 0.0, 0.62, 1.28, 1.95, 2.6, 3.15, 3.7] as const;
 /** Cab: cowl / windscreen base z, header z, back wall z, roof height. */
 const CAB = { cowlZ: -2.38, headerZ: -2.1, backZ: -0.87, cowlY: 1.98, roofY: 2.56 } as const;
@@ -856,7 +863,7 @@ export function buildBoxtruckVisual(opts: BoxtruckBuildOptions = { lod: 0 }): Ve
   }
   {
     // Fuel tank (left, polished aluminium) on straps; battery box + air tanks (right).
-    const tankBind = sideBind(['kb0_$', 'f4_lo_$', 'f5_lo_$', 'f6_lo_$', 'f5_hi_$', 'gd0_$', 'c3_sl_$', 'c2_sl_$'], 'L');
+    const tankBind = sideBind(['kb0_$', 'f4_lo_$', 'f5_lo_$', 'f6_lo_$', 'f5_hi_$', 'gd0_lo_$', 'gd0_hi_$', 'c3_sl_$', 'c2_sl_$'], 'L');
     const tank = orientMesh(
       gridLoftMesh(
         createLoft(
@@ -875,7 +882,7 @@ export function buildBoxtruckVisual(opts: BoxtruckBuildOptions = { lod: 0 }): Ve
     add('fuelTank', 'body', 'chrome', tank, tankBind);
     add('tankStraps', 'trim', 'trim', mergeMeshes([-1.25, -0.85].map((z) => cyl([-0.86, 0.66, z - 0.02], [-0.86, 0.66, z + 0.02], 0.275, lod === 0 ? 20 : 12, false))), tankBind);
     add('fuelCap', 'trim', 'chrome', cyl([-1.0, 0.9, -1.2], [-1.0, 0.95, -1.2], 0.05, 10), tankBind);
-    const battBind = sideBind(['kb0_$', 'f4_lo_$', 'f5_lo_$', 'f6_lo_$', 'f5_hi_$', 'gd0_$', 'c3_sl_$', 'c2_sl_$'], 'R');
+    const battBind = sideBind(['kb0_$', 'f4_lo_$', 'f5_lo_$', 'f6_lo_$', 'f5_hi_$', 'gd0_lo_$', 'gd0_hi_$', 'c3_sl_$', 'c2_sl_$'], 'R');
     add('batteryBox', 'body', 'trim', box([0.82, 0.68, -1.06], [0.3, 0.2, 0.36], 0.02), battBind);
     add('batteryLid', 'body', 'chrome', box([0.84, 0.885, -1.06], [0.3, 0.012, 0.37], 0.01), battBind);
     if (lod < 2) add('airTanks', 'body', 'underbody', mergeMeshes([cyl([-0.2, 0.55, -0.4], [-0.2, 0.55, 0.5], 0.12, 10), cyl([0.2, 0.55, -0.4], [0.2, 0.55, 0.5], 0.12, 10)]), ['kb0_*', 'kb1_*', 'f6_lo_*', 'f7_lo_*', 'f8_lo_*']);
@@ -885,12 +892,29 @@ export function buildBoxtruckVisual(opts: BoxtruckBuildOptions = { lod: 0 }): Ve
     add('engine', 'body', 'underbody', mergeMeshes([box([0, 0.95, -2.85], [0.32, 0.3, 0.55], 0.06), box([0, 0.86, -1.8], [0.2, 0.15, 0.4], 0.05)]), ['eng_*', 'gbx_*']);
   }
   {
-    // Side underrun guards: two aluminium rails on brackets between the axles.
-    const g = mergeMeshes([
-      box([1.17, 0.5, 0.35], [0.025, 0.04, 0.98], 0.012),
-      box([1.17, 0.74, 0.35], [0.025, 0.04, 0.98], 0.012),
-      ...[-0.55, 0.05, 0.65, 1.25].map((z) => box([1.15, 0.86, z], [0.02, 0.3, 0.025], 0.006)),
-    ]);
+    // Side underride guards (rig gd{0..3}_{lo|hi}): two steel rails between the axles on four posts that
+    // hang from the box sill, each post braced inboard to the frame rail; bolted bracket plates at the sill.
+    const GX = 1.17;
+    const GZ = [-0.6, 0.0, 0.62, 1.28];
+    const z0 = GZ[0]! - 0.04;
+    const z1 = GZ[GZ.length - 1]! + 0.04;
+    const zc = (z0 + z1) / 2;
+    const hz = (z1 - z0) / 2;
+    const sill = BOXTRUCK_DIMS.boxFloorY - 0.04;
+    const parts: PanelMesh[] = [
+      // Rails: 80 × 40 mm steel channel, the face proud of the posts.
+      box([GX + 0.012, 0.48, zc], [0.02, 0.04, hz], 0.008, 2),
+      box([GX + 0.012, 0.84, zc], [0.02, 0.04, hz], 0.008, 2),
+    ];
+    for (const z of GZ) {
+      parts.push(box([GX - 0.02, (0.44 + sill) / 2, z], [0.018, (sill - 0.44) / 2, 0.03], 0.006, 1));
+      // Sill bracket plate with two bolt heads.
+      parts.push(box([GX - 0.03, sill - 0.03, z], [0.035, 0.035, 0.055], 0.004, 1));
+      for (const dz of [-0.03, 0.03]) parts.push(cyl([GX + 0.006, sill - 0.03, z + dz], [GX + 0.014, sill - 0.03, z + dz], 0.008, 6));
+      // Inboard brace from the post foot to the frame rail's lower flange.
+      parts.push(cyl([GX - 0.03, 0.5, z], [0.46, 0.72, z], 0.016, 6));
+    }
+    const g = mergeMeshes(parts);
     for (const s of SIDES) add(`guards${s}`, 'body', 'chrome', perSide(g, s), sideBind(['gd*_$', 'b0_fl_$', 'b1_fl_$', 'b2_fl_$', 'b3_fl_$', 'b0_fi_$', 'b1_fi_$', 'b2_fi_$', 'b3_fi_$'], s));
   }
   {
@@ -913,20 +937,23 @@ export function buildBoxtruckVisual(opts: BoxtruckBuildOptions = { lod: 0 }): Ve
   }
 
   // ================================================================ BOX
+  /** Box-section panels: drawn on the reference floor, lifted onto the rig's (see BOX). */
+  const lifted = (m: PanelMesh): PanelMesh => ({ ...m, position: m.position.map((v, i) => (i % 3 === 1 ? v + BOX_LIFT : v)) });
+  const addBox = (...[id, kind, material, mesh, bind, extra]: Parameters<typeof add>): void => add(id, kind, material, lifted(mesh), bind, extra);
   const boxWhite = boxFinish(BOXTRUCK_LIVERY.box, { dirt: 0.12 });
   const railFin = boxFinish(BOXTRUCK_LIVERY.rail);
   const nz = Math.max(4, Math.round(4.3 / (0.12 * rs)));
   const ny = Math.max(3, Math.round(2.2 / (0.12 * rs)));
-  const wallBind = (s: 'L' | 'R'): string[] => sideBind(['b*_fl_$', 'b*_wl_$', 'b*_wm_$', 'b*_rl_$'], s);
+  const wallBind = (s: 'L' | 'R'): string[] => sideBind(['b*_fl_$', 'b*_wl_$', 'b*_wm_$', 'b*_rl_$', 'bp*_$'], s);
   {
     for (const s of SIDES) {
       const sx = s === 'R' ? 1 : -1;
       const x = sx * BOX.x;
-      add(`boxSide${s}`, 'body', 'paint', patch([x, 1.2, BOX.z0 + 0.06], [x, 1.2, BOX.z1 - 0.07], [x, 3.33, BOX.z0 + 0.06], [x, 3.33, BOX.z1 - 0.07], nz, ny, [sx, 0, 0]), wallBind(s), { finish: boxWhite });
+      addBox(`boxSide${s}`, 'body', 'paint', patch([x, 1.2, BOX.z0 + 0.06], [x, 1.2, BOX.z1 - 0.07], [x, 3.33, BOX.z0 + 0.06], [x, 3.33, BOX.z1 - 0.07], nz, ny, [sx, 0, 0]), wallBind(s), { finish: boxWhite });
     }
     const nx = Math.max(3, Math.round(2.4 / (0.14 * rs)));
-    add('boxFront', 'body', 'paint', patch([-1.2, 1.2, BOX.z0], [1.2, 1.2, BOX.z0], [-1.2, 3.34, BOX.z0], [1.2, 3.34, BOX.z0], nx, ny, [0, 0, -1]), ['b0_*'], { finish: boxWhite });
-    add('boxRoof', 'roof', 'paint', patch([-1.2, BOX.roof, BOX.z0 + 0.05], [1.2, BOX.roof, BOX.z0 + 0.05], [-1.2, BOX.roof, BOX.z1 - 0.05], [1.2, BOX.roof, BOX.z1 - 0.05], nx, nz, [0, 1, 0]), ['b*_rl_*', 'b*_rc'], { finish: boxFinish(BOXTRUCK_LIVERY.box) });
+    addBox('boxFront', 'body', 'paint', patch([-1.2, 1.2, BOX.z0], [1.2, 1.2, BOX.z0], [-1.2, 3.34, BOX.z0], [1.2, 3.34, BOX.z0], nx, ny, [0, 0, -1]), ['b0_*'], { finish: boxWhite });
+    addBox('boxRoof', 'roof', 'paint', patch([-1.2, BOX.roof, BOX.z0 + 0.05], [1.2, BOX.roof, BOX.z0 + 0.05], [-1.2, BOX.roof, BOX.z1 - 0.05], [1.2, BOX.roof, BOX.z1 - 0.05], nx, nz, [0, 1, 0]), ['b*_rl_*', 'b*_rc'], { finish: boxFinish(BOXTRUCK_LIVERY.box) });
     // Extruded rails: bottom (sill) and top along the sides, corner posts at the front, rear posts + header + sill.
     const rails: PanelMesh[] = [];
     for (const sx of [1, -1]) {
@@ -937,7 +964,7 @@ export function buildBoxtruckVisual(opts: BoxtruckBuildOptions = { lod: 0 }): Ve
     }
     rails.push(box([0, 3.32, BOX.z1 + 0.01], [1.24, 0.11, 0.045], 0.012), box([0, 1.12, BOX.z1 + 0.01], [1.24, 0.08, 0.06], 0.012));
     rails.push(box([0, BOX.roof + 0.008, BOX.z0 + 0.02], [1.24, 0.03, 0.035], 0.012));
-    add('boxRails', 'body', 'paint', mergeMeshes(rails), ['b*_fl_*', 'b*_rl_*', 'b0_*', 'b7_*'], { finish: railFin });
+    addBox('boxRails', 'body', 'paint', mergeMeshes(rails), ['b*_fl_*', 'b*_rl_*', 'b0_*', 'b7_*'], { finish: railFin });
     // Seam battens (the sheet-and-post joints), one per station + midway.
     const battens: PanelMesh[] = [];
     const seamZ: number[] = [];
@@ -945,7 +972,7 @@ export function buildBoxtruckVisual(opts: BoxtruckBuildOptions = { lod: 0 }): Ve
     for (let i = 1; i + 1 < BOX_ST.length; i++) seamZ.push(BOX_ST[i]!);
     seamZ.sort((a, b) => a - b);
     for (const z of seamZ) battens.push(slab([BOX.x + 0.003, 2.26, z], [0.004, 1.06, 0.022], ['-x']));
-    for (const s of SIDES) add(`battens${s}`, 'body', 'paint', perSide(mergeMeshes(battens), s), wallBind(s), { finish: railFin });
+    for (const s of SIDES) addBox(`battens${s}`, 'body', 'paint', perSide(mergeMeshes(battens), s), wallBind(s), { finish: railFin });
     if (lod < 2) {
       // LOD1 keeps the panel (same ids as LOD0) with 3-sided heads on every other rivet.
       const rv: PanelMesh[] = [];
@@ -956,16 +983,16 @@ export function buildBoxtruckVisual(opts: BoxtruckBuildOptions = { lod: 0 }): Ve
         rv.push(dome([BOX.x + 0.026, 1.16, z], [1, 0, 0], 0.007, 0.004, sides));
         rv.push(dome([BOX.x + 0.026, 3.37, z], [1, 0, 0], 0.007, 0.004, sides));
       }
-      for (const s of SIDES) add(`rivets${s}`, 'body', 'paint', perSide(mergeMeshes(rv), s), wallBind(s), { finish: railFin });
+      for (const s of SIDES) addBox(`rivets${s}`, 'body', 'paint', perSide(mergeMeshes(rv), s), wallBind(s), { finish: railFin });
     }
     // Floor crossmember ends (outriggers) under the sills.
     if (lod < 2) {
       const out: PanelMesh[] = [];
       for (let z = BOX.z0 + 0.15; z < BOX.z1; z += 0.3) out.push(slab([1.1, 1.04, z], [0.12, 0.035, 0.025], ['-x', '+y']));
-      for (const s of SIDES) add(`outriggers${s}`, 'body', 'underbody', perSide(mergeMeshes(out), s), sideBind(['b*_fl_$', 'b*_fi_$'], s));
+      for (const s of SIDES) addBox(`outriggers${s}`, 'body', 'underbody', perSide(mergeMeshes(out), s), sideBind(['b*_fl_$', 'b*_fi_$'], s));
     }
     // Box floor underside.
-    add('boxFloor', 'body', 'underbody', patch([-1.2, 1.0, BOX.z0], [1.2, 1.0, BOX.z0], [-1.2, 1.0, BOX.z1], [1.2, 1.0, BOX.z1], 4, 8, [0, -1, 0]), ['b*_fi_*', 'b*_fl_*', 'b*_fc']);
+    addBox('boxFloor', 'body', 'underbody', patch([-1.2, 1.0, BOX.z0], [1.2, 1.0, BOX.z0], [-1.2, 1.0, BOX.z1], [1.2, 1.0, BOX.z1], 4, 8, [0, -1, 0]), ['b*_fi_*', 'b*_fl_*', 'b*_fc']);
   }
   {
     // Rear: roller door (slats), handle, lock, pull strap.
@@ -980,9 +1007,9 @@ export function buildBoxtruckVisual(opts: BoxtruckBuildOptions = { lod: 0 }): Ve
       slats.push(patch([-1.06, ya + 0.004, z], [1.06, ya + 0.004, z], [-1.06, ya + h * 0.55, z + 0.008], [1.06, ya + h * 0.55, z + 0.008], lod === 0 ? 8 : 3, 1, [0, 0, 1]));
       slats.push(patch([-1.06, ya + h * 0.55, z + 0.008], [1.06, ya + h * 0.55, z + 0.008], [-1.06, ya + h - 0.004, z], [1.06, ya + h - 0.004, z], lod === 0 ? 8 : 3, 1, [0, 0, 1]));
     }
-    add('rollerDoor', 'trunk', 'paint', mergeMeshes(slats), ['b7_*'], { finish: boxFinish(BOXTRUCK_LIVERY.roller, { dirt: 0.2 }) });
-    add('doorHandle', 'trim', 'chrome', mergeMeshes([box([0, 1.32, BOX.z1 + 0.06], [0.16, 0.018, 0.02], 0.008), box([0.42, 1.3, BOX.z1 + 0.055], [0.05, 0.05, 0.015], 0.006)]), ['b7_*']);
-    if (lod < 2) add('strap', 'trim', 'rubber', box([-0.3, 1.5, BOX.z1 + 0.05], [0.025, 0.3, 0.004], 0.002), ['b7_*']);
+    addBox('rollerDoor', 'trunk', 'paint', mergeMeshes(slats), ['b7_*'], { finish: boxFinish(BOXTRUCK_LIVERY.roller, { dirt: 0.2 }) });
+    addBox('doorHandle', 'trim', 'chrome', mergeMeshes([box([0, 1.32, BOX.z1 + 0.06], [0.16, 0.018, 0.02], 0.008), box([0.42, 1.3, BOX.z1 + 0.055], [0.05, 0.05, 0.015], 0.006)]), ['b7_*']);
+    if (lod < 2) addBox('strap', 'trim', 'rubber', box([-0.3, 1.5, BOX.z1 + 0.05], [0.025, 0.3, 0.004], 0.002), ['b7_*']);
   }
   {
     // Rear lamps: round tail / brake pairs, amber indicators, white reverse, in black grommet plates; clearance lamps up top.
@@ -997,20 +1024,20 @@ export function buildBoxtruckVisual(opts: BoxtruckBuildOptions = { lod: 0 }): Ve
     }
     for (const x of [-0.18, 0, 0.18]) tails.push(box([x, 3.32, BOX.z1 + 0.058], [0.035, 0.02, 0.012], 0.008));
     for (const sx of [1, -1]) tails.push(box([sx * 1.15, 3.35, BOX.z1 + 0.058], [0.03, 0.02, 0.012], 0.008));
-    add('lampPlates', 'trim', 'trim', mergeMeshes(plates), ['b7_*']);
-    add('taillights', 'light', 'lightTail', mergeMeshes(tails), ['b7_*'], { lights: ['tail', 'brake'] });
-    add('reverseLamps', 'light', 'lightReverse', mergeMeshes(revs), ['b7_*'], { lights: ['reverse'] });
-    for (const s of SIDES) add(`indicatorR${s}`, 'light', 'lightIndicator', disc([(s === 'R' ? 1 : -1) * 0.7, 1.1, z], [0, 0, 1], 0.05, CYL, 0.01), ['b7_*'], { lights: [s === 'R' ? 'indicatorR' : 'indicatorL'] });
+    addBox('lampPlates', 'trim', 'trim', mergeMeshes(plates), ['b7_*']);
+    addBox('taillights', 'light', 'lightTail', mergeMeshes(tails), ['b7_*'], { lights: ['tail', 'brake'] });
+    addBox('reverseLamps', 'light', 'lightReverse', mergeMeshes(revs), ['b7_*'], { lights: ['reverse'] });
+    for (const s of SIDES) addBox(`indicatorR${s}`, 'light', 'lightIndicator', disc([(s === 'R' ? 1 : -1) * 0.7, 1.1, z], [0, 0, 1], 0.05, CYL, 0.01), ['b7_*'], { lights: [s === 'R' ? 'indicatorR' : 'indicatorL'] });
     const plateR = patch([-0.17, 1.22, BOX.z1 + 0.07], [0.17, 1.22, BOX.z1 + 0.07], [-0.17, 1.37, BOX.z1 + 0.07], [0.17, 1.37, BOX.z1 + 0.07], 1, 1, [0, 0, 1]);
-    add('plateR', 'trim', 'plate', plateR, ['b7_*']);
+    addBox('plateR', 'trim', 'plate', plateR, ['b7_*']);
   }
   if (lod < 2) {
     // Side marker lamps (amber front, red rear) on the sills; conspicuity tape (red / white) along the sills.
     const amber = mergeMeshes([box([BOX.x + 0.03, 1.15, BOX.z0 + 0.18], [0.008, 0.025, 0.04], 0.008), box([BOX.x + 0.03, 1.15, 1.55], [0.008, 0.025, 0.04], 0.008)]);
     const red = box([BOX.x + 0.03, 1.15, BOX.z1 - 0.15], [0.008, 0.025, 0.04], 0.008);
     for (const s of SIDES) {
-      add(`sideMarkersA${s}`, 'light', 'lightIndicator', perSide(amber, s), wallBind(s), { lights: ['tail'] });
-      add(`sideMarkersR${s}`, 'light', 'lightTail', perSide(red, s), wallBind(s), { lights: ['tail'] });
+      addBox(`sideMarkersA${s}`, 'light', 'lightIndicator', perSide(amber, s), wallBind(s), { lights: ['tail'] });
+      addBox(`sideMarkersR${s}`, 'light', 'lightTail', perSide(red, s), wallBind(s), { lights: ['tail'] });
     }
     const tapeR: PanelMesh[] = [];
     const tapeW: PanelMesh[] = [];
@@ -1020,8 +1047,8 @@ export function buildBoxtruckVisual(opts: BoxtruckBuildOptions = { lod: 0 }): Ve
       (k % 2 ? tapeW : tapeR).push(p);
     }
     for (const s of SIDES) {
-      add(`tapeRed${s}`, 'trim', 'paint', perSide(mergeMeshes(tapeR), s), wallBind(s), { finish: boxFinish(BOXTRUCK_LIVERY.tapeRed) });
-      add(`tapeWhite${s}`, 'trim', 'paint', perSide(mergeMeshes(tapeW), s), wallBind(s), { finish: boxFinish(BOXTRUCK_LIVERY.tapeWhite) });
+      addBox(`tapeRed${s}`, 'trim', 'paint', perSide(mergeMeshes(tapeR), s), wallBind(s), { finish: boxFinish(BOXTRUCK_LIVERY.tapeRed) });
+      addBox(`tapeWhite${s}`, 'trim', 'paint', perSide(mergeMeshes(tapeW), s), wallBind(s), { finish: boxFinish(BOXTRUCK_LIVERY.tapeWhite) });
     }
   }
   {
@@ -1038,24 +1065,24 @@ export function buildBoxtruckVisual(opts: BoxtruckBuildOptions = { lod: 0 }): Ve
       const xt = sx * (BOX.x + 0.0095);
       const band = patch([xt, 1.3, BOX.z0 + 0.1], [xt, 1.3, BOX.z1 - 0.12], [xt, 1.62, BOX.z0 + 0.1], [xt, 1.62, BOX.z1 - 0.12], lod === 0 ? 12 : 4, 1, nrm);
       const pin = patch([xt, 1.66, BOX.z0 + 0.1], [xt, 1.66, BOX.z1 - 0.12], [xt, 1.7, BOX.z0 + 0.1], [xt, 1.7, BOX.z1 - 0.12], lod === 0 ? 12 : 4, 1, nrm);
-      add(`liveryBand${s}`, 'trim', 'paint', band, wallBind(s), { finish: boxFinish(BOXTRUCK_LIVERY.blue) });
-      add(`liveryStripe${s}`, 'trim', 'paint', pin, wallBind(s), { finish: boxFinish(BOXTRUCK_LIVERY.orange) });
+      addBox(`liveryBand${s}`, 'trim', 'paint', band, wallBind(s), { finish: boxFinish(BOXTRUCK_LIVERY.blue) });
+      addBox(`liveryStripe${s}`, 'trim', 'paint', pin, wallBind(s), { finish: boxFinish(BOXTRUCK_LIVERY.orange) });
       const big = lettering('VALLEY', [xt, 2.32, zStart], ud, [0, 1, 0], nrm, 0.62, 0.17, 0.2);
       const small = lettering('FREIGHT', [xt, 1.93, zStart + (sx > 0 ? -0.02 : 0.02)], ud, [0, 1, 0], nrm, 0.26, 0.17, 0.42);
-      add(`liveryText${s}`, 'trim', 'paint', mergeMeshes([big, small]), wallBind(s), { finish: boxFinish(BOXTRUCK_LIVERY.blue) });
+      addBox(`liveryText${s}`, 'trim', 'paint', mergeMeshes([big, small]), wallBind(s), { finish: boxFinish(BOXTRUCK_LIVERY.blue) });
       // Orange swoosh: a slanted parallelogram ahead of the lettering.
       const zs = sx > 0 ? -0.15 : 3.25;
       const sw = patch([xt, 2.0, zs], [xt, 2.0, zs - 0.55 * sx], [xt, 3.05, zs + 0.25 * -sx], [xt, 3.05, zs - 0.3 * sx], 2, 3, nrm);
-      add(`liverySwoosh${s}`, 'trim', 'paint', sw, wallBind(s), { finish: boxFinish(BOXTRUCK_LIVERY.orange) });
+      addBox(`liverySwoosh${s}`, 'trim', 'paint', sw, wallBind(s), { finish: boxFinish(BOXTRUCK_LIVERY.orange) });
     }
     const nose = mergeMeshes([
       // Read from ahead of the truck: left-to-right is −X.
       lettering('VF', [0.3, 2.78, BOX.z0 - off], [-1, 0, 0], [0, 1, 0], [0, 0, -1], 0.42, 0.18, 0.12),
       patch([-0.75, 2.66, BOX.z0 - off], [0.75, 2.66, BOX.z0 - off], [-0.75, 2.7, BOX.z0 - off], [0.75, 2.7, BOX.z0 - off], 3, 1, [0, 0, -1]),
     ]);
-    add('liveryNose', 'trim', 'paint', nose, ['b0_*'], { finish: boxFinish(BOXTRUCK_LIVERY.blue) });
+    addBox('liveryNose', 'trim', 'paint', nose, ['b0_*'], { finish: boxFinish(BOXTRUCK_LIVERY.blue) });
     const doorText = lettering('VALLEY FREIGHT', [-0.82, 2.72, BOX.z1 + 0.05], [1, 0, 0], [0, 1, 0], [0, 0, 1], 0.17, 0.17, 0.28);
-    add('liveryDoor', 'trim', 'paint', doorText, ['b7_*'], { finish: boxFinish(BOXTRUCK_LIVERY.blue) });
+    addBox('liveryDoor', 'trim', 'paint', doorText, ['b7_*'], { finish: boxFinish(BOXTRUCK_LIVERY.blue) });
   }
 
   return {

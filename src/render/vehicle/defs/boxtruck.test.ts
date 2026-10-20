@@ -2,7 +2,7 @@ import { Vector3 } from 'three';
 import { describe, expect, it } from 'vitest';
 
 import { compileVehicle } from '../../../sim/vehicle/builder';
-import { BOXTRUCK } from '../../../sim/vehicle/defs/boxtruck';
+import { BOX_DIMS, BOXTRUCK } from '../../../sim/vehicle/defs/boxtruck';
 import { patchMaterial } from '../../material';
 import type { LightingStack, RenderContext } from '../../types';
 import { evalFlexVertex } from '../binder';
@@ -113,7 +113,8 @@ describe('BOXTRUCK_VISUAL', { timeout: 120_000 }, () => {
     for (const p of b0.binding.panels.filter((x) => x.kind === 'glass')) expect(p.glass!.beams.length, p.panelId).toBeGreaterThan(0);
   });
 
-  it('matches the rig: axles, dual spacing, hub height, tyre size', () => {
+  it('matches the rig: axles, dual spacing, hub height, tyre size, box floor', () => {
+    expect(BOXTRUCK_DIMS.boxFloorY).toBeCloseTo(BOX_DIMS.floorY, 6);
     const p = compiled.rig.nodePos;
     for (const w of compiled.wheels) {
       const x = Math.abs((p[3 * w.hubI]! + p[3 * w.hubO]!) / 2);
@@ -134,7 +135,7 @@ describe('BOXTRUCK_VISUAL', { timeout: 120_000 }, () => {
   it('a separate cab and box: box panels bind only box / guard nodes, cab panels never box nodes', () => {
     const boxPanels = BOXTRUCK_VISUAL.panels.filter((p) => /^(boxSide|boxRoof|boxFront|rollerDoor|battens|rivets|livery)/.test(p.id));
     expect(boxPanels.length).toBeGreaterThan(8);
-    for (const p of boxPanels) for (const s of p.bind) expect(/^(b\d|b\*)/.test(s), `${p.id} ${s}`).toBe(true);
+    for (const p of boxPanels) for (const s of p.bind) expect(/^(b\d|b\*|bp)/.test(s), `${p.id} ${s}`).toBe(true);
     for (const id of ['cabShell', 'doorR', 'doorL', 'windscreen', 'hood']) for (const s of BOXTRUCK_VISUAL.panels.find((p) => p.id === id)!.bind) expect(/^b\d/.test(s), `${id} ${s}`).toBe(false);
   });
 
