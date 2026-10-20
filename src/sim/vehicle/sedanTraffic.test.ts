@@ -1,10 +1,11 @@
 /**
  * SEDAN_TRAFFIC (P6, T1): the cheaper AI-traffic sedan rig. Fleet targets
- * (docs/CONTRACTS.md "Fleet targets", sedanTraffic column): ≤ 1500 beams,
+ * (docs/CONTRACTS.md "Fleet targets", sedanTraffic column): ≤ 1500 beams (≈ 1300 target),
  * 4 × 10-ray wheels, the sedan's mass / wheelbase / track / drivetrain and
  * node ids at the same rest positions, sag 2–7 cm, 0–100 ≤ 9 s (drift
  * ≤ 3°), 100–0 ≤ 45 m, R40 ≥ 0.85 g, step steer no spin, no weave at
- * 195 km/h, 50 km/h frontal crush 30–70 cm with intrusion < 15 cm, 100 km/h
+ * 195 km/h, 50 km/h frontal crush 35–55 cm — and still 35–55 cm at ±5 % speed
+ * and with a 10 % offset (90 % overlap) — with intrusion < 15 cm, 100 km/h
  * no explosion, and the player sedan into its side at 50 km/h: no NaN, no
  * interlock (the cars separate again).
  */
@@ -15,7 +16,7 @@ import { SimEngine } from '../engine';
 import { buildVehicleRig, compileVehicle, TRAFFIC_BEAM_BUDGET, validateVehicle, vehicleOmegaDtLimit } from './builder';
 import { runCrash, type CrashResult } from './crash';
 import { SEDAN } from './defs/sedan';
-import { SEDAN_TRAFFIC, SEDAN_TRAFFIC_CRASH_PROBES, SEDAN_TRAFFIC_TARGETS } from './defs/sedanTraffic';
+import { SEDAN_TRAFFIC, SEDAN_TRAFFIC_CRASH_PROBES, SEDAN_TRAFFIC_TARGETS, SKIP_STATIONS } from './defs/sedanTraffic';
 import {
   runBraking,
   runCircle,
@@ -42,6 +43,8 @@ describe('SEDAN_TRAFFIC definition', () => {
     expect(r.warnings).toEqual([]);
     expect(r.islands).toBe(1);
     expect(r.stats.beamCount).toBeLessThanOrEqual(TRAFFIC_BEAM_BUDGET);
+    // The ≈ 1300 target (CONTRACTS fleet table), not just the 1500 ceiling.
+    expect(r.stats.beamCount).toBeLessThanOrEqual(1360);
     console.log(`[sedanTraffic] ${cv.rig.nodeCount} nodes, ${cv.rig.beamCount} beams (body ${cv.bodyBeamCount}); sedan ${sedan.rig.beamCount}`);
   });
 
@@ -85,7 +88,7 @@ describe('SEDAN_TRAFFIC definition', () => {
     }
     // No hood sub-rig; every bumper / station of the sedan's shell is kept.
     expect(SEDAN_TRAFFIC.body.nodes.some((n) => n.id.startsWith('hood_'))).toBe(false);
-    for (let st = 0; st <= 13; st++) expect(SEDAN_TRAFFIC.body.nodes.some((n) => n.id.startsWith(`s${st}_`))).toBe(true);
+    for (let st = 0; st <= 13; st++) expect(SEDAN_TRAFFIC.body.nodes.some((n) => n.id.startsWith(`s${st}_`)), `s${st}`).toBe(!SKIP_STATIONS.has(st));
   });
 });
 
@@ -141,15 +144,32 @@ describe('SEDAN_TRAFFIC crashes', () => {
   const crash = (speedKmh: number): CrashResult =>
     runCrash({ kind: 'frontal', speedKmh, def: SEDAN_TRAFFIC, probes: SEDAN_TRAFFIC_CRASH_PROBES });
 
-  it('50 km/h frontal: crush 30–70 cm, intrusion < 15 cm, no NaN', () => {
+  it('50 km/h frontal: crush 35–55 cm, intrusion < 15 cm, no NaN', () => {
     const r = crash(50);
     console.log(`[sedanTraffic] 50 km/h: crush ${(r.crush * 100).toFixed(1)} cm (peak ${(r.crushMax * 100).toFixed(1)}), intrusion ${(r.intrusion * 100).toFixed(1)} cm`);
     expect(r.finite).toBe(true);
-    expect(r.crush).toBeGreaterThan(0.3);
-    expect(r.crush).toBeLessThan(0.7);
+    expect(r.crush).toBeGreaterThanOrEqual(0.35);
+    expect(r.crush).toBeLessThanOrEqual(0.55);
     expect(r.intrusion).toBeLessThan(0.15);
     expect(r.wheelsDetached).toBe(0);
   }, 60_000);
+
+  it('the 50 km/h crush is robust: 35–55 cm at 47.5 and 52.5 km/h and with a 10 % offset (90 % overlap), spread ≤ 8 cm', () => {
+    const runs = [
+      crash(47.5),
+      crash(52.5),
+      runCrash({ kind: 'offset', overlap: 0.9, speedKmh: 50, def: SEDAN_TRAFFIC, probes: SEDAN_TRAFFIC_CRASH_PROBES }),
+    ];
+    console.log(`[sedanTraffic] robustness: ${runs.map((r) => `${r.spec.kind} ${r.spec.speedKmh} km/h${r.spec.overlap !== undefined ? ` ${r.spec.overlap * 100} %` : ''}: ${(r.crush * 100).toFixed(1)} cm`).join(', ')}`);
+    for (const r of runs) {
+      expect(r.finite).toBe(true);
+      expect(r.crush).toBeGreaterThanOrEqual(0.35);
+      expect(r.crush).toBeLessThanOrEqual(0.55);
+      expect(r.intrusion).toBeLessThan(0.15);
+    }
+    const c = runs.map((r) => r.crush);
+    expect(Math.max(...c) - Math.min(...c)).toBeLessThanOrEqual(0.08);
+  }, 180_000);
 
   it('100 km/h frontal: no explosion', () => {
     const r = crash(100);
