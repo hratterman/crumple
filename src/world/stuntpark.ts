@@ -18,7 +18,7 @@
  *   z 437        ▤▤▤▤ grandstand ▤▤▤▤
  *
  * The ski jump sits on Anvil's south face (x 460): a 17 m start tower and
- * a 6 m in-run (18° → 28° → table, lip 96.8 m at z −336), then a 16 m
+ * a 6 m in-run (crest → 20° → 28° → table, lip 96.4 m at z −336), then a 16 m
  * landing hill of deck boxes (smoothed terrain envelope + 0.45 m, so no
  * terrain or tree pokes through) down to the outrun at z −215.
  */
@@ -135,7 +135,7 @@ function flood(id: string, x: number, z: number, faceX: number, faceZ: number): 
 /** Bowling: lane along z 330 heading west; pins (challenge props) around PIN_HEAD. */
 export const BOWLING = { laneZ: 330, startX: 437, headPinX: 396 } as const;
 /** Barrel-roll side kicker under the LEFT wheels of a car driving north on x = 388. */
-export const BARREL_ROLL = { laneX: 388, kickerX: 387.15, kickerZ: 300, startZ: 362, hx: 0.6, hy: 0.75, hz: 3.5 } as const;
+export const BARREL_ROLL = { laneX: 388, kickerX: 387.15, kickerZ: 300, startZ: 362, hx: 0.6, hy: 1.0, hz: 3.5 } as const;
 /** Wreck jump heading east along z 408. */
 export const WRECK_JUMP = { laneZ: 408, takeoffX: 457, wreckX: [466, 468, 470, 472], landingX: 482, runStartX: 335 } as const;
 /** Derby pit (inside, metres). */
@@ -151,23 +151,27 @@ export const QUARTER_PIPE = { x0: 499, radius: 5, maxDeg: 72, minZ: 344, maxZ: 3
 export const SKI_JUMP_X = 460;
 /** In-run top surface centreline (z, y), north → south; the start pad is the first segment. */
 export const SKI_INRUN: readonly (readonly [number, number])[] = [
-  [-402, 117],
-  [-394, 117],
-  [-387.5, 114.89],
-  [-381, 112.8],
-  [-373.5, 109.77],
-  [-366, 106.7],
-  [-359, 102.98],
-  [-352, 99.3],
-  [-349, 98.4],
-  [-346, 97.6],
-  [-343.5, 97.08],
-  [-341, 96.75],
-  [-338, 96.7],
-  [-336, 96.8],
+  [-402, 114],
+  [-394, 114],
+  // a gradual crest (4° → 20° in 3 m steps): a sharp one beaches a sedan on its floor
+  [-391, 113.79],
+  [-388, 113.37],
+  [-385, 112.73],
+  [-382, 111.87],
+  [-379, 110.78],
+  [-372.5, 108.16],
+  [-366, 105.53],
+  [-359, 101.81],
+  [-352, 98.08],
+  [-349, 97.11],
+  [-346, 96.58],
+  [-343.5, 96.36],
+  [-341, 96.27],
+  [-338, 96.27],
+  [-336, 96.37],
 ];
 /** The take-off lip (the in-run's last point). */
-export const SKI_LIP: V3 = [SKI_JUMP_X, 96.8, -336];
+export const SKI_LIP: V3 = [SKI_JUMP_X, 96.37, -336];
 /** Landing hill top surface (z, y): smoothed terrain envelope (±8 m strip max) + 0.45 m, measured on DEFAULT_LAYOUT v4/v5 terrain (unchanged there). */
 export const SKI_LANDING: readonly (readonly [number, number])[] = [
   [-335, 92.55], [-331, 92.03], [-327, 90.81], [-323, 89.03], [-319, 86.85], [-315, 84.19], [-311, 81.71], [-307, 78.95],
