@@ -46,7 +46,7 @@
  */
 import { NODE_FLAG_IN_CONTACT, type SimState } from '../types';
 import type { CompiledRig } from '../rig/types';
-import { CONTACT_RELEASE, RECAPTURE_SPEED, type CompiledShell } from './shellDefs';
+import { CONTACT_RELEASE, RECAPTURE_IMPACT_MAX_S, RECAPTURE_IMPACT_S, RECAPTURE_IMPACT_SPEED, RECAPTURE_SPEED, type CompiledShell } from './shellDefs';
 
 const POLAR_ITERS = 12;
 
@@ -70,6 +70,8 @@ export interface ShellRuntime {
   /** Per tier: a WHOLE tier has tripped (all its nodes released). */
   tripped: Uint8Array;
   calmTicks: number;
+  /** Ticks since a node last newly released (post-impact set, RECAPTURE_IMPACT_S). */
+  quietTicks: number;
   /** Max deviation this tick, m (diagnostics). */
   maxDev: number;
   /** Scratch: per-node goal xyz. */
@@ -94,6 +96,7 @@ export function createShellRuntime(shell: CompiledShell, rig: CompiledRig): Shel
     gone: new Uint8Array(n),
     tripped: new Uint8Array(shell.whole.length),
     calmTicks: 0,
+    quietTicks: 0,
     maxDev: 0,
     gx: new Float64Array(3 * n),
     vs: new Float64Array(3 * n),
@@ -114,6 +117,7 @@ export function resetShell(rt: ShellRuntime): void {
   rt.tripped.fill(0);
   rt.released = 0;
   rt.calmTicks = 0;
+  rt.quietTicks = 0;
   rt.R.set([1, 0, 0, 0, 1, 0, 0, 0, 1]);
 }
 
@@ -260,6 +264,8 @@ export function applyShell(s: SimState, rt: ShellRuntime, dt: number, gx: number
   const idt = 1 / dt;
   let maxDev2 = 0;
   let maxRel2 = 0;
+  let sumRel2 = 0;
+  let nRel = 0;
   let newRelease = false;
   const r0 = R[0]!, r1 = R[1]!, r2 = R[2]!, r3 = R[3]!, r4 = R[4]!, r5 = R[5]!, r6 = R[6]!, r7 = R[7]!, r8 = R[8]!;
   for (let q = 0; q < n; q++) {
@@ -279,6 +285,8 @@ export function applyShell(s: SimState, rt: ShellRuntime, dt: number, gx: number
       if (rt.gone[q] !== 0) continue;
       const r2v = ux * ux + uy * uy + uz * uz;
       if (r2v > maxRel2) maxRel2 = r2v;
+      sumRel2 += r2v;
+      nRel++;
       continue;
     }
     const e2 = ex * ex + ey * ey + ez * ez;
@@ -322,7 +330,11 @@ export function applyShell(s: SimState, rt: ShellRuntime, dt: number, gx: number
         newRelease = true;
       }
     }
-    if (wn < 1 && u2 > maxRel2) maxRel2 = u2;
+    if (wn < 1) {
+      if (u2 > maxRel2) maxRel2 = u2;
+      sumRel2 += u2;
+      nRel++;
+    }
     if (wn === 0) continue;
     const f = wn * mass[q]! * idt * inv1b;
     frcX[i]! += f * (beta * ux - kdt * ex);
@@ -332,8 +344,12 @@ export function applyShell(s: SimState, rt: ShellRuntime, dt: number, gx: number
   rt.maxDev = Math.sqrt(maxDev2);
   // ---- recapture after a crash once calm
   if (rt.released > 0) {
+    rt.quietTicks = newRelease ? 0 : rt.quietTicks + 1;
     if (newRelease || maxRel2 > RECAPTURE_SPEED * RECAPTURE_SPEED) rt.calmTicks = 0;
-    else if (++rt.calmTicks * dt >= sh.recaptureS) recapture(s, rt, cx, cy, cz);
+    else rt.calmTicks++;
+    if (rt.calmTicks * dt >= sh.recaptureS || (rt.quietTicks * dt >= RECAPTURE_IMPACT_S && sumRel2 <= nRel * RECAPTURE_IMPACT_SPEED * RECAPTURE_IMPACT_SPEED) || rt.quietTicks * dt >= RECAPTURE_IMPACT_MAX_S) {
+      recapture(s, rt, cx, cy, cz);
+    }
   }
 }
 
@@ -362,4 +378,5 @@ function recapture(s: SimState, rt: ShellRuntime, cx: number, cy: number, cz: nu
   rt.tripped.fill(0);
   rt.released = 0;
   rt.calmTicks = 0;
+  rt.quietTicks = 0;
 }

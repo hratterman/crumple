@@ -88,6 +88,8 @@ export interface CrashSpec {
   probes?: CrashProbes;
   /** Seconds simulated after first contact. Default 2.0. */
   afterContactS?: number;
+  /** Diagnostics: called after every step from the first contact on (`since` = ticks after contact). */
+  onStep?: (eng: SimEngine, obj: SimObject, since: number) => void;
 }
 
 export interface CrashResult {
@@ -380,7 +382,7 @@ export function runCrash(spec: CrashSpec): CrashResult {
       }
       if (spec.kind === 'pole' && P(i)[0] > poleX && Math.abs(P(i)[2] - barrier.pos[2]) < POLE_NEAR && poleSideKept) {
         poleSideKept = false;
-        poleViolator = `${cv.rig.nodeIds[i]!}@${t - contactTick}`;
+        poleViolator = `${cv.rig.nodeIds[i]!}@${t - contactTick} past ${((P(i)[0] - poleX) * 100).toFixed(1)} cm, dz ${((P(i)[2] - barrier.pos[2]) * 100).toFixed(1)} cm`;
       }
     }
     if (contactTick < 0 && touching) contactTick = t;
@@ -388,6 +390,7 @@ export function runCrash(spec: CrashSpec): CrashResult {
     if (touching) inContact = true;
     else if (inContact) contactEnded = true;
     const since = t - contactTick;
+    spec.onStep?.(eng, obj, since);
     const crush = crushNow();
     const intr = intrRest - dist(mean(firewall), mean(bpillar));
     const door = doorRest - dist(P(dmR!), P(dmL!));
@@ -566,6 +569,31 @@ function solve3(m: number[], b: number[]): number[] {
 }
 
 /** One-line summary (reports). */
+/**
+ * Feel pass: how the crush settles after its peak (crushTrace, 5 ms samples). `final` = mean of the last
+ * 0.5 s; `overshoot` = how far the crush springs back below `final`; `ringAfter(t)` = max |crush − final|
+ * from t seconds after the peak on (the visible post-crash wobble).
+ */
+export function crushSettle(trace: readonly number[]): { tPeak: number; final: number; overshoot: number; ringAfter: (t: number) => number } {
+  const dt = 0.005;
+  let ip = 0;
+  for (let i = 1; i < trace.length; i++) if (trace[i]! > trace[ip]!) ip = i;
+  const tail = trace.slice(Math.max(0, trace.length - 100));
+  const final = tail.reduce((a, b) => a + b, 0) / tail.length;
+  let mn = Infinity;
+  for (let i = ip; i < trace.length; i++) mn = Math.min(mn, trace[i]!);
+  return {
+    tPeak: ip * dt,
+    final,
+    overshoot: Math.max(0, final - mn),
+    ringAfter: (t) => {
+      let r = 0;
+      for (let i = ip + Math.round(t / dt); i < trace.length; i++) r = Math.max(r, Math.abs(trace[i]! - final));
+      return r;
+    },
+  };
+}
+
 export function formatCrash(r: CrashResult): string {
   const f = (x: number, d = 1): string => (Number.isFinite(x) ? x.toFixed(d) : String(x));
   const cm = (x: number): string => f(x * 100);
