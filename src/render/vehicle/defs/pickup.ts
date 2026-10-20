@@ -1438,7 +1438,8 @@ export function buildPickupVisual(opts: PickupBuildOptions = { lod: 0 }): Vehicl
       add(`doorCard${s}F`, 'interior', 'interiorTrim', perSide(card(-0.9, 0.06), s), doorFBind(s), { damageWeight: 0 });
       add(`doorCard${s}R`, 'interior', 'interiorTrim', perSide(card(0.2, 0.88), s), doorRBind(s), { damageWeight: 0 });
     }
-    const hl = cutC(S4lo, [uAbove(S4lo, dloTop - 0.01, 'seam'), vAbove(S4lo, 0, 'seam'), vBelow(S4lo, 1, 'seam'), sideCut({ sd: (_z, y) => y - 1.5 }, 'seam')], { offset: -0.016, border: 'seam' });
+    // ends inside the windscreen opening (see the sedan: a lining spanning it is a brown sheet once the glass is gone)
+    const hl = cutC(S4lo, [uAbove(S4lo, dloTop - 0.01, 'seam'), zAbove(HEADER_Z - 0.02, 'seam'), vBelow(S4lo, 1, 'seam'), sideCut({ sd: (_z, y) => y - 1.5 }, 'seam')], { offset: -0.016, border: 'seam' });
     add('headliner', 'interior', 'interior', flipMesh(hl.mesh), roofBind, { damageWeight: 0, castShadow: false });
   }
 

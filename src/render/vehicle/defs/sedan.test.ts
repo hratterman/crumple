@@ -7,6 +7,8 @@ import { tessellateVehicle } from '../loft';
 import { slotBox } from '../materials';
 import type { PanelGeometry, VehicleVisualDef } from '../types';
 import { VISUAL_DEFAULTS } from '../types';
+import { COUPE_VISUAL } from './coupe';
+import { PICKUP_VISUAL } from './pickup';
 import { buildSedanVisual, SEDAN_DIMS, SEDAN_VISUAL } from './sedan';
 
 const compiled = compileVehicle(SEDAN);
@@ -233,4 +235,39 @@ describe('SEDAN_VISUAL', { timeout: 60_000 }, () => {
     // Front lamp / grille / intake parts exist and bind to their own nodes.
     for (const id of ['headlampHousing', 'projectorBezels', 'grille', 'grilleSlats', 'intakeFins', 'splitter', 'indicatorFL', 'indicatorFR']) expect(byId.has(id), id).toBe(true);
   });
+});
+
+describe('headliners line the roof only', () => {
+  // A lining spanning the windscreen / rear-glass opening hid behind the tinted glass, then showed as
+  // a flat dark-brown sheet over a crushed car once the tempered rear glass shattered (hidden).
+  // (The beater has no glass; its lining is cut at the same planes.)
+  const cases: [string, VehicleVisualDef, string | null][] = [
+    ['sedan', SEDAN_VISUAL, 'rearGlass'],
+    ['coupe', COUPE_VISUAL, 'rearGlass'],
+    ['pickup', PICKUP_VISUAL, null],
+  ];
+  for (const [name, def, rear] of cases) {
+    it(name, () => {
+      const geoms = tessellateVehicle(def);
+      const zRange = (id: string): [number, number] => {
+        const g = geoms.find((q) => q.panelId === id)!;
+        let lo = Infinity;
+        let hi = -Infinity;
+        for (let i = 0; i < g.position.length; i += 3) {
+          lo = Math.min(lo, g.position[i + 2]!);
+          hi = Math.max(hi, g.position[i + 2]!);
+        }
+        return [lo, hi];
+      };
+      const ws = zRange('windscreen');
+      const hl = zRange('headliner');
+      // the lining starts at the windscreen header (the pane's top, most rearward edge) …
+      expect(hl[0], `${name}: headliner front ${hl[0].toFixed(3)} vs windscreen top ${ws[1].toFixed(3)}`).toBeGreaterThan(ws[1] - 0.04);
+      // … and ends at the rear glass's top edge
+      if (rear) {
+        const rg = zRange(rear);
+        expect(hl[1], `${name}: headliner rear ${hl[1].toFixed(3)} vs rear glass top ${rg[0].toFixed(3)}`).toBeLessThan(rg[0] + 0.04);
+      }
+    });
+  }
 });

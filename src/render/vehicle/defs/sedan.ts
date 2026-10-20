@@ -1475,7 +1475,9 @@ export function buildSedanVisual(opts: SedanBuildOptions = { lod: 0 }): VehicleV
       add(`doorCard${s}R`, 'interior', 'interiorTrim', perSide(card(0.16, 0.98), s), doorRBind(s), { damageWeight: 0 });
     }
     // Headliner + pillar trims: the greenhouse frame offset inward, facing in.
-    const hl = cutC(S4lo, [uAbove(S4lo, dloTop - 0.01, 'seam'), vAbove(S4lo, 0, 'seam'), vBelow(S4lo, 1, 'seam'), sideCut({ sd: (_z, y) => y - 1.005 }, 'seam')], { offset: -0.014, border: 'seam' });
+    // It ends 2 cm inside the windscreen / rear-glass openings (behind the frit), like the roof skin
+    // it lines: spanning them, it showed as a flat brown sheet once the rear glass shattered.
+    const hl = cutC(S4lo, [uAbove(S4lo, dloTop - 0.01, 'seam'), zAbove(HEADER_Z - 0.02, 'seam'), zBelow(REAR_TOP_Z + 0.02, 'seam'), sideCut({ sd: (_z, y) => y - 1.005 }, 'seam')], { offset: -0.014, border: 'seam' });
     const bpi = cut(S4, [uAbove(S4, 0.004, 'seam'), uBelow(S4, dloTop, 'seam'), zAbove(B_FRONT, 'seam'), zBelow(B_REAR, 'seam')], { offset: -0.03, border: 'seam', where: (p) => p[2] > 0 && p[2] < 0.3 });
     add('headliner', 'interior', 'interior', flipMesh(mergeMeshes([hl.mesh, bpi.mesh, mirrorMesh(bpi.mesh)])), ['s5_cw*', 's6_rf*', 's6_bt_*', 's7_rf*', 's7_bt_*', 's8_rf*', 's8_bt_*', 's9_dk*', 's10_ld*', 's11_ld*'], { damageWeight: 0, castShadow: false });
   }
@@ -1508,7 +1510,6 @@ export const SEDAN_FOLLOW: Readonly<Record<string, string>> = {
   doorCardRR: 'doorRR',
   doorCardLF: 'doorLF',
   doorCardLR: 'doorLR',
-  headliner: 'roof',
 };
 
 setVisualExtras(SEDAN_VISUAL, {

@@ -1501,7 +1501,8 @@ export function buildCoupeVisual(opts: CoupeBuildOptions = { lod: 0 }): VehicleV
       add(`doorCard${s}`, 'interior', 'interiorTrim', perSide(card, s), doorBind(s), { damageWeight: 0 });
     }
     // Headliner: the greenhouse frame offset inward, facing in.
-    const hl = cutC(S4lo, [uAbove(S4lo, dloTop - 0.01, 'seam'), vAbove(S4lo, 0, 'seam'), vBelow(S4lo, 1, 'seam'), sideCut({ sd: (_z, y) => y - 0.9 }, 'seam')], { offset: -0.014, border: 'seam' });
+    // ends inside the windscreen / rear-glass openings (see the sedan: a lining spanning them is a brown sheet once the glass shatters)
+    const hl = cutC(S4lo, [uAbove(S4lo, dloTop - 0.01, 'seam'), zAbove(HEADER_Z - 0.02, 'seam'), zBelow(REAR_TOP_Z + 0.02, 'seam'), sideCut({ sd: (_z, y) => y - 0.9 }, 'seam')], { offset: -0.014, border: 'seam' });
     add('headliner', 'interior', 'interior', flipMesh(hl.mesh), ['s5_cw*', 's6_rf*', 's6_bt_*', 's7_rf*', 's7_bt_*', 's8_rf*', 's8_bt_*', 's9_dk*'], { damageWeight: 0, castShadow: false });
   }
 
