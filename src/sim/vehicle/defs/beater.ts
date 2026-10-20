@@ -46,7 +46,9 @@ export const WHEEL_TUNING_BEATER_10 = {
   rimRadius: 0.178,
   width: 0.14,
   rays: 10,
-  treadBrushStiffness: WHEEL_TUNING_205_55R16.treadBrushStiffness * RAY_SCALE,
+  // R-PHYS: an old, hard 175/70R13-class tyre: C_α/Fz ≈ 13–14/rad (bench), the falloff of a worn tread
+  treadBrushStiffness: 1e5,
+  tyreSlideRatio: 0.75,
   treadBrushDamping: WHEEL_TUNING_205_55R16.treadBrushDamping * RAY_SCALE,
   tireRingSpring: WHEEL_TUNING_205_55R16.tireRingSpring * RAY_SCALE,
   tireRingDamp: WHEEL_TUNING_205_55R16.tireRingDamp * RAY_SCALE,

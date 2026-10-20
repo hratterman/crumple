@@ -88,7 +88,8 @@ export const COUPE_TYRE = {
   rays: 12,
   tireNodeRadius: 0.045,
   tireContactSpring: 8e4,
-  treadBrushStiffness: 8.5e4,
+  // R-PHYS: 8.5e4 → 1.9e5: a 255/35R19-class performance tyre, C_α/Fz ≈ 18–22/rad, peak ≈ 5–7°
+  treadBrushStiffness: 1.9e5,
   treadBrushDamping: 30,
   rimHoopTension: 1,
   treadHoopTension: 0.5,
@@ -103,6 +104,11 @@ export const COUPE_TYRE = {
   rimMass: 24,
   tireMass: 9.4,
   friction: 1.35,
+  // R-PHYS tyre model (tyre.ts)
+  tyreLoadSensitivity: 0.06,
+  tyreSlideRatio: 0.78,
+  tyrePeakSlip: 0.06,
+  tyreSlideSlip: 0.45,
 } as const satisfies Partial<WheelDef>;
 /**
  * Rear lateral brush stiffness, N/m per tread node (front: COUPE_TYRE's).
@@ -111,7 +117,7 @@ export const COUPE_TYRE = {
  * grew from 260 km/h (±0.09 rad/s at 278 km/h); at 1.15e5 the 10 s
  * full-throttle run from 245 km/h holds |r| < 0.01 rad/s.
  */
-const REAR_BRUSH = 1.15e5;
+const REAR_BRUSH = 2.3e5; // R-PHYS: 1.15e5 × 2 with the front's realism scaling
 
 const Z_F = -COUPE_TARGETS.wheelbase / 2; // front axle
 const Z_R = COUPE_TARGETS.wheelbase / 2; // rear axle
@@ -1308,7 +1314,7 @@ function buildCoupe(): { def: VehicleDef; design: CoupeDesign } {
     },
     wheels,
     drivetrain: DRIVETRAIN,
-    brakes: { frontBias: 0.64, handbrakeTorqueMax: 1800 },
+    brakes: { frontBias: 0.64, handbrakeTorqueMax: 1800, abs: true, esc: true },
     // Low, wide fastback with a ducktail and diffuser: net downforce. CdA 0.68 (Cd ≈ 0.35
     // × 1.95 m²) also caps v_max at ≈ 285 km/h (a 40 s run settles there, |r| < 0.02 rad/s):
     // at 0.58 it reached 288 km/h and slowly yawed off line (wheel speed far beyond the tread

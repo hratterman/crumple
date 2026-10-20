@@ -244,6 +244,9 @@ export interface DrivetrainStateEx extends DrivetrainState {
   wheelInertia: Float64Array;
   /** Locked-diff angle deviation per wheel, rad. */
   diffPhi: Float64Array;
+  /** R-PHYS driver assists (setAssists): ABS / ESC switched on (effective only when BrakesDef fits them). */
+  abs: boolean;
+  esc: boolean;
 }
 
 /**
@@ -284,6 +287,8 @@ export function createDrivetrainState(
     launchTrac: 0,
     wheelInertia,
     diffPhi: new Float64Array(wheelInertia.length),
+    abs: true,
+    esc: true,
   };
 }
 

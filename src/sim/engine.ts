@@ -66,6 +66,7 @@ import {
 } from './vehicle/runtime';
 import type { CompiledVehicle, TransmissionMode, VehicleDef, VehicleRuntime } from './vehicle/types';
 import { setWheelGround } from './vehicle/wheels';
+import type { DrivetrainStateEx } from './vehicle/drivetrain';
 
 /** Fixed physics step, s. */
 export const SIM_DT = 1 / 2000;
@@ -493,12 +494,19 @@ export class SimEngine {
   }
 
   /** Driver assists (protocol `setAssists`); omitted fields keep their state. */
-  setAssists(objectId: number, assists: { tractionControl?: boolean }): void {
+  setAssists(objectId: number, assists: { tractionControl?: boolean; abs?: boolean; esc?: boolean }): void {
     const v = this.vehicles.get(objectId);
     if (!v) throw new SimCommandError(`objectId ${objectId} is not a vehicle`, objectId);
     const tc = assists?.tractionControl;
+    const abs = assists?.abs;
+    const esc = assists?.esc;
     if (tc !== undefined && typeof tc !== 'boolean') throw new SimCommandError('setAssists: tractionControl must be a boolean', objectId);
+    if (abs !== undefined && typeof abs !== 'boolean') throw new SimCommandError('setAssists: abs must be a boolean', objectId);
+    if (esc !== undefined && typeof esc !== 'boolean') throw new SimCommandError('setAssists: esc must be a boolean', objectId);
     if (tc !== undefined) v.drivetrain.tractionControl = tc;
+    const dts = v.drivetrain as DrivetrainStateEx;
+    if (abs !== undefined) dts.abs = abs;
+    if (esc !== undefined) dts.esc = esc;
   }
 
   /** Upright the vehicle in place (damage and drivetrain kept); see recoverVehicle. */

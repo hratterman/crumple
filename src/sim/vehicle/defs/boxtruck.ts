@@ -115,11 +115,18 @@ export const BOXTRUCK_TIRE = {
   rimMass: 88,
   tireMass: 52,
   friction: 0.65,
+  // R-PHYS tyre model (tyre.ts): truck tyres are more load sensitive
+  tyreLoadSensitivity: 0.08,
+  tyreSlideRatio: 0.8,
+  tyrePeakSlip: 0.09,
+  tyreSlideSlip: 0.6,
 } as const satisfies Partial<WheelDef>;
 
 /** Lateral tread-brush stiffness per tread node, N/m, per axle (the rear has four tyres). */
-const FRONT_BRUSH = 1.2e5;
-const REAR_BRUSH = 3e5;
+// R-PHYS: front × 1.8, rear × 1.2 (1.2e5 / 3e5 before): a 245/70R19.5-class truck tyre, C_α/Fz ≈ 5–8/rad
+// (truck tyres ≈ 0.1·Fz per degree), peak ≈ 8–12° (bench)
+const FRONT_BRUSH = 2.16e5;
+const REAR_BRUSH = 3.6e5;
 const WHEEL_RADIUS = BOXTRUCK_TIRE.radius;
 const Y_W = WHEEL_RADIUS;
 
@@ -638,6 +645,8 @@ const DRIVETRAIN: DrivetrainDef = {
   clutchMaxTorque: 1600,
   transmission: 'auto',
   tractionControl: 0.15,
+  // R-PHYS: live rear axle — the differential's drive-torque reaction acts on the axle housing.
+  driveReaction: 'axle',
 };
 
 // ====================================================================== generator helpers
@@ -1856,7 +1865,7 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
     },
     wheels,
     drivetrain: DRIVETRAIN,
-    brakes: { frontBias: 0.55, handbrakeTorqueMax: 4000 },
+    brakes: { frontBias: 0.55, handbrakeTorqueMax: 4000, abs: true },
     aero: { dragCoeffArea: 5.6, liftCoeffArea: 0 },
     steering: { maxWheelAngleDeg: round((BOXTRUCK_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
     frame: { origin: 'f7_x', front: 'f3_x', top: sid('c3', 'rf') },

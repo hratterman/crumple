@@ -129,6 +129,8 @@ export function benchDef(src: WheelDef): { def: VehicleDef; wheel: WheelDef } {
     { id: 'b', pos: [xin, R, 0.3] as [number, number, number], mass: m, collidable: false, group: 'bench' },
   ];
   const wheel: WheelDef = {
+    // the bench's own mass would make the default design load meaningless: 4 kN unless the def says
+    tyreDesignLoad: 4000,
     ...src,
     id: 'W',
     hubInner: [0, R, 0],

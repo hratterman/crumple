@@ -59,7 +59,9 @@ export const WHEEL_TUNING_205_55R16 = {
   rays: 12,
   tireNodeRadius: 0.045,
   tireContactSpring: 8e4,
-  treadBrushStiffness: 7e4,
+  // R-PHYS: 7e4 → 1.6e5 (flat-track bench, realism/tyreSweeps.ts): cornering stiffness C_α/Fz 8.8 → 15.2/rad and
+  // peak slip angle 11.9° → 7.3° at 4 kN (205/55R16 data: C_α/Fz 15–20/rad, peak 6–9°; Pacejka §4.3)
+  treadBrushStiffness: 1.6e5,
   treadBrushDamping: 30,
   rimHoopTension: 1,
   treadHoopTension: 0.5,
@@ -74,6 +76,11 @@ export const WHEEL_TUNING_205_55R16 = {
   rimMass: 24,
   tireMass: 9.4,
   friction: 1.1,
+  // R-PHYS tyre model (tyre.ts): μ load sensitivity, sliding fall-off to 0.8 of peak (dry asphalt 0.7–0.85)
+  tyreLoadSensitivity: 0.06,
+  tyreSlideRatio: 0.8,
+  tyrePeakSlip: 0.07,
+  tyreSlideSlip: 0.5,
 } as const satisfies Partial<WheelDef>;
 
 function fail(wheel: string, msg: string): never {

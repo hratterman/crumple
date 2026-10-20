@@ -132,6 +132,20 @@ export interface WheelDef {
    */
   rimHoopTension?: number;
   treadHoopTension?: number;
+  /**
+   * R-PHYS tyre model (tyre.ts; additive, optional — defaults keep the P2
+   * tyre): load sensitivity of μ per unit of relative load (0 = none),
+   * sliding/peak μ ratio (1 = no fall-off), the combined slip σ where the
+   * fall-off starts / completes, and the rolling-loss correction table
+   * (excess loss per unit load every 20 km/h of tread speed, from 0).
+   */
+  tyreLoadSensitivity?: number;
+  tyreSlideRatio?: number;
+  tyrePeakSlip?: number;
+  tyreSlideSlip?: number;
+  rollingLossComp?: readonly number[];
+  /** Design load Fz0 of the load sensitivity, N (default: the car's weight shared over its wheels). */
+  tyreDesignLoad?: number;
   attachSpring?: number;
   attachDamp?: number;
   attachBreakF?: number;
@@ -253,6 +267,13 @@ export interface DrivetrainDef {
    * exceeds the undriven wheels' by more than that ratio. 0/absent = off.
    */
   tractionControl?: number;
+  /**
+   * R-PHYS (additive, optional): where the drive torque's reaction goes.
+   * 'body' (default): the differential is on the body (independent rear,
+   * transaxle) — a pure couple on the body's frame nodes. 'axle': a live
+   * axle — the couple acts on each driven wheel's upright / axle housing.
+   */
+  driveReaction?: 'body' | 'axle';
 }
 
 export type TransmissionMode = 'auto' | 'manual';
@@ -268,6 +289,12 @@ export interface BrakesDef {
   /** 0..1, fraction toward the front axle (≈ 0.6–0.7). */
   frontBias: number;
   handbrakeTorqueMax: number;
+  /**
+   * R-PHYS (additive, optional): the car has ABS (with EBD) / ESC fitted
+   * (brakes.ts). Default false. Toggled at runtime by `setAssists`.
+   */
+  abs?: boolean;
+  esc?: boolean;
 }
 
 /**
@@ -389,6 +416,16 @@ export interface CompiledWheel {
   rimHoop: number;
   treadHoop: number;
   friction: number;
+  /** R-PHYS tyre model parameters (WheelDef tyre* fields with defaults; additive, optional). */
+  tyre?: {
+    loadSensitivity: number;
+    slideRatio: number;
+    peakSlip: number;
+    slideSlip: number;
+    rollingLossComp: number[];
+    /** 0 = the car's weight shared over its wheels. */
+    designLoad: number;
+  };
 }
 
 export interface CompiledDrivetrain {
@@ -416,6 +453,8 @@ export interface CompiledDrivetrain {
   /** Wheel indices with driven = true, declaration order. */
   drivenWheels: Int32Array;
   transmission: TransmissionMode;
+  /** DrivetrainDef.driveReaction ?? 'body' (R-PHYS, additive optional for hand-built tables). */
+  driveReaction?: 'body' | 'axle';
 }
 
 /** compileVehicle output: what the worker spawns and main renders. Structured-cloneable. */
@@ -528,6 +567,19 @@ export interface WheelRuntime {
   /** Last applied (signed) drive / brake torque, N·m. */
   driveTorque: number;
   brakeTorque: number;
+  /**
+   * R-PHYS (additive, optional): global indices of the upright nodes that take
+   * the brake / rolling-resistance reaction couple (wheels.ts applyWheelTorques),
+   * and their rig-local indices (rebase source).
+   */
+  reactNodes?: Int32Array;
+  reactLocal?: Int32Array;
+  /**
+   * R-PHYS: extra torque about the spin axis this tick (tyre.ts rolling-loss
+   * correction), applied with the brake / rolling-resistance torque and
+   * reacting on the upright. Additive, optional.
+   */
+  extraTorque?: number;
 }
 
 export interface DrivetrainState {

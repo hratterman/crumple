@@ -1369,7 +1369,7 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
     },
     wheels,
     drivetrain: DRIVETRAIN,
-    brakes: { frontBias: 0.6, handbrakeTorqueMax: 1500 },
+    brakes: { frontBias: 0.6, handbrakeTorqueMax: 1500, abs: true, esc: true },
     aero: { dragCoeffArea: 0.65, liftCoeffArea: 0.08 },
     steering: { maxWheelAngleDeg: round((SEDAN_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
     frame: { origin: sid(7, 'tn'), front: sid(2, 'rs'), top: sid(7, 'rf') },

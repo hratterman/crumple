@@ -379,8 +379,92 @@ export const estimateWheelOmega: EstimateWheelOmega = (state, w) => {
 };
 
 /**
+ * REACTION COUPLE (R-PHYS; amends the P2 "no body reaction couple"): a torque
+ * τ put into the wheel by something mounted on the upright (caliper, the
+ * rolling-resistance stand-in, a live axle's differential) reacts on that
+ * upright as −τ about the spin axis s. Without it every brake applied an
+ * external torque to the car and the braking load transfer was
+ * m·a·(h − r)/L instead of m·a·h/L (sedan, measured on the axle loads:
+ * 1305 N/g vs 2473 N/g; the car dived and loaded its fronts half as much as
+ * a real one). Distribution: on the upright nodes j (WheelRuntime.reactNodes,
+ * ρ_j = their offset from the axle, ⊥ s), F_j = −τ·(s × ρ_j)/Σ|ρ|², whose
+ * moment is exactly −τ·s; the hubs take −ΣF_j/2 each (zero net force).
+ * Only + − × ÷ sqrt, no allocation.
+ */
+const DISABLE_REACT = false;
+export function applyUprightReaction(state: SimState, w: WheelRuntime, tau: number): void {
+  const nodes = w.reactNodes;
+  if (tau === 0 || nodes === undefined || nodes.length === 0 || w.detached !== 0 || !axleFrame(state, w) || DISABLE_REACT) return;
+  const { posX, posY, posZ, frcX, frcY, frcZ } = state;
+  const cx = frame[0]!;
+  const cy = frame[1]!;
+  const cz = frame[2]!;
+  const sx = frame[3]!;
+  const sy = frame[4]!;
+  const sz = frame[5]!;
+  const nr = nodes.length;
+  let r2 = 0;
+  for (let q = 0; q < nr; q++) {
+    const i = nodes[q]!;
+    const rx = posX[i]! - cx;
+    const ry = posY[i]! - cy;
+    const rz = posZ[i]! - cz;
+    const ax = rx * sx + ry * sy + rz * sz;
+    const px = rx - ax * sx;
+    const py = ry - ax * sy;
+    const pz = rz - ax * sz;
+    r2 += px * px + py * py + pz * pz;
+  }
+  if (!(r2 > 1e-6)) return;
+  const k = -tau / r2;
+  let tx = 0;
+  let ty = 0;
+  let tz = 0;
+  for (let q = 0; q < nr; q++) {
+    const i = nodes[q]!;
+    const rx = posX[i]! - cx;
+    const ry = posY[i]! - cy;
+    const rz = posZ[i]! - cz;
+    const ax = rx * sx + ry * sy + rz * sz;
+    const px = rx - ax * sx;
+    const py = ry - ax * sy;
+    const pz = rz - ax * sz;
+    const fx = k * (sy * pz - sz * py);
+    const fy = k * (sz * px - sx * pz);
+    const fz = k * (sx * py - sy * px);
+    frcX[i] = frcX[i]! + fx;
+    frcY[i] = frcY[i]! + fy;
+    frcZ[i] = frcZ[i]! + fz;
+    tx += fx;
+    ty += fy;
+    tz += fz;
+  }
+  const hi = w.hubI;
+  const ho = w.hubO;
+  frcX[hi] = frcX[hi]! - 0.5 * tx;
+  frcY[hi] = frcY[hi]! - 0.5 * ty;
+  frcZ[hi] = frcZ[hi]! - 0.5 * tz;
+  frcX[ho] = frcX[ho]! - 0.5 * tx;
+  frcY[ho] = frcY[ho]! - 0.5 * ty;
+  frcZ[ho] = frcZ[ho]! - 0.5 * tz;
+}
+
+/**
+ * Whether the drive torque reacts on the upright (live axle) — set per
+ * vehicle by vehiclePreStep through `setDriveOnUpright` (module state: the
+ * frozen ApplyWheelTorques signature has no vehicle).
+ */
+let driveOnUpright = false;
+export function setDriveOnUpright(on: boolean): void {
+  driveOnUpright = on;
+}
+
+/**
  * TORQUE LAW: τ = drive (0 when detached) + brake ramped as
  * −brakeTorque·clamp(ω/BRAKE_OMEGA_EPS, −1, 1), applied by applyAxleTorque.
+ * R-PHYS: brake + rolling resistance (+ drive on a live axle) react on the
+ * upright (applyUprightReaction); a body-mounted differential's drive
+ * reaction is applied by the runtime (runtime.ts applyDriveReaction).
  */
 export const applyWheelTorques: ApplyWheelTorques = (state, w, driveTorque, brakeTorque) => {
   const drive = w.detached !== 0 ? 0 : driveTorque;
@@ -399,7 +483,10 @@ export const applyWheelTorques: ApplyWheelTorques = (state, w, driveTorque, brak
     else if (rr < -1) rr = -1;
     roll = -crr * w.load * w.rollRadius * rr;
   }
+  const extra = w.extraTorque;
+  if (extra !== undefined) roll += extra;
   applyAxleTorque(state, w, drive + brake + roll);
+  applyUprightReaction(state, w, driveOnUpright ? drive + brake + roll : brake + roll);
 };
 
 /**
@@ -845,6 +932,7 @@ export const applyParkingClamp: ApplyParkingClamp = (state, vehicle, actions, dt
     const hold = total - prior;
     w.brakeTorque = total;
     applyAxleTorque(state, w, hold);
+    applyUprightReaction(state, w, hold);
 
     // ---- contact nodes: viscous + anchor, capped at μN(1 − tanhR(|v_t|/0.3))
     // (brush wheels: the tread brush already anchors the contact).
