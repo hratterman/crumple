@@ -152,8 +152,13 @@ export interface MountainsZone extends ZoneBase {
  */
 export interface LakeZone extends ZoneBase {
   kind: 'lake';
-  /** `water` (P5, render-only optics; default WATER_OPTICS_DEFAULTS) is ignored by the generator. */
-  params: { depth: number; shoreLift: number; water?: Partial<WaterOptics> };
+  /**
+   * `water` (P5, render-only optics; default WATER_OPTICS_DEFAULTS) is ignored by the generator.
+   * `level` (layout v6, R-WORLD; default layout.waterLevel): this basin's own surface height, m —
+   * ponds, fords and water splashes above the valley's water plane. The generator carves the basin
+   * to it and resolveWater floods it to it (WaterBody.level).
+   */
+  params: { depth: number; shoreLift: number; water?: Partial<WaterOptics>; level?: number };
 }
 /** Flattened, paved crash-test pad. Splat paved, material = params.material (concrete). */
 export interface ArenaZone extends ZoneBase {
@@ -176,7 +181,8 @@ export type ZoneKind = ZoneDef['kind'];
  */
 export interface PadDef {
   id: string;
-  purpose: 'lookout' | 'spawn' | 'props' | 'parking';
+  /** v6 adds: apron (airfield / paddock concrete), yard (industrial / quarry floor), lot (building plot), pit (quarry bench), field (farm). */
+  purpose: 'lookout' | 'spawn' | 'props' | 'parking' | 'apron' | 'yard' | 'lot' | 'pit' | 'field';
   shape: ZoneShape;
   height: number | null;
   material?: MaterialId;
@@ -228,7 +234,22 @@ export type ColliderVisual =
   | 'kicker' //     steel kicker ramp (ramp)
   | 'deck' //       steel-framed deck plate: ski-jump in-run / landing hill, quarter-pipe staves (box)
   | 'floodlight' // floodlight tower (cylinder = the mast base; the lattice + lamp head are drawn above it)
-  | 'grandstand'; // stepped grandstand (box = its bulk)
+  | 'grandstand' // stepped grandstand (box = its bulk)
+  // Layout v6 (R-WORLD, additive; docs/CONTRACTS.md "R-WORLD contracts"). Drawn by
+  // src/render/world/content/** from WorldContent, NOT by render/world/colliders.ts (it skips them):
+  | 'building' //   a building's solid (box); the façade / roof / interior come from WorldContent.render
+  | 'kerb' //       kerb stone + the first metres of sidewalk slab (box, top at sidewalk level)
+  | 'armco' //      W-beam / armco barrier run (box)
+  | 'railing' //    bridge / tunnel parapet (box)
+  | 'deckSlab' //   bridge deck segment (box; the ribbon draws its surface)
+  | 'tunnelWall' // tunnel lining / roof (box)
+  | 'pier' //       bridge pier / gantry leg (box or cylinder)
+  | 'parked' //     parked car (box; the car model comes from WorldContent.render)
+  | 'log' //        fallen log (cylinder, tilted)
+  | 'pipe' //       steel / concrete pipe (cylinder, tilted)
+  | 'crashBarrier' // crash-lab rigid barrier block (box)
+  | 'sled' //       crash-lab side-impact sled (box)
+  | 'lid'; //       invisible tunnel-cover lid (plane): keeps cars on the ridge drawn over a tunnel
 export interface ColliderDef {
   id: string;
   kind: ColliderKind;
@@ -456,17 +477,28 @@ export const VEG_ROAD_CLEARANCE_M: readonly number[] = [4, 5, 1.5, 1, 3];
 export const VEG_TRUNK_RADIUS_M: readonly number[] = [0.2, 0.28, 0, 0, 0];
 export const VEG_BOULDER_RADIUS_M = 1.1;
 export const VEG_BOULDER_CENTER_LIFT = 0.35;
-/** Pure, deterministic (U4). */
-export type ScatterVegetation = (layout: WorldLayout, terrain: TerrainData) => VegetationScatter;
+/**
+ * Pure, deterministic (U4). Layout v6: `extra` = the WorldContent's colliders, props and
+ * exclusion footprints (src/world/content/types.ts) — kept clear exactly like the layout's
+ * own (collider AABB + 2 m, prop + 3 m, footprint rectangles). Worker and main pass the same.
+ */
+export interface VegetationExtra {
+  colliders: readonly ColliderDef[];
+  props: readonly PropPlacement[];
+  exclusions: readonly { cx: number; cz: number; ax: number; az: number; hx: number; hz: number }[];
+}
+export type ScatterVegetation = (layout: WorldLayout, terrain: TerrainData, extra?: VegetationExtra | null) => VegetationScatter;
 /** FNV-1a 32 word-wise over count, kind, x, y, z, scale, collider (U4). */
 export type HashVegetation = (scatter: VegetationScatter) => number;
 
 // ============================================================ roads
 /**
  * Road kinds. Carve PRIORITY (low → high) decides who wins where roads
- * overlap at junctions: dirt < street < country < mountain < arena < highway.
+ * overlap at junctions: dirt < street < country < mountain < arena = track < highway.
+ * `track` (layout v6): a closed racing circuit / pit lane — paved, wide, graded like a
+ * country road, painted kerbs on its verges, no traffic.
  */
-export type RoadKind = 'highway' | 'country' | 'mountain' | 'dirt' | 'street' | 'arena';
+export type RoadKind = 'highway' | 'country' | 'mountain' | 'dirt' | 'street' | 'arena' | 'track';
 /**
  * Marking styles for the ribbon shader (E):
  *  - highway: white solid edge lines, white dashed lane dividers (3 m dash,
@@ -525,7 +557,70 @@ export interface RoadDef {
   /** Physics material of the carriageway (shoulders are gravel). */
   material: MaterialId;
   markings: RoadMarkings;
+  // ---- layout v6 (R-WORLD, additive; docs/CONTRACTS.md "R-WORLD contracts") ----
+  /** Bridge / tunnel spans along this road (see RoadStructureDef). */
+  structures?: readonly RoadStructureDef[];
+  /**
+   * One-way road (slip ramps): traffic only travels toward increasing s. The route network
+   * builds dir +1 lanes only, lane k centred at d = (k + 0.5 − lanes/2)·width/lanes, and
+   * no dead-end U-turns. Markings: edge lines + lane dividers.
+   */
+  oneWay?: boolean;
+  /** Raised sidewalks with real kerbs on both sides (see SidewalkDef). */
+  sidewalk?: SidewalkDef;
+  /** Render hint for the carriageway's wear (ribbon + decals): default 'fresh'. */
+  wear?: 'fresh' | 'worn' | 'patched';
 }
+
+/**
+ * BRIDGE / TUNNEL span of a road (layout v6). `from` / `to` are plan points the
+ * generator projects onto the road's centreline (s0 < s1 after sorting); the
+ * span is [s0, s1] in road arc metres (RoadProfile.structures).
+ *  - bridge: the road is NOT carved inside the span (the terrain below — lake,
+ *    valley, another road — stays as it is); its profile y (pin it with explicit
+ *    control-point y) is the deck surface. WorldContent adds the deck slabs
+ *    (box colliders `deckSlab`, top = the profile surface, ≤ 12 m long),
+ *    parapets (`railing`) and piers; the ribbon draws the deck surface from the
+ *    profile instead of the terrain. Roads may cross a bridge span without a
+ *    junction (the overpass exception to "roads meet only at junctions").
+ *  - tunnel: the road IS carved (physics drives the cut floor); the generator
+ *    also records the uncarved ridge over the span as a render-only
+ *    TerrainCover (TerrainData.covers) so the terrain is drawn closed over the
+ *    bore. WorldContent adds the lining / roof (`tunnelWall`), portals, lights
+ *    and invisible `lid` planes over the cover so cars on the ridge stay on it.
+ */
+export interface RoadStructureDef {
+  id: string;
+  kind: 'bridge' | 'tunnel';
+  from: Vec2;
+  to: Vec2;
+}
+/** Resolved span (RoadProfile.structures), s0 < s1 in road arc metres. */
+export interface RoadStructure {
+  id: string;
+  kind: 'bridge' | 'tunnel';
+  s0: number;
+  s1: number;
+}
+
+/**
+ * SIDEWALKS (layout v6, streets). Beyond the carriageway + shoulder edge (the
+ * KERB LINE, |d| = width/2 + shoulder) the generator raises the terrain by
+ * `kerb` m from |d| ≥ kerb line + SIDEWALK_RAMP_M out to kerb line + `width`,
+ * then blends back to the town ground over the road's blend band. The 1 m
+ * grid cannot hold a vertical step, so WorldContent places `kerb` box
+ * colliders (top = carriageway surface + kerb, inner face exactly on the kerb
+ * line, SIDEWALK_RAMP_M wide) over the ramp: tyres meet a real 12–15 cm step.
+ * Kerbs drop (no collider, no raise) across junction mouths and driveways.
+ */
+export interface SidewalkDef {
+  /** Sidewalk width from the kerb line, m (≥ SIDEWALK_RAMP_M + 0.5). */
+  width: number;
+  /** Kerb height above the carriageway edge, m (0.10–0.18). */
+  kerb: number;
+}
+/** Width of the kerb collider / grid ramp band behind the kerb line, m. */
+export const SIDEWALK_RAMP_M = 2;
 
 /**
  * Per-kind tuning used by the generator and checks. All roads of a kind
@@ -553,6 +648,7 @@ export const ROAD_KIND_DEFAULTS: Readonly<Record<RoadKind, RoadKindDefaults>> = 
   country: { priority: 2, smoothRadius: 25, maxGrade: 0.1, bankFullRadius: 120, blend: 14, surface: 'ribbon' },
   mountain: { priority: 3, smoothRadius: 15, maxGrade: 0.13, bankFullRadius: 45, blend: 12, surface: 'ribbon' },
   arena: { priority: 4, smoothRadius: 30, maxGrade: 0.02, bankFullRadius: 200, blend: 10, surface: 'ribbon' },
+  track: { priority: 4, smoothRadius: 30, maxGrade: 0.09, bankFullRadius: 70, blend: 14, surface: 'ribbon' },
   highway: { priority: 5, smoothRadius: 60, maxGrade: 0.07, bankFullRadius: 300, blend: 26, surface: 'ribbon' },
 };
 
@@ -568,7 +664,17 @@ export interface JunctionDef {
   id: string;
   pos: Vec2;
   roads: readonly string[];
+  /**
+   * Layout v6: traffic control (default 'none' = the priority rules above).
+   *  - signal:  traffic lights, a SignalPlan (src/world/signals.ts): the through road's legs
+   *             and the branch legs take turns; RoutePath.signal links connectors to it.
+   *  - stop:    stop signs on every BRANCH leg (RoutePath.stop on their connectors).
+   *  - allStop: stop signs on every leg.
+   *  - yield:   give-way signs on the branch legs (the default right of way, signed).
+   */
+  control?: JunctionControl;
 }
+export type JunctionControl = 'none' | 'signal' | 'stop' | 'allStop' | 'yield';
 export const JUNCTION_EASE_M = 40;
 
 // ============================================================ spawns / layout
@@ -584,6 +690,112 @@ export interface SpawnPoint {
   road?: { id: string; s: number; d: number; reverse?: boolean };
   pos?: Vec2;
   yaw?: number;
+  /** Layout v6: the WorldArea this spawn is the teleport entry of (menus group by it). */
+  area?: string;
+}
+
+// ============================================================ areas, POIs, surfaces (layout v6)
+/**
+ * WORLD AREA (layout v6, R-WORLD): a named region for menus, modes and
+ * ambience. `bounds` is a plan shape (its blend is ignored); `spawn` is the
+ * teleport entry (a SpawnPoint id). Areas may overlap (the crash lab sits in
+ * the proving ground); the frozen ids are listed in docs/CONTRACTS.md.
+ */
+export type AreaKind =
+  | 'town'
+  | 'arena'
+  | 'lake'
+  | 'mountain'
+  | 'trail'
+  | 'highway'
+  | 'interchange'
+  | 'bridge'
+  | 'tunnel'
+  | 'circuit'
+  | 'rally'
+  | 'drag'
+  | 'offroad'
+  | 'proving'
+  | 'crashLab'
+  | 'quarry'
+  | 'farm'
+  | 'campsite'
+  | 'landmark';
+export interface WorldArea {
+  id: string;
+  name: string;
+  kind: AreaKind;
+  bounds: ZoneShape;
+  /** Teleport entry: a SpawnPoint id. */
+  spawn: string;
+}
+
+/**
+ * POINT OF INTEREST (layout v6): a named world location game modes key on
+ * (start lines, grid slots, timing beams, split points, crash-lab targets,
+ * delivery depots, police posts, landmarks). Pure data; `pos` y null = on
+ * the ground (resolvePois: terrain, or the top of a box / ramp collider
+ * under it). `heading` is the unit (x, z) direction a car starting there
+ * faces / a gate's travel direction; `radius` the trigger radius, m;
+ * `width` a line's / gate's width across `heading`, m.
+ */
+export type PoiKind =
+  | 'start'
+  | 'finish'
+  | 'grid'
+  | 'checkpoint'
+  | 'split'
+  | 'pitEntry'
+  | 'pitExit'
+  | 'pitBox'
+  | 'stage'
+  | 'timingBeam'
+  | 'tree'
+  | 'barrier'
+  | 'pole'
+  | 'sled'
+  | 'runup'
+  | 'depot'
+  | 'delivery'
+  | 'police'
+  | 'roadblock'
+  | 'parking'
+  | 'fuel'
+  | 'repair'
+  | 'jump'
+  | 'target'
+  | 'landmark'
+  | 'lookout'
+  | 'hazard';
+export interface PointOfInterest {
+  id: string;
+  area: string;
+  kind: PoiKind;
+  name: string;
+  pos: RoadPoint;
+  heading?: Vec2;
+  radius?: number;
+  width?: number;
+}
+/** resolvePois output: y on the support surface. */
+export interface ResolvedPoi extends Omit<PointOfInterest, 'pos'> {
+  pos: WorldVec3;
+}
+
+/**
+ * SURFACE PATCH (layout v6): paint-only (plus an optional gentle depression)
+ * material area — mud pits, sand / gravel traps, wet meadows, worn asphalt
+ * lots. Applied after the zones / pads paint and before the roads paint
+ * (carriageways win). Inside the shape's core the material byte becomes
+ * `material` and the splat is repainted to match (mud / wetGrass → dirt /
+ * grass weights darkened through the surface mask, sand → gravel + dirt);
+ * `depth` lowers the terrain by depth·mask (m, before road carving).
+ */
+export interface SurfacePatchDef {
+  id: string;
+  shape: ZoneShape;
+  material: MaterialId;
+  depth?: number;
 }
 
 export interface WorldLayout {
@@ -616,6 +828,12 @@ export interface WorldLayout {
   colliders: readonly ColliderDef[];
   /** Soft-body props (P5), spawned by the worker on groundHeightfield; see PropPlacement. */
   props: readonly PropPlacement[];
+  /** Layout v6: named regions (menus, modes, ambience). */
+  areas?: readonly WorldArea[];
+  /** Layout v6: mode locations (see PointOfInterest). */
+  pois?: readonly PointOfInterest[];
+  /** Layout v6: paint-only material patches (see SurfacePatchDef). */
+  surfaces?: readonly SurfacePatchDef[];
 }
 
 // ============================================================ TerrainData
@@ -673,6 +891,11 @@ export interface RoadProfile {
   material: MaterialId;
   markings: RoadMarkings;
   surface: 'ribbon' | 'splat';
+  /** Layout v6 (copied from RoadDef / resolved): bridge + tunnel spans, ascending s0. */
+  structures?: readonly RoadStructure[];
+  oneWay?: boolean;
+  sidewalk?: SidewalkDef;
+  wear?: 'fresh' | 'worn' | 'patched';
   /** Total arc length, m (plan + vertical chord sum of the stations). */
   length: number;
   stationCount: number;
@@ -733,6 +956,28 @@ export interface TerrainData {
   spawns: readonly ResolvedSpawn[];
   /** hashTerrain(this) — u32. */
   hash: number;
+  /**
+   * Layout v6: render-only terrain over tunnels (see RoadStructureDef). NOT
+   * hashed, never used for collision, cameras or placement: only the terrain
+   * MESH / its splat read it (the physics worker may drop it).
+   */
+  covers?: readonly TerrainCover[];
+}
+
+/**
+ * Render-only terrain patch (tunnel covers): a sub-grid of samples whose drawn
+ * height / splat replace the carved ones. Sample (c, r) of the patch is grid
+ * sample (col0 + c, row0 + r); heights NaN = keep the terrain's sample there.
+ */
+export interface TerrainCover {
+  id: string;
+  col0: number;
+  row0: number;
+  cols: number;
+  rows: number;
+  heights: Float32Array;
+  /** cols × rows × SPLAT_CHANNELS. */
+  splat: Uint8Array;
 }
 
 // ============================================================ samplers / helpers
@@ -889,6 +1134,7 @@ export const ROUTE_SPEED_LIMITS: Readonly<Record<RoadKind, number>> = {
   street: 50 / 3.6,
   dirt: 0,
   arena: 0,
+  track: 0,
 };
 /** Station spacing along every RoutePath, m (the last station sits at `length`). */
 export const ROUTE_STATION_SPACING = 2;
@@ -942,11 +1188,21 @@ export interface RoutePath {
   /** Lane: the same-direction neighbour lanes (lane change), −1 = none. Connector: −1, −1. */
   left: number;
   right: number;
+  /**
+   * Layout v6 (R-WORLD, additive; not hashed): connector of a SIGNALLED junction — its
+   * incoming leg's signal (`plan` = index into buildSignalPlans(layout, net), `leg` = index
+   * into that plan's legs); query the aspect with signalAspect(plan, leg, tick). Null otherwise.
+   */
+  signal?: { plan: number; leg: number } | null;
+  /** Layout v6: connector that must STOP at the junction entry (stop / allStop control) before yielding. */
+  stop?: boolean;
 }
 
 export interface RouteJunction {
   id: string;
   pos: Vec2;
+  /** Layout v6: JunctionDef.control (default 'none'). */
+  control?: JunctionControl;
   /** Highest-priority routed road through the junction. */
   through: string;
   /** Connector path indices crossing it (ascending). */

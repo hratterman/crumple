@@ -20,6 +20,12 @@ export const MATERIAL_FRICTION: Readonly<Record<keyof typeof MaterialId, number>
   rubber: 1.1,
   wood: 0.6,
   cardboard: 0.55,
+  // Layout v6 terrain surfaces (R-WORLD; = src/world/surfaces.ts SURFACE_PHYSICS[*].friction).
+  // Rolling resistance / sinkage of that table are R-PHYS's to apply in the tyre contact.
+  mud: 0.45,
+  sand: 0.55,
+  wetGrass: 0.42,
+  asphaltWorn: 0.93,
 };
 
 /** Builds a MaterialTable; `overrides` replace individual entries. Not for hot paths (allocates). */

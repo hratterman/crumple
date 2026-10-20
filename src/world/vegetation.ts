@@ -369,6 +369,63 @@ class Out {
 /** Cumulative wall ms at the end of each scatter stage (diagnostics only). */
 export const lastScatterTimings: Record<string, number> = {};
 
+/**
+ * Plan exclusion boxes binned in BOX_CELL m cells (layout v6: thousands of content colliders —
+ * the linear scan per candidate point was O(points × boxes)). Axis-aligned boxes and oriented
+ * rectangles; a point is excluded when inside any. Exact (no false positives / negatives).
+ */
+const BOX_CELL = 32;
+class BoxGrid {
+  private readonly n: number;
+  private readonly cells: number[][];
+  /** Flat records: kind 0 = aabb [x0, z0, x1, z1]; kind 1 = obb [cx, cz, ax, az, hx, hz]. */
+  private readonly recs: number[][] = [];
+  constructor(
+    private readonly ox: number,
+    private readonly oz: number,
+    size: number,
+  ) {
+    this.n = Math.ceil(size / BOX_CELL) + 1;
+    this.cells = Array.from({ length: this.n * this.n }, () => []);
+  }
+  private bin(x0: number, z0: number, x1: number, z1: number, id: number): void {
+    const n = this.n;
+    const c0 = Math.max(0, Math.floor((x0 - this.ox) / BOX_CELL));
+    const c1 = Math.min(n - 1, Math.floor((x1 - this.ox) / BOX_CELL));
+    const r0 = Math.max(0, Math.floor((z0 - this.oz) / BOX_CELL));
+    const r1 = Math.min(n - 1, Math.floor((z1 - this.oz) / BOX_CELL));
+    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) this.cells[r * n + c]!.push(id);
+  }
+  add(x0: number, z0: number, x1: number, z1: number): void {
+    this.recs.push([0, x0, z0, x1, z1]);
+    this.bin(x0, z0, x1, z1, this.recs.length - 1);
+  }
+  addOriented(cx: number, cz: number, ax: number, az: number, hx: number, hz: number): void {
+    this.recs.push([1, cx, cz, ax, az, hx, hz]);
+    const ex = Math.abs(ax) * hx + Math.abs(az) * hz;
+    const ez = Math.abs(az) * hx + Math.abs(ax) * hz;
+    this.bin(cx - ex, cz - ez, cx + ex, cz + ez, this.recs.length - 1);
+  }
+  hit(x: number, z: number): boolean {
+    const c = Math.floor((x - this.ox) / BOX_CELL);
+    const r = Math.floor((z - this.oz) / BOX_CELL);
+    if (c < 0 || r < 0 || c >= this.n || r >= this.n) return false;
+    for (const id of this.cells[r * this.n + c]!) {
+      const b = this.recs[id]!;
+      if (b[0] === 0) {
+        if (x >= b[1]! && z >= b[2]! && x <= b[3]! && z <= b[4]!) return true;
+      } else {
+        const dx = x - b[1]!;
+        const dz = z - b[2]!;
+        const u = dx * b[3]! + dz * b[4]!;
+        const v = -dx * b[4]! + dz * b[3]!;
+        if (u >= -b[5]! && u <= b[5]! && v >= -b[6]! && v <= b[6]!) return true;
+      }
+    }
+    return false;
+  }
+}
+
 /** Fractional part × 2π (render yaw in [0, 2π)). */
 const yawOf = (t: number): number => (t - Math.floor(t)) * TWO_PI;
 
@@ -378,7 +435,7 @@ const yawOf = (t: number): number => (t - Math.floor(t)) * TWO_PI;
  * dropping the splat (an empty splat reads as pure grass and changes the
  * result → hash mismatch).
  */
-export const scatterVegetation: ScatterVegetation = (layout, terrain) => {
+export const scatterVegetation: ScatterVegetation = (layout, terrain, extra) => {
   const tStart = performance.now();
   const { cols, rows, spacing, originX, originZ, heights, splat } = terrain;
   const size = (cols - 1) * spacing;
@@ -533,19 +590,22 @@ export const scatterVegetation: ScatterVegetation = (layout, terrain) => {
   const lookZ = lookC ? (lookC.minZ + lookC.maxZ) * 0.5 : 0;
 
   // Static colliders (AABB + 2 m) and props (+ 3 m) as plan boxes; spawns 12 m.
-  const boxes: number[] = [];
-  for (const c of resolveColliders(layout.colliders ?? [], hAt)) {
+  // Layout v6: + the world content's colliders / props / footprints, binned in a plan grid.
+  const boxes = new BoxGrid(originX, originZ, size);
+  for (const c of resolveColliders([...(layout.colliders ?? []), ...(extra?.colliders ?? [])], hAt)) {
+    if (c.visual === 'lid') continue; // tunnel lids: the cover is excluded by its footprint instead
     const b = colliderWorldAabb(c, 2);
-    boxes.push(b[0], b[2], b[3], b[5]);
+    boxes.add(b[0], b[2], b[3], b[5]);
   }
-  for (const p of layout.props ?? []) {
+  for (const p of [...(layout.props ?? []), ...(extra?.props ?? [])]) {
     const n = p.row ? p.row.count : 1;
     for (let k = 0; k < n; k++) {
       const x = p.pos[0] + (p.row ? p.row.step[0] * k : 0);
       const z = p.pos[2] + (p.row ? p.row.step[1] * k : 0);
-      boxes.push(x - 3, z - 3, x + 3, z + 3);
+      boxes.add(x - 3, z - 3, x + 3, z + 3);
     }
   }
+  for (const e of extra?.exclusions ?? []) boxes.addOriented(e.cx, e.cz, e.ax, e.az, e.hx, e.hz);
   const spawns = terrain.spawns.map((s) => [s.pos[0], s.pos[2]] as const);
 
   const roadIdx = new RoadIndex(terrain, originX, originZ, size);
@@ -557,9 +617,7 @@ export const scatterVegetation: ScatterVegetation = (layout, terrain) => {
     if (x < originX + 4 || x > originX + size - 4 || z < originZ + 4 || z > originZ + size - 4) return true;
     for (const f of flats) if (f.mask(x, z) > 0.1) return true;
     for (const p of pads) if (p.outside(x, z) < padMargin) return true;
-    for (let i = 0; i < boxes.length; i += 4) {
-      if (x >= boxes[i]! && z >= boxes[i + 1]! && x <= boxes[i + 2]! && z <= boxes[i + 3]!) return true;
-    }
+    if (boxes.hit(x, z)) return true;
     for (const s of spawns) {
       const dx = x - s[0];
       const dz = z - s[1];

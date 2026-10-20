@@ -25,6 +25,26 @@ export const PLANE_SLAB_DEPTH = 0.5;
 
 const KINDS: readonly ColliderKind[] = ['box', 'cylinder', 'sphere', 'plane', 'ramp'];
 
+/**
+ * Layout v6 (R-WORLD) visuals drawn by src/render/world/content/** from the WorldContent, never by
+ * the static-collider renderer (render/world/colliders.ts skips them).
+ */
+export const CONTENT_VISUALS: ReadonlySet<ColliderVisual> = new Set<ColliderVisual>([
+  'building',
+  'kerb',
+  'armco',
+  'railing',
+  'deckSlab',
+  'tunnelWall',
+  'pier',
+  'parked',
+  'log',
+  'pipe',
+  'crashBarrier',
+  'sled',
+  'lid',
+]);
+
 /** Default render style per kind (ColliderDef.visual omitted). */
 export function colliderVisual(c: Pick<ColliderDef, 'kind' | 'visual'>): ColliderVisual {
   if (c.visual !== undefined) return c.visual;

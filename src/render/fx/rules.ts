@@ -4,6 +4,7 @@
  * palettes. Everything here is unit-tested; index.ts only wires it to the
  * pools.
  */
+import { baseSurface } from '../../world/surfaces';
 import { MaterialId } from '../../protocol/messages';
 import type { PropSurface } from '../../sim/props/types';
 import {
@@ -44,7 +45,7 @@ export function surfaceCode(s: PropSurface): number {
 export const GROUND_HARD = 0;
 export const GROUND_SOFT = 1;
 export const GROUND_OBJECT = 2;
-export function groundClass(materialId: number): number {
+function groundClassBase(materialId: number): number {
   switch (materialId) {
     case MaterialId.grass:
     case MaterialId.dirt:
@@ -193,7 +194,7 @@ export function sweptWidth(treadWidth: number, patchLength: number, ax: number, 
 // ------------------------------------------------------------------ palettes (linear RGB)
 export type Rgb = readonly [number, number, number];
 /** Dust colour per terrain material (soft grounds; hard grounds give pale grey). */
-export function dustColor(materialId: number): Rgb {
+function dustColorBase(materialId: number): Rgb {
   switch (materialId) {
     case MaterialId.dirt:
       return [0.42, 0.31, 0.21];
@@ -206,7 +207,7 @@ export function dustColor(materialId: number): Rgb {
   }
 }
 /** Clod / grit colour per terrain material. */
-export function clodColor(materialId: number): Rgb {
+function clodColorBase(materialId: number): Rgb {
   switch (materialId) {
     case MaterialId.dirt:
       return [0.16, 0.1, 0.06];
@@ -219,7 +220,7 @@ export function clodColor(materialId: number): Rgb {
   }
 }
 /** Rut multiplier tint (multiplied onto the lit ground). */
-export function rutTint(materialId: number): Rgb {
+function rutTintBase(materialId: number): Rgb {
   switch (materialId) {
     case MaterialId.dirt:
       return [0.5, 0.42, 0.36];
@@ -252,3 +253,23 @@ export function surfaceColor(s: number, rand: number): Rgb {
 export const VEHICLE_PAINT: Readonly<Record<string, number>> = {
   sedan: 0x1f4f9a,
 };
+
+/** Layout v6: groundClass of the surface's P1 base (src/world/surfaces.ts baseSurface). */
+export function groundClass(materialId: number): number {
+  return groundClassBase(baseSurface(materialId));
+}
+
+/** Layout v6: dustColor of the surface's P1 base (src/world/surfaces.ts baseSurface). */
+export function dustColor(materialId: number): Rgb {
+  return dustColorBase(baseSurface(materialId));
+}
+
+/** Layout v6: clodColor of the surface's P1 base (src/world/surfaces.ts baseSurface). */
+export function clodColor(materialId: number): Rgb {
+  return clodColorBase(baseSurface(materialId));
+}
+
+/** Layout v6: rutTint of the surface's P1 base (src/world/surfaces.ts baseSurface). */
+export function rutTint(materialId: number): Rgb {
+  return rutTintBase(baseSurface(materialId));
+}

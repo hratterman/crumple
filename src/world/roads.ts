@@ -264,6 +264,7 @@ const VERTICAL_SMOOTH_M: Readonly<Record<RoadDef['kind'], number>> = {
   street: 30,
   arena: 30,
   dirt: 14,
+  track: 40,
 };
 /** Grade limiter target as a fraction of maxGrade (margin for the second smoothing). */
 const GRADE_MARGIN = 0.95;

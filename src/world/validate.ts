@@ -14,8 +14,7 @@ import {
   type ZoneShape,
 } from './types';
 
-/** MaterialId count (FROZEN values 0..6 in protocol/messages.ts; world may only `import type` from protocol). */
-const MATERIAL_COUNT = 7;
+import { isTerrainMaterial } from '../protocol/messages';
 /** Prop placement shape limits (P5). */
 export const PROP_MAX_STACK = 16;
 export const PROP_MAX_ROW = 256;
@@ -89,7 +88,7 @@ function checkNoise(p: NoiseParams, where: string): void {
 }
 
 function checkMaterial(m: unknown, where: string): void {
-  if (!Number.isInteger(m) || (m as number) < 0 || (m as number) >= MATERIAL_COUNT) fail(`${where}: invalid MaterialId ${String(m)}`);
+  if (!Number.isInteger(m) || !isTerrainMaterial(m as number)) fail(`${where}: invalid terrain MaterialId ${String(m)}`);
 }
 
 function uniqueIds(items: readonly { id: string }[], what: string): void {

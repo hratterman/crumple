@@ -42,11 +42,24 @@ export const MaterialId = {
   rubber: 8,
   wood: 9,
   cardboard: 10,
+  // Layout v6 (R-WORLD) additive TERRAIN surfaces: painted into the terrain material map by
+  // surface patches / roads, physics per src/world/surfaces.ts SURFACE_PHYSICS
+  // (docs/CONTRACTS.md "R-WORLD contracts" → surfaces).
+  mud: 11,
+  sand: 12,
+  wetGrass: 13,
+  asphaltWorn: 14,
 } as const;
 export type MaterialId = (typeof MaterialId)[keyof typeof MaterialId];
-export const MATERIAL_COUNT = 11;
-/** Terrain-paintable materials are [0, TERRAIN_MATERIAL_COUNT) (P1 values). */
+export const MATERIAL_COUNT = 15;
+/** Terrain-paintable materials are [0, TERRAIN_MATERIAL_COUNT) (P1 values) plus TERRAIN_SURFACE_IDS (v6). */
 export const TERRAIN_MATERIAL_COUNT = 7;
+/** Layout v6: every MaterialId the terrain material map may hold (P1 0..6 + mud, sand, wetGrass, asphaltWorn). */
+export const TERRAIN_SURFACE_IDS: readonly number[] = [0, 1, 2, 3, 4, 5, 6, 11, 12, 13, 14];
+/** True for a terrain-paintable MaterialId (layout v6). */
+export function isTerrainMaterial(id: number): boolean {
+  return (id >= 0 && id < TERRAIN_MATERIAL_COUNT) || (id >= 11 && id <= 14);
+}
 
 // ============================================================ ActionState
 /**
@@ -576,6 +589,15 @@ export interface TerrainReadyMsg {
   vegetationColliders?: number;
   vegetationHash?: number;
   waterBodies?: number;
+  /**
+   * Layout v6 additive (R-WORLD): hashContent() of the worker's buildWorldContent (main
+   * compares it with its own; mismatch = console error, like terrainHash), content colliders
+   * installed after the layout colliders (before the vegetation colliders) and content props
+   * appended after the layout props (their instance indices follow the layout's).
+   */
+  contentHash?: number;
+  contentColliders?: number;
+  contentProps?: number;
 }
 
 /** One traffic variant's settled template (TrafficReadyMsg.variants, same order as SetTrafficMsg.variants). */

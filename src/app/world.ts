@@ -4,6 +4,7 @@
  * loading screen; if workers are unavailable it is generated inline after a
  * yield (the page then freezes for the generation time).
  */
+import type { WorldContent } from '../world/content/types';
 import type { TerrainData, VegetationScatter, WorldLayout } from '../world/types';
 import type { TerrainJob, TerrainJobResult } from './terrainWorker';
 
@@ -15,6 +16,9 @@ export interface LoadedTerrain {
   /** P5: scatterVegetation(layout, terrain), computed next to the terrain. */
   vegetation: VegetationScatter;
   vegetationMs: number;
+  /** Layout v6: buildWorldContent(layout, terrain, {render: true}), computed before the scatter. */
+  content: WorldContent;
+  contentMs: number;
 }
 
 function nextFrame(): Promise<void> {
@@ -26,7 +30,7 @@ class WorkerUnavailable extends Error {}
 
 function generateInWorker(
   layout: WorldLayout,
-): Promise<{ terrain: TerrainData; ms: number; vegetation: VegetationScatter; vegetationMs: number }> {
+): Promise<{ terrain: TerrainData; ms: number; vegetation: VegetationScatter; vegetationMs: number; content: WorldContent; contentMs: number }> {
   return new Promise((resolve, reject) => {
     let worker: Worker;
     try {
@@ -38,7 +42,7 @@ function generateInWorker(
     worker.onmessage = (ev: MessageEvent<TerrainJobResult>) => {
       worker.terminate();
       const r = ev.data;
-      if (r.ok) resolve({ terrain: r.terrain, ms: r.ms, vegetation: r.vegetation, vegetationMs: r.vegetationMs });
+      if (r.ok) resolve({ terrain: r.terrain, ms: r.ms, vegetation: r.vegetation, vegetationMs: r.vegetationMs, content: r.content, contentMs: r.contentMs });
       else reject(new Error(r.message));
     };
     worker.onerror = (ev) => {
@@ -59,18 +63,21 @@ function generateInWorker(
  */
 export async function loadTerrain(layout: WorldLayout): Promise<LoadedTerrain> {
   try {
-    const { terrain, ms, vegetation, vegetationMs } = await generateInWorker(layout);
-    return { terrain, generateMs: ms, worker: true, vegetation, vegetationMs };
+    const { terrain, ms, vegetation, vegetationMs, content, contentMs } = await generateInWorker(layout);
+    return { terrain, generateMs: ms, worker: true, vegetation, vegetationMs, content, contentMs };
   } catch (e) {
     if (!(e instanceof WorkerUnavailable)) throw e;
     console.warn('[world] terrain worker unavailable, generating on the main thread:', e);
     const { generateTerrain } = await import('../world/terrain');
     const { scatterVegetation } = await import('../world/vegetation');
+    const { buildWorldContent } = await import('../world/content');
     await nextFrame();
     const t0 = performance.now();
     const terrain = generateTerrain(layout);
     const t1 = performance.now();
-    const vegetation = scatterVegetation(layout, terrain);
-    return { terrain, generateMs: t1 - t0, worker: false, vegetation, vegetationMs: performance.now() - t1 };
+    const content = buildWorldContent(layout, terrain, { render: true });
+    const t2 = performance.now();
+    const vegetation = scatterVegetation(layout, terrain, content);
+    return { terrain, generateMs: t1 - t0, worker: false, vegetation, vegetationMs: performance.now() - t2, content, contentMs: t2 - t1 };
   }
 }

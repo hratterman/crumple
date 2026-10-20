@@ -41,7 +41,7 @@ import {
 } from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { createRng } from '../../core/rng';
-import { colliderVisual } from '../../world/colliders';
+import { CONTENT_VISUALS, colliderVisual } from '../../world/colliders';
 import type { ResolvedCollider } from '../../world/types';
 import type { LightingStack, PatchMaterial, QualityPreset, RenderContext } from '../types';
 
@@ -892,7 +892,8 @@ function grimeTexture(seed: number): Uint8Array {
 
 /** Every collider's visual group, placed in world space (one per collider, `collider:<id>`). */
 function placedGroups(resolved: readonly ResolvedCollider[], mats: Mats): Group[] {
-  return resolved.map((c) => {
+  // Layout v6: world-content visuals (buildings, kerbs, structures…) are the content renderer's.
+  return resolved.filter((c) => c.visual === undefined || !CONTENT_VISUALS.has(c.visual)).map((c) => {
     const g = buildCollider(c, mats);
     g.position.set(c.pos[0], c.pos[1], c.pos[2]);
     g.quaternion.set(c.quat[0], c.quat[1], c.quat[2], c.quat[3]);

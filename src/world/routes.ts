@@ -32,6 +32,7 @@
  *     CONFLICT_M = 2.5 m away from a shared start lane, or a shared end lane).
  */
 import { projectToRoad, sampleRoad, createRoadProjection, createRoadSample } from './roads';
+import { buildSignalPlans } from './signals';
 import {
   JUNCTION_BOX_M,
   ROAD_KIND_DEFAULTS,
@@ -337,12 +338,14 @@ export function buildRouteNetwork(layout: WorldLayout, terrain: TerrainData): Ro
   for (let ri = 0; ri < roads.length; ri++) {
     if (!routed[ri]) continue;
     const road = roads[ri]!;
-    const laneW = road.width / (2 * road.lanes);
+    const oneWay = layout.roads[ri]!.oneWay === true;
+    const laneW = oneWay ? road.width / road.lanes : road.width / (2 * road.lanes);
     intervals[ri]!.forEach((iv, ii) => {
       const grid: LaneRec[][] = [[], []];
-      for (const dir of [1, -1] as const) {
+      for (const dir of oneWay ? ([1] as const) : ([1, -1] as const)) {
         for (let k = 0; k < road.lanes; k++) {
-          const offset = dir * (k + 0.5) * laneW;
+          // Layout v6 one-way roads (ramps): lane k centred at (k + 0.5 − lanes/2)·width/lanes.
+          const offset = oneWay ? (k + 0.5 - road.lanes / 2) * laneW : dir * (k + 0.5) * laneW;
           const poly = newPoly();
           const len = iv.b - iv.a;
           const steps = Math.max(1, Math.floor(len) + 1);
@@ -407,6 +410,9 @@ export function buildRouteNetwork(layout: WorldLayout, terrain: TerrainData): Ro
   for (const l of lanes) if (l.jEnd === -2) l.path.next.push(l.path.index);
 
   // ---- 3. connectors per junction
+  const plans = buildSignalPlans(layout, terrain);
+  let planCount = 0;
+  const signalPlanOf = layout.junctions.map((j) => (j.control === 'signal' ? planCount++ : -1));
   const connectorsOf: number[][] = layout.junctions.map(() => []);
   const throughOf: number[] = layout.junctions.map(() => -1);
   layout.junctions.forEach((j, ji) => {
@@ -466,9 +472,19 @@ export function buildRouteNetwork(layout: WorldLayout, terrain: TerrainData): Ro
             }
           }
           if (!out) continue;
+          // Layout v6: at a junction with a one-way road (ramp merges / diverges) no connector
+          // turns back by more than 135° (a merge never feeds the opposite carriageway).
+          if ((layout.roads[A.road]!.oneWay || layout.roads[B.road]!.oneWay) && -A.ox * B.ox + -A.oz * B.oz < -0.7071) continue;
           const c = makeConnector(paths, inc.path, out.path, turn, j.id);
           const branchStart = A.road !== through;
           c.yield = branchStart || turn === 'left';
+          // Layout v6 traffic control (types.ts RoutePath.signal / .stop).
+          const plan = signalPlanOf[ji]!;
+          if (plan >= 0) {
+            const leg = plans[plan]!.legs.findIndex((l) => l.road === roads[A.road]!.id && l.side === A.side);
+            c.signal = leg >= 0 ? { plan, leg } : null;
+          }
+          if (j.control === 'allStop' || (j.control === 'stop' && branchStart)) c.stop = true;
           connectorsOf[ji]!.push(c.index);
         }
       }
@@ -477,7 +493,7 @@ export function buildRouteNetwork(layout: WorldLayout, terrain: TerrainData): Ro
 
   // ---- dead-end U-turns (roads in layout order, end of road then start)
   for (let ri = 0; ri < roads.length; ri++) {
-    if (!routed[ri]) continue;
+    if (!routed[ri] || layout.roads[ri]!.oneWay) continue;
     const road = roads[ri]!;
     const ivs = intervals[ri]!;
     ivs.forEach((iv, ii) => {
@@ -530,6 +546,7 @@ export function buildRouteNetwork(layout: WorldLayout, terrain: TerrainData): Ro
   const junctions: RouteJunction[] = layout.junctions.map((j, ji) => ({
     id: j.id,
     pos: [j.pos[0], j.pos[1]] as Vec2,
+    control: j.control ?? 'none',
     through: throughOf[ji]! >= 0 ? roads[throughOf[ji]!]!.id : '',
     connectors: [...connectorsOf[ji]!].sort((a, b) => a - b),
   }));
@@ -689,6 +706,8 @@ function pushConnector(
     conflicts: [],
     left: -1,
     right: -1,
+    signal: null,
+    stop: false,
   };
   paths.push(c);
   return c;

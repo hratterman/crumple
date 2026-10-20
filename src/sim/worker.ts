@@ -17,9 +17,11 @@ import {
   type MainToWorkerType,
   type WorkerToMain,
 } from '../protocol/messages';
-import type { TerrainData, VegetationScatter, WorldLayout } from '../world/types';
+import type { TerrainData, VegetationExtra, VegetationScatter, WorldLayout } from '../world/types';
 import { generateTerrain, hashTerrain } from '../world/terrain';
 import { scatterVegetation } from '../world/vegetation';
+import { buildWorldContent } from '../world/content';
+import type { WorldContent } from '../world/content/types';
 import { resolveWater } from '../world/water';
 import { resolvePropInstances } from './props/placement';
 import { SIM_DT, SIM_HZ, SimCommandError, SimEngine } from './engine';
@@ -68,10 +70,12 @@ export interface TerrainDeps {
   generateTerrain(layout: WorldLayout): TerrainData;
   hashTerrain(terrain: TerrainData): number;
   /** P5 (optional for older test doubles; default the real scatter). */
-  scatterVegetation?(layout: WorldLayout, terrain: TerrainData): VegetationScatter;
+  scatterVegetation?(layout: WorldLayout, terrain: TerrainData, extra?: VegetationExtra | null): VegetationScatter;
+  /** Layout v6 (R-WORLD; optional for older test doubles; default the real content builder, sim part only). */
+  buildWorldContent?(layout: WorldLayout, terrain: TerrainData, opts: { render: boolean }): WorldContent;
 }
 
-const DEFAULT_TERRAIN_DEPS: TerrainDeps = { generateTerrain, hashTerrain, scatterVegetation };
+const DEFAULT_TERRAIN_DEPS: TerrainDeps = { generateTerrain, hashTerrain, scatterVegetation, buildWorldContent };
 
 function hex(h: number): string {
   return `0x${(h >>> 0).toString(16).padStart(8, '0')}`;
@@ -317,29 +321,49 @@ export class WorkerHost {
     const terrain = this.terrainDeps.generateTerrain(layout);
     this.layout = layout;
     const hash = this.terrainDeps.hashTerrain(terrain) >>> 0;
+    const errors: string[] = [];
+    // Layout v6 (R-WORLD): the generated world content (buildings, kerbs, structures, area
+    // furniture; sim part only) — before the scatter, which keeps clear of it.
+    const contentFn = this.terrainDeps.buildWorldContent ?? null;
+    let content: WorldContent | null = null;
+    if (contentFn) {
+      try {
+        content = contentFn(layout, terrain, { render: false });
+      } catch (e) {
+        errors.push(`world content not built: ${errMessage(e)}`);
+      }
+    }
     // P5: the vegetation scatter needs the splat weights, so it runs before they are dropped.
     const scatterFn = this.terrainDeps.scatterVegetation ?? scatterVegetation;
-    const errors: string[] = [];
     let scatter: VegetationScatter | null = null;
     try {
-      scatter = scatterFn(layout, terrain);
+      scatter = scatterFn(layout, terrain, content);
     } catch (e) {
       errors.push(`vegetation not scattered: ${errMessage(e)}`);
     }
-    engine.setGroundTerrain({ ...terrain, splat: new Uint8Array(0) });
+    engine.setGroundTerrain({ ...terrain, splat: new Uint8Array(0), covers: undefined });
     // Layout colliders resolve against this terrain (same helper as main's meshes),
-    // then the vegetation colliders (ids veg:*), before the extra set.
+    // then the content colliders (ids w:*), then the vegetation colliders (ids veg:*), before the extra set.
+    const contentColliders = content?.colliders ?? [];
     const vegColliders = scatter?.colliders ?? [];
     let vegInstalled = 0;
+    let contentInstalled = 0;
     try {
-      engine.setLayoutColliders([...(layout.colliders ?? []), ...vegColliders]);
+      engine.setLayoutColliders([...(layout.colliders ?? []), ...contentColliders, ...vegColliders]);
       vegInstalled = vegColliders.length;
+      contentInstalled = contentColliders.length;
     } catch (e) {
       try {
-        engine.setLayoutColliders(layout.colliders ?? []);
+        engine.setLayoutColliders([...(layout.colliders ?? []), ...contentColliders]);
+        contentInstalled = contentColliders.length;
         errors.push(`vegetation colliders not installed: ${errMessage(e)}`);
       } catch (e2) {
-        errors.push(`layout colliders not installed: ${errMessage(e2)}`);
+        try {
+          engine.setLayoutColliders(layout.colliders ?? []);
+          errors.push(`content colliders not installed: ${errMessage(e2)}`);
+        } catch (e3) {
+          errors.push(`layout colliders not installed: ${errMessage(e3)}`);
+        }
       }
     }
     let waterBodies = 0;
@@ -353,7 +377,7 @@ export class WorkerHost {
     let props = 0;
     try {
       const sampler = engine.sampler!;
-      const instances = resolvePropInstances(layout.props ?? [], (x, z) => sampler.heightAt(x, z));
+      const instances = resolvePropInstances([...(layout.props ?? []), ...(content?.props ?? [])], (x, z) => sampler.heightAt(x, z));
       engine.spawnLayoutProps(instances);
       props = instances.length;
     } catch (e) {
@@ -375,6 +399,11 @@ export class WorkerHost {
       waterBodies,
     };
     if (scatter) ready.vegetationHash = scatter.hash >>> 0;
+    if (content) {
+      ready.contentHash = content.hash >>> 0;
+      ready.contentColliders = contentInstalled;
+      ready.contentProps = content.props.length;
+    }
     this.post(ready);
     for (const message of errors) this.post({ type: 'error', command: 'groundHeightfield', message });
     if (expected !== 0 && !matched) {

@@ -16,6 +16,7 @@
  * telemetry is the presented frame's), events arrive as frames are played
  * forward; seeks / reverse never fire one-shots.
  */
+import { baseSurface } from '../world/surfaces';
 import { createAmbienceInput } from './dsp/ambience';
 import { createEngineInput } from './dsp/engine';
 import type { OneShotKind } from './dsp/oneshots';
@@ -495,7 +496,7 @@ export class AudioDirector {
     g.tyres.setGain(1, now);
 
     // ---- tyres: squeal per axle on hard ground, rumble on soft
-    const mat = this.deps.materialAt(cx, cz);
+    const mat = baseSurface(this.deps.materialAt(cx, cz)); // layout v6 surfaces voice as their P1 base
     const hard = mat === 0 || mat === 3 || mat === 5 || mat === 6;
     let sqF = 0;
     let sqR = 0;

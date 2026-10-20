@@ -38,6 +38,8 @@ const KIND_STYLE: Readonly<Record<RoadKind, RoadStyle>> = {
   street: 'street',
   arena: 'arena',
   dirt: 'dirt',
+  // Layout v6 racing circuit / pit lane: the arena's clean concrete-grey asphalt style.
+  track: 'arena',
 };
 
 export function styleForProfile(p: RoadProfile): RoadStyle {

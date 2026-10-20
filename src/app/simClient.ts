@@ -912,12 +912,8 @@ export class SimClient {
         break;
       }
       case 'terrainReady': {
-        const info: TerrainReadyInfo = {
-          layoutId: msg.layoutId,
-          terrainHash: msg.terrainHash,
-          matched: msg.matched,
-          generateMs: msg.generateMs,
-        };
+        // Every field (P5 counts / vegetation hash, v6 content hash) reaches main's checks.
+        const { type: _type, ...info } = msg;
         this._terrain = info;
         const req = this.pendingTerrain.shift();
         if (req && req.hash !== 0 && !info.matched) this.mismatchErrorsDue++;

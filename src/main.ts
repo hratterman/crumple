@@ -88,12 +88,18 @@ import { createReplaySession, type ReplaySession } from './ui/replay/session';
 import type { PerfOverlay, PerfOverlayData } from './ui/perfOverlay';
 import type { AudioPlayerInfo, AudioSystem } from './audio/types';
 import { colliderWorldAabb, resolveColliders } from './world/colliders';
-import { DEFAULT_LAYOUT } from './world/layout';
 import { createTerrainSampler } from './world/sampler';
 import { resolveWater } from './world/water';
-import type { TerrainData, TerrainSampler } from './world/types';
+import type { ColliderDef, TerrainData, TerrainSampler, WorldLayout } from './world/types';
 
-const LAYOUT = DEFAULT_LAYOUT;
+/**
+ * Layout v6: the map data (zones, roads, areas, POIs, stunt park) is its own chunk, fetched at
+ * script start; boot() assigns LAYOUT before anything reads it (the app chunk stays < 500 kB).
+ */
+const layoutP: Promise<WorldLayout> = import('./world/layout').then((m) => m.DEFAULT_LAYOUT);
+let LAYOUT: WorldLayout;
+/** Layout + generated world-content colliders (what the worker installs before the vegetation). */
+let worldColliders: readonly ColliderDef[] = [];
 /** First view (layout spawn id; overridable with ?spawn=<id>). */
 const DEFAULT_SPAWN = 'highway';
 const VEHICLE_ID = 1;
@@ -186,7 +192,7 @@ const client = new SimClient({
   },
 });
 // The worker regenerates in parallel with main's own copy; main compares the two hashes once both exist.
-const physicsReady = client.groundHeightfield(LAYOUT, 0);
+const physicsReady = layoutP.then((layout) => client.groundHeightfield(layout, 0));
 /**
  * P7 live replay (app/replay; R2's UI / cameras consume `replay` as a ReplayController). Records
  * every snapshot as it arrives; while `replay.active` the frame loop presents recorded frames and
@@ -1320,6 +1326,7 @@ function loadWorldLayer() {
 
 async function boot(): Promise<void> {
   const t0 = performance.now();
+  LAYOUT = await layoutP;
   const worldLayerP = loadWorldLayer();
   physicsReady.then(
     (info) => {
@@ -1433,7 +1440,9 @@ async function boot(): Promise<void> {
   mark('roadRenderer');
   scene.add(createFarLand(world, { lighting, patchMaterial }).object);
   // Static colliders (arena wall, poles, ramp, barriers): drawn exactly where the worker collides with them.
-  const collidersR = createColliderRenderer(ctx, resolveColliders(LAYOUT.colliders, (x, z) => smp.heightAt(x, z)), {
+  // Layout v6: the generated world content's colliders follow the layout's (the worker's order).
+  worldColliders = [...LAYOUT.colliders, ...loaded.content.colliders];
+  const collidersR = createColliderRenderer(ctx, resolveColliders(worldColliders, (x, z) => smp.heightAt(x, z)), {
     lighting,
     patchMaterial,
   });
@@ -1449,7 +1458,7 @@ async function boot(): Promise<void> {
   // P5 world layer (contracts: docs/CONTRACTS.md "P5 contracts"). Same pure inputs as the physics worker.
   const heightAt = (x: number, z: number): number => smp.heightAt(x, z);
   const waterBodies = resolveWater(LAYOUT, world);
-  const propInstances = resolvePropInstances(LAYOUT.props, heightAt);
+  const propInstances = resolvePropInstances([...LAYOUT.props, ...loaded.content.props], heightAt);
   layoutPropCount = propInstances.length;
   propBoxes = propInstances.map((p) => p.aabb);
   const propsR = createPropRenderer(ctx, propInstances, { lighting, patchMaterial });
@@ -1493,6 +1502,11 @@ async function boot(): Promise<void> {
   if (info.vegetationHash !== undefined && info.vegetationHash >>> 0 !== loaded.vegetation.hash >>> 0) {
     console.error(
       `[world] vegetation hash mismatch: physics 0x${(info.vegetationHash >>> 0).toString(16)} vs render 0x${(loaded.vegetation.hash >>> 0).toString(16)}`,
+    );
+  }
+  if (info.contentHash !== undefined && info.contentHash >>> 0 !== loaded.content.hash >>> 0) {
+    console.error(
+      `[world] content hash mismatch: physics 0x${(info.contentHash >>> 0).toString(16)} vs render 0x${(loaded.content.hash >>> 0).toString(16)}`,
     );
   }
   if (!stats.terrainMatched) {
@@ -1551,7 +1565,9 @@ async function boot(): Promise<void> {
   const cameraHeight = (x: number, z: number): number => smp.heightAt(x, z);
   // Camera occluders: static colliders + the bulky layout props at their spawn poses (blocks, barrels, crates; not cones).
   const occluderBoxes = [
-    ...resolveColliders(LAYOUT.colliders, cameraHeight).map((c) => colliderWorldAabb(c)),
+    ...resolveColliders(worldColliders, cameraHeight)
+      .filter((c) => c.visual !== 'lid' && c.visual !== 'kerb')
+      .map((c) => colliderWorldAabb(c)),
     ...propBoxes.filter((b) => b[4] - b[1] > 0.7 && Math.max(b[3] - b[0], b[5] - b[2]) > 0.7),
   ];
   replaySession = createReplaySession({
@@ -1624,7 +1640,7 @@ async function boot(): Promise<void> {
   }
 
   // P8: the challenge host's deps (the host itself is a lazy chunk, created on first use)
-  const challengeColliders = resolveColliders(LAYOUT.colliders, cameraHeight);
+  const challengeColliders = resolveColliders(worldColliders, cameraHeight);
   challengeDepsP = () => ({
     client,
     scene,
