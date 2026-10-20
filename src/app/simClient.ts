@@ -621,7 +621,7 @@ export class SimClient {
     if (!cur) return false;
     const ci = cur.findObject(objectId);
     if (ci < 0 || local < 0 || local >= cur.objectNodeCount(ci)) return false;
-    if (!this.replaying && this.hist.length >= 2 && this.hist.node(objectId, local, time, out)) return true;
+    if (!this.replaying && this.hist.length >= 2 && this.hist.node(objectId, local, time, out, cur.objectRepairEpoch(ci))) return true;
     const cn = cur.nodes;
     const c = (cur.objectNodeOffset(ci) + local) * NODE_STRIDE;
     const prev = this.prev;

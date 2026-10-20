@@ -124,6 +124,8 @@ interface HistEntry {
   ids: Int32Array;
   offs: Int32Array;
   counts: Int32Array;
+  /** Repair epoch per object (reset / teleport / respawn bumps it). */
+  epochs: Uint32Array;
   traffic: TrafficAgentFrame[];
   trafficCount: number;
 }
@@ -136,6 +138,7 @@ function newEntry(): HistEntry {
     ids: new Int32Array(0),
     offs: new Int32Array(0),
     counts: new Int32Array(0),
+    epochs: new Uint32Array(0),
     traffic: [],
     trafficCount: 0,
   };
@@ -187,11 +190,13 @@ export class NodeHistory {
       e.ids = new Int32Array(cap);
       e.offs = new Int32Array(cap);
       e.counts = new Int32Array(cap);
+      e.epochs = new Uint32Array(cap);
     }
     for (let i = 0; i < n; i++) {
       e.ids[i] = r.objectId(i);
       e.offs[i] = r.objectNodeOffset(i);
       e.counts[i] = r.objectNodeCount(i);
+      e.epochs[i] = r.objectRepairEpoch(i);
     }
     e.objCount = n;
     const tn = r.trafficCount;
@@ -229,7 +234,11 @@ export class NodeHistory {
   /**
    * Node positions at `t` in `cur`'s layout (global snapshot order). Objects
    * missing from the bracketing pair (or with another node count) take
-   * `cur`'s positions. Returns false (out untouched) with < 2 entries.
+   * `cur`'s positions, and so does an object whose repair epoch differs
+   * anywhere between the pair and `cur` (reset / teleport / respawn: never
+   * lerp across it, nor show the pre-repair shape once the newest snapshot
+   * is repaired — the damage visuals read these positions). Returns false
+   * (out untouched) with < 2 entries.
    */
   interpolate(t: number, cur: SnapshotReader, out: Float32Array): boolean {
     if (!this.bracket(t, this.br)) return false;
@@ -243,12 +252,13 @@ export class NodeHistory {
       const id = cur.objectId(i);
       const off = cur.objectNodeOffset(i) * NODE_STRIDE;
       const cnt = cur.objectNodeCount(i);
+      const ep = cur.objectRepairEpoch(i);
       const len = cnt * NODE_STRIDE;
       // objects are in ascending id order in every snapshot: merge walk
       while (ia < a.objCount && a.ids[ia]! < id) ia++;
       while (ib < b.objCount && b.ids[ib]! < id) ib++;
-      const inA = ia < a.objCount && a.ids[ia] === id && a.counts[ia] === cnt;
-      const inB = ib < b.objCount && b.ids[ib] === id && b.counts[ib] === cnt;
+      const inA = ia < a.objCount && a.ids[ia] === id && a.counts[ia] === cnt && a.epochs[ia] === ep;
+      const inB = ib < b.objCount && b.ids[ib] === id && b.counts[ib] === cnt && b.epochs[ib] === ep;
       if (inA && inB) {
         const pa = a.offs[ia]! * NODE_STRIDE;
         const pb = b.offs[ib]! * NODE_STRIDE;
@@ -280,7 +290,7 @@ export class NodeHistory {
   }
 
   /** One node of `objectId` at `t` into out[0..2]; false when not in the bracketing pair. */
-  node(objectId: number, local: number, t: number, out: { [i: number]: number }): boolean {
+  node(objectId: number, local: number, t: number, out: { [i: number]: number }, epoch: number): boolean {
     if (!this.bracket(t, this.br)) return false;
     const a = this.at(this.br[0]!);
     const b = this.at(this.br[1]!);
@@ -289,7 +299,8 @@ export class NodeHistory {
     let ib = -1;
     for (let i = 0; i < a.objCount; i++) if (a.ids[i] === objectId) { ia = i; break; }
     for (let i = 0; i < b.objCount; i++) if (b.ids[i] === objectId) { ib = i; break; }
-    if (ib < 0 || local < 0 || local >= b.counts[ib]!) return false;
+    if (ib < 0 || local < 0 || local >= b.counts[ib]! || b.epochs[ib] !== epoch) return false;
+    if (ia >= 0 && a.epochs[ia] !== epoch) ia = -1;
     const pb = (b.offs[ib]! + local) * NODE_STRIDE;
     if (ia < 0 || a.counts[ia] !== b.counts[ib]) {
       out[0] = b.nodes[pb]!;
