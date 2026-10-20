@@ -9,7 +9,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { SnapshotReader } from '../../protocol/codec';
-import { GAME_CAPACITY, type ActionState, type WorkerToMain } from '../../protocol/messages';
+import { GAME_CAPACITY, SPAWN_SETTLE_S, type ActionState, type WorkerToMain } from '../../protocol/messages';
 import { compileVehicle } from '../../sim/vehicle/builder';
 import { BEATER } from '../../sim/vehicle/defs/beater';
 import { BOXTRUCK } from '../../sim/vehicle/defs/boxtruck';
@@ -68,7 +68,7 @@ export function playtest(def: ChallengeDef, opts: PlaytestOptions): { result: Ch
   ref = host;
   host.handle({ type: 'init', seed: 1234, gravity: [0, -9.81, 0], snapshotHz: 120, debugStrains: false, capacity: GAME_CAPACITY });
   host.handle({ type: 'groundHeightfield', layout: DEFAULT_LAYOUT, terrainHash: 0 });
-  host.handle({ type: 'spawnVehicle', objectId: 1, vehicle: vdef, transform: spawnTransform(def.spawn, cv.rig, heightAt), catalogId: vid });
+  host.handle({ type: 'spawnVehicle', objectId: 1, vehicle: vdef, transform: spawnTransform(def.spawn, cv.rig, heightAt), catalogId: vid, settle: SPAWN_SETTLE_S });
   if (def.tractionControl === false) host.handle({ type: 'setAssists', objectId: 1, tractionControl: false });
   const props = challengeProps(def, heightAt);
   if (props.spawns.length) host.handle({ type: 'spawnProps', items: props.spawns });
@@ -76,7 +76,7 @@ export function playtest(def: ChallengeDef, opts: PlaytestOptions): { result: Ch
     const od = DEFS[o.vehicle]!;
     const ocv = compileVehicle(od);
     const id = OPPONENT_ID_BASE + k;
-    host.handle({ type: 'spawnVehicle', objectId: id, vehicle: od, transform: spawnTransform(o.spawn, ocv.rig, heightAt), catalogId: o.vehicle });
+    host.handle({ type: 'spawnVehicle', objectId: id, vehicle: od, transform: spawnTransform(o.spawn, ocv.rig, heightAt), catalogId: o.vehicle, settle: SPAWN_SETTLE_S });
     return { id, rig: rigInfo(ocv), aggression: o.aggression ?? 0.7 };
   });
   const builder = new SampleBuilder({ playerId: 1, player: rigInfo(cv), surfaceAt: surf, pins: props.pins, opponents: opp.map((o) => ({ id: o.id, rig: o.rig })) });

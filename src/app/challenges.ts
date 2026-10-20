@@ -21,7 +21,7 @@ import { loadStore, recordRun, saveStore } from '../game/challenges/storage';
 import type { ChallengeDef, ChallengeEvent, ChallengeResult, ChallengeRunState, GhostTrack } from '../game/challenges/types';
 import { getVehicleEntry, type VehicleChoice, type VehicleId } from '../game/catalog';
 import type { InputCommand } from '../input/actions';
-import type { ActionState, Transform } from '../protocol/messages';
+import { SPAWN_SETTLE_S, type ActionState, type Transform } from '../protocol/messages';
 import type { ReplayController } from './replay/types';
 import { createCourseRenderer, type CourseRenderer } from '../render/challenges/gates';
 import { createGhostCar, type GhostCar } from '../render/challenges/ghost';
@@ -315,7 +315,7 @@ export function createChallengeHost(deps: ChallengeHostDeps): ChallengeHost {
         const v = deps.visualDeps ? new PlayerVehicle(assets, pid, deps.visualDeps) : null;
         if (v?.object) deps.scene.add(v.object);
         const id2 = OPPONENT_ID_BASE + k;
-        client.spawnVehicle(id2, assets.sim, t, 'auto', od.vehicle);
+        client.spawnVehicle(id2, assets.sim, t, 'auto', od.vehicle, SPAWN_SETTLE_S);
         deps.fx.addVehicle(id2, assets.compiled);
         opp.push({ id: id2, vehicle: v, transform: t, aggression: od.aggression ?? 0.7 });
       }
@@ -370,7 +370,7 @@ export function createChallengeHost(deps: ChallengeHostDeps): ChallengeHost {
     if (propIds.length) client.resetProps(propIds);
     for (const o of opponents) {
       client.setAutopilot(o.id, { mode: 'off' });
-      client.reset(o.id, o.transform);
+      client.reset(o.id, o.transform, SPAWN_SETTLE_S);
     }
     armed = 0;
     resetTick = client.latestTick;
