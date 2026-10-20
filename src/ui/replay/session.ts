@@ -24,7 +24,7 @@ import { REPLAY_SPEEDS, createReplayTarget, type ReplayController, type ReplayEv
 import type { DirectorMarker } from '../../render/cameras/autoDirector';
 import { pickDistance } from '../../render/cameras/pick';
 import { PhotoFx } from '../../render/cameras/photoFx';
-import { ReplayCameraRig, REPLAY_CAMERA_MODES, type ReplayCameraMode } from '../../render/cameras/replayRig';
+import { ReplayCameraRig, REPLAY_CAMERA_MODES, type ReplayCameraFrame, type ReplayCameraMode } from '../../render/cameras/replayRig';
 import type { HoodMount } from '../../render/cameras/shots';
 import { applyPose, subjectRadius, type CameraPose, type CameraWorld } from '../../render/cameras/rig';
 import type { PostStack } from '../../render/types';
@@ -151,6 +151,7 @@ export class ReplaySession {
   private readonly tmpV = new Vector3();
   private readonly tmpD = new Vector3();
   private readonly bufSize = new Vector2();
+  private readonly camFrame: ReplayCameraFrame;
   private readonly onKeyDown = (e: KeyboardEvent): void => this.keyDown(e);
   private readonly onKeyUp = (e: KeyboardEvent): void => this.keyUp(e);
   private readonly onPointerDown = (e: PointerEvent): void => this.pointerDown(e);
@@ -205,6 +206,7 @@ export class ReplaySession {
     this.flash.className = 'rp-flash';
     parent.appendChild(this.flash);
     this.tmpPose = { position: new Vector3(), look: new Vector3(), fov: 55, roll: 0, focus: 10 };
+    this.camFrame = { wallDt: 0, time: 0, playing: false, speed: 1, direction: 1, subject: null, markers: [], world: deps.world, hoodMount: null };
     this.overlayState = { start: 0, end: 0, time: 0, playing: false, speed: 1, direction: 1, markers: [], camera: 'follow', shot: 'follow', subject: 'Player', subjects: 1 };
     this.unsub = this.replay.on((e) => this.onReplayEvent(e));
     window.addEventListener('blur', this.onBlur);
@@ -545,17 +547,16 @@ export class ReplaySession {
       if (r.target(this.subjectId, this.target)) subject = this.target;
     }
     this.updateFreeInput();
-    const pose = this.rig.update({
-      wallDt,
-      time: r.time,
-      playing: r.playing,
-      speed: r.speed,
-      direction: r.direction,
-      subject,
-      markers: this.markersForDirector(),
-      world: this.d.world,
-      hoodMount: subject && this.d.hoodMount ? this.d.hoodMount(subject.objectId) : null,
-    });
+    const cf = this.camFrame;
+    cf.wallDt = wallDt;
+    cf.time = r.time;
+    cf.playing = r.playing;
+    cf.speed = r.speed;
+    cf.direction = r.direction;
+    cf.subject = subject;
+    cf.markers = this.markersForDirector();
+    cf.hoodMount = subject && this.d.hoodMount ? this.d.hoodMount(subject.objectId) : null;
+    const pose = this.rig.update(cf);
     applyPose(this.d.camera, pose);
     if (this.photoOn && this.photo.settings.autofocus && subject) {
       // Focus a little in front of the subject's centre (its near side is what reads as sharp); the

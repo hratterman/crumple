@@ -547,7 +547,7 @@ export class PauseMenu {
       ['Slow motion', 'T', 'D-pad ↓'],
       ['Traction control', 'X', 'D-pad ←'],
       ['Spawn points', '1 – 8', '—'],
-      ['Replay', '⌫', 'D-pad →'],
+      ['Replay', 'Backspace', 'D-pad →'],
       ['Replay: play · frame · speed', 'Space · ← → · [ ]', 'A · D-pad · LB RB'],
       ['Replay: reverse · camera · subject', 'R · C · 1–7 · Tab', 'Back · X · Y'],
       ['Replay: crashes · hide UI · exit', ', . · H · Esc', 'B'],

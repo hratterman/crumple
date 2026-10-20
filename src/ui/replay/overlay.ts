@@ -181,7 +181,7 @@ export class ReplayOverlay {
     const meter = h('span', 'rp-meter', hlSub);
     this.hlMeter = h('i', '', meter);
     const skip = h('div', 'rp-skip', root);
-    skip.innerHTML = '<span><kbd>Any key</kbd> Skip</span><span><kbd>⌫</kbd> Keep watching</span>';
+    skip.innerHTML = '<span><kbd>Any key</kbd> Skip</span><span><kbd>Backspace</kbd> Keep watching</span>';
 
     // ---- dock
     const dock = h('div', 'rp-dock rp-chrome', root);
