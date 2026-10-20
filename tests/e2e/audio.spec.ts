@@ -109,3 +109,80 @@ test('audio: boots, resumes on a gesture, voices run, a crash fires one-shots, r
   expect(errors.filter((e) => /audio|worklet/i.test(e))).toEqual([]);
   expect(errors).toEqual([]);
 });
+
+/**
+ * Main-thread cost of the real audio system (worklet voices, HRTF player car,
+ * traffic voices, Doppler) without the game's rendering: fake sim deps with
+ * live-changing telemetry, one update per animation frame for 15 s.
+ */
+test('audio bench: main-thread update cost per frame', async ({ page }) => {
+  test.setTimeout(200_000);
+  await page.goto('/crumple/src/audio/types.ts');
+  await page.mouse.click(10, 10);
+  const r = await page.evaluate(async () => {
+    const m = await import('/crumple/src/audio/index.ts' as string);
+    const tel = new Float32Array(32);
+    const cam = new Float32Array(16); cam[0] = cam[5] = cam[10] = cam[15] = 1;
+    const nodes = new Float32Array(3 * 400);
+    const agentsSrc = Array.from({ length: 20 }, (_, i) => ({ awake: i < 4, x: -100 + i * 12, z: (i % 3) * 8 - 20 }));
+    const settings = { volume: 0.8, engineVolume: 1, effectsVolume: 1, ambienceVolume: 1, muted: false };
+    const voices = { awake: 4, ghosts: 4 };
+    const ranges = [{ objectId: 1, nodeOffset: 0, nodeCount: 300 }];
+    const player = { id: 'coupe', drivetrain: { idleRpm: 750, redlineRpm: 7000, revLimitRpm: 7300, torqueCurve: [[0, 200], [3000, 520]], shiftTimeS: 0.1 }, hubs: new Int32Array([0, 1, 2, 3, 4, 5, 6, 7]), wheelRadius: 0.33, length: 4.4 };
+    let t = 0;
+    const sys = await m.createAudioSystem({
+      sim: {
+        telemetry: (id: number) => (id === 1 || (id >= 100 && id < 104) ? tel : null),
+        readTrafficAgents: (_t: number, out: any[]) => {
+          for (let i = 0; i < agentsSrc.length; i++) {
+            if (!out[i]) out.push({ agent: 0, objectId: 0, flags: 0, pos: [0, 0, 0], quat: [0, 0, 0, 1], speed: 0 });
+            const a = agentsSrc[i]!, o = out[i];
+            o.agent = i; o.objectId = a.awake ? 100 + i : 0; o.flags = a.awake ? 1 : 0;
+            o.pos[0] = a.x + t * 20; o.pos[1] = 0; o.pos[2] = a.z; o.speed = 20;
+          }
+          return agentsSrc.length;
+        },
+        renderTime: () => t,
+        objectRanges: () => ranges,
+      },
+      cameraMatrix: () => cam,
+      replay: { active: false, playing: false, speed: 1, direction: 1, phase: 'live', on: () => () => {} },
+      playerObjectId: 1,
+      player: () => player,
+      nodes: () => nodes,
+      playerForward: (o: Float64Array) => { o[0] = 0; o[1] = 0; o[2] = -1; return true; },
+      materialAt: () => 0,
+      layoutZones: [],
+      heightAt: () => 10,
+      propKey: () => null,
+      settings: () => settings,
+      timeScale: () => 1,
+      crashCam: () => false,
+      playerDamage: () => null,
+      hrtf: () => true,
+      trafficVoices: () => voices,
+    });
+    await sys.debug.resume();
+    const times: number[] = [];
+    for (let f = 0; f < 900; f++) {
+      await new Promise((r) => requestAnimationFrame(r));
+      t += 1 / 60;
+      // a car accelerating through the gears, sliding a little, the camera following
+      const rpm = 1500 + ((f * 23) % 5500);
+      tel[0] = 10 + f * 0.03; tel[1] = rpm; tel[2] = 1 + Math.floor(f / 200); tel[3] = 0.8; tel[22] = 400;
+      tel[8] = tel[9] = 0.5; tel[10] = tel[11] = 2 + Math.sin(f / 30) * 2; tel[12] = tel[13] = tel[14] = tel[15] = 3500 + Math.sin(f / 7) * 300;
+      tel[16] = f * 0.4; tel[17] = 0.5; tel[18] = 0; tel[19] = 24; tel[31] = 15;
+      cam[12] = f * 0.4 + 6; cam[13] = 1.6; cam[14] = 1 + Math.sin(f / 50);
+      const t0 = performance.now();
+      sys.update(1 / 60);
+      times.push(performance.now() - t0);
+    }
+    const s = times.slice(120).sort((a, b) => a - b);
+    return { median: s[s.length >> 1]!, p95: s[Math.floor(s.length * 0.95)]!, max: s[s.length - 1]!, mean: s.reduce((a, b) => a + b, 0) / s.length, state: sys.debug.state, worklet: sys.debug.worklet, voices: sys.debug.voices, errors: sys.debug.errors };
+  });
+  console.log(`[e2e] audio update: mean ${r.mean.toFixed(3)} ms, median ${r.median.toFixed(2)}, p95 ${r.p95.toFixed(2)}, max ${r.max.toFixed(2)} (timer resolution 0.1 ms); voices ${JSON.stringify(r.voices)}`);
+  expect(r.state).toBe('running');
+  expect(r.errors).toEqual([]);
+  // budget 0.3 ms per frame (lenient bound for loaded CI boxes)
+  expect(r.mean).toBeLessThan(0.6);
+});

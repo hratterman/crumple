@@ -312,8 +312,10 @@ export class AudioDirector {
       a.crickets = 0.45 * (1 - arena) * (1 - 0.6 * town) * (1 - alt);
       a.water = 0.85 * lake;
     }
-    this.amb.pitch = pitchW;
-    g.ambience.setInputs(this.amb, now);
+    if (this.ambT === 0.25 || this.amb.pitch !== pitchW) {
+      this.amb.pitch = pitchW;
+      g.ambience.setInputs(this.amb, now);
+    }
 
     // ---- one-shot bank: build a little each frame until complete
     if (!g.oneShots.ready) g.oneShots.build(1);

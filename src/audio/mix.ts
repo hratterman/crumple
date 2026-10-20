@@ -70,6 +70,7 @@ export class MixGraph {
   private readonly sRev: ParamSlot;
   private readonly sWorld: ParamSlot;
   private duckLevel = 1;
+  private armedAt = -1;
 
   constructor(ctx: AudioContext) {
     this.ctx = ctx;
@@ -133,6 +134,9 @@ export class MixGraph {
 
   /** Re-arms the dead-man's switch (call every frame the world is live). */
   keepAlive(now: number): void {
+    // re-armed at most every 0.1 s: the fade only starts 0.28 s after the last arm
+    if (now - this.armedAt < 0.1 && now >= this.armedAt) return;
+    this.armedAt = now;
     const a = this.alive.gain;
     a.cancelScheduledValues(now);
     a.setTargetAtTime(1, now, 0.03);
