@@ -242,10 +242,10 @@ describe('spawn settle window (engine)', () => {
     const send = (m: MainToWorker): void => host.handle(m);
     send({ type: 'init', seed: 11, gravity: [0, -9.81, 0], snapshotHz: 120, debugStrains: false, capacity: { maxObjects: 8, nodeCapacity: 8192, beamCapacity: 32768 } });
     send({ type: 'ground', mode: 'plane', y: 0, materialId: MaterialId.asphalt });
-    // A 2 m drop: without the window it yields beams, with it nothing yields.
-    send({ type: 'spawnVehicle', objectId: 1, vehicle: SEDAN, transform: { pos: [0, 2, 0], quat: [0, 0, 0, 1] }, catalogId: 'sedan', settle: 1 });
+    // A 4 m drop (the rigid body shell rides out 2 m untouched): without the window it yields beams, with it nothing yields.
+    send({ type: 'spawnVehicle', objectId: 1, vehicle: SEDAN, transform: { pos: [0, 4, 0], quat: [0, 0, 0, 1] }, catalogId: 'sedan', settle: 1 });
     host.runSteps(1500);
-    send({ type: 'reset', objectId: 1, transform: { pos: [3, 2, 2], quat: [0, Math.sin(1), 0, Math.cos(1)] }, settle: 1 });
+    send({ type: 'reset', objectId: 1, transform: { pos: [3, 4, 2], quat: [0, Math.sin(1), 0, Math.cos(1)] }, settle: 1 });
     host.runSteps(1500);
     send({ type: 'input', objectId: 1, actions: { throttle: 0.5, gearSelect: 1 } });
     host.runSteps(1000);
