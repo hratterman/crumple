@@ -18,6 +18,7 @@ interface SpawnGlobal {
   spawns: string[];
   spawnIndex: number;
   vehicle: { speed: number; damage: number } | null;
+  position: [number, number, number] | null;
   player: { id: string; swaps: number } | null;
   showroom: { open: boolean; busy: boolean; selection: { id: string } | null; studioVehicle: string | null };
   debug: {
@@ -102,6 +103,21 @@ test('spawn: teleporting to every spawn point and swapping vehicles leaves the c
     await page.locator(`.pm-spawn[data-spawn="${id}"]`).click();
     await waitFor(page, `c.mode === "drive" && !c.paused && c.spawns[c.spawnIndex] === ${JSON.stringify(id)}`);
     await settleAndCheck(page, `sedan-menu-${id}`, rows);
+    if (id === 'dirtTrail') {
+      // ≈ 10° grade: the spawn parking-brake hold keeps the car put until the player gives input…
+      const pos = () => page.evaluate(() => (window as unknown as { __crumple: SpawnGlobal }).__crumple.position!);
+      const p0 = await pos();
+      const t0 = (await page.evaluate(() => (window as unknown as { __crumple: SpawnGlobal }).__crumple.tick)) as number;
+      await waitFor(page, `c.tick > ${t0 + 4000}`, 60_000);
+      const p1 = await pos();
+      const moved = Math.hypot(p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]);
+      console.log(`dirtTrail hold: moved ${(moved * 100).toFixed(2)} cm in 2 s`);
+      expect(moved).toBeLessThan(0.05);
+      // …then throttle releases it and the car drives off.
+      await page.keyboard.down('KeyW');
+      await waitFor(page, 'c.vehicle && Math.abs(c.vehicle.speed) > 2', 60_000);
+      await page.keyboard.up('KeyW');
+    }
   }
 
   // Showroom DRIVE at another start point: the sedan again (same body → same node count); with

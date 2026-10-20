@@ -75,7 +75,7 @@ test('replay: wall hit at speed, seek to the impact, 1/4× slow-mo, scrub back, 
     c.hold = true;
   });
   await page.waitForTimeout(1500);
-  await page.evaluate(() => (window as unknown as { __crumple: G }).__crumple.debug.client.input(1, { throttle: 1, brake: 0, gearSelect: 1 }));
+  await page.evaluate(() => (window as unknown as { __crumple: G }).__crumple.debug.client.input(1, { throttle: 1, brake: 0, handbrake: 0, gearSelect: 1 }));
   let vMax = 0;
   for (let i = 0; i < 400; i++) {
     await page.waitForTimeout(50);
@@ -291,7 +291,7 @@ test('replay exit restores the live visual state exactly (damage older than the 
   });
   await page.waitForTimeout(1500);
   // crash 1 from a 30 m run-up (the car must still drive for crash 2)
-  await input({ throttle: 1, brake: 0, gearSelect: 1 });
+  await input({ throttle: 1, brake: 0, handbrake: 0, gearSelect: 1 });
   await page.waitForFunction(() => ((window as unknown as { __crumple: G2 }).__crumple.vehicle?.damage ?? 0) > 0.03, null, { timeout: 60_000, polling: 50 });
   const crash1 = await page.evaluate(() => (window as unknown as { __crumple: G2 }).__crumple.replay.state.end);
   await input({ throttle: 0, brake: 1 });
@@ -299,9 +299,9 @@ test('replay exit restores the live visual state exactly (damage older than the 
   // until crash 1 has left the buffer (20 s at low)
   await page.waitForFunction((t) => (window as unknown as { __crumple: G2 }).__crumple.replay.state.start > t + 1, crash1, { timeout: 120_000, polling: 500 });
   // crash 2: back off, then into the wall again
-  await input({ brake: 0, gearSelect: -1, throttle: 0.6 });
+  await input({ brake: 0, handbrake: 0, gearSelect: -1, throttle: 0.6 });
   await page.waitForTimeout(3000);
-  await input({ gearSelect: 1, throttle: 1 });
+  await input({ gearSelect: 1, throttle: 1, handbrake: 0 });
   await page.waitForFunction((d) => ((window as unknown as { __crumple: G2 }).__crumple.vehicle?.damage ?? 0) > d + 0.003, d1, { timeout: 30_000, polling: 50 });
   await input({ throttle: 0, brake: 1 });
   await page.waitForTimeout(3000);

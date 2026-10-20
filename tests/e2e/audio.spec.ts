@@ -66,7 +66,7 @@ test('audio: boots, resumes on a gesture, voices run, a crash fires one-shots, r
     g.place(360, 330, 0);
   });
   await page.waitForTimeout(1500);
-  await page.evaluate(() => (window as unknown as { __crumple: G }).__crumple.debug.client.input(1, { throttle: 1, brake: 0, gearSelect: 1 }));
+  await page.evaluate(() => (window as unknown as { __crumple: G }).__crumple.debug.client.input(1, { throttle: 1, brake: 0, handbrake: 0, gearSelect: 1 }));
   let rpmMax = 0;
   for (let i = 0; i < 400; i++) {
     await page.waitForTimeout(100);

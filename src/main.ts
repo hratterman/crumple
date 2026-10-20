@@ -34,6 +34,7 @@ import type { PropVisualState } from './render/props/types';
 import type { FxState } from './render/fx/types';
 import { createTrafficController, type TrafficController } from './app/traffic';
 import { placeOnGround, repairSpot, yawOf, yawOfQuat, type Aabb, type RestPose } from './app/spawn';
+import { SPAWN_HOLD_BRAKE, SPAWN_HOLD_INPUT_EPS, SpawnHold } from './app/spawnHold';
 import { chaseFramingFor, drivableEntry, hasStoredChoice, loadPlayerAssets, loadVehicleChoice, PlayerVehicle, saveVehicleChoice, speedoMax, type PlayerAssets } from './app/player';
 import { chaseScale, loadSettings, saveSettings, trafficDensityFor, type GameSettings } from './app/settings';
 import { DEFAULT_VEHICLE_ID, getVehicleEntry, PLAYER_VEHICLE_IDS, type VehicleChoice } from './game/catalog';
@@ -536,6 +537,7 @@ function teleport(i: number): void {
   spawnIndex = i;
   lastSpawn = spawnTransformAt(i);
   client.reset(VEHICLE_ID, lastSpawn, SPAWN_SETTLE_S);
+  holdParked();
   lastSent.gearSelect = NaN; // force a full input resend
   snapAfterTick = client.latestTick;
   replaySession?.quietCrashCam(); // P7: the drop onto the spawn is not a crash
@@ -547,6 +549,7 @@ function placeVehicle(x: number, z: number, yaw: number): void {
   if (!sampler) return;
   lastSpawn = placeOnGround(playerRest(), sampler, x, z, yaw);
   client.reset(VEHICLE_ID, lastSpawn, SPAWN_SETTLE_S);
+  holdParked();
   lastSent.gearSelect = NaN;
   snapAfterTick = client.latestTick;
   replaySession?.quietCrashCam();
@@ -563,6 +566,7 @@ function repairVehicle(): void {
     t = propBoxes.length > 0 ? (repairSpot(sedanRig, sampler, pose.position.x, pose.position.z, yaw, propBoxes) ?? lastSpawn) : placeOnGround(sedanRig, sampler, pose.position.x, pose.position.z, yaw);
   }
   client.reset(VEHICLE_ID, t, SPAWN_SETTLE_S);
+  holdParked();
   lastSent.gearSelect = NaN;
   snapAfterTick = client.latestTick;
   replaySession?.quietCrashCam();
@@ -584,6 +588,13 @@ function spawnCube(): void {
 }
 
 // ------------------------------------------------------------ input plumbing
+/** Parking-brake hold after every placement of the player car (spawn, teleport, F, DRIVE, challenge start) until the player touches a control. */
+const spawnHold = new SpawnHold();
+/** Arms the hold and sends it right away (held render loops send no per-frame input; the input log carries it either way). */
+function holdParked(): void {
+  spawnHold.arm();
+  client.input(VEHICLE_ID, { handbrake: 1, brake: SPAWN_HOLD_BRAKE });
+}
 const lastSent: ActionState = { throttle: NaN, brake: NaN, steer: NaN, handbrake: NaN, clutch: NaN, gearSelect: NaN, horn: NaN };
 function sendInput(a: ActionState): void {
   if (
@@ -817,6 +828,7 @@ async function swapVehicle(choice: VehicleChoice, spawnAt: number | null): Promi
   }
   applyPlayerSpec(assets);
   client.spawnVehicle(VEHICLE_ID, assets.sim, lastSpawn, transmission, entry.id, SPAWN_SETTLE_S);
+  holdParked();
   replaySession?.quietCrashCam();
   tractionControl = settings.tractionControl;
   if (!tractionControl) client.setAssists(VEHICLE_ID, { tractionControl: false });
@@ -1494,6 +1506,7 @@ async function boot(): Promise<void> {
   spawnIndex = Math.max(0, world.spawns.findIndex((s) => s.id === wanted));
   lastSpawn = spawnTransformAt(spawnIndex);
   client.spawnVehicle(VEHICLE_ID, bootAssets.sim, lastSpawn, transmission, bootAssets.entry.id, SPAWN_SETTLE_S);
+  holdParked();
   if (!tractionControl) client.setAssists(VEHICLE_ID, { tractionControl: false });
   spawnCube();
   // P6 traffic: ?traffic=0 (perf comparisons) or the 'off' setting disables it; the stub resolves false until T2 lands.
@@ -1630,6 +1643,7 @@ async function boot(): Promise<void> {
     placePlayer: (t) => {
       lastSpawn = t;
       client.reset(VEHICLE_ID, t, SPAWN_SETTLE_S);
+      holdParked();
       lastSent.gearSelect = NaN;
       snapAfterTick = client.latestTick;
       replaySession?.quietCrashCam();
@@ -1682,7 +1696,16 @@ async function boot(): Promise<void> {
       devices.poll();
       const tel = client.telemetry(VEHICLE_ID);
       const speed = tel ? (tel[VehicleTelemetry.speed] ?? 0) : 0;
-      const act = mapper.update(dt, speed);
+      const raw = mapper.update(dt, speed);
+      // A running challenge holds the car through its own countdown filter: no spawn hold on top.
+      if (challenges?.active) spawnHold.release();
+      else if (spawnHold.active && tel && (tel[VehicleTelemetry.throttle] ?? 0) > SPAWN_HOLD_INPUT_EPS) {
+        // Throttle arrived from elsewhere (autopilot, tests driving through debug.client.input): the car
+        // is being driven, so the hold is over — and main does not resend idle input over that driver.
+        spawnHold.release();
+        Object.assign(lastSent, raw);
+      }
+      const act = spawnHold.apply(raw);
       if (challenges?.active) {
         // P8: countdown hold / results brake / playtest bot
         Object.assign(challengeInput, act);

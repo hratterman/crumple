@@ -90,7 +90,7 @@ test('replay UI: crash cam, timeline markers, scrub, cameras, photo mode + PNG',
     c.hold = true;
   });
   await page.waitForTimeout(1500);
-  await page.evaluate(() => (window as unknown as { __crumple: G }).__crumple.debug.client.input(1, { throttle: 1, brake: 0, gearSelect: 1 }));
+  await page.evaluate(() => (window as unknown as { __crumple: G }).__crumple.debug.client.input(1, { throttle: 1, brake: 0, handbrake: 0, gearSelect: 1 }));
   for (let i = 0; i < 400; i++) {
     await page.waitForTimeout(50);
     const v = await page.evaluate(() => (window as unknown as { __crumple: G }).__crumple.vehicle);
