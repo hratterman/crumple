@@ -1,14 +1,13 @@
 /**
  * Catalog entry: the TRAFFIC sedan (owner: T1 — sim rig `SEDAN_TRAFFIC` in
  * src/sim/vehicle/defs/sedanTraffic.ts, ≤ 1500 beams; T2 — its visual
- * binding). Not selectable. `available` flips to true when T1 lands the rig
- * and T2 the visual (load() must then resolve).
+ * binding, re-pointed from the sedan's body). Not selectable.
  */
-import { metallicPaint, notYetBuilt, solidPaint, type VehicleCatalogEntry } from '../catalogTypes';
+import { metallicPaint, solidPaint, type VehicleCatalogEntry } from '../catalogTypes';
 
 export const SEDAN_TRAFFIC_ENTRY: VehicleCatalogEntry = {
   id: 'sedanTraffic',
-  available: false,
+  available: true,
   selectable: false,
   trafficEligible: true,
   stats: {
@@ -22,7 +21,7 @@ export const SEDAN_TRAFFIC_ENTRY: VehicleCatalogEntry = {
     torqueNm: 350,
     massKg: 1450,
     topSpeedKmh: 210,
-    zeroTo100S: null,
+    zeroTo100S: 6.8,
     ratings: { speed: 3, handling: 3, toughness: 2 },
   },
   // Everyday colours: traffic must read as "other cars", not as the player's showroom paint.
@@ -39,5 +38,11 @@ export const SEDAN_TRAFFIC_ENTRY: VehicleCatalogEntry = {
   beamBudget: 1500,
   chase: { distance: 5.6, height: 1.9 },
   extent: { min: [-0.95, 0, -2.35], max: [0.95, 1.47, 2.45] },
-  load: notYetBuilt('sedanTraffic'),
+  load: async () => {
+    const [{ SEDAN_TRAFFIC }, { SEDAN_TRAFFIC_VISUAL }] = await Promise.all([
+      import('../../sim/vehicle/defs/sedanTraffic'),
+      import('../../render/vehicle/defs/sedanTraffic'),
+    ]);
+    return { sim: SEDAN_TRAFFIC, visual: SEDAN_TRAFFIC_VISUAL };
+  },
 };

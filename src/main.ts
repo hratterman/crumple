@@ -312,23 +312,27 @@ let layoutPropCount = 0;
 /** Spawn-pose AABBs of the layout props (F re-places them; see repairVehicle). */
 let propBoxes: readonly Aabb[] = [];
 
-/** Sim events → the sedan's damage, prop scuffs and world FX (allocation-free routing; every object's events reach FX). */
+/**
+ * Sim events → the sedan's damage, prop scuffs and world FX (allocation-free routing). Awake
+ * traffic events reach FX through the traffic controller (it drops the spawn-contact burst of
+ * a freshly promoted car).
+ */
 const eventSink = {
   impact(e: Readonly<ImpactEvent>): void {
     if (e.objectId === VEHICLE_ID) playerVisual()?.onImpact(e);
     else if (isPropObjectId(e.objectId)) props?.onImpact(e);
-    else if (traffic?.owns(e.objectId)) traffic.onImpact(e);
+    else if (traffic?.owns(e.objectId)) return traffic.onImpact(e);
     fx?.onImpact(e);
   },
   beamBreak(e: Readonly<BeamBreakEvent>): void {
     if (e.objectId === VEHICLE_ID) playerVisual()?.onBeamBreak(e);
     else if (isPropObjectId(e.objectId)) props?.onBeamBreak(e);
-    else if (traffic?.owns(e.objectId)) traffic.onBeamBreak(e);
+    else if (traffic?.owns(e.objectId)) return traffic.onBeamBreak(e);
     fx?.onBeamBreak(e);
   },
   skid(e: Readonly<SkidEvent>): void {
     if (e.objectId === VEHICLE_ID) playerVisual()?.onSkid(e);
-    else if (traffic?.owns(e.objectId)) traffic.onSkid(e);
+    else if (traffic?.owns(e.objectId)) return traffic.onSkid(e);
     fx?.onSkid(e);
   },
 };
