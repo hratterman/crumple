@@ -138,7 +138,16 @@ export type ObjectiveDef =
    * or they moved < 1 m in immobileS; the player FAILS by the same rules.
    * Meters knock-outs and survival time.
    */
-  | { type: 'derby'; immobileS: number; wreckDamage: number };
+  | {
+      type: 'derby';
+      immobileS: number;
+      /** Opponents are wrecked at this telemetry damage. */
+      wreckDamage: number;
+      /** The player's own stall limit (default immobileS): pinned by rammers is not stalling. */
+      playerImmobileS?: number;
+      /** The player's wreck damage (default wreckDamage): the beater crumples far sooner than a traffic sedan. */
+      playerWreckDamage?: number;
+    };
 
 // ============================================================ set-up
 /** Challenge props: spawned with `spawnProps` (dynamic ids) on start, `resetProps` on restart, despawned on exit. */
@@ -173,7 +182,7 @@ export type ChallengeMetric =
   | 'drift' //       drift points
   | 'destruction' // destruction points
   | 'stunt' //       stunt points (air + flips + drift combos)
-  | 'derby' //       derby points (knock-outs × 1000 + survival s × 10)
+  | 'derby' //       derby points (knock-outs × 1000 + damage dealt to the rest × 500 per wreck + survival s × 10)
   | 'park' //        park points (see PARK)
   | 'topSpeed'; //   km/h
 

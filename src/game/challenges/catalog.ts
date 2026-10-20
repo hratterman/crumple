@@ -79,7 +79,7 @@ export function findChallenge(world: CatalogWorld, id: string): ChallengeDef | n
 
 function buildCatalog(world: CatalogWorld): ChallengeDef[] {
   const ridge = road(world, 'ridgePass');
-  const valley = road(world, 'valleyRoad');
+  const ring = road(world, 'townRing');
   const [inrunZ0, inrunY0] = SKI_INRUN[0]!;
 
   const defs: ChallengeDef[] = [
@@ -114,10 +114,12 @@ function buildCatalog(world: CatalogWorld): ChallengeDef[] {
       spawn: { pos: [BARREL_ROLL.laneX, null, BARREL_ROLL.startZ], yawDeg: 0 },
       traffic: 0,
       objectives: [
-        { type: 'jump', takeoff: { kind: 'rect', center: [BARREL_ROLL.laneX, BARREL_ROLL.kickerZ - 3], halfX: 5, halfZ: 9 }, ends: true, settleS: 3, minAirtimeS: 0.2 },
         { type: 'flips', axis: 'roll' },
+        // the finish gate 30 m past the kicker (a tumbling car crosses it too); the rolls keep counting while it settles
+        { type: 'gates', gates: [{ pos: [BARREL_ROLL.laneX, null, BARREL_ROLL.kickerZ - 32], yawDeg: 0, width: 22, height: 9 }] },
+        { type: 'jump', takeoff: { kind: 'rect', center: [BARREL_ROLL.laneX, BARREL_ROLL.kickerZ - 3], halfX: 5, halfZ: 9 }, minAirtimeS: 0.2 },
         { type: 'landUpright', mode: 'bonus', factor: 0.5 },
-        { type: 'timeLimit', seconds: 25, onExpire: 'fail' },
+        { type: 'timeLimit', seconds: 16, onExpire: 'finish' },
       ],
       scoring: { metric: 'rolls', better: 'higher', unit: 'rolls', decimals: 2 },
       medals: { bronze: 0.25, silver: 0.5, gold: 1, crumple: 2 },
@@ -163,22 +165,22 @@ function buildCatalog(world: CatalogWorld): ChallengeDef[] {
     {
       id: 'drift-king',
       name: 'Drift King',
-      blurb: 'Valley Road, a 300 kW coupe and no traction control. Angle, speed, style.',
-      brief: 'Drift points build with slip angle × speed × time; hold a drift and the multiplier climbs to ×8. Touch anything and the chain is gone. Reach the finish before the clock runs out; points bank when you straighten up.',
-      where: 'Valley Road',
+      blurb: 'Two laps of the Millbrook Ring in a 300 kW coupe, traction control off. Angle, speed, style.',
+      brief: 'Drift points build with slip angle × speed × time; hold a drift and the multiplier climbs to ×8. Touch anything and the chain is gone. Two laps through every checkpoint; points bank when you straighten up, and the clock stops the run at 90 s.',
+      where: 'Millbrook Ring',
       icon: 'drift',
       vehicle: { kind: 'forced', id: 'coupe' },
-      spawn: roadSpawn(valley, 25, 1.9),
+      spawn: roadSpawn(ring, 8, 0),
       traffic: 0,
       tractionControl: false,
       objectives: [
-        { type: 'gates', gates: roadGates(valley, 25, valley.length - 30, 110, 11) },
         { type: 'drift' },
-        { type: 'timeLimit', seconds: 75, onExpire: 'finish' },
+        { type: 'gates', gates: roadGates(ring, 8, 8 + 2 * ring.length, ring.length / 8, 11) },
+        { type: 'timeLimit', seconds: 90, onExpire: 'finish' },
       ],
       scoring: { metric: 'drift', better: 'higher', unit: 'pts', decimals: 0 },
-      medals: { bronze: 1500, silver: 4000, gold: 8000, crumple: 14000 },
-      botLine: roadLine(valley, 25, valley.length - 25, 6, 1.9),
+      medals: { bronze: 300, silver: 900, gold: 2000, crumple: 4000 },
+      botLine: [...roadLine(ring, 8, 8 + 2 * ring.length + 40, 5, 0)],
     },
     {
       id: 'truck-topple',
@@ -210,11 +212,11 @@ function buildCatalog(world: CatalogWorld): ChallengeDef[] {
       id: 'demolition-derby',
       name: 'Demolition Derby',
       blurb: 'The beater against four rammers in the derby pit. Last one moving wins.',
-      brief: 'Four traffic sedans are out to ram you. Knock them out: wreck them or leave them stalled for 8 s. You are out the same way. Knock-outs score 1000, every second survived 10.',
+      brief: 'Four traffic sedans are out to ram you, joining one after another. Knock them out: wreck them or leave them stalled for 10 s. When you are wrecked or stalled 15 s, the derby ends. Knock-outs score 1000, damage dealt to the rest up to 500 each, every second survived 10.',
       where: 'Derby Pit',
       icon: 'derby',
       vehicle: { kind: 'forced', id: 'beater' },
-      spawn: { pos: [DERBY_PIT.centre[0], null, DERBY_PIT.maxZ - 8], yawDeg: 0 },
+      spawn: { pos: [DERBY_PIT.centre[0], null, DERBY_PIT.centre[1] + 16], yawDeg: 0 },
       traffic: 0,
       opponents: [
         { vehicle: 'sedanTraffic', spawn: { pos: [DERBY_PIT.minX + 7, null, DERBY_PIT.minZ + 8], yawDeg: 225 }, aggression: 0.75 },
@@ -223,11 +225,11 @@ function buildCatalog(world: CatalogWorld): ChallengeDef[] {
         { vehicle: 'sedanTraffic', spawn: { pos: [DERBY_PIT.maxX - 7, null, DERBY_PIT.minZ + 34], yawDeg: 90 }, aggression: 0.8 },
       ],
       objectives: [
-        { type: 'derby', immobileS: 8, wreckDamage: 0.3 },
+        { type: 'derby', immobileS: 10, wreckDamage: 0.16, playerImmobileS: 15, playerWreckDamage: 0.6 },
         { type: 'timeLimit', seconds: 150, onExpire: 'finish' },
       ],
       scoring: { metric: 'derby', better: 'higher', unit: 'pts', decimals: 0 },
-      medals: { bronze: 1500, silver: 2600, gold: 4200, crumple: 5300 },
+      medals: { bronze: 1200, silver: 2200, gold: 3400, crumple: 4800 },
     },
     {
       id: 'hill-climb',
@@ -244,7 +246,7 @@ function buildCatalog(world: CatalogWorld): ChallengeDef[] {
         { type: 'timeLimit', seconds: 210, onExpire: 'fail' },
       ],
       scoring: { metric: 'time', better: 'lower', unit: 's', decimals: 2 },
-      medals: { bronze: 150, silver: 120, gold: 100, crumple: 90 },
+      medals: { bronze: 110, silver: 92, gold: 80, crumple: 72 },
       botLine: roadLine(ridge, 26, ridge.length - 2, 5, 1.2),
     },
     {
@@ -288,7 +290,7 @@ function buildCatalog(world: CatalogWorld): ChallengeDef[] {
         { type: 'timeLimit', seconds: 75, onExpire: 'finish' },
       ],
       scoring: { metric: 'stunt', better: 'higher', unit: 'pts', decimals: 0 },
-      medals: { bronze: 600, silver: 1500, gold: 3000, crumple: 5000 },
+      medals: { bronze: 300, silver: 900, gold: 1800, crumple: 3200 },
       botLine: [[WRECK_JUMP.runStartX + 5, WRECK_JUMP.laneZ], [WRECK_JUMP.landingX + 20, WRECK_JUMP.laneZ]],
     },
   ];

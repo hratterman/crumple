@@ -6,6 +6,9 @@
  */
 import type { ChallengeSample, XZ } from './types';
 
+/** Braking deceleration the speed profile plans with, m/s². */
+const BRAKE_DECEL = 5;
+
 export interface BotConfig {
   line: readonly XZ[];
   /** Cruise target, km/h. */
@@ -106,13 +109,21 @@ export class Bot {
     const fz = s.forward[2];
     const fl = Math.hypot(fx, fz) || 1;
     const ahead = (dx * fx + dz * fz) / fl;
-    const lat = (dx * -fz + dz * fx) / fl;
-    const ang = Math.atan2(lat, Math.max(0.1, ahead));
+    const latOff = (dx * -fz + dz * fx) / fl;
+    const ang = Math.atan2(latOff, Math.max(0.1, ahead));
     o.steer = Math.max(-1, Math.min(1, (this.cfg.steerGain ?? 1.6) * ang));
     // speed profile
+    // speed profile: the corner speed of every point within braking reach, braked back to here
     let vt = this.cfg.speedKmh / 3.6;
-    const kap = Math.max(this.curvature(bestS + 2, 16), this.curvature(bestS + 0.4 * v + 6, 24));
-    if (kap > 1e-4) vt = Math.min(vt, Math.sqrt((this.cfg.latAcc ?? 6) / kap));
+    const lat = this.cfg.latAcc ?? 6;
+    const reach = Math.min(160, (v * v) / (2 * BRAKE_DECEL) + 25);
+    for (let d = 0; d <= reach; d += 4) {
+      const kap = this.curvature(bestS + d, 12);
+      if (kap < 1e-4) continue;
+      const vc = Math.sqrt(lat / kap);
+      const allowed = Math.sqrt(vc * vc + 2 * BRAKE_DECEL * Math.max(0, d - 6));
+      if (allowed < vt) vt = allowed;
+    }
     this.remaining = this.length - bestS;
     if (this.cfg.stopAtEnd) vt = Math.min(vt, Math.sqrt(Math.max(0, 2 * 2.5 * (this.remaining - 0.6))));
     const e = vt - v;

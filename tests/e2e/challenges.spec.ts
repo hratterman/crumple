@@ -87,7 +87,9 @@ test.describe('stunt challenges', () => {
     const errors: string[] = [];
     page.on('pageerror', (e) => errors.push(e.stack ?? String(e)));
     const shots = async (name: string): Promise<void> => {
-      await info.attach(name, { body: await page.screenshot(), contentType: 'image/png' });
+      const path = info.outputPath(`${name}.png`);
+      await page.screenshot({ path });
+      await info.attach(name, { path, contentType: 'image/png' });
     };
     const r = await runChallenge(page, 'bowling', 'spawn=arena', { speedKmh: 95 }, shots);
     expect(r.result.completed).toBe(true);
@@ -104,7 +106,9 @@ test.describe('stunt challenges', () => {
   test('long jump: off the ski jump, BIG AIR popup, distance scored', async ({ page }, info) => {
     test.setTimeout(600_000);
     const shots = async (name: string): Promise<void> => {
-      await info.attach(name, { body: await page.screenshot(), contentType: 'image/png' });
+      const path = info.outputPath(`${name}.png`);
+      await page.screenshot({ path });
+      await info.attach(name, { path, contentType: 'image/png' });
     };
     const r = await runChallenge(page, 'long-jump', 'spawn=summit', { maxThrottle: 0.4, speedKmh: 200, latAcc: 50 }, shots);
     expect(r.result.completed).toBe(true);
@@ -115,7 +119,9 @@ test.describe('stunt challenges', () => {
   test('barrel roll: the side kicker rolls the coupe; select screen lists the PB', async ({ page }, info) => {
     test.setTimeout(600_000);
     const shots = async (name: string): Promise<void> => {
-      await info.attach(name, { body: await page.screenshot(), contentType: 'image/png' });
+      const path = info.outputPath(`${name}.png`);
+      await page.screenshot({ path });
+      await info.attach(name, { path, contentType: 'image/png' });
     };
     const r = await runChallenge(page, 'barrel-roll', 'spawn=arena', { speedKmh: 78, latAcc: 50 }, shots);
     expect(r.result.completed).toBe(true);

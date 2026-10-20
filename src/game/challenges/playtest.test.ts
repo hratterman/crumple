@@ -29,6 +29,7 @@ import { challengeCatalog } from './catalog';
 import { ChallengeRun } from './runtime';
 import { rigInfo, SampleBuilder } from './sample';
 import { challengeProps, OPPONENT_ID_BASE, spawnTransform } from './setup';
+import { OPPONENT_STAGGER_S } from '../../app/challenges';
 import type { ChallengeDef, ChallengeResult, ChallengeSample } from './types';
 import { surfaceIndex } from '../../world/surface';
 
@@ -86,6 +87,7 @@ export function playtest(def: ChallengeDef, opts: PlaytestOptions): { result: Ch
   const a: ActionState = { throttle: 0, brake: 0, steer: 0, handbrake: 0, clutch: 0, gearSelect: 1 };
   const popups: string[] = [];
   let calibrated = false;
+  let armed = 0;
   let started = false;
   const maxS = opts.maxS ?? 240;
   for (let f = 0; f < maxS * 60; f++) {
@@ -100,9 +102,12 @@ export function playtest(def: ChallengeDef, opts: PlaytestOptions): { result: Ch
         }
         run.startCountdown(s.simTime);
         started = true;
-        for (const o of opp) host.handle({ type: 'setAutopilot', objectId: o.id, mode: 'ram', targetObjectId: 1, aggression: o.aggression, seed: o.id });
       }
       run.onSample(s);
+      if (run.running && armed < opp.length && run.state.clock >= armed * OPPONENT_STAGGER_S) {
+        const o = opp[armed++]!;
+        host.handle({ type: 'setAutopilot', objectId: o.id, mode: 'ram', targetObjectId: 1, aggression: o.aggression, seed: o.id });
+      }
       for (const e of run.drainEvents()) if (e.type === 'popup') popups.push(`${e.text}${e.sub ? ` (${e.sub})` : ''}`);
     }
     if (run.over) break;
@@ -118,7 +123,7 @@ export function playtest(def: ChallengeDef, opts: PlaytestOptions): { result: Ch
   }
   expect(errors).toEqual([]);
   const ls = builder.sample;
-  popups.push(`end@(${ls.pos.map((v) => v.toFixed(1)).join(',')}) v ${ls.speed.toFixed(1)} up ${ls.up[1].toFixed(2)}`);
+  popups.push(`end@(${ls.pos.map((v) => v.toFixed(1)).join(',')}) v ${ls.speed.toFixed(1)} up ${ls.up[1].toFixed(2)} dmg ${ls.damage.toFixed(2)}${ls.opponents.length ? ` opp dmg ${ls.opponents.map((o) => o.damage.toFixed(2)).join('/')}` : ''}`);
   return { result: run.result, run, popups };
 }
 
@@ -174,9 +179,63 @@ describe.skipIf(!ON)('challenge playtests (PLAYTEST=1)', () => {
 
   it.runIf(want('stunt-jam'))('stunt-jam', () => {
     report('stunt-jam', 'wreck jump line', playtest(def('stunt-jam'), { bot: { speedKmh: 80, latAcc: 50 }, maxS: 80 }));
+    // a freestyle loop: wreck jump east, round to the large kicker, fly at the quarter-pipe, back for the wreck jump
+    const loop: [number, number][] = [
+      [340, 408], [470, 408], [492, 404], [494, 392], [480, 386], [430, 386], [395, 383], [390, 374], [400, 368], [440, 376], [470, 376], [492, 378],
+      [494, 392], [470, 397], [420, 400], [390, 404], [380, 412], [360, 416], [345, 412], [350, 408], [470, 408], [495, 408],
+    ];
+    report('stunt-jam', 'freestyle loop', playtest(def('stunt-jam'), { bot: { line: loop, speedKmh: 80, latAcc: 7 }, maxS: 80 }));
   }, 900_000);
 
   it.runIf(want('demolition-derby'))('demolition-derby', () => {
-    report('demolition-derby', 'parked', playtest(def('demolition-derby'), { bot: null, maxS: 160 }));
+    if (!ENV.PLAYTEST_RAMMER_ONLY) report('demolition-derby', 'parked', playtest(def('demolition-derby'), { bot: null, maxS: 160 }));
+    // rammer: drive at the nearest opponent still moving, back off when stuck
+    let rev = 0;
+    let stuck = 0;
+    report(
+      'demolition-derby',
+      'rammer',
+      playtest(def('demolition-derby'), {
+        bot: null,
+        maxS: 160,
+        script: (t, s, a) => {
+          if (t === null) return;
+          let best: { pos: number[] } | null = null;
+          let bd = Infinity;
+          for (const o of s.opponents) {
+            if (!o.present || o.damage > 0.5) continue;
+            const d = Math.hypot(o.pos[0]! - s.pos[0], o.pos[2]! - s.pos[2]);
+            if (d < bd) {
+              bd = d;
+              best = o;
+            }
+          }
+          if (!best) return;
+          const dx = best.pos[0]! - s.pos[0];
+          const dz = best.pos[2]! - s.pos[2];
+          const fx = s.forward[0];
+          const fz = s.forward[2];
+          const ang = Math.atan2(dx * -fz + dz * fx, dx * fx + dz * fz);
+          if (Math.abs(s.speed) < 1) stuck += 1 / 60;
+          else stuck = 0;
+          if (stuck > 1.5) {
+            rev = 1.2;
+            stuck = 0;
+          }
+          if (rev > 0) {
+            rev -= 1 / 60;
+            a.throttle = 1;
+            a.brake = 0;
+            a.steer = -Math.sign(ang);
+            a.gearSelect = -1; // raw worker input: R + throttle
+            return;
+          }
+          a.gearSelect = 1;
+          a.steer = Math.max(-1, Math.min(1, ang * 1.5));
+          a.throttle = 1;
+          a.brake = 0;
+        },
+      }),
+    );
   }, 1_800_000);
 });

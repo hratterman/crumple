@@ -123,6 +123,8 @@ const BOT_DEFAULTS: Readonly<Record<string, Partial<BotConfig>>> = {
 
 /** Countdown starts this long (sim s) after the set-up snapshot: the intro card reads first. */
 const INTRO_S = 1.6;
+/** Derby opponents are switched on this far apart after GO, s (sim). */
+export const OPPONENT_STAGGER_S = 2.5;
 /** Results open this long (real ms) after the finish / fail banner. */
 const RESULTS_DELAY_MS = 1500;
 
@@ -151,7 +153,7 @@ export function createChallengeHost(deps: ChallengeHostDeps): ChallengeHost {
   let propIds: number[] = [];
   let propInstances: PropInstance[] = [];
   let opponents: Opponent[] = [];
-  let opponentsArmed = false;
+  let armed = 0;
   let course: CourseRenderer | null = null;
   let ghost: GhostCar | null = null;
   let ghostTrack: GhostTrack | null = null;
@@ -232,9 +234,10 @@ export function createChallengeHost(deps: ChallengeHostDeps): ChallengeHost {
       const b = bot.update(s);
       client.input(1, { throttle: b.throttle, brake: b.brake, steer: b.steer, handbrake: b.handbrake, gearSelect: 1 });
     }
-    if (run.running && !opponentsArmed) {
-      opponentsArmed = true;
-      for (const o of opponents) client.setAutopilot(o.id, { mode: 'ram', targetObjectId: 1, aggression: o.aggression, seed: o.id });
+    // opponents join one after another (OPPONENT_STAGGER_S apart), not all at GO
+    if (run.running && armed < opponents.length && run.state.clock >= armed * OPPONENT_STAGGER_S) {
+      const o = opponents[armed++]!;
+      client.setAutopilot(o.id, { mode: 'ram', targetObjectId: 1, aggression: o.aggression, seed: o.id });
     }
   });
 
@@ -345,7 +348,7 @@ export function createChallengeHost(deps: ChallengeHostDeps): ChallengeHost {
         pins: ps.pins,
         opponents: await Promise.all(opp.map(async (o, k) => ({ id: o.id, rig: rigInfo((await loadPlayerAssets(getVehicleEntry(d.opponents![k]!.vehicle))).compiled) }))),
       });
-      bot = botCfg ? new Bot({ line: d.botLine ?? [], speedKmh: 60, ...BOT_DEFAULTS[d.id], ...botCfg }) : null;
+      bot = botCfg && (d.botLine?.length ?? 0) >= 2 ? new Bot({ line: d.botLine ?? [], speedKmh: 60, ...BOT_DEFAULTS[d.id], ...botCfg }) : null;
       beginRun();
       deps.toast(d.name.toUpperCase(), d.where.toUpperCase());
     })();
@@ -369,7 +372,7 @@ export function createChallengeHost(deps: ChallengeHostDeps): ChallengeHost {
       client.setAutopilot(o.id, { mode: 'off' });
       client.reset(o.id, o.transform);
     }
-    opponentsArmed = false;
+    armed = 0;
     resetTick = client.latestTick;
     introUntil = 0;
     crashCamDone = false;
@@ -609,7 +612,7 @@ export function createChallengeHost(deps: ChallengeHostDeps): ChallengeHost {
     },
     bot(on, cfg) {
       botCfg = on ? { ...(cfg ?? {}) } : null;
-      bot = on && def ? new Bot({ line: def.botLine ?? [], speedKmh: 60, ...BOT_DEFAULTS[def.id], ...botCfg }) : null;
+      bot = on && def && (def.botLine?.length ?? 0) >= 2 ? new Bot({ line: def.botLine ?? [], speedKmh: 60, ...BOT_DEFAULTS[def.id], ...botCfg }) : null;
     },
     get ghostFrames() {
       return ghostTrack ? ghostTrack.count : 0;

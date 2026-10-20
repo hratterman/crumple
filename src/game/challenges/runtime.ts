@@ -56,6 +56,7 @@ const SMASH_WINDOW_S = 0.6;
 interface DerbyCar {
   id: number;
   out: boolean;
+  damage: number;
   anchor: [number, number, number];
   anchorT: number;
   reason: string;
@@ -111,6 +112,7 @@ export class ChallengeRun {
   private crushCm = 0;
   private derby: DerbyCar[] = [];
   private derbyKOs = 0;
+  private derbyOutReason: string | null = null;
   private playerAnchor: [number, number, number] = [0, 0, 0];
   private playerAnchorT = 0;
   private lastSpeedKmh = 0;
@@ -230,7 +232,7 @@ export class ChallengeRun {
     this.hasPrev = true;
     this.playerAnchor = [s.pos[0], s.pos[1], s.pos[2]];
     this.playerAnchorT = s.simTime;
-    this.derby = s.opponents.map((o) => ({ id: o.id, out: false, anchor: [o.pos[0], o.pos[1], o.pos[2]], anchorT: s.simTime, reason: '' }));
+    this.derby = s.opponents.map((o) => ({ id: o.id, out: false, damage: 0, anchor: [o.pos[0], o.pos[1], o.pos[2]], anchorT: s.simTime, reason: '' }));
     this.rotation.update(s.forward, s.up, true, 0);
     this.recordGhost(s, 0);
   }
@@ -499,8 +501,14 @@ export class ChallengeRun {
       this.playerAnchor = [s.pos[0], s.pos[1], s.pos[2]];
       this.playerAnchorT = t;
     }
-    if (s.damage >= o.wreckDamage) return this.fail('Wrecked', s);
-    if (t - this.playerAnchorT >= o.immobileS) return this.fail('Stalled out', s);
+    // the player being knocked out ENDS the derby (scored as it stands): surviving is the score, not a pass mark
+    const wrecked = s.damage >= (o.playerWreckDamage ?? o.wreckDamage);
+    if (wrecked || t - this.playerAnchorT >= (o.playerImmobileS ?? o.immobileS)) {
+      this.popup('warn', wrecked ? 'WRECKED' : 'STALLED OUT', `${this.derbyKOs} knock-out${this.derbyKOs === 1 ? '' : 's'}`);
+      this.derbyOutReason = wrecked ? 'Wrecked' : 'Stalled out';
+      this.goals[i] = true;
+      return;
+    }
     let alive = 0;
     for (const car of this.derby) {
       if (car.out) continue;
@@ -512,6 +520,7 @@ export class ChallengeRun {
           car.anchor = [op.pos[0], op.pos[1], op.pos[2]];
           car.anchorT = t;
         }
+        car.damage = op.damage;
         if (op.damage >= o.wreckDamage) reason = 'wrecked';
         else if (op.upY < 0.3 && t - car.anchorT >= 2) reason = 'flipped';
         else if (t - car.anchorT >= o.immobileS) reason = 'stalled';
@@ -597,8 +606,12 @@ export class ChallengeRun {
         return this.destruction;
       case 'stunt':
         return this.stuntPoints;
-      case 'derby':
-        return this.derbyKOs * 1000 + Math.floor(this.state.clock) * 10;
+      case 'derby': {
+        const d = this.def.objectives.find((x): x is Extract<ObjectiveDef, { type: 'derby' }> => x.type === 'derby');
+        let dealt = 0;
+        for (const c of this.derby) if (!c.out && d) dealt += Math.min(1, c.damage / d.wreckDamage) * 500;
+        return this.derbyKOs * 1000 + Math.round(dealt) + Math.floor(this.state.clock) * 10;
+      }
       case 'park':
         return this.parked ? Math.max(0, PARK_BASE - 4 * this.parkOffsetCm - 15 * this.parkYawErr - 10 * (this.frozenClock >= 0 ? this.frozenClock : this.state.clock)) : 0;
       case 'topSpeed':
@@ -643,7 +656,11 @@ export class ChallengeRun {
       stats.push({ label: 'Offset', value: `${Math.round(this.parkOffsetCm)} cm` });
       stats.push({ label: 'Angle', value: `${this.parkYawErr.toFixed(1)}°` });
     }
-    if (has('derby')) stats.push({ label: 'Knock-outs', value: `${this.derbyKOs} / ${this.derby.length}` });
+    if (has('derby')) {
+      stats.push({ label: 'Knock-outs', value: `${this.derbyKOs} / ${this.derby.length}` });
+      stats.push({ label: 'Survived', value: `${formatTime(time, 1)} s` });
+      stats.push({ label: 'Ending', value: this.derbyOutReason ?? (this.derbyKOs === this.derby.length ? 'Last one moving' : 'Time up') });
+    }
     if (has('topSpeed') || def.scoring.metric === 'topSpeed') stats.push({ label: 'Top speed', value: `${Math.round(this.topSpeedKmh)} km/h` });
     if (has('landUpright')) stats.push({ label: 'Landing', value: this.uprightAtEnd ? 'On its wheels' : 'Crash landing ×0.5' });
     return {
