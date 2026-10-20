@@ -226,12 +226,12 @@ export class EngineDsp {
     const ex = p.exhaust;
     for (let b = 0; b < 2; b++) {
       this.loop[b]!.setHz(ex.loopHz * pitch, sr);
-      this.rasp[b]!.set(ex.raspHz * pitch * (0.8 + 0.4 * load1), 0.9, sr);
+      this.rasp[b]!.set(ex.raspHz * pitch * (0.8 + 0.4 * load1), 0.6, sr);
     }
     const pipeD0 = ((2 * ex.pipeM[0]) / SPEED_OF_SOUND) * sr / pitch;
     const pipeD1 = ((2 * ex.pipeM[1]) / SPEED_OF_SOUND) * sr / pitch;
     const overrunNow = thr1 < 0.04 && rpm1 > p.idleRpm * 1.35 && !crank;
-    const muffHz = ex.lowpassHz * (overrunNow ? 0.6 : 0.7 + 0.65 * load1) * pitch;
+    const muffHz = ex.lowpassHz * (overrunNow ? 0.75 : 0.95 + 0.6 * load1) * pitch;
     this.muffler.set(muffHz, 0.7, sr);
     if (Math.abs(this.bodyPitch - pitch) > 0.002) {
       this.body.peaking(ex.bodyHz * pitch, 1.1, ex.bodyDb, sr);
@@ -399,7 +399,7 @@ export class EngineDsp {
           this.whPh2 += whF2 / sr;
           if (this.whPh2 >= 1) this.whPh2 -= 1;
           this.whNoise.tick(rng.white());
-          fr += whAmp * (sin01(this.whPh) * 0.55 + sin01(this.whPh2) * 0.12 + this.whNoise.bpn * 0.5);
+          fr += whAmp * (sin01(this.whPh) * 0.5 + sin01(this.whPh2) * 0.04 + this.whNoise.bpn * 0.6);
         }
         if (this.dumpEnv > 1e-3 && p.turbo) {
           let d = rng.white() * this.dumpEnv;
@@ -471,7 +471,7 @@ export class EngineDsp {
     this.inCur += ia * frac;
     this.inNext += ia * (1 - frac);
     if (this.light) return;
-    const rasp = p.exhaust.rasp * (0.12 + 0.88 * load * load) * (overrun ? 0.3 : 1);
+    const rasp = p.exhaust.rasp * (0.3 + 0.7 * load * load) * (overrun ? 0.45 : 1);
     if (!crank && a * rasp > this.raspEnv[b]!) this.raspEnv[b] = a * rasp;
     this.tickEnv = Math.max(this.tickEnv, 0.6 + 0.4 * rng.next());
     if (p.mech.clatter > 0 && !crank) {
