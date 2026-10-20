@@ -243,7 +243,7 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
   const object = new Group();
   object.name = 'fx';
   const { sampler, lighting } = opts;
-  const rng = createRng(0xf00d5);
+  let rng = createRng(0xf00d5);
   const lift = new SurfaceLift(opts.terrain);
   const light = createLightUniforms();
   const puff = createPuffTexture();
@@ -1192,6 +1192,25 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
     },
   };
 
+  /** Everything but the skidmarks (P7 replay seeks keep them). */
+  const clearTransient = (): void => {
+    soft.clear();
+    bits.clear();
+    sparks.clear();
+    chunks.clear();
+    flakes.clear();
+    impN = brkN = skN = 0;
+    scr.fill(0);
+    for (const v of vehicles) {
+      for (const w of v.wheels) {
+        w.strip = 0;
+        w.valid = w.prevValid = false;
+        w.smokeAcc = w.sprayAcc = w.roostAcc = w.stampT = 0;
+      }
+    }
+    lastDeathSoft = lastDeathBits = lastDeathSparks = -1e9;
+  };
+
   const sys: FxSystem = {
     object,
     stats,
@@ -1340,23 +1359,23 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
       }
       if (objectId >= 0 && objectId < MAX_OBJECT_ID) surfaces[objectId] = 0;
     },
+    clearTransient(): void {
+      clearTransient();
+      lastSim = Number.NaN;
+      prevLatest = Number.NaN;
+      frameIndex++;
+    },
+    reseed(seed: number): void {
+      rng = createRng(seed);
+    },
+    setSkidmarksFrozen(frozen: boolean): void {
+      skid.frozen = frozen;
+      if (!frozen) for (const v of vehicles) for (const w of v.wheels) w.strip = 0;
+    },
     clear(): void {
-      soft.clear();
-      bits.clear();
-      sparks.clear();
+      clearTransient();
       skid.clear();
-      chunks.clear();
-      flakes.clear();
-      impN = brkN = skN = 0;
-      scr.fill(0);
-      for (const v of vehicles) {
-        for (const w of v.wheels) {
-          w.strip = 0;
-          w.valid = w.prevValid = false;
-          w.smokeAcc = w.sprayAcc = w.roostAcc = w.stampT = 0;
-        }
-      }
-      lastDeathSoft = lastDeathBits = lastDeathSparks = lastSkidBirth = -1e9;
+      lastSkidBirth = -1e9;
     },
     dispose(): void {
       soft.dispose();

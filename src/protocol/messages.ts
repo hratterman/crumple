@@ -15,6 +15,7 @@ import type { PropKey } from '../sim/props/types';
 import type { RigDef } from '../sim/rig/types';
 import type { TransmissionMode, VehicleDef } from '../sim/vehicle/types';
 import type { ColliderDef, WorldLayout } from '../world/types';
+import type { ReplayFile } from './replay';
 import type { TrafficBubble, TrafficDensity, TrafficVariantSpec } from './traffic';
 
 // ============================================================ MaterialId
@@ -399,15 +400,48 @@ export interface SetBubbleMsg {
   center: Vec3;
   radius: number;
 }
-/** RESERVED (P7): ask for a replay keyframe. Worker may answer `unimplemented`. */
+/**
+ * RESERVED (P1; P7 keeps it reserved for P8 'keyframe' starts): ask for a
+ * replay keyframe. Worker answers `unimplemented`.
+ */
 export interface KeyframeRequestMsg {
   type: 'keyframeRequest';
   requestId: number;
 }
-/** RESERVED (P7): re-simulate to `tick`. Worker may answer `unimplemented`. */
+/**
+ * SUPERSEDED (P7): scrubbing plays the main-side live replay buffer (no
+ * re-simulation on seek; docs/CONTRACTS.md "P7 contracts"). Re-simulation of
+ * a ReplayFile runs in its own worker host (src/sim/replay/resim.ts). The
+ * worker keeps answering `unimplemented`.
+ */
 export interface ReplaySeekMsg {
   type: 'replaySeek';
   tick: number;
+}
+
+// ---------------------------------------------------------------- replay (P7, additive; protocol/replay.ts)
+/**
+ * Freeze / unfreeze stepping for the replay viewer. While paused the worker
+ * takes no steps at all (independent of `timescale`, which is kept), its
+ * pacing clock is re-based every wake (no catch-up burst on resume), and
+ * commands still apply (and are logged) as usual — main sends none while
+ * replaying. Answered with `replayPaused` carrying the tick and the state
+ * hash at that moment: the hash at resume equals the hash at pause when
+ * nothing was sent in between (e2e). Idempotent.
+ */
+export interface ReplayPauseMsg {
+  type: 'replayPause';
+  paused: boolean;
+}
+/** Ask for hashSimState() now (answered with `stateHash`; no state change). */
+export interface StateHashRequestMsg {
+  type: 'stateHashRequest';
+  requestId: number;
+}
+/** Ask for the ReplayFile of the run so far (answered with `replayFile`; input arrays transferred). */
+export interface ReplayFileRequestMsg {
+  type: 'replayFileRequest';
+  requestId: number;
 }
 
 export type MainToWorker =
@@ -431,7 +465,10 @@ export type MainToWorker =
   | SetTrafficDensityMsg
   | SetBubbleMsg
   | KeyframeRequestMsg
-  | ReplaySeekMsg;
+  | ReplaySeekMsg
+  | ReplayPauseMsg
+  | StateHashRequestMsg
+  | ReplayFileRequestMsg;
 export type MainToWorkerType = MainToWorker['type'];
 
 // ============================================================ worker → main
@@ -515,5 +552,38 @@ export interface TrafficReadyMsg {
   setupMs: number;
 }
 
-export type WorkerToMain = ReadyMsg | SnapshotMsg | FatalMsg | UnimplementedMsg | ErrorMsg | TerrainReadyMsg | TrafficReadyMsg;
+/** Answer to `replayPause` (P7). */
+export interface ReplayPausedMsg {
+  type: 'replayPaused';
+  paused: boolean;
+  /** engine.tick at the moment the pause state applied. */
+  tick: number;
+  /** hashSimState() at that tick (u32). */
+  stateHash: number;
+}
+/** Answer to `stateHashRequest` (P7). */
+export interface StateHashMsg {
+  type: 'stateHash';
+  requestId: number;
+  tick: number;
+  hash: number;
+}
+/** Answer to `replayFileRequest` (P7). `file.build` is '' (main stamps it), vehicle paints null. */
+export interface ReplayFileMsg {
+  type: 'replayFile';
+  requestId: number;
+  file: ReplayFile;
+}
+
+export type WorkerToMain =
+  | ReadyMsg
+  | SnapshotMsg
+  | FatalMsg
+  | UnimplementedMsg
+  | ErrorMsg
+  | TerrainReadyMsg
+  | TrafficReadyMsg
+  | ReplayPausedMsg
+  | StateHashMsg
+  | ReplayFileMsg;
 export type WorkerToMainType = WorkerToMain['type'];

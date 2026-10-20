@@ -65,7 +65,8 @@ void main() {
   float u = vMark.x;
   float along = vMark.y;
   float age = uTime - vMark.w;
-  float fade = 1.0 - smoothstep( uFade * 0.3, uFade, age );
+  // P7 replay: a mark born after the presented time is not there yet
+  float fade = ( 1.0 - smoothstep( uFade * 0.3, uFade, age ) ) * step( -1e-3, age );
   float edge = 1.0 - smoothstep( 0.72, 1.0, abs( u ) );
   // tread striations along the travel direction + patchy rubber transfer
   float grooves = 0.88 + 0.12 * sin( u * 19.0 + 1.3 );
@@ -98,6 +99,8 @@ export class SkidLayer {
   private tintAttr!: BufferAttribute;
   private next = 0;
   private used = 0;
+  /** P7 replay: no new segments while frozen (the shader hides marks born after uTime). */
+  frozen = false;
   private dirtyStart = -1;
   private dirtyCount = 0;
   private readonly ranges: { start: number; count: number }[][] = [0, 1, 2].map(() => [
@@ -195,6 +198,7 @@ export class SkidLayer {
     along0: number, along1: number, s0: number, s1: number, birth: number,
     tr: number, tg: number, tb: number, sheen: number,
   ): void {
+    if (this.frozen) return;
     const i = this.next;
     this.next = i + 1 === this.cap ? 0 : i + 1;
     if (this.used < this.cap && i + 1 > this.used) this.used = i + 1;

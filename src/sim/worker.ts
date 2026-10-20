@@ -124,6 +124,9 @@ export class WorkerHost {
         case 'setBubble':
         case 'keyframeRequest':
         case 'replaySeek':
+        case 'replayPause':
+        case 'stateHashRequest':
+        case 'replayFileRequest':
           this.post({ type: 'unimplemented', command: msg.type });
           return;
         case 'returnBuffer':

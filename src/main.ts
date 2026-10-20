@@ -28,6 +28,7 @@ import type { Mesh, Material } from 'three';
 import { FrameProfiler, gpuSyncFn, PassCounter, perfGpuSync, perfRequested } from './app/perf';
 import { anisotropyFor, createQualityControllerWith, isQualityLevel, isSoftwareRenderer, loadQualityLevel, SOFTWARE_GL_PIXEL_RATIO } from './app/quality';
 import { SimClient, type ObjectRange } from './app/simClient';
+import { createReplayController } from './app/replay';
 import { createTrafficController, type TrafficController } from './app/traffic';
 import { placeOnGround, repairSpot, yawOf, yawOfQuat, type Aabb } from './app/spawn';
 import { chaseFramingFor, drivableEntry, hasStoredChoice, loadPlayerAssets, loadVehicleChoice, PlayerVehicle, saveVehicleChoice, speedoMax, type PlayerAssets } from './app/player';
@@ -178,6 +179,18 @@ const client = new SimClient({
 });
 // The worker regenerates in parallel with main's own copy; main compares the two hashes once both exist.
 const physicsReady = client.groundHeightfield(LAYOUT, 0);
+/**
+ * P7 live replay (app/replay; R2's UI / cameras consume `replay` as a ReplayController). Records
+ * every snapshot as it arrives; while `replay.active` the frame loop presents recorded frames and
+ * sends the worker nothing.
+ */
+const replay = createReplayController({
+  client,
+  playerObjectId: 1,
+  level: startLevel,
+  build: __BUILD_HASH__,
+  paintOf: (id) => (id === 1 && player ? player.palette.id : null),
+});
 
 const cubeRig = compileRig(softCube());
 /** ?view=body|body+beams|beams|nodes picks the first debug view (B cycles them). */
@@ -1016,6 +1029,10 @@ const crumple = {
   setVehicle(id: string, palette?: string, spawn?: number): Promise<void> {
     return swapVehicle({ id: id as VehicleChoice['id'], palette: palette ?? '' }, spawn ?? null);
   },
+  /** P7 live replay (app/replay/types.ts ReplayDebugApi). */
+  get replay() {
+    return replay.debug;
+  },
   /** Dev handles for tuning from the console (not a contract). `sedanVisual` stays as an alias of `playerVisual`. */
   debug: { scene, camera, renderer, ctx, client } as Record<string, unknown>,
 };
@@ -1204,7 +1221,7 @@ async function boot(): Promise<void> {
   const trafficQ = { setQuality: (q: typeof ctx.quality) => trafficC.setQuality(trafficPreset(q)) };
   const qc = createQualityControllerWith(
     ctx,
-    { lighting, post: postStack, others: [terrainR, roadsR, collidersR, propsR, vegetationR, waterR, fxR, trafficQ] },
+    { lighting, post: postStack, others: [terrainR, roadsR, collidersR, propsR, vegetationR, waterR, fxR, trafficQ, { setQuality: (q: typeof ctx.quality) => replay.setQuality(q.level) }] },
     forcedLevel ? { initial: forcedLevel, storage: null, maxPixelRatio } : { maxPixelRatio },
   );
   quality = qc;
@@ -1295,6 +1312,8 @@ async function boot(): Promise<void> {
     }
     prof.lap('input');
 
+    // P7: the replay playhead advances and presents its frames through the client (no-op while live).
+    replay.update(dt);
     // Sim → interpolated nodes → beam view + camera subject.
     const need = client.nodeTotal * 3;
     if (positions.length < need) positions = new Float32Array(need);

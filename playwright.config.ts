@@ -1,5 +1,8 @@
 import { defineConfig } from '@playwright/test';
 
+/** E2E_PORT: run the dev server on another port (parallel agents / worktrees; default 5173). */
+const PORT = Number(process.env.E2E_PORT) || 5173;
+
 export default defineConfig({
   testDir: 'tests/e2e',
   // *.slow.spec.ts are full-scene SwiftShader renders that take minutes;
@@ -16,7 +19,7 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   reporter: [['list'], ['html', { open: 'never' }]],
   use: {
-    baseURL: 'http://localhost:5173',
+    baseURL: `http://localhost:${PORT}`,
     launchOptions: {
       // Required for headless WebGL2 on Chromium 141: ANGLE on SwiftShader.
       args: [
@@ -34,8 +37,8 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'npm run dev -- --port 5173 --strictPort',
-    url: 'http://localhost:5173/crumple/',
+    command: `npm run dev -- --port ${PORT} --strictPort`,
+    url: `http://localhost:${PORT}/crumple/`,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
   },

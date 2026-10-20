@@ -90,6 +90,22 @@ export interface FxSystem extends WorldLayerRenderer {
   /** Drop every live particle, debris chunk and skidmark (teleport, repair-all). */
   clear(): void;
   readonly stats: FxStats;
+  // ---- P7 replay hooks (additive; docs/CONTRACTS.md "P7 contracts")
+  /**
+   * Drop live particles, debris and queued events and reset the emitters'
+   * per-wheel accumulators, but KEEP the skidmarks (replay seek: the FX are
+   * then re-run over recorded frames).
+   */
+  clearTransient(): void;
+  /** Restart the FX random stream with `seed` (a re-run from the same frame spawns the same particles). */
+  reseed(seed: number): void;
+  /**
+   * While frozen no skidmark / rut / burnout segment is laid (replay: the
+   * live marks already cover the buffer; the shader hides marks born after
+   * the current time, so they follow the playhead). Unfreezing restarts the
+   * wheels' strips.
+   */
+  setSkidmarksFrozen(frozen: boolean): void;
 }
 export interface FxOptions {
   lighting: LightingStack;
