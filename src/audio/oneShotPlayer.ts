@@ -12,7 +12,7 @@ import { VoicePool } from './pool';
 import { SpatialVoice } from './spatial';
 
 /** Build order: what a first crash needs first. */
-const BUILD_ORDER: readonly OneShotKind[] = ['crunch', 'thump', 'hit', 'boom', 'snap', 'glass', 'debris', 'glassCrack', 'concrete', 'clang', 'cone', 'pole', 'wood', 'cardboard', 'tire', 'whoosh'];
+const BUILD_ORDER: readonly OneShotKind[] = ['thump', 'crunch', 'crumple', 'tap', 'boom', 'snap', 'plastic', 'glass', 'debris', 'glassCrack', 'concrete', 'drum', 'clang', 'cone', 'pole', 'wood', 'cardboard', 'tire', 'whoosh'];
 
 interface Slot {
   voice: SpatialVoice;
@@ -99,9 +99,10 @@ export class OneShotPlayer {
     while (this.buildQueue.length > 0) this.build(1e9);
   }
 
-  private pick(kind: OneShotKind): AudioBuffer | null {
+  private pick(kind: OneShotKind, variant = -1): AudioBuffer | null {
     const list = this.bank.get(kind);
     if (!list || list.length === 0) return null;
+    if (variant >= 0) return list[Math.min(variant, list.length - 1)]!;
     return list[Math.floor(Math.random() * list.length)]!;
   }
 
@@ -111,8 +112,8 @@ export class OneShotPlayer {
    * event's size (a big crash carries further). Returns false when the bank
    * variant is not built yet or the pool refused (quieter than every voice).
    */
-  play(kind: OneShotKind, x: number, y: number, z: number, gain: number, rate: number, refDistance: number, distance: number, now: number, delay = 0): boolean {
-    const buf = this.pick(kind);
+  play(kind: OneShotKind, x: number, y: number, z: number, gain: number, rate: number, refDistance: number, distance: number, now: number, delay = 0, variant = -1): boolean {
+    const buf = this.pick(kind, variant);
     if (!buf || gain <= 1e-4) return false;
     // reclaim finished slots
     for (let i = 0; i < this.pool.capacity; i++) {

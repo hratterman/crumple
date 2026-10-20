@@ -1,24 +1,37 @@
 /**
  * One-shot sound synthesis (P8 audio): crashes, glass, debris, props,
  * snaps, booms, transitions. PURE: each call renders one variant into a new
- * Float32Array (done once per variant when the bank is built — never per
- * event). Seeded, so variants are reproducible in tests and WAV renders.
+ * Float32Array (done once per variant when the bank is built, in a worker —
+ * never per event). Seeded, so variants are reproducible in tests and renders.
  *
- * Building blocks: modal resonators (decaying sinusoids driven by an
- * excitation — metal, plastic, wood modes), filtered noise bursts, pitch-
- * dropping sine thumps, and particle clouds (glass tinkle, debris bounces).
+ * CRASH DESIGN (P8 review: "crashes sound like windchimes"): a car crash is
+ * a heavy, dull, broadband low-mid IMPACT plus a dense, granular CRUMPLE —
+ * not pitched ringing. So the crash kinds are built from
+ *   - a low body: low-passed noise burst + a dropping 60–110 Hz thud, fast attack;
+ *   - grains: hundreds of 0.4–6 ms noise micro-bursts through random
+ *     band-passes (300–3000 Hz, low Q), density and level decaying, arriving
+ *     in irregular waves for the rolling crumple;
+ *   - creaks (short, low-Q falling resonances) and plastic cracks (sharp
+ *     clicks into 2–5 kHz band-passes);
+ *   - metal ringing only for hard metal-on-metal ('clang', 'pole', 'drum'):
+ *     DENSE inharmonic partials (40+) that die in < 150 ms (drum / pole a bit longer).
+ * Glass is a crunchy broadband shatter burst + a few short fragment ticks
+ * (noise grains, no sine partials). Debris = low thuds and short scrapes.
  */
-import { Noise, OnePole, softClip, Svf } from './core';
+import { DcBlock, Noise, OnePole, softClip, Svf } from './core';
 
 export const ONE_SHOT_KINDS = [
   'thump',
+  'tap',
   'crunch',
-  'hit',
+  'crumple',
+  'plastic',
   'snap',
   'glass',
   'glassCrack',
   'debris',
   'clang',
+  'drum',
   'cone',
   'tire',
   'cardboard',
@@ -30,16 +43,19 @@ export const ONE_SHOT_KINDS = [
 ] as const;
 export type OneShotKind = (typeof ONE_SHOT_KINDS)[number];
 
-/** Variants built per kind (bank size). */
+/** Variants built per kind (bank size). `crumple` variants are ordered short → long (index ≈ crash energy). */
 export const ONE_SHOT_VARIANTS: Readonly<Record<OneShotKind, number>> = {
   thump: 4,
+  tap: 4,
   crunch: 6,
-  hit: 4,
+  crumple: 4,
+  plastic: 3,
   snap: 4,
   glass: 3,
   glassCrack: 3,
   debris: 4,
   clang: 3,
+  drum: 3,
   cone: 3,
   tire: 2,
   cardboard: 3,
@@ -51,23 +67,29 @@ export const ONE_SHOT_VARIANTS: Readonly<Record<OneShotKind, number>> = {
 };
 
 const DUR: Readonly<Record<OneShotKind, number>> = {
-  thump: 0.55,
-  crunch: 1.3,
-  hit: 0.45,
-  snap: 0.3,
-  glass: 1.7,
-  glassCrack: 0.3,
-  debris: 1.5,
-  clang: 1.9,
+  thump: 0.35,
+  tap: 0.25,
+  crunch: 0.45,
+  crumple: 1.6,
+  plastic: 0.3,
+  snap: 0.2,
+  glass: 0.9,
+  glassCrack: 0.15,
+  debris: 1.4,
+  clang: 0.35,
+  drum: 0.6,
   cone: 0.45,
   tire: 0.45,
   cardboard: 0.55,
   wood: 0.6,
-  pole: 2.3,
+  pole: 0.9,
   concrete: 0.6,
-  boom: 1.3,
+  boom: 0.8,
   whoosh: 1.4,
 };
+
+/** Crumple variant lengths (s): index 0..3 = light … massive crash. */
+export const CRUMPLE_LENGTHS = [0.5, 0.8, 1.15, 1.5];
 
 /** Bank of 2-pole modal resonators (y = 2r·cos w·y1 − r²·y2 + x). */
 class Modes {
@@ -105,6 +127,10 @@ class Modes {
 }
 
 function normalize(out: Float32Array, peak: number): Float32Array {
+  // a 25 Hz DC blocker (low-passed noise bodies carry a little DC)
+  const dc = new DcBlock();
+  dc.setHz(25, 48000);
+  for (let i = 0; i < out.length; i++) out[i] = dc.tick(out[i]!);
   let m = 0;
   for (let i = 0; i < out.length; i++) m = Math.max(m, Math.abs(out[i]!));
   if (m > 0) {
@@ -182,141 +208,213 @@ function driveModes(out: Float32Array, m: Modes, sr: number, rng: Noise, start: 
   }
 }
 
+
+/** Low body of an impact: double low-passed noise burst + a dropping thud (60–250 Hz, fast attack). */
+function addBody(out: Float32Array, sr: number, rng: Noise, start: number, amp: number, decayS: number, lpHz = 220): void {
+  const a = new OnePole();
+  const b = new OnePole();
+  a.setHz(lpHz, sr);
+  b.setHz(lpHz * 1.3, sr);
+  const i0 = Math.floor(start * sr);
+  const n = Math.min(out.length - i0, Math.floor(decayS * 7 * sr));
+  const dec = Math.exp(-1 / (decayS * sr));
+  const atk = Math.max(1, Math.floor(0.0015 * sr));
+  let env = amp * 9;
+  for (let i = 0; i < n; i++) {
+    const v = b.tick(a.tick(rng.white()));
+    out[i0 + i] = out[i0 + i]! + v * env * (i < atk ? i / atk : 1);
+    env *= dec;
+  }
+  addThump(out, sr, start, 105 + 30 * rng.next(), 58, 0.03, decayS * 1.1, amp * 0.55, 1.6);
+}
+
+/**
+ * Granular crumple: Poisson micro-bursts of noise through random low-Q
+ * band-passes. `rate(u)` grains/s and `level(u)` over u = 0..1 of `durS`.
+ */
+function addGrains(
+  out: Float32Array,
+  sr: number,
+  rng: Noise,
+  start: number,
+  durS: number,
+  rate0: number,
+  rate1: number,
+  amp: number,
+  fLo: number,
+  fHi: number,
+  msLo: number,
+  msHi: number,
+  qLo = 0.7,
+  qHi = 2.5,
+): void {
+  const f = new Svf();
+  let t = 0;
+  while (t < durS) {
+    const u = t / durS;
+    const rate = rate0 + (rate1 - rate0) * u;
+    const lvl = amp * (1 - u) * (1 - 0.5 * u) * (0.25 + 0.75 * rng.next()) * (rng.next() < 0.08 ? 2.2 : 1);
+    const hz = fLo * Math.pow(fHi / fLo, rng.next());
+    f.reset();
+    f.set(hz, qLo + (qHi - qLo) * rng.next(), sr);
+    const len = Math.max(4, Math.floor(((msLo + (msHi - msLo) * rng.next()) / 1000) * sr));
+    const i0 = Math.floor((start + t) * sr);
+    for (let i = 0; i < len + Math.floor(0.004 * sr) && i0 + i < out.length; i++) {
+      const e = i < len ? (i < 3 ? i / 3 : 1 - i / len) : 0;
+      f.tick(rng.white() * e);
+      out[i0 + i] = out[i0 + i]! + f.bpn * lvl;
+    }
+    t += -Math.log(1 - rng.next() * 0.999) / Math.max(rate, 1);
+  }
+}
+
+/** Creak: a short, low-Q band of noise whose centre falls (bending sheet metal). */
+function addCreak(out: Float32Array, sr: number, rng: Noise, start: number, amp: number): void {
+  const f = new Svf();
+  const i0 = Math.floor(start * sr);
+  const n = Math.floor((0.03 + 0.07 * rng.next()) * sr);
+  const f0 = 500 + 900 * rng.next();
+  for (let i = 0; i < n && i0 + i < out.length; i++) {
+    const u = i / n;
+    if ((i & 15) === 0) f.set(f0 * (1 - 0.4 * u), 5 + 3 * rng.next(), sr);
+    f.tick(rng.white() * (rng.next() < 0.5 ? 1 : 0.2));
+    out[i0 + i] = out[i0 + i]! + f.bpn * amp * Math.sin(Math.PI * u);
+  }
+}
+
+/** Plastic crack: a few sharp clicks into 2–5 kHz band-passes, in a quick cluster. */
+function addCracks(out: Float32Array, sr: number, rng: Noise, start: number, count: number, amp: number): void {
+  let t = start;
+  for (let k = 0; k < count; k++) {
+    const f = new Svf();
+    f.set(1800 + 3200 * rng.next(), 2 + 2 * rng.next(), sr);
+    const i0 = Math.floor(t * sr);
+    const n = Math.floor((0.004 + 0.006 * rng.next()) * sr);
+    const a = amp * (0.4 + 0.6 * rng.next());
+    for (let i = 0; i < n && i0 + i < out.length; i++) {
+      f.tick(i === 0 ? 1 : rng.white() * Math.exp(-i / (0.0008 * sr)));
+      out[i0 + i] = out[i0 + i]! + f.bpn * a * 3;
+    }
+    t += 0.004 + 0.03 * rng.next();
+  }
+}
+
+/** Dense inharmonic metal partials (decays dLo..dHi s) excited by a short noise burst. */
+function addMetal(out: Float32Array, sr: number, rng: Noise, start: number, count: number, lo: number, hi: number, dLo: number, dHi: number, amp: number): void {
+  const m = metalModes(rng, count, lo, hi, dLo, dHi, sr);
+  const i0 = Math.floor(start * sr);
+  const burst = Math.floor(0.004 * sr);
+  const n = Math.min(out.length - i0, Math.floor(dHi * 6 * sr));
+  for (let i = 0; i < n; i++) out[i0 + i] = out[i0 + i]! + m.tick(i < burst ? rng.white() * amp * (1 - i / burst) * 0.25 : 0);
+}
+
 export function synthOneShot(kind: OneShotKind, sr: number, seed: number): Float32Array {
   const rng = new Noise(seed * 0x2545f491 + kind.length * 977 + 13);
-  const dur = DUR[kind] * (0.9 + 0.2 * rng.next());
+  const dur = kind === 'crumple' ? (CRUMPLE_LENGTHS[(seed - 1) % CRUMPLE_LENGTHS.length]! + 0.25) : DUR[kind] * (0.9 + 0.2 * rng.next());
   const out = new Float32Array(Math.ceil(dur * sr));
   switch (kind) {
     case 'thump': {
-      addThump(out, sr, 0, 120 + 40 * rng.next(), 55, 0.035, 0.12, 1, 1.4);
-      addBurst(out, sr, rng, 0, 0.03, 900, 0.7, 0.5, 0.008);
+      addBody(out, sr, rng, 0, 1, 0.06);
       return normalize(out, 0.9);
     }
+    case 'tap': {
+      // a light knock: small dull body + a short cluster of grains
+      addBody(out, sr, rng, 0, 0.7, 0.03, 320);
+      addGrains(out, sr, rng, 0.002, 0.035, 700, 200, 0.5, 500, 2600, 0.4, 3);
+      return normalize(out, 0.8);
+    }
     case 'boom': {
-      addThump(out, sr, 0, 85 + 15 * rng.next(), 36, 0.07, 0.2, 1, 1.8);
-      addThump(out, sr, 0.01, 52, 32, 0.15, 0.3, 0.45, 1);
-      addBurst(out, sr, rng, 0, 0.06, 300, 0.6, 0.3, 0.03);
+      addThump(out, sr, 0, 80 + 15 * rng.next(), 38, 0.05, 0.12, 1, 1.8);
+      addBody(out, sr, rng, 0, 0.6, 0.09, 160);
       return normalize(out, 0.95);
     }
     case 'crunch': {
-      // crumpling sheet metal: a dense, decaying crackle of buckling events (Poisson) exciting many
-      // short-lived panel modes, the same crackle as raw grit, a low body thump and a falling creak
-      const m = metalModes(rng, 22, 240, 6500, 0.012, 0.11, sr);
-      const big = metalModes(rng, 5, 180, 900, 0.08, 0.25, sr);
-      const exc = new Float32Array(out.length);
-      const crumpleS = 0.28 + 0.3 * rng.next();
+      // short crumple: dense grains decaying over ~0.3 s, a couple of creaks and cracks, a body hit
+      addBody(out, sr, rng, 0, 0.9, 0.05);
+      addGrains(out, sr, rng, 0.001, 0.28 + 0.1 * rng.next(), 1400, 120, 0.75, 300, 3000, 0.4, 5);
+      addGrains(out, sr, rng, 0.0, 0.06, 900, 300, 0.45, 180, 600, 2, 8, 0.7, 1.5);
+      for (let k = 0; k < 2; k++) addCreak(out, sr, rng, 0.03 + 0.18 * rng.next(), 0.35);
+      addCracks(out, sr, rng, 0.01 + 0.05 * rng.next(), 2 + Math.floor(rng.next() * 3), 0.4);
+      return normalize(out, 0.92);
+    }
+    case 'crumple': {
+      // rolling crumple: irregular waves of buckling (each a grain burst + low thud), creaks, cracks
+      const len = dur - 0.25;
       let t = 0;
-      while (t < crumpleS) {
-        const u = t / crumpleS;
-        const a = (1 - u) * (1 - u) * (0.3 + 0.7 * rng.next()) * (rng.next() < 0.15 ? 2.2 : 1);
-        const i0 = Math.floor(t * sr);
-        const len = Math.floor((0.0008 + 0.005 * rng.next()) * sr);
-        for (let i = 0; i < len && i0 + i < exc.length; i++) exc[i0 + i] = exc[i0 + i]! + rng.white() * a * (1 - i / len);
-        t += -Math.log(1 - rng.next() * 0.999) * (0.004 + 0.02 * u);
-      }
-      const grit = new Svf();
-      grit.set(2600 + 1200 * rng.next(), 0.7, sr);
-      const lp = new OnePole();
-      lp.setHz(7000, sr);
-      for (let i = 0; i < out.length; i++) {
-        const x = lp.tick(exc[i]!);
-        grit.tick(exc[i]!);
-        out[i] = out[i]! + m.tick(x) * 0.8 + big.tick(x) * 0.35 + grit.bpn * 0.6;
-      }
-      addThump(out, sr, 0, 95 + 30 * rng.next(), 48, 0.04, 0.09, 0.55, 1.3);
-      // creak: a slowly falling resonance
-      const cr = new Svf();
-      const i0 = Math.floor((0.08 + 0.15 * rng.next()) * sr);
-      const cdur = Math.floor((0.25 + 0.3 * rng.next()) * sr);
-      const cf = 500 + 600 * rng.next();
-      for (let i = 0; i < cdur && i0 + i < out.length; i++) {
-        const u = i / cdur;
-        cr.set(cf * (1 - 0.35 * u), 18, sr);
-        cr.tick(rng.white() * (rng.next() < 0.3 ? 1 : 0));
-        out[i0 + i] = out[i0 + i]! + cr.bpn * 0.2 * Math.sin(Math.PI * u);
+      let w = 0;
+      while (t < len) {
+        const u = t / len;
+        const a = (1 - 0.75 * u) * (0.55 + 0.45 * rng.next());
+        const wl = 0.08 + 0.17 * rng.next();
+        addGrains(out, sr, rng, t, wl, 1600 * a + 200, 150, 0.7 * a, 300, 3000, 0.4, 5);
+        addGrains(out, sr, rng, t, wl * 0.6, 500, 150, 0.4 * a, 180, 700, 2, 9, 0.7, 1.5);
+        if (w === 0 || rng.next() < 0.5) addBody(out, sr, rng, t, (w === 0 ? 1 : 0.45) * a, 0.05);
+        if (rng.next() < 0.6) addCreak(out, sr, rng, t + wl * rng.next(), 0.3 * a);
+        if (rng.next() < 0.45) addCracks(out, sr, rng, t + wl * rng.next(), 1 + Math.floor(rng.next() * 3), 0.35 * a);
+        t += wl * (0.5 + 0.7 * rng.next());
+        w++;
       }
       return normalize(out, 0.92);
     }
-    case 'hit': {
-      const m = metalModes(rng, 7, 350, 4800, 0.02, 0.18, sr);
-      driveModes(out, m, sr, rng, 0, 0.006, 1, 1, null);
-      addThump(out, sr, 0, 140, 70, 0.02, 0.05, 0.5);
-      return normalize(out, 0.85);
+    case 'plastic': {
+      addCracks(out, sr, rng, 0, 4 + Math.floor(rng.next() * 5), 0.8);
+      addGrains(out, sr, rng, 0, 0.12, 900, 100, 0.35, 900, 4000, 0.3, 2);
+      return normalize(out, 0.75);
     }
     case 'snap': {
-      // metal tearing / weld letting go: very sharp transient + short bright ring
-      const m = metalModes(rng, 6, 1500, 7500, 0.01, 0.06, sr);
-      driveModes(out, m, sr, rng, 0, 0.004, 1.5, 1, null);
-      addBurst(out, sr, rng, 0, 0.02, 3500, 0.8, 0.8, 0.004);
-      addBurst(out, sr, rng, 0.004, 0.08, 1800, 1.2, 0.25, 0.02);
+      // a beam / weld letting go: a sharp crack and a short dull knock, no ringing
+      addCracks(out, sr, rng, 0, 1 + Math.floor(rng.next() * 2), 1);
+      addGrains(out, sr, rng, 0, 0.04, 1200, 300, 0.5, 600, 3000, 0.3, 2);
+      addBody(out, sr, rng, 0.002, 0.35, 0.025, 300);
       return normalize(out, 0.85);
     }
     case 'glass': {
-      // shatter: bright crack transient, a burst of breakage noise, then falling tinkle particles
-      addBurst(out, sr, rng, 0, 0.012, 6500, 0.6, 1, 0.003);
-      addBurst(out, sr, rng, 0.002, 0.35, 5200, 0.5, 0.45, 0.07);
-      addBurst(out, sr, rng, 0.0, 0.2, 2600, 0.8, 0.2, 0.05);
-      const particles = 55 + Math.floor(rng.next() * 40);
-      for (let k = 0; k < particles; k++) {
-        const t = 0.01 + Math.min(1.4, -Math.log(1 - rng.next() * 0.98) * 0.28);
-        const f = 2800 + 7500 * rng.next();
-        const m = new Modes([f, f * (1.47 + 0.2 * rng.next()), f * (2.31 + 0.3 * rng.next())], [0.006 + 0.03 * rng.next(), 0.004 + 0.015 * rng.next(), 0.003 + 0.01 * rng.next()], [1, 0.5, 0.3], sr);
-        const i0 = Math.floor(t * sr);
-        const a = (0.15 + 0.85 * rng.next()) * Math.exp(-t * 1.8) * 0.5;
-        const len = Math.min(out.length - i0, Math.floor(0.06 * sr));
-        for (let i = 0; i < len; i++) out[i0 + i] = out[i0 + i]! + m.tick(i === 0 ? a : 0);
+      // shatter: a crunchy broadband burst (dense short grains, 2–9 kHz) + a few short fragment ticks
+      addCracks(out, sr, rng, 0, 2, 1);
+      addGrains(out, sr, rng, 0, 0.09, 5000, 600, 0.9, 1800, 9000, 0.2, 1.6, 0.5, 1.5);
+      addBurst(out, sr, rng, 0, 0.12, 4500, 0.4, 0.35, 0.03);
+      const ticks = 6 + Math.floor(rng.next() * 9);
+      for (let k = 0; k < ticks; k++) {
+        const t = 0.12 + Math.pow(rng.next(), 1.4) * (dur - 0.2);
+        const a = 0.25 * (1 - 0.6 * (t / dur)) * (0.4 + 0.6 * rng.next());
+        addGrains(out, sr, rng, t, 0.004 + 0.01 * rng.next(), 1500, 500, a, 2500, 7000, 0.3, 1.5, 1, 2.5);
       }
       return normalize(out, 0.85);
     }
     case 'glassCrack': {
-      addBurst(out, sr, rng, 0, 0.006, 7000, 0.7, 1, 0.0015);
-      const m = new Modes([3200 + 1500 * rng.next(), 5400 + 2000 * rng.next()], [0.012, 0.008], [1, 0.6], sr);
-      driveModes(out, m, sr, rng, 0, 0.003, 0.6, 1, null);
-      for (let k = 0; k < 5; k++) addBurst(out, sr, rng, 0.01 + rng.next() * 0.12, 0.004, 6000, 1, 0.3 * rng.next(), 0.001);
-      return normalize(out, 0.75);
-    }
-    case 'debris': {
-      // a handful of pieces bouncing: geometric bounce intervals, each bounce a small modal hit
-      const pieces = 3 + Math.floor(rng.next() * 4);
-      for (let p = 0; p < pieces; p++) {
-        const metal = rng.next() < 0.6;
-        const m = metal ? metalModes(rng, 4, 900, 6000, 0.01, 0.07, sr) : new Modes([600 + 900 * rng.next(), 1500 + 1500 * rng.next()], [0.015, 0.01], [1, 0.5], sr);
-        let t = 0.03 + rng.next() * 0.3;
-        let gap = 0.12 + rng.next() * 0.15;
-        let a = 0.5 + 0.5 * rng.next();
-        const hits: number[] = [];
-        while (t < DUR.debris - 0.1 && a > 0.04) {
-          hits.push(t, a);
-          t += gap;
-          gap *= 0.62 + 0.1 * rng.next();
-          a *= 0.55 + 0.15 * rng.next();
-          if (gap < 0.012) break;
-        }
-        let h = 0;
-        for (let i = Math.floor(hits[0]! * sr); i < out.length; i++) {
-          let x = 0;
-          if (h < hits.length && i >= Math.floor(hits[h]! * sr)) {
-            x = hits[h + 1]!;
-            h += 2;
-          }
-          out[i] = out[i]! + m.tick(x);
-        }
-      }
+      addCracks(out, sr, rng, 0, 1, 1);
+      addGrains(out, sr, rng, 0.002, 0.03, 2500, 400, 0.4, 2000, 7000, 0.2, 1.2, 0.6, 1.6);
       return normalize(out, 0.7);
     }
+    case 'debris': {
+      // pieces landing: low thuds and short scrapes, bounce intervals shrinking
+      const pieces = 3 + Math.floor(rng.next() * 4);
+      for (let p = 0; p < pieces; p++) {
+        let t = 0.02 + rng.next() * 0.35;
+        let gap = 0.1 + rng.next() * 0.18;
+        let a = 0.5 + 0.5 * rng.next();
+        while (t < dur - 0.1 && a > 0.05 && gap > 0.015) {
+          addBody(out, sr, rng, t, a * 0.6, 0.018, 280 + 200 * rng.next());
+          addGrains(out, sr, rng, t, 0.015 + 0.03 * rng.next(), 600, 200, a * 0.35, 500, 2500, 0.5, 4);
+          t += gap;
+          gap *= 0.6 + 0.12 * rng.next();
+          a *= 0.5 + 0.15 * rng.next();
+        }
+      }
+      return normalize(out, 0.75);
+    }
     case 'clang': {
-      // 200 L steel drum: strong shell modes + hollow body boom
-      const base = 165 + 30 * rng.next();
-      const ratios = [1, 1.83, 2.71, 3.86, 5.12, 6.9, 8.95];
-      const m = new Modes(
-        ratios.map((r) => base * r * (0.97 + 0.06 * rng.next())),
-        [1.1, 0.9, 0.7, 0.55, 0.4, 0.3, 0.2],
-        [1, 0.8, 0.65, 0.5, 0.4, 0.3, 0.2],
-        sr,
-      );
-      driveModes(out, m, sr, rng, 0, 0.008, 1, 1, null);
-      addThump(out, sr, 0, 120, 82, 0.05, 0.16, 0.8, 1.2);
-      addBurst(out, sr, rng, 0, 0.02, 2200, 0.7, 0.4, 0.005);
+      // hard metal on metal: dense inharmonic partials, heavily damped (< 150 ms), with a body knock
+      addMetal(out, sr, rng, 0, 48, 280, 6000, 0.025, 0.12, 1);
+      addBody(out, sr, rng, 0, 0.5, 0.03, 300);
+      addGrains(out, sr, rng, 0, 0.05, 1500, 300, 0.4, 600, 3500, 0.3, 2);
+      return normalize(out, 0.85);
+    }
+    case 'drum': {
+      // 200 L steel drum: hollow body boom + a dense, short shell ring
+      addThump(out, sr, 0, 125 + 20 * rng.next(), 85, 0.04, 0.13, 0.9, 1.3);
+      addBody(out, sr, rng, 0, 0.6, 0.05, 260);
+      addMetal(out, sr, rng, 0, 40, 160, 3200, 0.06, 0.24, 1.1);
       return normalize(out, 0.85);
     }
     case 'cone': {
@@ -352,16 +450,9 @@ export function synthOneShot(kind: OneShotKind, sr: number, seed: number): Float
       return normalize(out, 0.8);
     }
     case 'pole': {
-      const base = 118 + 20 * rng.next();
-      const ratios = [1, 2.76, 5.4, 8.93, 13.3, 18.6];
-      const m = new Modes(
-        ratios.map((r) => base * r * (0.98 + 0.04 * rng.next())),
-        [1.6, 1.3, 0.9, 0.6, 0.4, 0.25],
-        [1, 0.7, 0.5, 0.35, 0.25, 0.15],
-        sr,
-      );
-      driveModes(out, m, sr, rng, 0, 0.006, 1.2, 1, null);
-      addBurst(out, sr, rng, 0, 0.015, 3200, 0.7, 0.5, 0.004);
+      // a sign / light pole: a knock and a dense, damped ring (a pole sings a little longer than a panel)
+      addBody(out, sr, rng, 0, 0.5, 0.03, 300);
+      addMetal(out, sr, rng, 0, 56, 140, 3600, 0.08, 0.32, 1.2);
       return normalize(out, 0.8);
     }
     case 'concrete': {

@@ -7,7 +7,7 @@
  */
 import { ONE_SHOT_KINDS, ONE_SHOT_VARIANTS, synthOneShot, type OneShotKind } from './dsp/oneshots';
 
-const FIRST: readonly OneShotKind[] = ['crunch', 'thump', 'hit', 'boom', 'snap', 'glass', 'debris', 'glassCrack', 'concrete', 'clang', 'cone', 'pole'];
+const FIRST: readonly OneShotKind[] = ['thump', 'crunch', 'crumple', 'tap', 'boom', 'snap', 'plastic', 'glass', 'debris', 'glassCrack', 'concrete', 'drum', 'clang', 'cone', 'pole'];
 
 const scope = self as unknown as { onmessage: ((e: MessageEvent) => void) | null; postMessage(m: unknown, t?: Transferable[]): void };
 

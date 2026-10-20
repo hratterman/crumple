@@ -48,7 +48,7 @@ export interface ListenerLike {
   readonly vel: Float64Array;
 }
 export interface OneShotsLike {
-  play(kind: OneShotKind, x: number, y: number, z: number, gain: number, rate: number, refDistance: number, distance: number, now: number, delay?: number): boolean;
+  play(kind: OneShotKind, x: number, y: number, z: number, gain: number, rate: number, refDistance: number, distance: number, now: number, delay?: number, variant?: number): boolean;
   playUi(kind: OneShotKind, gain: number, rate: number, now: number): boolean;
   stopAll(now: number): void;
   build(budgetMs: number): void;
@@ -100,6 +100,28 @@ const STARTER_CRANK_S = 0.85;
 const STARTER_CATCH_S = 0.75;
 const MAX_AGENTS = 64;
 const COOLDOWN_SLOTS = 32;
+/** Suspension thump thresholds: per-frame wheel-load jump (N) and tyre impact (N·s). */
+export const THUMP_LOAD_JUMP = 7000;
+export const THUMP_TYRE_IMPULSE = 20;
+/**
+ * Crash gate (from recorded drives vs wall hits, see CONTRACTS "P8 audio as
+ * built"): clean driving over bumps / off-road peaks at Δdamage 0.001 per
+ * snapshot, normal-weighted body impulse 47 N·s, single events 19 N·s; a
+ * 10 km/h wall tap already gives Δdamage 0.013 / 92 N·s.
+ */
+export const CRASH_DAMAGE_STEP = 0.004;
+export const CRASH_IMPULSE_GATE = 80;
+export const CRASH_EVENT_GATE = 12;
+
+/** Crash level 0..1 of one object's frame (0 = not a crash). */
+export function crashLevel(wImpulse: number, maxEvent: number, breaks: number, dDamage: number): number {
+  const gate = dDamage >= CRASH_DAMAGE_STEP || (wImpulse >= CRASH_IMPULSE_GATE && maxEvent >= CRASH_EVENT_GATE) || breaks >= 2;
+  if (!gate) return 0;
+  const a = Math.pow(clamp01(dDamage / 0.05), 0.7);
+  const b = Math.pow(clamp01((wImpulse - 60) / 900), 0.6);
+  const c = clamp01(breaks / 12);
+  return Math.max(0.08, a, b, c);
+}
 
 function clamp01(x: number): number {
   return x < 0 ? 0 : x > 1 ? 1 : x;
@@ -108,7 +130,7 @@ function clamp01(x: number): number {
 function propSound(key: string | null): OneShotKind {
   switch (key) {
     case 'barrel':
-      return 'clang';
+      return 'drum';
     case 'cone':
       return 'cone';
     case 'tire':
@@ -123,7 +145,7 @@ function propSound(key: string | null): OneShotKind {
     case 'concreteBlock':
       return 'concrete';
     default:
-      return 'hit';
+      return 'tap';
   }
 }
 
@@ -174,10 +196,24 @@ export class AudioDirector {
   private readonly ghostDop: Float64Array;
 
   // ---- one-shot cooldowns (per object id, decaying level)
+  // per-object crash episodes (sim-time clock): see fireEvents
   private readonly cdId = new Int32Array(COOLDOWN_SLOTS).fill(-1);
-  private readonly cdLevel = new Float64Array(COOLDOWN_SLOTS);
-  private readonly cdBreak = new Float64Array(COOLDOWN_SLOTS);
+  private readonly epUntil = new Float64Array(COOLDOWN_SLOTS);
+  private readonly epPeak = new Float64Array(COOLDOWN_SLOTS);
+  private readonly epCool = new Float64Array(COOLDOWN_SLOTS);
+  private readonly epGrain = new Float64Array(COOLDOWN_SLOTS);
+  private readonly epSnap = new Float64Array(COOLDOWN_SLOTS);
+  private readonly epBreaks = new Float64Array(COOLDOWN_SLOTS);
+  private readonly epDebris = new Uint8Array(COOLDOWN_SLOTS);
+  private readonly lastDmg = new Float64Array(COOLDOWN_SLOTS);
   private cdNext = 0;
+  private scrapeOcc = 0;
+  private scrapeOn = false;
+  private readonly playerPos = new Float64Array(3);
+  private readonly vfArgs = new Float64Array(6);
+  /** Crash one-shot triggers since start (episodes started, continuation grains) — tests / debug. */
+  crashStarts = 0;
+  crashGrains = 0;
 
   // ---- glass hook (chained into the player's damage FX sink)
   private prevFx: ((fx: { type: string; pos: ArrayLike<number> }) => void) | null = null;
@@ -378,6 +414,12 @@ export class AudioDirector {
     const vy = tel[T_VEL + 1]!;
     const vz = tel[T_VEL + 2]!;
     const vmag = Math.sqrt(vx * vx + vy * vy + vz * vz);
+    this.playerPos[0] = cx;
+    this.playerPos[1] = cy;
+    this.playerPos[2] = cz;
+    this.acc.vx = vx;
+    this.acc.vy = vy;
+    this.acc.vz = vz;
     const contactBits = (tel[T_CONTACT] ?? 0) | 0;
     const airborne = (tel[T_AIRBORNE] ?? 0) >= 0.5;
 
@@ -491,16 +533,24 @@ export class AudioDirector {
     surf.gravel = this.gravel;
     surf.dirt = this.dirt;
     surf.grass = this.grass;
-    // body scrape: fast attack, 0.15 s release
-    const sTarget = clamp01(Math.sqrt(this.acc.scrapePower) / 260);
-    this.scrape = sTarget > this.scrape ? sTarget : this.scrape * Math.exp(-dt / 0.15);
+    // body scrape: only a SUSTAINED sliding body contact (occupancy with hysteresis) — bumps that
+    // ground the underbody for a snapshot or two are not a scrape (recorded drives: ~50 such
+    // snapshots per 30 s off-road)
+    const scraping = this.acc.scrapeEvents > 0 ? 1 : 0;
+    this.scrapeOcc += (scraping - this.scrapeOcc) * Math.min(1, dt / 0.3);
+    if (this.scrapeOcc > 0.6) this.scrapeOn = true;
+    else if (this.scrapeOcc < 0.3) this.scrapeOn = false;
+    const powerRate = this.acc.scrapePower / Math.max(simDt, 1 / 120);
+    const sTarget = this.scrapeOn ? clamp01(Math.sqrt(powerRate) / 2500) : 0;
+    this.scrape += (sTarget - this.scrape) * Math.min(1, dt / (sTarget > this.scrape ? 0.05 : 0.15));
     if (this.acc.scrapeSpeed > 0) this.scrapeSpeed += (this.acc.scrapeSpeed - this.scrapeSpeed) * Math.min(1, dt * 10);
     surf.scrape = this.scrape;
     surf.scrapeSpeed = this.scrapeSpeed;
-    // suspension: wheel-load jumps (landings, kerbs) and hard tyre impacts → thumps / bump-stop knocks
+    // suspension (the surface voice only): big wheel-load jumps (landings, hard kerb strikes) and
+    // hard tyre impacts; ordinary bumps stay silent
     if (rate > 0) {
-      const amp = Math.max(clamp01((maxJump - 2500) / 9000), clamp01((this.acc.tyreImpact - 15) / 140));
-      if (amp > 0.06 && this.simClock - this.lastThump > 0.12) {
+      const amp = Math.max(clamp01((maxJump - THUMP_LOAD_JUMP) / 12000), clamp01((this.acc.tyreImpact - THUMP_TYRE_IMPULSE) / 120));
+      if (amp > 0.08 && this.simClock - this.lastThump > 0.25) {
         this.lastThump = this.simClock;
         surf.thumpAmp = amp;
         surf.thumpCount = ++this.thumpCount;
@@ -657,23 +707,104 @@ export class AudioDirector {
     const i = this.cdNext;
     this.cdNext = (this.cdNext + 1) % COOLDOWN_SLOTS;
     this.cdId[i] = id;
-    this.cdLevel[i] = 0;
-    this.cdBreak[i] = 0;
+    this.epUntil[i] = -1;
+    this.epPeak[i] = 0;
+    this.epCool[i] = -1;
+    this.epGrain[i] = -1;
+    this.epSnap[i] = -1;
+    this.epBreaks[i] = 0;
+    this.epDebris[i] = 0;
+    this.lastDmg[i] = NaN;
     return i;
   }
 
+  /** Δdamage of a vehicle since its last check (telemetry slot 23); 0 without telemetry or after a repair. */
+  private damageStep(slot: number, id: number): number {
+    const tel = this.deps.sim.telemetry(id);
+    if (!tel) return 0;
+    const d = tel[T_DAMAGE] ?? 0;
+    const prev = this.lastDmg[slot]!;
+    this.lastDmg[slot] = d;
+    return prev !== prev || d < prev ? 0 : d - prev;
+  }
+
+  private playAt(kind: OneShotKind, p: Float64Array, gain: number, ref: number, dist: number, now: number, delay = 0, variant = -1, rate = -1): void {
+    this.g.oneShots.play(kind, p[0]!, p[1]!, p[2]!, gain, rate > 0 ? rate : this.vr(), ref, dist, now, delay, variant);
+  }
+
+  /**
+   * One vehicle's frame: a CRASH needs real deformation (Δdamage), a hard
+   * horizontal body hit or beam breaks (crashLevel). A crash opens an
+   * EPISODE (0.25 + 1.25·level s of sim time): body thud + crunch, a rolling
+   * crumple whose length follows the level, a sub boom and a duck for heavy
+   * ones, a damped clang only for metal-on-metal. While the episode lasts,
+   * further deformation / breaks add short crunch grains (≥ 90 ms apart): a
+   * big crash rolls for 0.5–1.5 s. After it, a 0.35 s cool-down; only a
+   * clearly bigger hit (1.6× the peak) restarts it early.
+   */
+  private vehicleFrame(slot: number, brk: number, mat: number, p: Float64Array): void {
+    // doubles travel through a scratch array: a non-inlined call boxes double arguments (allocation per frame)
+    const a = this.vfArgs;
+    const E = a[0]!;
+    const maxJ = a[1]!;
+    const dd = a[2]!;
+    const dist = a[3]!;
+    const now = a[4]!;
+    const pitchW = a[5]!;
+    const t = this.simClock;
+    const g = crashLevel(E, maxJ, brk, dd);
+    const active = t < this.epUntil[slot]!;
+    const ref = 5 + 10 * Math.max(g, this.epPeak[slot]!);
+    if (g > 0 && ((!active && t >= this.epCool[slot]!) || g > this.epPeak[slot]! * 1.6 + 0.1)) {
+      this.epPeak[slot] = g;
+      this.epUntil[slot] = t + 0.25 + 1.25 * g;
+      this.epCool[slot] = this.epUntil[slot]! + 0.35;
+      this.epGrain[slot] = t;
+      this.epBreaks[slot] = 0;
+      this.epDebris[slot] = 0;
+      this.crashStarts++;
+      this.playAt('thump', p, 0.45 + 0.55 * g, ref, dist, now);
+      if (g < 0.22) this.playAt('tap', p, 0.45 + g, ref, dist, now);
+      else {
+        this.playAt('crunch', p, 0.5 + 0.45 * g, ref, dist, now);
+        if (g >= 0.4) this.playAt('crumple', p, 0.45 + 0.5 * g, ref, dist, now, 0.02 / pitchW, Math.min(3, Math.floor((g - 0.4) / 0.15)));
+      }
+      if (g >= 0.6) {
+        this.playAt('boom', p, 0.9 * g, ref * 1.5, dist, now, 0, -1, pitchW);
+        if (dist < 60) this.g.mix.duckTo(duckGain(g), now);
+      }
+      if (mat === 6 && g >= 0.2) this.playAt('clang', p, 0.4 * g, ref, dist, now);
+      this.noteCrash(g, g >= 0.6 ? 'heavy' : g >= 0.22 ? 'crunch' : 'tap', now);
+    } else if (active && (dd > 0.0015 || brk > 0 || E >= CRASH_IMPULSE_GATE) && t - this.epGrain[slot]! >= 0.09) {
+      // the crash keeps crumpling
+      this.epGrain[slot] = t;
+      this.crashGrains++;
+      this.playAt('crunch', p, Math.min(0.9, 0.25 + 0.6 * clamp01(dd / 0.03 + brk / 10 + E / 1500)), ref, dist, now);
+    }
+    if (brk > 0) {
+      this.epBreaks[slot] = this.epBreaks[slot]! + brk;
+      if (t - this.epSnap[slot]! >= 0.07) {
+        this.epSnap[slot] = t;
+        this.playAt('snap', p, Math.min(1, 0.3 + 0.06 * brk), ref, dist, now);
+        if (brk >= 3) this.playAt('plastic', p, Math.min(0.9, 0.3 + 0.05 * brk), ref, dist, now);
+      }
+      if (this.epBreaks[slot]! >= 4 && !this.epDebris[slot]) {
+        this.epDebris[slot] = 1;
+        this.playAt('debris', p, Math.min(1, 0.4 + 0.03 * this.epBreaks[slot]!), ref, dist, now, 0.25 / pitchW);
+      }
+    }
+  }
+
   private fireEvents(dt: number, now: number, pitchW: number): void {
+    void dt;
     const acc = this.acc;
     const g = this.g;
     const shots = g.oneShots;
     const lpos = g.listener.pos;
-    const decay = Math.exp(-dt / 0.22);
-    for (let i = 0; i < COOLDOWN_SLOTS; i++) {
-      this.cdLevel[i] = this.cdLevel[i]! * decay;
-      this.cdBreak[i] = this.cdBreak[i]! * Math.exp(-dt / 0.6);
-    }
     const p = this.pos;
     this.pitchW = pitchW;
+    const t = this.simClock;
+    let playerSeen = false;
     for (let b = 0; b < acc.count; b++) {
       const id = acc.id[b]!;
       acc.position(b, p);
@@ -681,53 +812,52 @@ export class AudioDirector {
       const dy = p[1]! - lpos[1]!;
       const dz = p[2]! - lpos[2]!;
       const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      const gain = crashGain(acc.impulse[b]!);
       const brk = acc.breaks[b]!;
       const slot = this.cooldownSlot(id);
-      const fresh = gain > this.cdLevel[slot]! * 1.25 + 0.04;
-      const ref = 4 + 10 * gain;
       if (id >= PROP_BASE) {
-        if (fresh && gain > 0.03) {
-          const kind = propSound(this.deps.propKey(id));
-          shots.play(kind, p[0]!, p[1]!, p[2]!, 0.3 + 0.7 * gain, this.vr(), ref, dist, now);
-          this.cdLevel[slot] = Math.max(this.cdLevel[slot]!, gain);
+        // props: a real knock (one event ≥ 8 N·s, Σ ≥ 15), at most every 0.25 s unless clearly louder
+        const J = acc.impulse[b]!;
+        const lvl = Math.pow(clamp01((J - 10) / 300), 0.6);
+        if (acc.maxImpulse[b]! >= 8 && J >= 15 && (t >= this.epCool[slot]! || lvl > this.epPeak[slot]! * 1.6)) {
+          this.epPeak[slot] = lvl;
+          this.epCool[slot] = t + 0.25;
+          this.playAt(propSound(this.deps.propKey(id)), p, 0.3 + 0.7 * lvl, 4 + 8 * lvl, dist, now);
         }
-        if (brk > 0 && this.cdBreak[slot]! < 0.5) {
+        if (brk > 0 && t - this.epSnap[slot]! >= 0.3) {
+          this.epSnap[slot] = t;
           const kind = propSound(this.deps.propKey(id));
-          shots.play(kind === 'clang' || kind === 'pole' ? 'snap' : kind, p[0]!, p[1]!, p[2]!, 0.6, this.vr() * 0.9, ref, dist, now);
-          this.cdBreak[slot] = 1;
+          this.playAt(kind === 'drum' || kind === 'pole' ? 'snap' : kind, p, 0.6, 6, dist, now);
         }
         continue;
       }
-      // vehicles (player, traffic, other rigs)
-      if (fresh && gain > 0.03) {
-        const mat = acc.material[b]!;
-        const hardGround = mat === 0 || mat === 3 || mat === 5;
-        if (gain < 0.3) {
-          shots.play('hit', p[0]!, p[1]!, p[2]!, 0.2 + gain * 1.4, this.vr(), ref, dist, now);
-          if (hardGround && gain > 0.12) shots.play('concrete', p[0]!, p[1]!, p[2]!, gain, this.vr(), ref, dist, now);
-          this.noteCrash(gain, 'hit', now);
-        } else {
-          shots.play('thump', p[0]!, p[1]!, p[2]!, 0.4 + 0.6 * gain, this.vr(), ref, dist, now);
-          shots.play('crunch', p[0]!, p[1]!, p[2]!, 0.45 + 0.55 * gain, this.vr(), ref, dist, now);
-          if (hardGround) shots.play('concrete', p[0]!, p[1]!, p[2]!, 0.5 * gain, this.vr(), ref, dist, now);
-          if (gain > 0.55) {
-            shots.play('boom', p[0]!, p[1]!, p[2]!, gain, pitchW, ref * 1.5, dist, now);
-            shots.play('crunch', p[0]!, p[1]!, p[2]!, 0.7 * gain, this.vr(), ref, dist, now, 0.06 / pitchW);
-            // the hit takes the air out of everything else for a moment
-            if (dist < 60) g.mix.duckTo(duckGain(gain), now);
-          }
-          this.noteCrash(gain, gain > 0.55 ? 'heavy' : 'crunch', now);
-        }
-        this.cdLevel[slot] = Math.max(this.cdLevel[slot]!, gain);
-      }
-      if (brk > 0) {
-        const s = Math.min(1, 0.3 + 0.07 * brk);
-        if (this.cdBreak[slot]! < s) {
-          shots.play('snap', p[0]!, p[1]!, p[2]!, s, this.vr(), ref, dist, now);
-          if (brk >= 3 && this.cdBreak[slot]! < 0.3) shots.play('debris', p[0]!, p[1]!, p[2]!, Math.min(1, 0.35 + 0.04 * brk), this.vr(), ref, dist, now, 0.18 / pitchW);
-          this.cdBreak[slot] = Math.max(this.cdBreak[slot]!, s);
-        }
+      if (id === this.deps.playerObjectId) playerSeen = true;
+      const va = this.vfArgs;
+      va[0] = acc.wImpulse[b]!;
+      va[1] = acc.maxImpulse[b]!;
+      va[2] = this.damageStep(slot, id);
+      va[3] = dist;
+      va[4] = now;
+      va[5] = pitchW;
+      this.vehicleFrame(slot, brk, acc.material[b]!, p);
+    }
+    // the player deforming without an impact bucket this frame (damage lags its contacts by a snapshot)
+    if (!playerSeen && this.profile) {
+      const slot = this.cooldownSlot(this.deps.playerObjectId);
+      const va = this.vfArgs;
+      va[2] = this.damageStep(slot, this.deps.playerObjectId);
+      if (va[2]! > 0) {
+        p[0] = this.playerPos[0]!;
+        p[1] = this.playerPos[1]!;
+        p[2] = this.playerPos[2]!;
+        const dx = p[0]! - lpos[0]!;
+        const dy = p[1]! - lpos[1]!;
+        const dz = p[2]! - lpos[2]!;
+        va[0] = 0;
+        va[1] = 0;
+        va[3] = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        va[4] = now;
+        va[5] = pitchW;
+        this.vehicleFrame(slot, 0, 0, p);
       }
     }
     for (let k = 0; k < acc.glassCount; k++) {
@@ -738,8 +868,8 @@ export class AudioDirector {
       const dy = y - lpos[1]!;
       const dz = z - lpos[2]!;
       const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      if (acc.glassShatter[k]) shots.play('glass', x, y, z, 0.85, this.vr(), 6, dist, now, 0.01);
-      else shots.play('glassCrack', x, y, z, 0.55, this.vr(), 4, dist, now);
+      if (acc.glassShatter[k]) shots.play('glass', x, y, z, 0.8, this.vr(), 6, dist, now, 0.01);
+      else shots.play('glassCrack', x, y, z, 0.5, this.vr(), 4, dist, now);
     }
   }
 
