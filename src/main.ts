@@ -1455,6 +1455,32 @@ async function boot(): Promise<void> {
     worldFrame.tick = client.latestTick;
   };
   const noEvents = {};
+  /** Prime: FX only (vehicle damage gets impacts only on body-hit frames, processed on their own geometry). */
+  const fxOnlySink = {
+    impact(e: Readonly<ImpactEvent>): void {
+      if (isPropObjectId(e.objectId)) props?.onImpact(e);
+      fxR.onImpact(e);
+    },
+    beamBreak(e: Readonly<BeamBreakEvent>): void {
+      if (isPropObjectId(e.objectId)) props?.onBeamBreak(e);
+      fxR.onBeamBreak(e);
+    },
+    skid(e: Readonly<SkidEvent>): void {
+      fxR.onSkid(e);
+    },
+  };
+  /** Prime, body-hit frame outside the FX window: the player's damage only. */
+  const damageOnlySink = {
+    impact(e: Readonly<ImpactEvent>): void {
+      if (e.objectId === VEHICLE_ID) playerVisual()?.onImpact(e);
+    },
+    beamBreak(e: Readonly<BeamBreakEvent>): void {
+      if (e.objectId === VEHICLE_ID) playerVisual()?.onBeamBreak(e);
+    },
+    skid(e: Readonly<SkidEvent>): void {
+      if (e.objectId === VEHICLE_ID) playerVisual()?.onSkid(e);
+    },
+  };
   replay.setVisuals({
     enter() {
       mapper.releaseAll();
@@ -1474,10 +1500,11 @@ async function boot(): Promise<void> {
       fxR.clearTransient();
       fxR.reseed(seed);
     },
-    primeFrame(time) {
+    primeFrame(time, fx, damage) {
       fillWorldFrame(time);
-      client.drainEvents(eventSink);
-      fxR.update(worldFrame);
+      client.drainEvents(fx ? (damage ? eventSink : fxOnlySink) : damageOnlySink);
+      if (damage && worldFrame.interpolated) updateVisuals(0);
+      if (fx) fxR.update(worldFrame);
     },
   });
 

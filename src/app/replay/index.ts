@@ -21,7 +21,7 @@ import { createTrafficAgentFrame, isTrafficObjectId, TRAFFIC_ID_BASE, type Traff
 import { isPropObjectId } from '../../protocol/messages';
 import type { QualityLevel } from '../../render/types';
 import type { SimClient } from '../simClient';
-import { ReplayBuffer, type WheelHubs } from './buffer';
+import { FRAME_BODY_HIT, ReplayBuffer, type WheelHubs } from './buffer';
 import {
   REPLAY_BUFFER_PRESETS,
   REPLAY_FX_PRIME_S,
@@ -45,9 +45,11 @@ const EPOCH_STRIDE = 0x100000;
 
 /**
  * Main's visual pipeline during a settled seek (all optional; without them a
- * seek only presents frames). Order: present(start, no events) →
- * primeBegin(seed) → for every frame start..target: present(k, events) +
- * primeFrame(time) → present(target bracket) → primeEnd().
+ * seek only presents frames). Order: present(first frame, no events) →
+ * primeBegin(seed) → for every held frame up to the target that either lies
+ * in the FX window (last REPLAY_FX_PRIME_S) or carries a vehicle body hit
+ * (FRAME_BODY_HIT): present(k, events) + primeFrame(time, fx, damage) →
+ * present(target bracket) → primeEnd().
  */
 export interface ReplayVisualHooks {
   /** Replay starts (freeze skidmarks, gate input, release keys). */
@@ -56,8 +58,14 @@ export interface ReplayVisualHooks {
   exit?(): void;
   /** A settle starts on the presented first prime frame: reset damage (update visuals once), clear transient FX with `seed`, drop queued events. */
   primeBegin?(seed: number): void;
-  /** One prime frame is presented (its events captured): route events, run FX emitters to `time`. */
-  primeFrame?(time: number): void;
+  /**
+   * One prime frame is presented (its events captured). fx: route events to
+   * the world FX and run the emitters to `time`. damage: the frame carries a
+   * vehicle body hit — route its impacts to the vehicle damage and update the
+   * vehicle visuals NOW (scuffs land on this frame's geometry). Events not
+   * routed are dropped.
+   */
+  primeFrame?(time: number, fx: boolean, damage: boolean): void;
   primeEnd?(): void;
 }
 
@@ -245,13 +253,17 @@ export function createReplayController(deps: ReplayDeps): ReplayDriver {
     const t0 = performance.now();
     gen++;
     const target = buf.findFrame(t);
-    const start = buf.findFrame(t - REPLAY_FX_PRIME_S);
-    presentFrame(start, false);
+    const fxStart = buf.findFrame(t - REPLAY_FX_PRIME_S);
+    presentFrame(0, false);
     client.discardEvents();
-    visuals.primeBegin?.(hash32(buf.frameSeq(start)));
-    for (let k = start; k <= target; k++) {
+    visuals.primeBegin?.(hash32(buf.frameSeq(fxStart)));
+    for (let k = 0; k <= target; k++) {
+      const fx = k >= fxStart;
+      const hit = (buf.frameFlags(k) & FRAME_BODY_HIT) !== 0;
+      if (!fx && !hit) continue;
       presentFrame(k, true);
-      visuals.primeFrame?.(buf.frameTime(k));
+      visuals.primeFrame?.(buf.frameTime(k), fx, hit);
+      client.discardEvents();
     }
     // events of the bracket's frames up to t are already delivered: present without events
     presentAt(t, false);

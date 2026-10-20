@@ -14,7 +14,8 @@
  *   0 flags (bit0 keyframe)   1 byteLength   2 tick   3 objectCount
  *   4–5 simTime f64           6 timeScale f32 7 seq
  *   8 impacts  9 beamBreaks  10 skids  11 traffic records
- *   12 events (byte offset of the first event word)  13–15 reserved
+ *   12 events (byte offset of the first event word)
+ *   13 frame flags (FRAME_BODY_HIT)  14–15 reserved
  *   16… object table, OBJ_W words per object (ascending id):
  *     id, flags (sim flags & 0xffff | REC_* bits), nodeCount, beamCount,
  *     epoch, nodes (byte offset in this frame, or SOURCE SEQ when REPEAT),
@@ -76,6 +77,9 @@ const O_DATA = 5;
 const O_TEL = 6;
 const O_BROKEN = 7;
 const REC_REPEAT = 1 << 16;
+/** Frame flag: a non-tyre impact ≥ BODY_HIT_IMPULSE on a vehicle (replay settles replay these frames' damage). */
+export const FRAME_BODY_HIT = 1;
+const BODY_HIT_IMPULSE = 3;
 const SIM_FLAGS_MASK = 0xffff;
 const Q = 65535;
 /** objectIds below this can be stored by reference while asleep (all protocol ranges fit). */
@@ -245,6 +249,11 @@ export class ReplayBuffer {
   }
   frameSeq(i: number): number {
     return this.headSeq + i;
+  }
+  /** FRAME_BODY_HIT etc. of held frame i. */
+  frameFlags(i: number): number {
+    const slot = this.ringIndex(i);
+    return this.chunks[this.fChunk[slot]!]!.u32[(this.fOff[slot]! >>> 2) + 13]!;
   }
   isKeyframe(i: number): boolean {
     return this.fKey[this.ringIndex(i)] === 1;
@@ -523,6 +532,15 @@ export class ReplayBuffer {
     }
     // events (staged, protocol word layout) + traffic records
     u32[bw + 12] = off - base;
+    let fflags = 0;
+    for (let e = 0; e < this.impN; e++) {
+      const k = e * IMPACT_WORDS;
+      if (this.impTyre[e] === 0 && this.impStageU[k]! < PROP_LAYOUT_ID_BASE && this.impStage[k + 8]! >= BODY_HIT_IMPULSE) {
+        fflags |= FRAME_BODY_HIT;
+        break;
+      }
+    }
+    u32[bw + 13] = fflags;
     let w = off >>> 2;
     // plain loops: subarray() would allocate a view per frame
     for (let k = 0, m = this.impN * IMPACT_WORDS, src = this.impStageU; k < m; k++) u32[w++] = src[k]!;
