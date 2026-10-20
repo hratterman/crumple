@@ -114,7 +114,7 @@ function buildCatalog(world: CatalogWorld): ChallengeDef[] {
       spawn: { pos: [BARREL_ROLL.laneX, null, BARREL_ROLL.startZ], yawDeg: 0 },
       traffic: 0,
       objectives: [
-        { type: 'jump', takeoff: { kind: 'rect', center: [BARREL_ROLL.laneX, BARREL_ROLL.kickerZ - 3], halfX: 4, halfZ: 6 }, ends: true, settleS: 3, minAirtimeS: 0.2 },
+        { type: 'jump', takeoff: { kind: 'rect', center: [BARREL_ROLL.laneX, BARREL_ROLL.kickerZ - 3], halfX: 5, halfZ: 9 }, ends: true, settleS: 3, minAirtimeS: 0.2 },
         { type: 'flips', axis: 'roll' },
         { type: 'landUpright', mode: 'bonus', factor: 0.5 },
         { type: 'timeLimit', seconds: 25, onExpire: 'fail' },

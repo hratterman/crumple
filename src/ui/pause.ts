@@ -14,8 +14,8 @@ import './pause.css';
 import type { GameSettings } from '../app/settings';
 import { firstGamepad, keyIntent, moveFocus, PadNav, type NavIntent } from './showroom/nav';
 
-export type PauseSection = 'resume' | 'replay' | 'vehicle' | 'spawn' | 'settings' | 'controls' | 'restart';
-export const PAUSE_SECTIONS: readonly PauseSection[] = ['resume', 'replay', 'vehicle', 'spawn', 'settings', 'controls', 'restart'];
+export type PauseSection = 'resume' | 'challenges' | 'replay' | 'vehicle' | 'spawn' | 'settings' | 'controls' | 'restart';
+export const PAUSE_SECTIONS: readonly PauseSection[] = ['resume', 'challenges', 'replay', 'vehicle', 'spawn', 'settings', 'controls', 'restart'];
 
 export interface PauseSpawn {
   id: string;
@@ -41,10 +41,16 @@ export interface PauseMenuOptions {
   onPhoto?: () => void;
   /** Seconds held in the replay buffer and crash markers in it. */
   replayInfo?: () => { seconds: number; crashes: number };
+  /** P8: stunt challenges — browse (select screen), and restart / quit the running one (name, or null). */
+  onChallenges?: () => void;
+  challengeActive?: () => string | null;
+  onChallengeRestart?: () => void;
+  onChallengeQuit?: () => void;
 }
 
 const LABELS: Readonly<Record<PauseSection, string>> = {
   resume: 'Resume',
+  challenges: 'Stunt challenges',
   replay: 'Replay & photo',
   vehicle: 'Choose vehicle',
   spawn: 'Spawn point',
@@ -54,6 +60,7 @@ const LABELS: Readonly<Record<PauseSection, string>> = {
 };
 const SUBS: Readonly<Record<PauseSection, string>> = {
   resume: 'Back to the road',
+  challenges: 'Jumps · rolls · drifts · medals',
   replay: 'Rewind · slow-mo · photo mode',
   vehicle: 'Showroom · paint',
   spawn: 'Teleport anywhere',
@@ -302,6 +309,9 @@ export class PauseMenu {
       case 'replay':
         this.renderReplay(p);
         break;
+      case 'challenges':
+        this.renderChallenges(p);
+        break;
       case 'spawn':
         this.renderSpawns(p);
         break;
@@ -343,6 +353,30 @@ export class PauseMenu {
       this.section === 'vehicle'
         ? 'Step into the studio: pick a car and a paint, then drive it out at the start point you choose.'
         : 'The world is frozen. Press Esc or Start to drive on.',
+    );
+  }
+
+  private renderChallenges(p: HTMLElement): void {
+    const active = this.opts.challengeActive?.() ?? null;
+    this.head(p, 'Stunt challenges', active ? `Running · ${active}` : 'Ten events · medals · ghosts');
+    const row = h('div', 'pm-replay-actions', p);
+    const btn = (label: string, testid: string, ghost: boolean, fn: (() => void) | undefined): void => {
+      const b = h('button', ghost ? 'pm-confirm pm-confirm--ghost' : 'pm-confirm', row);
+      b.dataset.nav = '';
+      b.dataset.testid = testid;
+      h('span', '', b, label);
+      b.addEventListener('click', () => fn?.());
+    };
+    if (active) {
+      btn('Restart challenge', 'pause-challenge-restart', false, this.opts.onChallengeRestart);
+      btn('Quit challenge', 'pause-challenge-quit', true, this.opts.onChallengeQuit);
+    }
+    btn('Browse challenges', 'pause-challenges-browse', !!active, this.opts.onChallenges);
+    h(
+      'p',
+      'pm-note',
+      p,
+      'Ski jump, barrel rolls, a demolition derby, the hill climb and more: beat the medal times, chase the hidden Crumple medal and race your best run’s ghost. F restarts a run instantly.',
     );
   }
 

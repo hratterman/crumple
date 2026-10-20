@@ -55,7 +55,7 @@ export class LoadingScreen {
    * runs on the Drive button; 0 = no wait: the buttons stay clickable while
    * the overlay fades). No-op markup-less pages resolve 'drive'.
    */
-  ready(carName: string, holdMs: number): Promise<'drive' | 'choose'> {
+  ready(carName: string, holdMs: number): Promise<'drive' | 'choose' | 'challenges'> {
     const box = this.root?.querySelector<HTMLElement>('.loading-ready');
     if (!this.root || !box) return Promise.resolve('drive');
     const steps = this.root.querySelector<HTMLElement>('.loading-steps');
@@ -65,9 +65,9 @@ export class LoadingScreen {
     if (steps) steps.hidden = true;
     box.hidden = false;
     if (this.fill) this.fill.style.transform = 'scaleX(1)';
-    return new Promise((resolve) => {
+    return new Promise<'drive' | 'choose' | 'challenges'>((resolve) => {
       let done = false;
-      const finish = (r: 'drive' | 'choose'): void => {
+      const finish = (r: 'drive' | 'choose' | 'challenges'): void => {
         if (done) return;
         done = true;
         window.clearTimeout(t);
@@ -76,7 +76,11 @@ export class LoadingScreen {
       };
       const onKey = (e: KeyboardEvent): void => {
         if (e.code === 'Enter' || e.code === 'NumpadEnter') finish('drive');
-        else if (e.code === 'KeyC') {
+        else if (e.code === 'KeyJ') {
+          e.stopImmediatePropagation();
+          e.preventDefault();
+          finish('challenges');
+        } else if (e.code === 'KeyC') {
           e.stopImmediatePropagation();
           e.preventDefault();
           finish('choose');
@@ -84,6 +88,8 @@ export class LoadingScreen {
       };
       box.querySelector('[data-action="choose"]')?.addEventListener('click', () => finish('choose'));
       box.querySelector('[data-action="drive"]')?.addEventListener('click', () => finish('drive'));
+      // P8: stunt challenges (J)
+      box.querySelector('[data-action="challenges"]')?.addEventListener('click', () => finish('challenges'));
       window.addEventListener('keydown', onKey, true);
       const t = window.setTimeout(() => finish('drive'), Math.max(0, holdMs));
       if (timer && holdMs > 0) {

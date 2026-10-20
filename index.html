@@ -172,6 +172,9 @@
       .loading-ready[hidden] {
         display: none;
       }
+      .loading-ready [data-action='challenges'] {
+        grid-column: 1 / -1;
+      }
       .loading-btn {
         position: relative;
         display: flex;
@@ -263,6 +266,7 @@
         <div class="loading-ready" hidden>
           <button class="loading-btn loading-btn--primary" type="button" data-action="choose">Choose your car<small>Showroom</small></button>
           <button class="loading-btn" type="button" data-action="drive">Drive<small class="loading-ready-car"></small><span class="loading-btn-timer"></span></button>
+          <button class="loading-btn" type="button" data-action="challenges">Stunt challenges<small>Medals · ghosts</small></button>
         </div>
         <div class="loading-foot"><kbd>W A S D</kbd> drive &nbsp;·&nbsp; <kbd>1</kbd>–<kbd>8</kbd> spawn points &nbsp;·&nbsp; <kbd>Esc</kbd> menu</div>
       </div>

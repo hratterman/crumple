@@ -56,6 +56,7 @@ import { createPostStack } from './render/post';
 import { createRoadRenderer } from './render/roads';
 import { createTerrainRenderer, prebuildTerrainArrays, terrainAnisotropy, terrainTextureSize } from './render/terrain';
 import { createFarLand, FARLAND_OUTER_M } from './render/terrain/farland';
+import type { ChallengeHost } from './app/challenges';
 import type { FxSystem } from './render/fx/types';
 import type { PropRenderer } from './render/props/types';
 import { createStudio, type Studio } from './render/showroom/studio';
@@ -450,7 +451,7 @@ function applyTimescale(): void {
 }
 
 /** P6 game mode: boot (loading), drive, pause (menu), showroom (studio instead of the world). */
-type GameMode = 'boot' | 'drive' | 'pause' | 'showroom';
+type GameMode = 'boot' | 'drive' | 'pause' | 'showroom' | 'challenges';
 let mode: GameMode = 'boot';
 
 // ------------------------------------------------------------ vehicle pose
@@ -583,6 +584,8 @@ function setTractionControl(on: boolean): void {
 
 function handleCommands(): void {
   for (const c of mapper.drainCommands()) {
+    // P8: F / R restart a running challenge
+    if (challenges?.onCommand(c)) continue;
     switch (c) {
       case 'recover':
         client.recover(VEHICLE_ID);
@@ -646,6 +649,7 @@ window.addEventListener('keydown', (e) => {
   if (!running || mode !== 'drive' || replay.active || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
   const m = /^(?:Digit|Numpad)([1-9])$/.exec(e.code);
   if (m) {
+    challenges?.quit(); // P8: teleporting abandons a challenge
     teleport(Number(m[1]) - 1);
     e.preventDefault();
   } else if (e.code === 'Backquote') {
@@ -690,8 +694,12 @@ function applyPlayerSpec(assets: PlayerAssets): void {
 /** Traffic density for a preset under the player's traffic setting (the quality controller and the menu both route here). */
 let trafficStarted = false;
 function trafficPreset(q: (typeof QUALITY_PRESETS)[keyof typeof QUALITY_PRESETS]) {
-  return { ...q, traffic: trafficDensityFor(q.traffic, settings.traffic) };
+  const d = trafficDensityFor(q.traffic, settings.traffic);
+  // P8: a running challenge caps the agents (most run with none)
+  return { ...q, traffic: challengeTraffic === null ? d : { ...d, agents: Math.min(d.agents, challengeTraffic) } };
 }
+/** P8: traffic agents allowed while a challenge runs (null = the player's setting). */
+let challengeTraffic: number | null = null;
 function startTraffic(): void {
   if (!traffic || trafficStarted || settings.traffic === 'off' || params.get('traffic') === '0') return;
   trafficStarted = true;
@@ -807,11 +815,49 @@ let showroomFrom: 'pause' | 'loading' = 'pause';
 /** Re-render the frozen world once (behind the pause menu: resize, quality change). */
 let redrawPaused = false;
 
-function enterMenuMode(m: 'pause' | 'showroom'): void {
+function enterMenuMode(m: 'pause' | 'showroom' | 'challenges'): void {
   mode = m;
   mapper.releaseAll();
   paused = true;
   applyTimescale();
+}
+
+// ---- P8 stunt challenges (lazy chunk: app/challenges + game/ui/render challenges)
+let challenges: ChallengeHost | null = null;
+let challengesP: Promise<ChallengeHost> | null = null;
+let challengesFrom: 'pause' | 'loading' | 'drive' = 'pause';
+/** The driving input after the challenge filter (the mapper's object is never mutated). */
+const challengeInput: ActionState = { throttle: 0, brake: 0, steer: 0, handbrake: 0, clutch: 0, gearSelect: 1 };
+let challengeDepsP: (() => Parameters<typeof import('./app/challenges').createChallengeHost>[0]) | null = null;
+
+function loadChallenges(): Promise<ChallengeHost> {
+  challengesP ??= import('./app/challenges').then((m) => {
+    if (!challengeDepsP) throw new Error('challenges before boot');
+    challenges = m.createChallengeHost(challengeDepsP());
+    return challenges;
+  });
+  return challengesP;
+}
+
+/** Opens the challenge select (world paused behind it, like the pause menu). */
+function openChallenges(from: 'pause' | 'loading' | 'drive'): void {
+  void loadChallenges().then((h) => {
+    if (mode === 'showroom' || mode === 'boot') return;
+    challengesFrom = from;
+    pauseMenu?.close();
+    enterMenuMode('challenges');
+    h.openSelect();
+  });
+}
+
+/** The select screen closed: back to where it came from, or drive (a challenge starts). */
+function challengesClosed(reason: 'start' | 'back'): void {
+  if (mode !== 'challenges') return;
+  if (reason === 'back' && challengesFrom === 'pause' && pauseMenu) {
+    mode = 'pause';
+    redrawPaused = true;
+    pauseMenu.open('challenges');
+  } else resume();
 }
 
 function openPause(): void {
@@ -821,7 +867,7 @@ function openPause(): void {
 }
 
 function resume(): void {
-  if (mode !== 'pause' && mode !== 'showroom') return;
+  if (mode !== 'pause' && mode !== 'showroom' && mode !== 'challenges') return;
   pauseMenu?.close();
   if (showroom?.isOpen) closeShowroom();
   mapper.releaseAll();
@@ -829,6 +875,8 @@ function resume(): void {
   paused = false;
   applyTimescale();
   mode = 'drive';
+  // P8: after the mode change (challengesClosed then leaves the mode alone)
+  if (challenges?.selectOpen) challenges.closeSelect();
 }
 
 function openShowroom(from: 'pause' | 'loading'): void {
@@ -867,6 +915,7 @@ function handleMenuCommands(): void {
     if (c !== 'pause') continue;
     if (mode === 'pause') resume();
     else if (mode === 'showroom') showroom?.back();
+    else if (mode === 'challenges') challenges?.closeSelect();
   }
 }
 
@@ -902,10 +951,12 @@ function createMenus(): void {
     onChooseVehicle: () => openShowroom('pause'),
     onSpawn: (i) => {
       resume();
+      challenges?.quit();
       teleport(i);
     },
     onRestart: () => {
       resume();
+      if (challenges?.active) return challenges.restart(); // P8: restart the running challenge
       teleport(spawnIndex);
       if (layoutPropCount > 0) client.resetProps();
       fx?.clear();
@@ -926,6 +977,17 @@ function createMenus(): void {
       void replaySession?.enterPhoto();
     },
     replayInfo: () => ({ seconds: replay.duration, crashes: replay.markers().length }),
+    // P8: stunt challenges
+    onChallenges: () => openChallenges('pause'),
+    challengeActive: () => (challenges?.active ? challenges.activeName : null),
+    onChallengeRestart: () => {
+      resume();
+      challenges?.restart();
+    },
+    onChallengeQuit: () => {
+      resume();
+      challenges?.quit();
+    },
   });
   showroom = new Showroom(document.body, {
     entries: PLAYER_VEHICLE_IDS.map((id) => getVehicleEntry(id)),
@@ -1158,6 +1220,19 @@ const crumple = {
   /** P8 synthesized audio (src/audio/types.ts AudioDebug), null until its chunk loaded. */
   get audio() {
     return audio ? audio.debug : null;
+  },
+  /** P8 stunt challenges (app/challenges.ts ChallengeDebugApi), null until the challenge chunk loaded. */
+  get challenges() {
+    return challenges ? challenges.debug : null;
+  },
+  /** P8: load the challenge chunk (tests). */
+  loadChallenges(): Promise<boolean> {
+    return loadChallenges().then(() => true);
+  },
+  /** P8: open the challenge select screen. */
+  openChallenges(): void {
+    if (mode === 'pause') openChallenges('pause');
+    else openChallenges('drive');
   },
   /** P7 (R2) replay UI / cameras / crash cam / photo mode (ui/replay/session.ts ReplaySessionDebug), null before boot. */
   get replayUi() {
@@ -1510,6 +1585,54 @@ async function boot(): Promise<void> {
       .catch((e: unknown) => console.warn('[audio] unavailable', e));
   }
 
+  // P8: the challenge host's deps (the host itself is a lazy chunk, created on first use)
+  const challengeColliders = resolveColliders(LAYOUT.colliders, cameraHeight);
+  challengeDepsP = () => ({
+    client,
+    scene,
+    camera,
+    sampler: smp,
+    terrain: world,
+    colliders: challengeColliders,
+    props: propsR,
+    fx: fxR,
+    replay,
+    replayUi: () => replaySession,
+    visualDeps,
+    build: __BUILD_HASH__,
+    player: () => player,
+    swapVehicle: (choice) => swapVehicle(choice, null),
+    placePlayer: (t) => {
+      lastSpawn = t;
+      client.reset(VEHICLE_ID, t);
+      lastSent.gearSelect = NaN;
+      snapAfterTick = client.latestTick;
+      replaySession?.quietCrashCam();
+      director.snap();
+    },
+    setTrafficAgents: (n) => {
+      if (challengeTraffic === n) return;
+      challengeTraffic = n;
+      if (trafficStarted) traffic?.setQuality(trafficPreset(ctx.quality));
+    },
+    setTractionControl: (on) => {
+      const want = on ?? settings.tractionControl;
+      if (want !== tractionControl) {
+        tractionControl = want;
+        client.setAssists(VEHICLE_ID, { tractionControl: want });
+      }
+    },
+    toast: (title, sub) => hudView.showToast(title, sub, 2400),
+    onSelectOpen: (open, reason) => {
+      if (!open) challengesClosed(reason ?? 'back');
+      else if (mode === 'drive') {
+        // opened from the results screen: pause the world behind it like the menu path
+        challengesFrom = 'drive';
+        enterMenuMode('challenges');
+      }
+    },
+  });
+
   const hudStatus = { paused: false, slowMo: false, camera: 'chase', transmission, beamView: true, view: debugView as string, tractionControl };
   const bootTime = performance.now();
   const worldFrame: WorldFrame = {
@@ -1534,7 +1657,13 @@ async function boot(): Promise<void> {
       devices.poll();
       const tel = client.telemetry(VEHICLE_ID);
       const speed = tel ? (tel[VehicleTelemetry.speed] ?? 0) : 0;
-      sendInput(mapper.update(dt, speed));
+      const act = mapper.update(dt, speed);
+      if (challenges?.active) {
+        // P8: countdown hold / results brake / playtest bot
+        Object.assign(challengeInput, act);
+        challenges.filterInput(challengeInput);
+        sendInput(challengeInput);
+      } else sendInput(act);
       handleCommands();
     }
     prof.lap('input');
@@ -1601,6 +1730,8 @@ async function boot(): Promise<void> {
     worldFrame.interpolated = interpolated;
     worldFrame.objects = client.objectRanges();
     worldFrame.tick = client.latestTick;
+    // P8: challenge course, ghost, opponents' bodies and HUD (camera final, before props / FX)
+    challenges?.frame(dt, worldFrame);
     trafficC.update(worldFrame);
     prof.lap('traffic');
     propsR.update(worldFrame);
@@ -1829,6 +1960,18 @@ async function boot(): Promise<void> {
       requestAnimationFrame(loop);
       return;
     }
+    if (mode === 'challenges') {
+      // P8: the challenge select over the frozen world (like the pause menu).
+      devices.poll();
+      handleMenuCommands();
+      challenges?.selectFrame(dt);
+      if (redrawPaused) {
+        redrawPaused = false;
+        frame(0, false);
+      }
+      requestAnimationFrame(loop);
+      return;
+    }
     if (mode === 'pause') {
       // The last world frame stays on the canvas behind the menu; redrawn only when it was cleared.
       devices.poll();
@@ -1864,9 +2007,13 @@ async function boot(): Promise<void> {
     const holdParam = Number(params.get('welcome'));
     const r = await loading.ready(player.assets.entry.stats.name, holdParam > 0 ? holdParam : WELCOME_HOLD_MS);
     if (r === 'choose') openShowroom('loading');
+    else if (r === 'challenges') openChallenges('loading');
   }
   await loading.hide();
   if (mode === 'drive') hudView.showToast(world.spawns[spawnIndex]!.name.toUpperCase(), LAYOUT.name.toUpperCase(), 3200);
+  // P8: ?challenge=<id> starts one straight away (tests, links)
+  const wantChallenge = params.get('challenge');
+  if (wantChallenge) void loadChallenges().then((h) => h.start(wantChallenge));
 }
 
 boot().catch((e: unknown) => {

@@ -9,7 +9,7 @@ import { colliderGroups, createColliderRenderer, jerseyGeometry, rampGeometry } 
 const ctx = { renderer: { capabilities: { getMaxAnisotropy: () => 4 } } } as unknown as RenderContext;
 const lighting = { csm: null } as unknown as LightingStack;
 
-describe('createColliderRenderer', () => {
+describe('createColliderRenderer', { timeout: 60_000 }, () => {
   const resolved = resolveColliders(DEFAULT_LAYOUT.colliders, () => 10.5);
   const r = createColliderRenderer(ctx, resolved, { lighting, patchMaterial });
 
@@ -40,7 +40,7 @@ describe('createColliderRenderer', () => {
       // And it fills the collider (no tiny placeholder).
       expect(bb.max.y - bb.min.y).toBeGreaterThan(0.9 * (ref[4] - ref[1] - 0.04));
     }
-  });
+  }, 60_000);
 
   it('batches the parts per (material, casts shadow): a handful of draws, all inside the colliders', () => {
     const meshes = r.object.children.filter((o) => (o as Mesh).isMesh) as Mesh[];

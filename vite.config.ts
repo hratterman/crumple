@@ -30,8 +30,6 @@ export default defineConfig({
             { name: 'vendor', test: /node_modules[\\/](three[\\/]examples|postprocessing|n8ao)[\\/]/, priority: 2 },
             // P7: the replay recorder / playback, its UI and the camera rigs (static imports, own chunk).
             { name: 'replay', test: /src[\\/](app[\\/]replay|ui[\\/]replay|render[\\/]cameras)[\\/]/, priority: 1 },
-            // P8: the challenge layer (host, runtime, catalog, UI, course / ghost visuals), loaded on first use.
-            { name: 'challenges', test: /src[\\/](app[\\/]challenges|game[\\/]challenges|ui[\\/]challenges|render[\\/]challenges)/, priority: 1 },
           ],
         },
       },

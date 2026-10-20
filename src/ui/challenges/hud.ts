@@ -18,7 +18,7 @@ function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls: string, parent?: 
   return e;
 }
 
-const POPUP_MS = 1900;
+const POPUP_MS = 2400;
 const MAX_POPUPS = 4;
 
 export class ChallengeHud {
@@ -171,6 +171,7 @@ export class ChallengeHud {
   update(state: Readonly<ChallengeRunState>, clockS: number, arrow: number | null): void {
     const def = this.def;
     if (!def) return;
+    if (state.phase === 'running' && clockS > 0.6) this.hideIntro();
     const c = formatTime(Math.max(0, clockS), def.scoring.metric === 'time' ? 2 : 1);
     if (c !== this.last.clock) this.clock.textContent = this.last.clock = c;
     const sc = def.scoring.metric === 'time' ? this.target : state.scoreText;

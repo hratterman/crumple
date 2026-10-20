@@ -61,8 +61,8 @@ export interface ChallengeHostDeps {
   /** Traction control forced for the run (null = back to the player's setting). */
   setTractionControl(on: boolean | null): void;
   toast(title: string, sub: string): void;
-  /** The select screen was opened / closed (main pauses the world while it is open). */
-  onSelectOpen(open: boolean): void;
+  /** The select screen was opened / closed ('start': a challenge starts; 'back': the player backed out). */
+  onSelectOpen(open: boolean, reason?: 'start' | 'back'): void;
 }
 
 /** `window.__crumple.challenges`. */
@@ -84,6 +84,8 @@ export interface ChallengeDebugApi {
   readonly selectOpen: boolean;
   /** Popups shown this run (tests). */
   readonly popups: string[];
+  /** The latest sample's COM / speed / up (tests, while the render loop is held). */
+  readonly sample: { pos: number[]; speed: number; upY: number; airborne: boolean } | null;
 }
 
 export interface ChallengeHost {
@@ -156,6 +158,7 @@ export function createChallengeHost(deps: ChallengeHostDeps): ChallengeHost {
   let playerTransform: Transform | null = null;
   let bot: Bot | null = null;
   let botCfg: Partial<BotConfig> | null = null;
+  let botTick = 0;
   let resultTimer = 0;
   let lastResult: ChallengeResult | null = null;
   let crashCamDone = false;
@@ -187,7 +190,7 @@ export function createChallengeHost(deps: ChallengeHostDeps): ChallengeHost {
     record: (id) => store.records[id] ?? null,
     vehicleName: (d) => (d.vehicle.kind === 'forced' ? getVehicleEntry(d.vehicle.id).stats.name : 'Your car'),
     onStart: (id) => {
-      closeSelect();
+      closeSelect('start');
       void start(id);
     },
     onBack: () => {
@@ -200,10 +203,10 @@ export function createChallengeHost(deps: ChallengeHostDeps): ChallengeHost {
     select.open(focusId);
     deps.onSelectOpen(true);
   }
-  function closeSelect(): void {
+  function closeSelect(reason: 'start' | 'back' = 'back'): void {
     if (!select.isOpen) return;
     select.close();
-    deps.onSelectOpen(false);
+    deps.onSelectOpen(false, reason);
   }
 
   // ---------------------------------------------------------------- snapshot listener
@@ -221,6 +224,14 @@ export function createChallengeHost(deps: ChallengeHostDeps): ChallengeHost {
       phase = 'live';
     }
     run.onSample(s);
+    // events go to the HUD / results at once (DOM only): popups and the finish never wait for a rendered frame
+    handleEvents(run.drainEvents());
+    if (!run) return;
+    // the playtest bot drives at snapshot rate (30 Hz), independent of the render loop (held in tests)
+    if (bot && run.running && ++botTick % 4 === 0) {
+      const b = bot.update(s);
+      client.input(1, { throttle: b.throttle, brake: b.brake, steer: b.steer, handbrake: b.handbrake, gearSelect: 1 });
+    }
     if (run.running && !opponentsArmed) {
       opponentsArmed = true;
       for (const o of opponents) client.setAutopilot(o.id, { mode: 'ram', targetObjectId: 1, aggression: o.aggression, seed: o.id });
@@ -268,7 +279,7 @@ export function createChallengeHost(deps: ChallengeHostDeps): ChallengeHost {
     const d = defs().find((x) => x.id === id);
     if (!d) throw new Error(`unknown challenge '${id}'`);
     starting = (async () => {
-      closeSelect();
+      closeSelect('start');
       results.close();
       if (def) teardownWorld();
       hud.hide();
@@ -505,8 +516,6 @@ export function createChallengeHost(deps: ChallengeHostDeps): ChallengeHost {
       o.vehicle?.update(client, o.id, range, wf.nodes, dt, deps.camera);
     }
     if (!run || !def) return;
-    handleEvents(run.drainEvents());
-    if (!run) return;
     const st = run.state;
     // smooth run clock: the render time (interpolated, a snapshot behind) while running, the frozen clock after
     const clock = st.phase === 'running' && run.goTick >= 0 ? Math.min(st.clock + 0.05, Math.max(0, wf.simTime - run.goSimTime)) : st.clock;
@@ -614,6 +623,10 @@ export function createChallengeHost(deps: ChallengeHostDeps): ChallengeHost {
     get popups() {
       return popups.slice();
     },
+    get sample() {
+      const sm = builder?.sample;
+      return sm && sm.valid ? { pos: sm.pos.slice(), speed: sm.speed, upY: sm.up[1], airborne: sm.airborne } : null;
+    },
   };
 
   return {
@@ -630,7 +643,7 @@ export function createChallengeHost(deps: ChallengeHostDeps): ChallengeHost {
       return def ? def.name : null;
     },
     openSelect,
-    closeSelect,
+    closeSelect: () => closeSelect('back'),
     selectFrame: (dt) => select.frame(dt),
     start,
     restart,
