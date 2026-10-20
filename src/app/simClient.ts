@@ -42,6 +42,7 @@ import { buildVehicleRig } from '../sim/vehicle/builder';
 import type { TransmissionMode, VehicleDef } from '../sim/vehicle/types';
 import type { ColliderDef, WorldLayout } from '../world/types';
 import type { ReplayFile } from '../protocol/replay';
+import { NodeHistory, RenderClock } from './renderClock';
 
 export interface SimClientOptions {
   seed: number;
@@ -150,6 +151,11 @@ export class SimClient {
 
   private lastArrivalMs = -1;
   private arrivalIntervalMs: number;
+  /** Live presentation: smooth render clock + node history (renderClock.ts). */
+  private readonly clock = new RenderClock();
+  private readonly hist = new NodeHistory();
+  private readonly trafficOlder = createTrafficAgentFrame();
+  private readonly trafficNewer = createTrafficAgentFrame();
   private rateWindowStart = -1;
   private rateWindowCount = 0;
 
@@ -378,6 +384,7 @@ export class SimClient {
     if (!cur) return 0;
     const n = cur.trafficCount;
     while (out.length < n) out.push(createTrafficAgentFrame());
+    if (!this.replaying && this.hist.length >= 2) return this.readTrafficAgentsLive(renderSimTime, cur, out, n);
     const prev = this.prev;
     const span = prev ? cur.simTime - prev.simTime : 0;
     let t = span > 0 && prev ? (renderSimTime - prev.simTime) / span : 1;
@@ -412,6 +419,38 @@ export class SimClient {
       o.speed = p.speed + (o.speed - p.speed) * t;
       o.steer = p.steer + (o.steer - p.steer) * t;
       o.brake = p.brake + (o.brake - p.brake) * t;
+    }
+    return n;
+  }
+
+  /** Live path of readTrafficAgents: poses from the node history's bracketing pair at the render time. */
+  private readTrafficAgentsLive(t: number, cur: SnapshotReader, out: TrafficAgentFrame[], n: number): number {
+    const a = this.trafficOlder;
+    const b = this.trafficNewer;
+    for (let i = 0; i < n; i++) {
+      const o = cur.readTrafficAgent(i, out[i]!);
+      o.nodesReady = false;
+      if ((o.flags & TRAFFIC_FLAG_AWAKE) !== 0) o.nodesReady = this.hist.hasObjectPair(o.objectId, t);
+      let u = this.hist.trafficPair(o.agent, t, a, b);
+      if (u < 0) continue;
+      const awake = (a.flags & TRAFFIC_FLAG_AWAKE) !== 0;
+      if (((b.flags & TRAFFIC_FLAG_AWAKE) !== 0) !== awake) continue;
+      if ((b.flags & TRAFFIC_FLAG_TELEPORTED) !== 0) u = 1;
+      if (u > 1) u = 1;
+      for (let k = 0; k < 3; k++) o.pos[k] = a.pos[k]! + (b.pos[k]! - a.pos[k]!) * u;
+      const dot = a.quat[0] * b.quat[0] + a.quat[1] * b.quat[1] + a.quat[2] * b.quat[2] + a.quat[3] * b.quat[3];
+      const sg = dot < 0 ? -1 : 1;
+      let len = 0;
+      for (let k = 0; k < 4; k++) {
+        const q = a.quat[k]! + (sg * b.quat[k]! - a.quat[k]!) * u;
+        o.quat[k] = q;
+        len += q * q;
+      }
+      len = len > 0 ? 1 / Math.sqrt(len) : 1;
+      for (let k = 0; k < 4; k++) o.quat[k] = o.quat[k]! * len;
+      o.speed = a.speed + (b.speed - a.speed) * u;
+      o.steer = a.steer + (b.steer - a.steer) * u;
+      o.brake = a.brake + (b.brake - a.brake) * u;
     }
     return n;
   }
@@ -537,6 +576,7 @@ export class SimClient {
     this.livePrevBuffer = this.liveCurBuffer = null;
     if (this.cur) this.rebuildRanges(this.cur);
     this.discardEvents();
+    this.clock.reset();
     const p = this.pendingLive;
     this.pendingLive = null;
     if (p) this.onSnapshot(p);
@@ -581,6 +621,7 @@ export class SimClient {
     if (!cur) return false;
     const ci = cur.findObject(objectId);
     if (ci < 0 || local < 0 || local >= cur.objectNodeCount(ci)) return false;
+    if (!this.replaying && this.hist.length >= 2 && this.hist.node(objectId, local, time, out)) return true;
     const cn = cur.nodes;
     const c = (cur.objectNodeOffset(ci) + local) * NODE_STRIDE;
     const prev = this.prev;
@@ -657,18 +698,18 @@ export class SimClient {
   }
 
   /**
-   * Render clock about one snapshot behind the newest: sweeps from the
-   * previous snapshot's simTime to the current one's over the measured
-   * arrival interval, so interpolation always has both endpoints.
+   * Live render clock (renderClock.ts): advances smoothly with wall time ×
+   * the sim's time scale and trails the newest snapshot by about one
+   * snapshot interval + the arrival jitter (rate-steered, never snapped per
+   * arrival). Advances on every call: call it ONCE per frame and reuse the
+   * value for every consumer of that frame. Replay: the playhead time.
    */
   renderTime(nowMs: number = performance.now()): number {
     if (this.replaying) return this.replayTime;
     const cur = this.cur;
     if (!cur) return 0;
-    const prev = this.prev;
-    if (!prev) return cur.simTime;
-    const a = Math.min(Math.max((nowMs - this.lastArrivalMs) / this.arrivalIntervalMs, 0), 1);
-    return prev.simTime + (cur.simTime - prev.simTime) * a;
+    if (this.hist.length < 2) return cur.simTime;
+    return this.clock.time(nowMs, cur.simTime, cur.timeScale);
   }
 
   /**
@@ -692,6 +733,7 @@ export class SimClient {
       throw new RangeError(`interpolate: out holds ${out.length} floats, need ${total * NODE_STRIDE}`);
     }
     const curNodes = cur.nodes;
+    if (!this.replaying && this.hist.interpolate(renderSimTime, cur, out)) return total;
     const prev = this.prev;
     const span = prev ? cur.simTime - prev.simTime : 0;
     if (!prev || span <= 0) {
@@ -941,6 +983,9 @@ export class SimClient {
     for (let i = 0; i < this.snapshotListeners.length; i++) this.snapshotListeners[i]!(reader);
 
     const now = performance.now();
+    const prevNewest = this.hist.newestTime;
+    this.hist.push(reader);
+    this.clock.onArrival(now, prevNewest, reader.simTime, reader.timeScale);
     if (this.lastArrivalMs >= 0) {
       const dt = now - this.lastArrivalMs;
       // Smoothed arrival interval drives renderTime; clamp outliers (tab stalls).

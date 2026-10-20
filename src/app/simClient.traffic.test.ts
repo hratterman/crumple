@@ -103,7 +103,10 @@ describe('SimClient traffic (P6)', () => {
     w.reply({ type: 'snapshot', buffer: snap(40, [awake], true) });
     client.readTrafficAgents(t1, out);
     expect(out[0]!.nodesReady).toBe(false);
-    expect(out[0]!.pos[0]).toBe(3); // mode switch ghost → awake: latest pose as-is
+    // The render clock trails the newest snapshot: at t1 the agent was still a ghost at x = 2 (node history pair 0 → 20).
+    expect(out[0]!.pos[0]).toBe(2);
+    client.readTrafficAgents(30 / 2000, out);
+    expect(out[0]!.pos[0]).toBe(3); // mode switch ghost → awake inside the pair: the newer pose as-is
     w.reply({ type: 'snapshot', buffer: snap(60, [awake], true) });
     client.readTrafficAgents(50 / 2000, out);
     expect(out[0]!.nodesReady).toBe(true);

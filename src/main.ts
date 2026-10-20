@@ -1722,7 +1722,9 @@ async function boot(): Promise<void> {
     // Sim → interpolated nodes → beam view + camera subject.
     const need = client.nodeTotal * 3;
     if (positions.length < need) positions = new Float32Array(need);
-    const interpolated = client.interpolate(client.renderTime(), positions) > 0;
+    // One render-clock read per frame: every consumer (nodes, traffic, FX, audio) sees the same instant.
+    const renderT = client.renderTime();
+    const interpolated = client.interpolate(renderT, positions) > 0;
     prof.lap('interpolate');
     if (interpolated) {
       if (beamView.visible) beamView.update(client, positions);
@@ -1772,7 +1774,7 @@ async function boot(): Promise<void> {
     // P5 world layer: camera is final; water last (its planar reflection sees this frame's props/vegetation).
     worldFrame.dtS = dt;
     worldFrame.time = (performance.now() - bootTime) / 1000;
-    worldFrame.simTime = client.renderTime();
+    worldFrame.simTime = renderT;
     worldFrame.timeScale = paused || replay.active ? 0 : slowMo ? SLOW_MO_SCALE : 1;
     worldFrame.nodes = positions;
     worldFrame.interpolated = interpolated;
