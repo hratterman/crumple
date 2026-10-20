@@ -19,6 +19,7 @@ import processorsUrl from './worklet/processors.ts?worker&url';
 import { AudioDirector, type AwakeVoiceLike, type DirectorGraph, type GhostVoiceLike } from './director';
 import { FallbackAmbience, FallbackEngineVoice, FallbackSurfaceVoice, noiseBuffer, ParamSlot, WorkletAmbience, WorkletEngineVoice, WorkletSurfaceVoice, type EngineVoiceIO } from './io';
 import { MixGraph } from './mix';
+import type { OneShotKind } from './dsp/oneshots';
 import { OneShotPlayer } from './oneShotPlayer';
 import { SEDAN_ENGINE, SEDAN_TRAFFIC_ENGINE } from './profiles';
 import { ListenerRig, SpatialVoice } from './spatial';
@@ -193,6 +194,30 @@ export async function createAudioSystem(o: AudioSystemOptions): Promise<AudioSys
   const ghosts: GhostVoiceLike[] = [];
   for (let i = 0; i < GHOST_VOICES; i++) ghosts.push(new GhostVoice(ctx, mix.engine, noise));
   const oneShots = new OneShotPlayer(ctx, mix.oneShots, mix.ui, ONE_SHOT_SLOTS);
+  // the bank renders in a worker (≈ 0.5 s of CPU kept off the frame loop); inline slices if that fails
+  let bankWorker: Worker | null = null;
+  try {
+    bankWorker = new Worker(new URL('./bankWorker.ts', import.meta.url), { type: 'module' });
+    oneShots.useExternalBank();
+    bankWorker.onmessage = (e: MessageEvent) => {
+      const d = e.data as { done?: boolean; kind?: OneShotKind; data?: Float32Array };
+      if (d.done) {
+        oneShots.bankDone();
+        bankWorker?.terminate();
+        bankWorker = null;
+      } else if (d.kind && d.data) oneShots.addVariant(d.kind, d.data);
+    };
+    bankWorker.onerror = (e) => {
+      errors.push(`bank worker: ${e.message}`);
+      oneShots.useInlineBank();
+      bankWorker?.terminate();
+      bankWorker = null;
+    };
+    bankWorker.postMessage({ sampleRate: ctx.sampleRate });
+  } catch (e) {
+    errors.push(`bank worker: ${String(e)}`);
+    oneShots.useInlineBank();
+  }
   const listener = new ListenerRig(ctx);
 
   const zones = o.layoutZones;
@@ -314,6 +339,7 @@ export async function createAudioSystem(o: AudioSystemOptions): Promise<AudioSys
     dispose(): void {
       for (const g of gestures) window.removeEventListener(g, onGesture, true);
       hint.remove();
+      bankWorker?.terminate();
       director.dispose();
       void ctx.close();
     },

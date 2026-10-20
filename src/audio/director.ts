@@ -316,7 +316,7 @@ export class AudioDirector {
     g.ambience.setInputs(this.amb, now);
 
     // ---- one-shot bank: build a little each frame until complete
-    if (!g.oneShots.ready) g.oneShots.build(1.5);
+    if (!g.oneShots.ready) g.oneShots.build(1);
   }
 
   private hookGlass(): void {

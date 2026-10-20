@@ -1,7 +1,8 @@
 /**
  * One-shot playback (P8 audio): the synthesized bank (dsp/oneshots.ts,
- * built progressively in idle slices after start — a few ms per variant,
- * crash sounds first) played through a capped pool of spatial slots with
+ * rendered in a Web Worker — bankWorker.ts — and handed over variant by
+ * variant, crash sounds first; inline in small slices only when workers are
+ * unavailable) played through a capped pool of spatial slots with
  * priority stealing. Each trigger creates one AudioBufferSourceNode (the
  * WebAudio way: sources are single-use); nothing is allocated while no
  * event fires.
@@ -40,8 +41,39 @@ export class OneShotPlayer {
     for (const k of ONE_SHOT_KINDS) if (!BUILD_ORDER.includes(k)) for (let v = 0; v < ONE_SHOT_VARIANTS[k]; v++) this.buildQueue.push([k, v]);
   }
 
+  private external = false;
+  private externalDone = false;
+
   get ready(): boolean {
-    return this.buildQueue.length === 0;
+    return this.external ? this.externalDone : this.buildQueue.length === 0;
+  }
+
+  /** The bank arrives from a worker (`addVariant` / `bankDone`); inline building stops. */
+  useExternalBank(): void {
+    this.external = true;
+    this.buildQueue = [];
+  }
+
+  addVariant(kind: OneShotKind, data: Float32Array): void {
+    const b = this.ctx.createBuffer(1, data.length, this.ctx.sampleRate);
+    b.getChannelData(0).set(data);
+    let list = this.bank.get(kind);
+    if (!list) this.bank.set(kind, (list = []));
+    list.push(b);
+  }
+
+  bankDone(): void {
+    this.externalDone = true;
+  }
+
+  /** Falls back to inline building (the worker failed). */
+  useInlineBank(): void {
+    if (!this.external || this.externalDone) return;
+    this.external = false;
+    for (const k of ONE_SHOT_KINDS) {
+      const have = this.bank.get(k)?.length ?? 0;
+      for (let v = have; v < ONE_SHOT_VARIANTS[k]; v++) this.buildQueue.push([k, v]);
+    }
   }
 
   get active(): number {
@@ -57,12 +89,7 @@ export class OneShotPlayer {
     const t0 = performance.now();
     while (this.buildQueue.length > 0 && performance.now() - t0 < budgetMs) {
       const [k, v] = this.buildQueue.shift()!;
-      const data = synthOneShot(k, this.ctx.sampleRate, v + 1);
-      const b = this.ctx.createBuffer(1, data.length, this.ctx.sampleRate);
-      b.getChannelData(0).set(data);
-      let list = this.bank.get(k);
-      if (!list) this.bank.set(k, (list = []));
-      list.push(b);
+      this.addVariant(k, synthOneShot(k, this.ctx.sampleRate, v + 1));
     }
     this.buildMs += performance.now() - t0;
   }
