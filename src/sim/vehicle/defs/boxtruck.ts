@@ -500,6 +500,8 @@ const K_AXLE = 1.4e6;
 const K_REAR_AXLE = 2.5e6;
 /** Fixed joints onto the frame (fixedLink). */
 const K_TOWER = 1.5e6;
+/** Crossmember centre node (f3_x, f7_x) fore-aft braces, N/m each (≈ 25 Hz on the 6 kg node). */
+const K_XMEMBER_BRACE = 4e4;
 const K_CAB_MOUNT = 1.2e6;
 const K_BOX_MOUNT = 1.6e6;
 const K_BUMPER_MOUNT = 1.4e6;
@@ -1132,6 +1134,10 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
       if (e[1] === 0) {
         // Crossmember centre node: to both flanges of both rails.
         for (const s of SIDES) for (const t of ['lo', 'hi']) link(sid(st.id, e[0]), sid(st.id, t, s), cls);
+        // Fore-aft braces to the neighbouring stations' lower chords: the four beams above all lie in the
+        // station plane, so fore-aft the centre node (f7_x is the vehicle's frame origin: chase camera,
+        // telemetry) hung on string tension alone and swung ±1.2 cm at 1.8 Hz on a parked truck.
+        for (const nb of [FRAME[i - 1], FRAME[i + 1]]) if (nb) for (const s of SIDES) fixedLink(sid(st.id, e[0]), sid(nb.id, 'lo', s), cls, K_XMEMBER_BRACE);
         continue;
       }
       for (const s of SIDES) {
