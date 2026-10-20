@@ -1508,6 +1508,7 @@ export const SEDAN_FOLLOW: Readonly<Record<string, string>> = {
   doorCardRR: 'doorRR',
   doorCardLF: 'doorLF',
   doorCardLR: 'doorLR',
+  headliner: 'roof',
 };
 
 setVisualExtras(SEDAN_VISUAL, {

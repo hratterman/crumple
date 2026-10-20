@@ -730,6 +730,19 @@ describe('dmg1 shader patch', () => {
     expect(applyDamageGlsl(ShaderLib.basic.fragmentShader, 'paint')).toBe(ShaderLib.basic.fragmentShader);
   });
 
+  it('takes screen derivatives of linear varyings only (no quad-flat blocks of a procedural height)', () => {
+    // dFdx / dFdy / fwidth are constant over each 2x2 pixel quad on SwiftShader and many GPUs: a
+    // bump from dFdx(h) of a procedural height lit every quad flat (blocky crushed panels).
+    const anchors = ['#include <common>', '#include <clearcoat_normal_fragment_begin>', '#include <clearcoat_normal_fragment_maps>', '#include <lights_physical_fragment>'].join('\n');
+    for (const v of ['paint', 'plastic', 'glass'] as const) {
+      const fs = applyDamageGlsl(anchors, v).replace(/\/\/.*$/gm, ''); // code only
+      const args = [...fs.matchAll(/\b(?:dFdx|dFdy|fwidth)\s*\(\s*([^()]*?)\s*\)/g)].map((m) => m[1]);
+      expect(args.length, v).toBeGreaterThan(0);
+      for (const a of args) expect(['dmgP', 'surfPos'], `${v}: derivative of ${a}`).toContain(a);
+    }
+    expect(applyDamageGlsl(anchors, 'paint')).toContain('normal = dmgBump(-vViewPosition, normal, dmgDx, dmgDy, faceDirection);');
+  });
+
   it('patchFor: paint / glass variants, null for undamageable panels; key dmg1', () => {
     const f = fixture();
     expect(f.dmg.patchFor(0)!.key).toBe('dmg1:paint');

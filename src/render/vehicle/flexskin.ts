@@ -103,24 +103,78 @@ const triadCall = (k: number): string =>
  * to its bump so the folds shade. Stage-agnostic GLSL (both stages include it).
  */
 export const FLEX_CRUMPLE_GLSL = /* glsl */ `
-float flexHash13( vec3 p ) {
-	p = fract( p * 0.1031 );
-	p += dot( p, p.zyx + 31.32 );
-	return fract( ( p.x + p.y ) * p.z );
+vec3 flexMod289( vec3 x ) {
+	return x - floor( x * ( 1.0 / 289.0 ) ) * 289.0;
 }
-float flexNoise( vec3 x ) {
-	vec3 i = floor( x );
-	vec3 f = fract( x );
-	vec3 u = f * f * ( 3.0 - 2.0 * f );
-	return mix( mix( mix( flexHash13( i ), flexHash13( i + vec3( 1.0, 0.0, 0.0 ) ), u.x ),
-			mix( flexHash13( i + vec3( 0.0, 1.0, 0.0 ) ), flexHash13( i + vec3( 1.0, 1.0, 0.0 ) ), u.x ), u.y ),
-		mix( mix( flexHash13( i + vec3( 0.0, 0.0, 1.0 ) ), flexHash13( i + vec3( 1.0, 0.0, 1.0 ) ), u.x ),
-			mix( flexHash13( i + vec3( 0.0, 1.0, 1.0 ) ), flexHash13( i + vec3( 1.0, 1.0, 1.0 ) ), u.x ), u.y ), u.z );
+vec4 flexMod289( vec4 x ) {
+	return x - floor( x * ( 1.0 / 289.0 ) ) * 289.0;
+}
+vec4 flexPermute( vec4 x ) {
+	return flexMod289( ( x * 34.0 + 10.0 ) * x );
+}
+// 3D simplex noise in about [-0.97, 0.97] with its ANALYTIC gradient (webgl-noise, Ashima Arts /
+// Stefan Gustavson, MIT; kernel radius 0.5: C2, no lattice-aligned flat lines like value noise).
+// Shading takes slopes from this gradient, never from dFdx / dFdy of a procedural height: screen
+// derivatives are constant over each 2x2 pixel quad (always under SwiftShader, coarse on many GPUs),
+// which lit every quad flat (4x4 screen-pixel blocks at the 0.5 software render scale).
+float flexSnoise( vec3 v, out vec3 grad ) {
+	const vec2 C = vec2( 1.0 / 6.0, 1.0 / 3.0 );
+	vec3 i = floor( v + dot( v, C.yyy ) );
+	vec3 x0 = v - i + dot( i, C.xxx );
+	vec3 g = step( x0.yzx, x0.xyz );
+	vec3 l = 1.0 - g;
+	vec3 i1 = min( g.xyz, l.zxy );
+	vec3 i2 = max( g.xyz, l.zxy );
+	vec3 x1 = x0 - i1 + C.xxx;
+	vec3 x2 = x0 - i2 + C.yyy;
+	vec3 x3 = x0 - 0.5;
+	i = flexMod289( i );
+	vec4 p = flexPermute( flexPermute( flexPermute( i.z + vec4( 0.0, i1.z, i2.z, 1.0 ) ) + i.y + vec4( 0.0, i1.y, i2.y, 1.0 ) ) + i.x + vec4( 0.0, i1.x, i2.x, 1.0 ) );
+	vec4 j = p - 49.0 * floor( p * ( 1.0 / 49.0 ) );
+	vec4 xg = floor( j * ( 1.0 / 7.0 ) );
+	vec4 yg = floor( j - 7.0 * xg );
+	vec4 x = xg * ( 2.0 / 7.0 ) + ( 0.5 / 7.0 - 1.0 );
+	vec4 y = yg * ( 2.0 / 7.0 ) + ( 0.5 / 7.0 - 1.0 );
+	vec4 h = 1.0 - abs( x ) - abs( y );
+	vec4 b0 = vec4( x.xy, y.xy );
+	vec4 b1 = vec4( x.zw, y.zw );
+	vec4 s0 = floor( b0 ) * 2.0 + 1.0;
+	vec4 s1 = floor( b1 ) * 2.0 + 1.0;
+	vec4 sh = -step( h, vec4( 0.0 ) );
+	vec4 a0 = b0.xzyw + s0.xzyw * sh.xxyy;
+	vec4 a1 = b1.xzyw + s1.xzyw * sh.zzww;
+	vec3 g0 = normalize( vec3( a0.xy, h.x ) );
+	vec3 g1 = normalize( vec3( a0.zw, h.y ) );
+	vec3 g2 = normalize( vec3( a1.xy, h.z ) );
+	vec3 g3 = normalize( vec3( a1.zw, h.w ) );
+	vec4 m = max( 0.5 - vec4( dot( x0, x0 ), dot( x1, x1 ), dot( x2, x2 ), dot( x3, x3 ) ), 0.0 );
+	vec4 m2 = m * m;
+	vec4 m3 = m2 * m;
+	vec4 m4 = m2 * m2;
+	vec4 pd = vec4( dot( g0, x0 ), dot( g1, x1 ), dot( g2, x2 ), dot( g3, x3 ) );
+	vec4 t = -8.0 * m3 * pd;
+	grad = 105.0 * ( t.x * x0 + t.y * x1 + t.z * x2 + t.w * x3 + m4.x * g0 + m4.y * g1 + m4.z * g2 + m4.w * g3 );
+	return 105.0 * dot( m4, pd );
+}
+// Ridged noise 1 - |n| (sharp crest at n = 0) with gradient; e > 0 rounds the crest over about e
+// (anti-aliasing: e ~ the noise change across one pixel).
+float flexRidge( float n, vec3 gn, float e, out vec3 g ) {
+	float s = sqrt( n * n + e * e );
+	g = -( n / max( s, 1e-6 ) ) * gn;
+	return 1.0 - ( s - e );
+}
+// Crumple fold field (rest space) and its rest-space gradient; e as flexRidge (0 = exact crests).
+float flexCrumpleG( vec3 p, float e, out vec3 g ) {
+	vec3 sa = vec3( 1.7, 2.3, 5.2 );
+	vec3 ga, gb, ra, rb;
+	float a = flexRidge( flexSnoise( p * sa + 3.1, ga ), ga * sa, e, ra );
+	float b = flexRidge( flexSnoise( p * 3.1 + 9.7, gb ), gb * 3.1, e, rb );
+	g = 1.4 * a * ra + 0.9 * b * rb;
+	return 0.7 * ( a * a - 0.2 ) + 0.45 * ( b * b - 0.3 );
 }
 float flexCrumple( vec3 p ) {
-	float a = 1.0 - abs( flexNoise( p * vec3( 1.7, 2.3, 5.2 ) + 3.1 ) * 2.0 - 1.0 );
-	float b = 1.0 - abs( flexNoise( p * 3.1 + 9.7 ) * 2.0 - 1.0 );
-	return 0.7 * ( a * a - 0.2 ) + 0.45 * ( b * b - 0.3 );
+	vec3 g;
+	return flexCrumpleG( p, 0.0, g );
 }
 `;
 

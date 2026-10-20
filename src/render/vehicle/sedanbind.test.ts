@@ -56,8 +56,9 @@ describe('sedan render LODs + door-card followers (U6)', { timeout: 60_000 }, ()
   });
 
   it('door cards follow their door skins: rest pose exact, and a recorded 80 km/h side-pole peak keeps them behind the skin', () => {
-    const follow = extras.follow!;
-    expect(Object.keys(follow).sort()).toEqual(['doorCardLF', 'doorCardLR', 'doorCardRF', 'doorCardRR']);
+    const all = extras.follow!;
+    expect(Object.keys(all).sort()).toEqual(['doorCardLF', 'doorCardLR', 'doorCardRF', 'doorCardRR', 'headliner']);
+    const follow = Object.fromEntries(Object.entries(all).filter(([id]) => id.startsWith('doorCard')));
     const bf = applyFollowers(compiled.rig, b0, follow);
     const out = new Float64Array(6);
     const panel = (b: typeof b0, id: string) => b.panels.find((p) => p.panelId === id)!;
@@ -163,7 +164,7 @@ describe('sedan render LODs + door-card followers (U6)', { timeout: 60_000 }, ()
     };
     let samples = 0;
     let exposed = 0;
-    for (const [cardId, doorId] of Object.entries(extras.follow!)) {
+    for (const [cardId, doorId] of Object.entries(extras.follow!).filter(([id]) => id.startsWith('doorCard'))) {
       const card = bf.panels.find((p) => p.panelId === cardId)!;
       const door = bf.panels.find((p) => p.panelId === doorId)!;
       const C = deform(card);

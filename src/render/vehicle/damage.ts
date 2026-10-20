@@ -254,21 +254,29 @@ float dmgNoise(vec3 x) {
   float k = dmgHash13(i + vec3(1.0, 1.0, 1.0));
   return mix(mix(mix(a, b, u.x), mix(c, d, u.x), u.y), mix(mix(e, g, u.x), mix(h, k, u.x), u.y), u.z);
 }
-float dmgRidge(vec3 x) {
-  return 1.0 - abs(dmgNoise(x) * 2.0 - 1.0);
-}
-// Surface-gradient bump (Mikkelsen) with UNnormalized screen derivatives:
-// h in metres gives a true slope, independent of distance / resolution.
-vec3 dmgBump(vec3 surfPos, vec3 n, float h, float faceDir) {
+// Surface-gradient bump (Mikkelsen) with UNnormalized screen derivatives. The height's own
+// screen derivatives (hx, hy) come from its ANALYTIC rest-space gradient by the chain rule through
+// the rest-position varying (linear in a triangle, so its dFdx / dFdy are exact even where the
+// hardware takes one derivative per 2x2 pixel quad); dFdx(h) of a procedural h is quad-constant
+// there (SwiftShader always, many GPUs coarse) and lit every quad flat: 4x4-pixel blocks at the
+// 0.5 software render scale. h in metres gives a true slope, independent of distance / resolution.
+vec3 dmgBump(vec3 surfPos, vec3 n, float hx, float hy, float faceDir) {
   vec3 sx = dFdx(surfPos);
   vec3 sy = dFdy(surfPos);
   vec3 r1 = cross(sy, n);
   vec3 r2 = cross(n, sx);
   float det = dot(sx, r1) * faceDir;
-  vec3 grad = sign(det) * (dFdx(h) * r1 + dFdy(h) * r2);
+  vec3 grad = sign(det) * (hx * r1 + hy * r2);
   vec3 nn = abs(det) * n - grad;
   float l = length(nn);
   return l > 1e-12 ? nn / l : n;
+}
+// smoothstep(a, b, x) and its slope d/dx
+float dmgStep(float a, float b, float x, out float d) {
+  float w = max(b - a, 1e-6);
+  float t = clamp((x - a) / w, 0.0, 1.0);
+  d = 6.0 * t * (1.0 - t) / w;
+  return t * t * (3.0 - 2.0 * t);
 }
 `;
 
@@ -284,75 +292,125 @@ const DMG_INPUTS = /* glsl */ `
   float dmgStrain = clamp(dmgD.x * uDmgAmount, 0.0, 1.0);
   float dmgScuff = clamp(dmgD.y * uDmgAmount, 0.0, 1.0);
   float dmgTorn = clamp(dmgD.w * uDmgAmount, 0.0, 1.0);
-  float dmgPx = length(fwidth(dmgP));
+  // rest-space step per pixel (derivatives of a linear varying: exact per triangle)
+  vec3 dmgPdx = dFdx(dmgP);
+  vec3 dmgPdy = dFdy(dmgP);
+  float dmgPx = length(abs(dmgPdx) + abs(dmgPdy));
 `;
 
+/**
+ * Damage surface: every height term carries its analytic rest-space
+ * gradient (dmgGH, m/m), every mask edge is anti-aliased over the pixel
+ * footprint from those gradients, and detail fades out before it aliases.
+ */
 const DMG_SURFACE = /* glsl */ `
   float dmgW1 = clamp(1.0 - dmgPx * 15.0, 0.0, 1.0);
-  float dmgW2 = clamp(1.0 - dmgPx * 17.0 * 1.5, 0.0, 1.0);
-  float dmgW3 = clamp(1.0 - dmgPx * 41.0 * 1.5, 0.0, 1.0);
+  float dmgW2 = clamp(1.0 - dmgPx * 26.0, 0.0, 1.0);
+  float dmgW3 = clamp(1.0 - dmgPx * 60.0, 0.0, 1.0);
   // Sheet-metal folds. Rest space is the vehicle frame (z = length): frontal / rear crush
   // buckles panels into accordion ridges ACROSS z, so one fold family is stretched that way;
   // a second, isotropic family breaks it up; broad low-frequency dents ripple reflections.
-  float dmgR1 = dmgRidge(dmgP * vec3(2.2, 3.0, 7.5) + 3.1);
-  float dmgR1b = dmgRidge(dmgP * 5.5 + 9.7);
-  float dmgR2 = dmgRidge(dmgP * 14.0 + 7.7);
-  float dmgN3 = dmgNoise(dmgP * 41.0);
-  float dmgDent = dmgNoise(dmgP * 2.6 + 1.3);
-  // tent-like crests (ridged noise is sharp at the crest): faceted folds with a crisp light/dark split
+  vec3 dmgGa, dmgGb, dmgG2, dmgG3, dmgGd, dmgGc, dmgRa, dmgRb, dmgR2g;
+  const vec3 dmgSa = vec3(2.2, 3.0, 7.5);
+  float dmgNa = flexSnoise(dmgP * dmgSa + 3.1, dmgGa);
+  dmgGa *= dmgSa;
+  float dmgNb = flexSnoise(dmgP * 5.5 + 9.7, dmgGb);
+  dmgGb *= 5.5;
+  float dmgN2 = flexSnoise(dmgP * 14.0 + 7.7, dmgG2);
+  dmgG2 *= 14.0;
+  float dmgN3 = flexSnoise(dmgP * 41.0, dmgG3);
+  dmgG3 *= 41.0;
+  float dmgND = flexSnoise(dmgP * 2.6 + 1.3, dmgGd);
+  dmgGd *= 2.6;
+  // crests rounded over ~1.5 px of noise change (sharp up close, never a sub-pixel sparkle line)
+  float dmgR1 = flexRidge(dmgNa, dmgGa, 0.03 + 1.5 * dmgPx * length(dmgGa), dmgRa);
+  float dmgR1b = flexRidge(dmgNb, dmgGb, 0.03 + 1.5 * dmgPx * length(dmgGb), dmgRb);
+  float dmgR2 = flexRidge(dmgN2, dmgG2, 0.03 + 1.5 * dmgPx * length(dmgG2), dmgR2g);
+  // tent-like crests (cubed ridges): faceted folds with a crisp light/dark split
   float dmgF1 = dmgR1 * dmgR1 * dmgR1;
-  float dmgF1b = dmgR1b * dmgR1b * dmgR1b;
+  float dmgF1b = 0.7 * dmgR1b * dmgR1b * dmgR1b;
   float dmgF2 = dmgR2 * dmgR2;
-  float dmgFold = max(dmgF1, 0.7 * dmgF1b) * dmgW1;
+  bool dmgFa = dmgF1 >= dmgF1b;
+  float dmgFold = (dmgFa ? dmgF1 : dmgF1b) * dmgW1;
+  vec3 dmgGFold = (dmgFa ? 3.0 * dmgR1 * dmgR1 * dmgRa : 2.1 * dmgR1b * dmgR1b * dmgRb) * dmgW1;
   // + the vertex stage's geometric crumple folds (flexskin FLEX_CRUMPLE_GLSL), so they shade.
-  float dmgH = dmgStrain * (0.008 * dmgFold + 0.0025 * dmgF2 * dmgW2 + 0.001 * dmgN3 * dmgW3 + 0.005 * dmgDent
-    + ${FLEX_CRUMPLE_AMP} * flexCrumple(dmgP));
-  // scrape streaks: long horizontal scratches (stretched along y) broken up by coarse noise
+  float dmgCrum = flexCrumpleG(dmgP, 0.03 + 20.0 * dmgPx, dmgGc);
+  // height h = strain · (folds + dents + crumple) in metres; only its gradient is needed
+  vec3 dmgGH = dmgStrain * (0.008 * dmgGFold + 0.005 * dmgW2 * dmgR2 * dmgR2g + 0.0005 * dmgW3 * dmgG3 + 0.0025 * dmgGd
+    + ${FLEX_CRUMPLE_AMP} * dmgGc);
+  // crease valleys (inside of a fold): grime collects there
+  float dmgValley = clamp(0.5 - 1.6 * dmgCrum, 0.0, 1.0) * dmgW1;
+  // Scrape streaks: long horizontal scratches (stretched along y) broken up by coarse noise and a
+  // fine ragged-edge term; all in [0, 1].
+  vec3 dmgGs1, dmgGs2, dmgGs3, dmgGs4;
+  const vec3 dmgSs1 = vec3(2.0, 90.0, 2.0);
+  const vec3 dmgSs2 = vec3(1.3, 24.0, 1.3);
   float dmgWF = clamp(1.0 - dmgPx * 90.0, 0.0, 1.0);
-  float dmgS1 = mix(0.5, dmgNoise(dmgP * vec3(2.0, 90.0, 2.0)), dmgWF);
-  float dmgS2 = dmgNoise(dmgP * vec3(1.3, 24.0, 1.3) + 5.0);
-  float dmgS3 = dmgNoise(dmgP * 4.0 + 11.0);
-  float dmgStreak = 0.42 * dmgS1 + 0.36 * dmgS2 + 0.22 * dmgS3;
+  float dmgWE = clamp(1.0 - dmgPx * 45.0, 0.0, 1.0);
+  float dmgS1 = 0.5 + 0.5 * dmgWF * flexSnoise(dmgP * dmgSs1, dmgGs1);
+  float dmgS2 = 0.5 + 0.5 * flexSnoise(dmgP * dmgSs2 + 5.0, dmgGs2);
+  float dmgS3 = 0.5 + 0.5 * flexSnoise(dmgP * 4.0 + 11.0, dmgGs3);
+  float dmgS4 = flexSnoise(dmgP * vec3(55.0, 70.0, 55.0) + 2.0, dmgGs4) * dmgWE;
+  float dmgStreak = 0.42 * dmgS1 + 0.36 * dmgS2 + 0.22 * dmgS3 + 0.05 * dmgS4;
+  vec3 dmgGS = 0.21 * dmgWF * dmgSs1 * dmgGs1 + 0.18 * dmgSs2 * dmgGs2 + 0.44 * dmgGs3 + 0.05 * dmgWE * vec3(55.0, 70.0, 55.0) * dmgGs4;
+  // streak change across one pixel: every scrape edge is at least that soft (no stair-stepping)
+  float dmgAA = 0.7 * dmgPx * length(dmgGS);
   // Bent metal keeps its paint; only the sharpest fold crests of a heavily crushed panel crack
   // it (small chips), everything broader is scrape damage.
   float dmgChip = smoothstep(0.55, 1.0, dmgStrain) * smoothstep(0.5, 0.9, dmgFold) * 0.35;
   float dmgCover = clamp(dmgScuff * 0.9 + dmgChip, 0.0, 1.0);
+  float dmgOn = smoothstep(0.0, 0.02, dmgCover);
   float dmgT = 0.8 - 0.62 * dmgCover;
-  float dmgOn = step(0.002, dmgCover);
-  float dmgPrimer = smoothstep(dmgT, dmgT + 0.035, dmgStreak) * dmgOn;
-  float dmgMetal = smoothstep(dmgT + 0.1, dmgT + 0.13, dmgStreak) * dmgOn;
+  float dmgDP;
+  float dmgDM;
+  float dmgPrimer = dmgStep(dmgT - dmgAA, dmgT + 0.03 + dmgAA, dmgStreak, dmgDP) * dmgOn;
+  float dmgMetal = dmgStep(dmgT + 0.1 - dmgAA, dmgT + 0.125 + dmgAA, dmgStreak, dmgDM) * dmgOn;
   // the polished-out halo around scrapes (not around crease chips)
-  float dmgHalo = smoothstep(dmgT - 0.16, dmgT, dmgStreak) * dmgOn * clamp(dmgScuff * 3.0, 0.0, 1.0);
-  dmgH -= 0.00025 * dmgPrimer + 0.0002 * dmgMetal;
+  float dmgHalo = smoothstep(dmgT - 0.16 - dmgAA, dmgT + dmgAA, dmgStreak) * dmgOn * clamp(dmgScuff * 3.0, 0.0, 1.0);
+  // the paint layers' thickness: a tiny step down at each scrape edge catches the light
+  dmgGH -= (0.00025 * dmgDP + 0.0002 * dmgDM) * dmgOn * dmgGS;
+  // Dirt / dust ground into the damage: in crease valleys, around scrapes, never as a flat wash.
+  float dmgDirtAmt = clamp(dmgScuff * 0.75 + dmgStrain * 0.55 + dmgTorn * 0.4, 0.0, 1.0);
+  float dmgDirtN = 0.5 * dmgS2 + 0.3 * (0.5 + 0.5 * dmgND) + 0.2 * (0.5 + 0.5 * dmgN2 * dmgW2);
+  float dmgDirt = smoothstep(0.62 - 0.45 * dmgDirtAmt, 0.9 - 0.45 * dmgDirtAmt, dmgDirtN + 0.3 * dmgValley) * dmgDirtAmt;
+  float dmgDx = dot(dmgGH, dmgPdx);
+  float dmgDy = dot(dmgGH, dmgPdy);
 `;
 
 const DMG_PAINT = /* glsl */ `
-  diffuseColor.rgb *= 1.0 - dmgStrain * (0.08 + 0.4 * dmgFold);
+  // shallow crease valleys read a touch darker (micro-shadowed, grimy); bent paint keeps its colour
+  diffuseColor.rgb *= 1.0 - dmgStrain * (0.04 + 0.16 * dmgValley);
   diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * 1.2 + 0.035, dmgHalo * 0.6 * (1.0 - dmgPrimer));
-  diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.115, 0.12, 0.118) * (0.8 + 0.4 * dmgS2), dmgPrimer);
+  diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.2, 0.205, 0.2) * (0.75 + 0.35 * dmgS2), dmgPrimer);
   diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.6, 0.6, 0.62) * (0.8 + 0.35 * dmgS1), dmgMetal);
+  diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.085, 0.072, 0.058) * (0.8 + 0.4 * dmgS3), dmgDirt * 0.6 * (1.0 - 0.6 * dmgMetal));
   // torn-edge grime: vFlexDamage.w is a smooth triad-weighted share, so square it to keep it at the tear
-  diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.03, 0.027, 0.024), clamp(0.45 * dmgTorn * dmgTorn + 0.06 * dmgStrain, 0.0, 0.6));
+  diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.03, 0.027, 0.024), clamp(0.45 * dmgTorn * dmgTorn + 0.04 * dmgStrain, 0.0, 0.6));
   roughnessFactor = mix(roughnessFactor, 0.5, clamp(dmgStrain * 0.15 + dmgHalo * 0.7 + dmgTorn * 0.3, 0.0, 1.0));
   roughnessFactor = mix(roughnessFactor, 0.78, dmgPrimer);
   roughnessFactor = mix(roughnessFactor, 0.36 + 0.2 * dmgS1, dmgMetal);
+  roughnessFactor = mix(roughnessFactor, 0.88, dmgDirt * 0.8);
   metalnessFactor = mix(metalnessFactor, 0.0, dmgPrimer);
   metalnessFactor = mix(metalnessFactor, 1.0, dmgMetal);
-  float dmgCoatKill = clamp(max(dmgPrimer, dmgHalo * 0.8), 0.0, 1.0);
+  metalnessFactor = mix(metalnessFactor, 0.0, dmgDirt * 0.6);
+  float dmgCoatKill = clamp(max(max(dmgPrimer, dmgHalo * 0.8), dmgDirt * 0.75), 0.0, 1.0);
   float dmgCoatRough = 0.12 * dmgStrain + 0.3 * dmgTorn;
-  normal = dmgBump(-vViewPosition, normal, dmgH, faceDirection);
+  normal = dmgBump(-vViewPosition, normal, dmgDx, dmgDy, faceDirection);
 `;
 
 const DMG_PLASTIC = /* glsl */ `
-  diffuseColor.rgb *= 1.0 - dmgStrain * (0.08 + 0.35 * dmgFold);
+  dmgDx *= 0.7;
+  dmgDy *= 0.7;
+  diffuseColor.rgb *= 1.0 - dmgStrain * (0.04 + 0.14 * dmgValley);
   diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.16, 0.16, 0.165), dmgPrimer * 0.8);
   diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * 1.6 + 0.04, dmgHalo * 0.35 * (1.0 - dmgPrimer));
+  diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.085, 0.072, 0.058), dmgDirt * 0.5);
   diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.04, 0.035, 0.03), 0.4 * dmgTorn);
-  roughnessFactor = mix(roughnessFactor, 0.85, clamp(dmgPrimer + dmgStrain * 0.4 + dmgHalo * 0.3, 0.0, 1.0));
+  roughnessFactor = mix(roughnessFactor, 0.85, clamp(dmgPrimer + dmgStrain * 0.4 + dmgHalo * 0.3 + dmgDirt * 0.5, 0.0, 1.0));
   metalnessFactor = mix(metalnessFactor, 0.0, dmgPrimer);
-  float dmgCoatKill = dmgPrimer;
+  float dmgCoatKill = max(dmgPrimer, dmgDirt * 0.75);
   float dmgCoatRough = 0.4 * dmgStrain;
-  normal = dmgBump(-vViewPosition, normal, dmgH * 0.7, faceDirection);
+  normal = dmgBump(-vViewPosition, normal, dmgDx, dmgDy, faceDirection);
 `;
 
 const DMG_GLASS = /* glsl */ `
@@ -444,7 +502,7 @@ export function applyDamageGlsl(fragmentShader: string, variant: DamageVariant, 
     fs = insertAfter(
       fs,
       ANCHOR_CC_MAPS,
-      '#ifdef USE_CLEARCOAT\n  clearcoatNormal = dmgBump(-vViewPosition, clearcoatNormal, dmgH, faceDirection);\n#endif',
+      '#ifdef USE_CLEARCOAT\n  clearcoatNormal = dmgBump(-vViewPosition, clearcoatNormal, dmgDx, dmgDy, faceDirection);\n#endif',
     );
   }
   fs = insertAfter(
