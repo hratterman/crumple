@@ -135,7 +135,7 @@ function flood(id: string, x: number, z: number, faceX: number, faceZ: number): 
 /** Bowling: lane along z 330 heading west; pins (challenge props) around PIN_HEAD. */
 export const BOWLING = { laneZ: 330, startX: 437, headPinX: 396 } as const;
 /** Barrel-roll side kicker under the LEFT wheels of a car driving north on x = 388. */
-export const BARREL_ROLL = { laneX: 388, kickerX: 387.15, kickerZ: 300, startZ: 362, hx: 0.6, hy: 1.0, hz: 3.5 } as const;
+export const BARREL_ROLL = { laneX: 388, kickerX: 387.1, kickerZ: 300, startZ: 362, hx: 0.9, hy: 1.0, hz: 3.5 } as const;
 /** Wreck jump heading east along z 408. */
 export const WRECK_JUMP = { laneZ: 408, takeoffX: 457, wreckX: [466, 468, 470, 472], landingX: 482, runStartX: 335 } as const;
 /** Derby pit (inside, metres). */

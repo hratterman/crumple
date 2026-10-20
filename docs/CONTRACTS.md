@@ -622,7 +622,7 @@ Contract files (change only via this doc): `src/game/challenges/types.ts` (new: 
 | Challenge | Where / vehicle | Score | Bronze / Silver / Gold / Crumple | Measured (headless playtest bot unless noted) |
 |---|---|---|---|---|
 | Long Jump | Anvil ski jump / sedan | jump m (×0.5 crash landing) | 35 / 50 / 65 / 76 | throttle 0.4: 74.8 m upright (browser e2e identical); 0.7: 89.6 m onto the flat, flipped → 44.8; 1.0: 96.5 → 48.2; coasting from the pad does not start |
-| Barrel Roll | side kicker / coupe | rolls (¼ steps, ×0.5 crash landing) | 0.25 / 0.5 / 1 / 2 | 40 km/h 0.5 roll on the roof → 0.25; 55–85 km/h one clean roll; browser run 2.25 rolls tumbling → 1.13 |
+| Barrel Roll | side kicker / coupe | rolls (¼ steps, ×0.5 crash landing) | 0.25 / 0.5 / 1 / 2 | side kicker 1.8 m wide, 2 m lip: 40 km/h 0.5 roll onto the roof → 0.25; 55 / 70 km/h one clean roll (gold); 85 km/h over-rotates onto the roof → 0.25; a browser run tumbled 2.25 rolls → 1.13 |
 | Wall of Fame | crash lane / sedan | crush cm at ≥ 100 km/h | 70 / 95 / 115 / 135 | 95 km/h → fail (too slow); 108 km/h 135 cm; 114 km/h (lane maximum) 120 cm |
 | Bowling | stunt park / sedan | pins | 5 / 7 / 9 / 10 | 45–70 km/h centre or offset 0.9–1.8 m: 5–6; 100 km/h offset 0.4 m: 9; browser 95 km/h: 6 |
 | Drift King | Millbrook Ring / coupe, TC off | drift pts | 300 / 900 / 2000 / 4000 | the grip bot banks 0–340 (it does not drift on purpose); thresholds set from the scoring rule: a held 25° drift at 12 m/s for 3 s banks ≈ 270 per corner, 8 corners in two laps |
