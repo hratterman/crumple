@@ -76,7 +76,7 @@ export const SUPER_CHUNK = 4;
  * how far a face turns from the sun (horizontally) and how steep it is, so
  * sun-averted cuts get the most and flat ground ≈ a tenth of it.
  */
-export const TERRAIN_FILL = 0.11;
+export const TERRAIN_FILL = 0.18;
 
 /**
  * Per-layer look. `mean` is the target mean albedo (linear) the texture is

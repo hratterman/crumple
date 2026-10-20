@@ -8,7 +8,7 @@ import { compileVehicle } from '../../sim/vehicle/builder';
 import { SEDAN } from '../../sim/vehicle/defs/sedan';
 import type { TerrainData, TerrainSampler, WaterBody } from '../../world/types';
 import { QUALITY_PRESETS, type LightingStack, type PatchMaterial, type RenderContext, type SimObjectSlice, type WorldFrame } from '../types';
-import { createFxSystem, SMOKE_SPACING_M } from './index';
+import { createFxSystem, SMOKE_OPACITY_RATE, SMOKE_SPACING_M } from './index';
 import { SkidLayer } from './skidmarks';
 import { SurfaceLift } from './surface';
 import { RIBBON_LIFT_M } from '../types';
@@ -133,6 +133,36 @@ describe('createFxSystem', () => {
     let gap = 0;
     for (let i = 1; i < zs.length; i++) gap = Math.max(gap, zs[i]! - zs[i - 1]!);
     expect(gap).toBeLessThan(SMOKE_SPACING_M * 2);
+  });
+
+  it('a standing burnout feeds its cloud at most SMOKE_OPACITY_RATE (opacity × area) per wheel per second', () => {
+    const { fx, tel, pose, step } = setup();
+    tel[VehicleTelemetry.wheelContact] = 15;
+    for (let c = 0; c < 4; c++) tel[12 + c] = 4000;
+    tel[10] = 24; // rear tread spinning at 24 m/s, car standing
+    tel[11] = 24;
+    tel[28] = 80;
+    tel[29] = 80;
+    const seconds = 2;
+    for (let k = 0; k <= seconds * 60; k++) {
+      pose(0, 0, 0);
+      step(k / 60);
+    }
+    const soft = fx.object.children.find((o) => o.name === 'fx.soft') as unknown as {
+      geometry: { instanceCount: number; attributes: { iD: { data: { array: Float32Array; stride: number } } } };
+    };
+    const { array, stride } = soft.geometry.attributes.iD.data;
+    let opacity = 0;
+    let n = 0;
+    for (let i = 0; i < soft.geometry.instanceCount; i++) {
+      const w = array[i * stride + 15]!;
+      if (Math.floor(w) !== 0) continue; // smoke only
+      opacity += w - Math.floor(w);
+      n++;
+    }
+    expect(n).toBeGreaterThan(60);
+    expect(opacity / (2 * seconds)).toBeLessThanOrEqual(SMOKE_OPACITY_RATE * 1.05);
+    expect(opacity / (2 * seconds)).toBeGreaterThan(SMOKE_OPACITY_RATE * 0.5);
   });
 
   it('dirt: ruts + spray + rooster tail instead of rubber smoke', () => {

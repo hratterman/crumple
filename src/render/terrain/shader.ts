@@ -99,6 +99,7 @@ uniform float uTDebug;     // 0 off, 1 albedo, 2 normal, 3 roughness, 4 splat, 5
 uniform vec4 uTCut;        // steep cuts (render only): N.y where rock starts, N.y where it is full, rock share of the moved weight, jitter
 uniform vec3 uTFill;       // bounce from sunlit terrain + sky multiple scattering (linear radiance at full weight)
 uniform vec2 uTSunH;       // horizontal unit vector toward the sun (x, z)
+uniform float uTCutFoot;   // reach (m) of the scree band at the foot of a steep cut
 
 vec2 tHash22(vec2 p) {
   vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
@@ -524,6 +525,70 @@ float tSpec = uTSpec;
   // Mid-scale breakup (1–10 m) so no surface reads as a flat colour at 20–80 m.
   albedo *= mix(0.84, 1.14, clamp(nzA.g * 0.65 + nzC.a * 0.35, 0.0, 1.0));
 
+  // Rock-cut character on steep faces (shader only): sedimentary strata along world Y (warped,
+  // gently dipping, two scales, alternating warm / grey beds), dark bedding-plane and joint
+  // cracks, exposed harder ledges from macro noise; scree / debris tint where a cut meets the
+  // flat ground below it (the shoulder). Flat ground pays one branch.
+  {
+    // strata start a little shallower than the rock override, so a cut's lower apron keeps them
+    float cutK = smoothstep(uTCut.x + 0.06, uTCut.y + 0.08, N.y);
+    vec2 gT = uTGrid.zw * uTCutFoot;
+    float footN = 0.0;
+    if (cutK < 0.98) {
+      // steepest neighbour within ~uTCutFoot m (the normal texture stores (x, z): |xz|² = 1 − y²)
+      vec2 a1 = textureLod(tTNormal, gridUv + vec2(gT.x, gT.y) * 0.7, 0.0).xy;
+      vec2 a2 = textureLod(tTNormal, gridUv - vec2(gT.x, gT.y) * 0.7, 0.0).xy;
+      float sMax = max(dot(a1, a1), dot(a2, a2));
+#ifndef TERRAIN_LITE
+      vec2 a3 = textureLod(tTNormal, gridUv + vec2(gT.x, -gT.y) * 0.7, 0.0).xy;
+      vec2 a4 = textureLod(tTNormal, gridUv - vec2(gT.x, -gT.y) * 0.7, 0.0).xy;
+      sMax = max(sMax, max(dot(a3, a3), dot(a4, a4)));
+#endif
+      footN = smoothstep(uTCut.x + 0.06, uTCut.y + 0.08, sqrt(max(1.0 - sMax, 0.0))) * (1.0 - cutK);
+    }
+    if (cutK > 0.0) {
+      // explicit gradients: this runs under a branch (implicit derivatives are undefined there)
+      const float kS = 1.0 / 37.0;
+      vec4 nzS = textureGrad(tTNoise, vec2(P.x + P.z, P.y * 2.3) * kS, vec2(dPdx.x + dPdx.z, dPdx.y * 2.3) * kS, vec2(dPdy.x + dPdy.z, dPdy.y * 2.3) * kS);
+      float yS = P.y + (nzC.r - 0.5) * 6.0 + (nzS.g - 0.5) * 1.2 + dot(P.xz, vec2(0.021, -0.013));
+      float bedA = sin(yS * 3.6959);                 // ~1.7 m beds
+      float bedB = sin(yS * 11.4240 + nzS.b * 3.0);  // ~0.55 m laminae
+      float tone = 1.0 + 0.26 * bedA + 0.1 * bedB;
+      // beds alternate buff sandstone / grey shale / iron-stained red-brown
+      float bedC = 0.5 + 0.5 * sin(yS * 1.31 + nzC.g * 4.0);
+      vec3 bedTint = mix(mix(vec3(1.1, 1.0, 0.86), vec3(0.9, 0.93, 0.98), smoothstep(0.3, 0.7, bedC)), vec3(1.12, 0.86, 0.72), smoothstep(0.8, 0.95, bedC) * 0.8);
+      // bedding-plane cracks (thin, along the beds) and joints (noise ridges across them)
+      float ph = fract(yS * 0.588);
+      float plane = abs(ph - 0.5) * 2.0;
+      float bedCrack = 1.0 - smoothstep(0.0, 0.07 + 0.05 * nzS.r, 1.0 - plane);
+      float joint = 1.0 - smoothstep(0.015, 0.05, abs(nzS.a - 0.5));
+      float crack = max(bedCrack * 0.85, joint * 0.7 * smoothstep(0.3, 0.7, nzS.r));
+      crack *= 1.0 - smoothstep(0.03, 0.12, footprint); // sub-pixel cracks alias: fade with distance
+      // harder ledges: patches of bare, paler, smoother rock
+      float ledge = smoothstep(0.55, 0.7, nzC.b * 0.7 + nzS.r * 0.3);
+      // exposed rock reads paler and greyer than the soil it is cut through
+      float lum = dot(albedo, vec3(0.2126, 0.7152, 0.0722));
+      vec3 rockC = mix(albedo, vec3(lum) * vec3(1.06, 1.0, 0.9), 0.65) * 1.3;
+      vec3 cutAlb = rockC * tone * bedTint * mix(1.0, 1.25, ledge) * (1.0 - 0.6 * crack);
+      albedo = mix(albedo, cutAlb, cutK);
+      tRough = mix(tRough, mix(tRough, 0.6, ledge), cutK);
+      tAO = mix(tAO, tAO * (1.0 - 0.5 * crack), cutK);
+      // stepped beds: each bed's tread tilts toward the sky, its riser (just under the next
+      // bedding plane) toward the horizon, so light catches the ledges
+      float riser = smoothstep(0.72, 0.94, ph) * (1.0 - smoothstep(0.96, 1.0, ph));
+      nW = normalize(nW + vec3(0.0, 1.0, 0.0) * ((0.3 - 0.75 * riser) * cutK * (0.6 + 0.4 * ledge)));
+    }
+    if (footN > 0.0) {
+      // scree: fallen, paler grey-brown debris with coarse speckle at the foot of the cut
+      const float kP = 1.0 / 1.7;
+      float speck = textureGrad(tTNoise, P.xz * kP, dPdx.xz * kP, dPdy.xz * kP).r;
+      vec3 scree = vec3(0.16, 0.148, 0.13) * mix(0.55, 1.3, speck * speck) * mix(0.9, 1.1, nzA.b);
+      float k = footN * mix(0.55, 1.0, smoothstep(0.3, 0.7, nzA.r * 0.5 + speck * 0.5));
+      albedo = mix(albedo, scree, k * 0.9);
+      tRough = mix(tRough, 0.9, k);
+    }
+  }
+
   // Wet ground near the water line (and darker under it).
   if (uTWater.w > 0.5) {
     float above = P.y - uTWater.x;
@@ -589,6 +654,7 @@ export function createTerrainUniforms(): TerrainUniforms {
     uTCut: { value: new Vector4(0.84, 0.66, 0.85, 0.14) },
     uTFill: { value: new Vector3(0, 0, 0) },
     uTSunH: { value: new Vector2(1, 0) },
+    uTCutFoot: { value: 4 },
   };
 }
 
