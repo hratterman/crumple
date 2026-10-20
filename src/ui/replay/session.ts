@@ -87,7 +87,8 @@ export interface ReplaySessionDebug {
   enterPhoto(): Promise<boolean>;
   exitPhoto(): void;
   setPhoto(patch: Partial<PhotoSettings>): void;
-  capture(scale?: 1 | 2): Promise<{ width: number; height: number; bytes: number; name: string }>;
+  /** `scale` × the CSS size (photo panel: 1 or 2; tests may pass the screen pixel ratio). */
+  capture(scale?: number): Promise<{ width: number; height: number; bytes: number; name: string }>;
   /** Focus at a CSS pixel (photo mode); resolves the picked distance. */
   focusAt(x: number, y: number): number | null;
   /** Start the crash cam on the most severe marker now (no delay, ignores the setting). */
@@ -748,7 +749,7 @@ export class ReplaySession {
     this.photo.setOutputSize(Math.round(ow), Math.round(oh));
   }
 
-  async capture(scale?: 1 | 2): Promise<{ width: number; height: number; bytes: number; name: string }> {
+  async capture(scale?: number): Promise<{ width: number; height: number; bytes: number; name: string }> {
     if (!this.photoOn) throw new Error('capture outside photo mode');
     if (this.busy) throw new Error('capture in progress');
     this.busy = true;

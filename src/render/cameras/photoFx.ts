@@ -165,6 +165,9 @@ export class PhotoFx {
     this.baseExposure = this.renderer.toneMappingExposure;
     this.effect = new PhotoGradeEffect();
     this.pass = new EffectPass(this.camera, this.effect);
+    // It is the last pass (8-bit output) now: dither like the stack's own EffectPass, or graded sky
+    // gradients band.
+    this.pass.dithering = true;
     this.composer.addPass(this.pass);
   }
 
