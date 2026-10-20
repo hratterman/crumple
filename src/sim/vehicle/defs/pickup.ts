@@ -111,6 +111,21 @@ const Y_W = WHEEL_RADIUS;
 
 const OMEGA_DT_TARGET = 0.33;
 const BUDGET_PER_KG = (OMEGA_DT_TARGET / DT) ** 2;
+/**
+ * Front bumper mounting (see the FRONT BUMPER beams). Crush brackets: stiffness / crush force per member
+ * (at 5e5 the crushed brackets stored enough to spring the horn tips 14 cm back out: 50 km/h spring-back
+ * 32 %; 2e5 gives 6 %). Straps: stiffness, bend (yield) force and bolt-shear force. A strap folds
+ * plastically at BUMPER_STRAP_YIELD as the horns crush, so it never springs the bar back off the crushed
+ * horns; the ratchet lets its force run ahead of the yield in proportion to the closing rate (beams.ts
+ * PLASTIC_RATCHET: ≈ k·v·dt / ratchet = k·v·0.005), so the bolts shear only when the horns are driven in
+ * fast. Measured peaks (lower strap): 50 km/h 8.0 kN, 60 km/h 8.8 kN, 70 km/h tears the lower straps,
+ * 80 km/h and up tears all four. Shear at 9.6 kN leaves 20 % margin at 50 km/h.
+ */
+const K_BUMPER_BRACKET = 2e5;
+const BUMPER_BRACKET_CRUSH = 2.5e4;
+const K_BUMPER_STRAP = 9e4;
+const BUMPER_STRAP_YIELD = 2e3;
+const BUMPER_STRAP_SHEAR = 9.6e3;
 /** Shell nodes (group 'body': frame, clip, cab, bed, bumpers) run stiffer for crash response (sedan.ts SHELL_OMEGA_DT_TARGET). */
 const SHELL_OMEGA_DT_TARGET = 0.485;
 const SHELL_BUDGET_PER_KG = (SHELL_OMEGA_DT_TARGET / DT) ** 2;
@@ -530,6 +545,8 @@ export interface PickupDesign {
   /** Tailgate hinge + latch beams. */
   tailgateHinges: [string, string][];
   tailgateLatches: [string, string][];
+  /** Front bumper straps (the tear-off beams; the render detaches the bar on them). */
+  bumperStraps: [string, string][];
 }
 
 function buildPickup(): { def: VehicleDef; design: PickupDesign } {
@@ -995,12 +1012,6 @@ function buildPickup(): { def: VehicleDef; design: PickupDesign } {
   const bumperMounts: [string, string][] = [];
   for (const s of ['L', 'R'] as const) {
     bumperMounts.push(
-      [sid('bf', 'bl', s), sid('f0', 'lo', s)],
-      [sid('bf', 'bl', s), sid('f0', 'hi', s)],
-      [sid('bf', 'bu', s), sid('f0', 'hi', s)],
-      [sid('bf', 'bu', s), sid('f0', 'lo', s)],
-      [sid('bf', 'bo', s), sid('f0', 'lo', s)],
-      [sid('bf', 'bo', s), sid('f0', 'hi', s)],
       [sid('br', 'bl', s), sid('f11', 'lo', s)],
       [sid('br', 'bl', s), sid('f11', 'hi', s)],
       [sid('br', 'bu', s), sid('f11', 'hi', s)],
@@ -1008,9 +1019,37 @@ function buildPickup(): { def: VehicleDef; design: PickupDesign } {
       [sid('br', 'bo', s), sid('f11', 'hi', s)],
     );
   }
-  bumperMounts.push(['bf_bl', 'f0_lo_L'], ['bf_bl', 'f0_lo_R'], ['bf_bu', 'f0_hi_L'], ['bf_bu', 'f0_hi_R']);
   bumperMounts.push(['br_bl', 'f11_lo_L'], ['br_bl', 'f11_lo_R'], ['br_bu', 'f11_hi_L'], ['br_bu', 'f11_hi_R']);
   for (const [a, b] of bumperMounts) link(a, b, 'bumperMount');
+  // FRONT BUMPER: the bar bears on the horn tips through crush brackets (compression only: they crush,
+  // they never hold the bar on), and is held on by bracket straps bolted back along the rails to the
+  // first crossmember (f3). The straps fold with the horns; driven in fast (≥ ~65 km/h) their bolts shear
+  // and the bar comes away. A 50 km/h hit crushes the horns about 0.45 m with the bar staying on, bent;
+  // 80–100 km/h tear it off (constants above).
+  const bumperCrush: [string, string][] = [];
+  for (const s of ['L', 'R'] as const) {
+    bumperCrush.push(
+      [sid('bf', 'bl', s), sid('f0', 'lo', s)],
+      [sid('bf', 'bl', s), sid('f0', 'hi', s)],
+      [sid('bf', 'bu', s), sid('f0', 'hi', s)],
+      [sid('bf', 'bu', s), sid('f0', 'lo', s)],
+      [sid('bf', 'bo', s), sid('f0', 'lo', s)],
+      [sid('bf', 'bo', s), sid('f0', 'hi', s)],
+    );
+  }
+  bumperCrush.push(['bf_bl', 'f0_lo_L'], ['bf_bl', 'f0_lo_R'], ['bf_bu', 'f0_hi_L'], ['bf_bu', 'f0_hi_R']);
+  for (const [a, b] of bumperCrush) {
+    const ma = massOf.get(a)!;
+    const mb = massOf.get(b)!;
+    fix({ a, b, type: 'support', k: K_BUMPER_BRACKET, d: sig3(0.8 * Math.sqrt((K_BUMPER_BRACKET * ma * mb) / (ma + mb))), deform: BUMPER_BRACKET_CRUSH, breakF: 0 });
+  }
+  const bumperStraps: [string, string][] = [];
+  for (const s of ['L', 'R'] as const) bumperStraps.push([sid('bf', 'bl', s), sid('f3', 'lo', s)], [sid('bf', 'bu', s), sid('f3', 'hi', s)]);
+  for (const [a, b] of bumperStraps) {
+    const ma = massOf.get(a)!;
+    const mb = massOf.get(b)!;
+    fix({ a, b, type: 'normal', k: K_BUMPER_STRAP, d: sig3(0.5 * Math.sqrt((K_BUMPER_STRAP * ma * mb) / (ma + mb))), deform: BUMPER_STRAP_YIELD, breakF: BUMPER_STRAP_SHEAR });
+  }
   for (const t of ['f11_lo_L', 'f11_lo_R', 'f11_hi_L', 'f11_hi_R', 'br_bl', 'br_bl_L', 'br_bl_R', 'br_bu']) link(rearHitch, t, 'frame');
 
   // ---- engine: rigid block + mounts to the frame
@@ -1426,6 +1465,7 @@ function buildPickup(): { def: VehicleDef; design: PickupDesign } {
     bedMounts,
     tailgateHinges,
     tailgateLatches,
+    bumperStraps,
   };
   return { def, design };
 }

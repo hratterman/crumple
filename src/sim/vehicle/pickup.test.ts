@@ -190,9 +190,9 @@ function hardDriving(): number {
 /**
  * The crash harness reports no per-beam state, so the mount check re-runs its frontal set-up
  * (plane, 0.5 s settle, rigid concrete wall 3 cm ahead, rolling release, 2 s) and counts the
- * broken cab / bed mount beams.
+ * broken cab / bed mount beams and front-bumper straps.
  */
-function mountsBrokenInFrontal(kmh: number): { cab: number; bed: number } {
+function mountsBrokenInFrontal(kmh: number): { cab: number; bed: number; straps: number } {
   const eng = new SimEngine({ gravity: [0, -9.81, 0], debugStrains: false, capacity: { maxObjects: 2, nodeCapacity: 2048, beamCapacity: 8192 } });
   eng.setGroundPlane(0, MaterialId.concrete);
   const obj = eng.spawnVehicle(1, PICKUP, { pos: [0, 0, 0], quat: [0, 0, 0, 1] }, 'auto');
@@ -217,7 +217,7 @@ function mountsBrokenInFrontal(kmh: number): { cab: number; bed: number } {
     }
     return n;
   };
-  return { cab: count(PICKUP_DESIGN.cabMounts), bed: count(PICKUP_DESIGN.bedMounts) };
+  return { cab: count(PICKUP_DESIGN.cabMounts), bed: count(PICKUP_DESIGN.bedMounts), straps: count(PICKUP_DESIGN.bumperStraps) };
 }
 
 let f50: CrashResult;
@@ -226,7 +226,8 @@ let f10: CrashResult;
 let pole: CrashResult;
 let offset: CrashResult;
 let f100: CrashResult;
-let f50Mounts = { cab: -1, bed: -1 };
+let f50Mounts = { cab: -1, bed: -1, straps: -1 };
+let f85Mounts = { cab: -1, bed: -1, straps: -1 };
 
 beforeAll(() => {
   st = runStatic(PICKUP);
@@ -246,6 +247,7 @@ beforeAll(() => {
   offset = runCrash({ kind: 'offset', speedKmh: 64, overlap: 0.4, def: PICKUP, probes });
   f100 = runCrash({ kind: 'frontal', speedKmh: 100, def: PICKUP, probes });
   f50Mounts = mountsBrokenInFrontal(50);
+  f85Mounts = mountsBrokenInFrontal(85);
 }, 600_000);
 
 afterAll(() => {
@@ -362,6 +364,16 @@ describe('PICKUP crash harness (fleet targets)', () => {
   it('64 km/h 40 % offset: cabin intrusion < 15 cm', () => {
     expect(offset.intrusion).toBeLessThan(0.15);
     expect(offset.finite).toBe(true);
+  });
+
+  it('front bumper: stays on (bent) at 50 km/h, tears off at 85 and 100 km/h', () => {
+    // Every strap holding the bar must shear for it to come away; at 50 km/h none may.
+    const n = PICKUP_DESIGN.bumperStraps.length;
+    expect(n).toBeGreaterThanOrEqual(4);
+    expect(f50Mounts.straps).toBe(0);
+    expect(f30.bumperBrokenFraction).toBe(0);
+    expect(f85Mounts.straps).toBe(n);
+    expect(f100.bumperBrokenFraction).toBeGreaterThan(0);
   });
 
   it('100 km/h frontal: stable, hood latch broken, windscreen shattered', () => {

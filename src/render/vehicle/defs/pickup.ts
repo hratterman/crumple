@@ -401,6 +401,51 @@ function m5Section(z: number): V3[] {
 const KB = { skirt: 2, shoulder: 5, railOut: 9, railIn: 11, wallLow: 13, floor: 14 } as const;
 
 // ====================================================================== ribbons (M2 nose)
+/** Front bumper straps (sim PICKUP_DESIGN.bumperStraps; pickup.test.ts checks they match). */
+export const PICKUP_BUMPER_STRAPS: readonly (readonly [string, string])[] = [
+  ['bf_bl_L', 'f3_lo_L'],
+  ['bf_bu_L', 'f3_hi_L'],
+  ['bf_bl_R', 'f3_lo_R'],
+  ['bf_bu_R', 'f3_hi_R'],
+];
+
+/**
+ * Brute's grille emblem: a flat-topped hex-nut prism facing forward (-z), with a chamfered front edge so
+ * the chrome catches a highlight ring. `c` is the centre of the back face; R the corner radius.
+ */
+function hexNutMesh(c: V3, R: number, depth: number, chamfer: number): PanelMesh {
+  const out: PanelMesh = { position: [], normal: [], uv: [], tangent: [], index: [] };
+  const quad = (p: readonly V3[], n: V3): void => {
+    const base = out.position.length / 3;
+    const t = [p[1]![0] - p[0]![0], p[1]![1] - p[0]![1], p[1]![2] - p[0]![2]];
+    const tl = Math.hypot(t[0]!, t[1]!, t[2]!) || 1;
+    for (let k = 0; k < p.length; k++) {
+      out.position.push(p[k]![0], p[k]![1], p[k]![2]);
+      out.normal.push(n[0], n[1], n[2]);
+      out.tangent.push(t[0]! / tl, t[1]! / tl, t[2]! / tl, 1);
+      out.uv.push(p[k]![0] - c[0], p[k]![1] - c[1]);
+    }
+    for (let k = 1; k + 1 < p.length; k++) out.index.push(base, base + k, base + k + 1);
+  };
+  const corner = (r: number, i: number, z: number): V3 => [c[0] + r * Math.cos((i * Math.PI) / 3), c[1] + r * Math.sin((i * Math.PI) / 3), z];
+  const zBack = c[2];
+  const zEdge = c[2] - depth + chamfer;
+  const zFront = c[2] - depth;
+  const ri = R - chamfer;
+  // Front face (fan, wound to face -z).
+  quad([0, 5, 4, 3, 2, 1].map((i) => corner(ri, i, zFront)), [0, 0, -1]);
+  for (let i = 0; i < 6; i++) {
+    const j = (i + 1) % 6;
+    const mid = ((i + 0.5) * Math.PI) / 3;
+    const nx = Math.cos(mid);
+    const ny = Math.sin(mid);
+    // Chamfer (45°) and the flank back to the grille.
+    quad([corner(ri, i, zFront), corner(ri, j, zFront), corner(R, j, zEdge), corner(R, i, zEdge)], [nx * Math.SQRT1_2, ny * Math.SQRT1_2, -Math.SQRT1_2]);
+    quad([corner(R, i, zEdge), corner(R, j, zEdge), corner(R, j, zBack), corner(R, i, zBack)], [nx, ny, 0]);
+  }
+  return out;
+}
+
 function sampleCurve(poly: readonly P2[], ts: readonly number[], outward: (dx: number, dz: number) => P2): { p: P2; n: P2 }[] {
   const cum = [0];
   for (let i = 1; i < poly.length; i++) cum.push(cum[i - 1]! + Math.hypot(poly[i]![0] - poly[i - 1]![0], poly[i]![1] - poly[i - 1]![1]));
@@ -477,7 +522,7 @@ const pairs = (p: readonly (readonly string[])[]): BeamSelector => ({ pairs: p.m
 const sideBind = (ids: readonly string[], s: 'L' | 'R'): string[] => ids.map((id) => id.replace(/\$/g, s));
 
 /** Panels a LOD2 pickup leaves out (seals, handles, small cabin / underbody parts). */
-const LOD2_DROP = /Seal[LR]?$|^handle|^steering$|^console$|^mirrorGlass|^plateFrame$|^wipers$|^towHooks$|^spare$|^exhaust$|^bedTieDowns$|^badges$|^hoodVents$|Badge[LR]?$/;
+const LOD2_DROP = /Seal[LR]?$|^handle|^steering$|^console$|^mirrorGlass|^plateFrame$|^wipers$|^towHooks$|^spare$|^exhaust$|^bedTieDowns$|^badges$|^badgeFace$|^hoodVents$|Badge[LR]?$/;
 
 export interface PickupBuildOptions {
   /** 0 = full detail, 1 ≈ 40 % of the triangles (LOD1 ≥ 25 m), 2 ≈ 20 % (LOD2 ≥ 80 m, far shadows). */
@@ -877,8 +922,15 @@ export function buildPickupVisual(opts: PickupBuildOptions = { lod: 0 }): Vehicl
     }
     const bm = mergeMeshes(bars);
     add('grilleBars', 'grille', 'chrome', mergeMeshes([bm, mirrorMesh(bm)]), noseBind, { damageWeight: 0.8 });
-    // Badge: a chrome plate in the centre of the upper bar.
-    add('badges', 'trim', 'chrome', roundedBoxMesh([0, 1.0, -2.83 - 0.03], [0.13, 0.04, 0.008], 0.008, { segs: SS }), noseBind, { damageWeight: 0.6 });
+    // Emblem: the Brute hex nut — a chrome nut on the upper bar, black-enamel face, chrome bore boss.
+    {
+      const zb = -2.83 - 0.03;
+      const nut = hexNutMesh([0, 0.985, zb], 0.07, 0.016, 0.006);
+      const face = hexNutMesh([0, 0.985, zb - 0.0155], 0.05, 0.003, 0.0015);
+      const boss = hexNutMesh([0, 0.985, zb - 0.018], 0.022, 0.004, 0.002);
+      add('badges', 'trim', 'chrome', mergeMeshes([nut, boss]), noseBind, { damageWeight: 0.6 });
+      add('badgeFace', 'trim', 'trim', face, noseBind, { damageWeight: 0.6, castShadow: false });
+    }
     // Headlamps: dark housing recess, lit lens (lamp shader: projector eyes + C-shaped DRL), chrome eye bezels.
     const housing = cutC(S2, [frontCut(lampShape, lens)], { corner: 0.01, offset: -0.006, where: (p) => p[1] > 0.85 && p[0] > 0.5 });
     add('headlampHousing', 'light', 'trim', housing.mesh, noseBind, { damageWeight: 0.3 });
@@ -991,7 +1043,9 @@ export function buildPickupVisual(opts: PickupBuildOptions = { lod: 0 }): Vehicl
       return prof.map(([o, y]) => [p[0] + n[0] * o, lerp(0.66, y, shrink), p[1] + n[1] * o] as V3);
     });
     const bar = orientMesh(gridLoftMesh(createLoft(secs.map((s) => s)), opts.lod === 0 ? 30 : 12, nPlan), [0, 0.67, -2.6], true);
-    add('bumperF', 'bumper', 'chrome', bar, bumperFBind, { detach: follow('boundary', 1), damageWeight: 1 });
+    // The bar bears on the horns through compression-only crush brackets and is held on only by the
+    // straps back to the f3 crossmember (sim PICKUP_DESIGN.bumperStraps): it comes away when they all shear.
+    add('bumperF', 'bumper', 'chrome', bar, bumperFBind, { detach: follow({ pairs: PICKUP_BUMPER_STRAPS }, 1), damageWeight: 1 });
     // Black lower valance / skid plate, fog lamps in black bezels, tow hooks.
     const valance = roundedBoxMesh([0, 0.49, -2.86], [0.8, 0.028, 0.045], 0.02, { segs: SS });
     const skid = transformMesh(roundedBoxMesh([0, 0.43, -2.74], [0.5, 0.012, 0.16], 0.01, { segs: 1 }), (q) => {

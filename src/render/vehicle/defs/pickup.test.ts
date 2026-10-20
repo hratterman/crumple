@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
 import { compileVehicle } from '../../../sim/vehicle/builder';
-import { PICKUP } from '../../../sim/vehicle/defs/pickup';
+import { PICKUP, PICKUP_DESIGN } from '../../../sim/vehicle/defs/pickup';
 import { bindTolerant } from '../index';
 import { tessellateVehicle } from '../loft';
 import { visualExtras } from '../lods';
 import type { PanelGeometry, VehicleVisualDef } from '../types';
 import { VISUAL_DEFAULTS } from '../types';
-import { buildPickupVisual, PICKUP_DIMS, PICKUP_FOLLOW, PICKUP_PAINT, PICKUP_VISUAL } from './pickup';
+import { buildPickupVisual, PICKUP_BUMPER_STRAPS, PICKUP_DIMS, PICKUP_FOLLOW, PICKUP_PAINT, PICKUP_VISUAL } from './pickup';
 
 const compiled = compileVehicle(PICKUP);
 const geoms = tessellateVehicle(PICKUP_VISUAL);
@@ -238,6 +238,9 @@ describe('PICKUP_VISUAL', { timeout: 120_000 }, () => {
     expect(def.panels.find((p) => p.id === 'tailgate')!.bind).toEqual(['tg_*']);
     for (const id of ['hood', 'tailgate', 'bumperF', 'bumperR']) expect(def.panels.find((p) => p.id === id)!.detach?.mode, id).toBe('follow');
     for (const id of ['mirrorL', 'mirrorR']) expect(def.panels.find((p) => p.id === id)!.detach?.mode, id).toBe('hide');
+    // The front bar detaches on the sim's strap beams (the crush brackets are compression-only and never break).
+    expect(PICKUP_BUMPER_STRAPS.map(([a, b]) => `${a}|${b}`)).toEqual(PICKUP_DESIGN.bumperStraps.map(([a, b]) => `${a}|${b}`));
+    expect(def.panels.find((p) => p.id === 'bumperF')!.detach?.attach).toEqual({ pairs: PICKUP_BUMPER_STRAPS });
     expect(def.paint).toEqual(PICKUP_PAINT);
     expect(def.wheels.tire.tread).toBe('allTerrain');
   });
