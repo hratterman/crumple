@@ -698,6 +698,38 @@ export class SnapshotReader {
     }
     return broken;
   }
+  /**
+   * P7 additive: object i's broken flags as OBJECT-LOCAL packed bits (bit b
+   * of out[b >> 5] = local beam b broken) into out[0..⌈beamCount/32⌉).
+   * Returns the broken count (0, out zeroed, when the section is absent).
+   * Word-level (≈ 32× fewer steps than readObjectBroken); allocation-free.
+   */
+  readObjectBrokenBits(i: number, out: Uint32Array): number {
+    const n = this.objectBeamCount(i);
+    const words = (n + 31) >>> 5;
+    if (out.length < words) throw new RangeError(`readObjectBrokenBits: out holds ${out.length}, need ${words}`);
+    if (!this._hasBroken || n === 0) {
+      out.fill(0, 0, words);
+      return 0;
+    }
+    const off = this.objectBeamOffset(i);
+    const u = this.u32;
+    const w = this.brokenW + (off >>> 5);
+    const sh = off & 31;
+    let count = 0;
+    for (let k = 0; k < words; k++) {
+      let v = sh === 0 ? u[w + k]! : (u[w + k]! >>> sh) | (u[w + k + 1]! << (32 - sh));
+      const rem = n - (k << 5);
+      if (rem < 32) v &= (1 << rem) - 1;
+      v >>>= 0;
+      out[k] = v;
+      // popcount
+      let x = v - ((v >>> 1) & 0x55555555);
+      x = (x & 0x33333333) + ((x >>> 2) & 0x33333333);
+      count += (Math.imul((x + (x >>> 4)) & 0x0f0f0f0f, 0x01010101) >>> 24);
+    }
+    return count;
+  }
   /** Object index for `objectId` (binary search; ids are ascending), or -1. */
   findObject(objectId: number): number {
     let lo = 0;
