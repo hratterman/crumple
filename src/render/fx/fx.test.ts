@@ -8,7 +8,7 @@ import { compileVehicle } from '../../sim/vehicle/builder';
 import { SEDAN } from '../../sim/vehicle/defs/sedan';
 import type { TerrainData, TerrainSampler, WaterBody } from '../../world/types';
 import { QUALITY_PRESETS, type LightingStack, type PatchMaterial, type RenderContext, type SimObjectSlice, type WorldFrame } from '../types';
-import { createFxSystem } from './index';
+import { createFxSystem, SMOKE_SPACING_M } from './index';
 import { SkidLayer } from './skidmarks';
 import { SurfaceLift } from './surface';
 import { RIBBON_LIFT_M } from '../types';
@@ -103,6 +103,36 @@ describe('createFxSystem', () => {
     tel[10] = tel[11] = 0;
     step(1.5 + FX_SKID_FADE_S + 1);
     expect(fx.stats.skidSegments).toBe(0);
+  });
+
+  it('tyre smoke from a fast car at a low smoke rate is a continuous trail, not discrete puffs', () => {
+    const { fx, tel, pose, step } = setup();
+    tel[VehicleTelemetry.wheelContact] = 15;
+    const v = 25;
+    tel[VehicleTelemetry.velZ] = -v;
+    for (let c = 0; c < 4; c++) tel[12 + c] = 3500;
+    tel[10] = 3.6; // just above the smoke threshold: ~3 puffs/s per wheel by rate alone
+    tel[11] = 3.6;
+    tel[28] = 40;
+    tel[29] = 40;
+    const frames = 60;
+    for (let k = 0; k <= frames; k++) {
+      pose(0, 0, (-v * k) / 60);
+      step(k / 60);
+    }
+    const soft = fx.object.children.find((o) => o.name === 'fx.soft') as unknown as {
+      geometry: { instanceCount: number; attributes: { iA: { data: { array: Float32Array; stride: number } } } };
+    };
+    const { array, stride } = soft.geometry.attributes.iA.data;
+    const zs: number[] = [];
+    for (let i = 0; i < soft.geometry.instanceCount; i++) zs.push(array[i * stride + 2]!);
+    // two wheels over (frames − 1) / 60 s × v of path: at least one puff per SMOKE_SPACING_M each
+    const path = ((frames - 1) / 60) * v;
+    expect(zs.length).toBeGreaterThanOrEqual(Math.floor((2 * path) / SMOKE_SPACING_M) - 4);
+    zs.sort((a, b) => a - b);
+    let gap = 0;
+    for (let i = 1; i < zs.length; i++) gap = Math.max(gap, zs[i]! - zs[i - 1]!);
+    expect(gap).toBeLessThan(SMOKE_SPACING_M * 2);
   });
 
   it('dirt: ruts + spray + rooster tail instead of rubber smoke', () => {

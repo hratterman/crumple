@@ -1,6 +1,19 @@
+import { DepthTexture, FloatType, PerspectiveCamera, type Vector4, type WebGLRenderer } from 'three';
 import { describe, expect, it } from 'vitest';
 
-import { createLightUniforms, createParticleSpawn, createSoftMaterial, createSparkMaterial, motionY, NO_BOUNCE, ParticlePool, RECORD_FLOATS, solveGroundHit, type KindMotion } from './particles';
+import {
+  createLightUniforms,
+  createParticleSpawn,
+  createSoftMaterial,
+  createSparkMaterial,
+  motionY,
+  NO_BOUNCE,
+  ParticlePool,
+  RECORD_FLOATS,
+  SceneDepthCopy,
+  solveGroundHit,
+  type KindMotion,
+} from './particles';
 import { createPuffTexture, puffDensity } from './textures';
 
 const SPARK: KindMotion = { drag: 0.8, gravity: 9.81, rise: 0, wind: 0 };
@@ -100,6 +113,48 @@ describe('fx materials + textures', () => {
     expect(m.uniforms.uKind).toBeDefined();
     expect(m.depthWrite).toBe(false);
     expect(m.vertexShader).toContain('fxMotion');
+  });
+  it('soft shading never uses screen-space derivatives (constant per 2×2 quad → blocky smoke)', () => {
+    const m = createSoftMaterial(createPuffTexture(), createLightUniforms(), [SMOKE], [[0.1, 0.4, 0.8, 0]]);
+    expect(m.fragmentShader).not.toMatch(/\b(dFdx|dFdy|fwidth)\s*\(/);
+    expect(m.fragmentShader).toContain('uSceneDepth');
+    expect(m.uniforms.uSoftDepth).toBeDefined();
+  });
+  it('scene depth copy: blits the bound target once per draw, restores it, enables soft depth', () => {
+    const m = createSoftMaterial(createPuffTexture(), createLightUniforms(), [SMOKE], [[0.1, 0.4, 0.8, 0]]);
+    const copy = new SceneDepthCopy(m);
+    const src = new DepthTexture(320, 180, FloatType);
+    const rt = { width: 320, height: 180, samples: 0, depthTexture: src };
+    const calls: string[] = [];
+    let bound: unknown = rt;
+    const renderer = {
+      getRenderTarget: () => bound,
+      initRenderTarget: () => calls.push('init'),
+      copyTextureToTexture: (a: unknown, b: DepthTexture) => {
+        calls.push(a === src && b.isDepthTexture ? 'copy' : 'bad');
+        bound = null;
+      },
+      setRenderTarget: (t: unknown) => {
+        calls.push(t === rt ? 'restore' : 'bad');
+        bound = t;
+      },
+      getActiveCubeFace: () => 0,
+      getActiveMipmapLevel: () => 0,
+    } as unknown as WebGLRenderer;
+    const cam = new PerspectiveCamera(60, 16 / 9, 0.1, 2000);
+    copy.prepare(renderer, cam);
+    expect(calls).toEqual(['init', 'copy', 'restore']);
+    const soft = m.uniforms.uSoftDepth!.value as Vector4;
+    expect(soft.x).toBe(1);
+    expect(soft.y).toBeCloseTo(0.1);
+    expect(soft.z).toBe(2000);
+    expect((m.uniforms.uSceneDepth!.value as DepthTexture).isDepthTexture).toBe(true);
+    // no depth texture on the target (canvas / other passes): soft depth off, nothing copied
+    bound = { width: 320, height: 180, samples: 0, depthTexture: null };
+    copy.prepare(renderer, cam);
+    expect(soft.x).toBe(0);
+    expect(calls.length).toBe(3);
+    copy.dispose();
   });
   it('puff density is zero outside the unit disc and positive at the centre', () => {
     const noise = (): number => 0;

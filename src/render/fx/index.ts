@@ -24,6 +24,7 @@ import type { SimObjectSlice, WorldFrame } from '../types';
 import { DebrisPool, createChunkGeometry, createDebrisMaterial, createFlakeGeometry } from './debris';
 import {
   ParticlePool,
+  SceneDepthCopy,
   createBitsMaterial,
   createLightUniforms,
   createParticleSpawn,
@@ -145,6 +146,8 @@ const STAMP_S = 0.2;
 const STAMP_MAX_SPEED = 1.5;
 const STAMP_LENGTH_M = 1.1;
 const STAMP_BACK_M = 0.3;
+/** Tyre smoke puffs are laid at least this far apart along the contact path (high preset), m. */
+export const SMOKE_SPACING_M = 0.45;
 /** Radius around the player vehicle (the first registered) inside which smoke between it and the camera thins out, m. */
 const FOCUS_RADIUS_M = 2.6;
 /** Sim step (s): WorldFrame.tick × SIM_DT = the latest snapshot's sim time. */
@@ -200,6 +203,8 @@ interface WheelFx {
   along: number;
   lastS: number;
   smokeAcc: number;
+  /** Path since the last smoke puff, in units of the puff spacing. */
+  smokeDist: number;
   sprayAcc: number;
   roostAcc: number;
   /** Seconds of near-stationary skid slip since the last burnout stamp. */
@@ -251,6 +256,8 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
   let q = ctx.quality;
   const [softCap, bitsCap, sparkCap] = particleCaps(q.particleBudget);
   const soft = new ParticlePool('fx.soft', softCap, createSoftMaterial(puff, light, SOFT_KINDS, SOFT_SHAPING), SOFT_KINDS, 30);
+  const softDepth = new SceneDepthCopy(soft.mesh.material);
+  softDepth.attach(soft.mesh);
   const bits = new ParticlePool('fx.bits', bitsCap, createBitsMaterial(light, BITS_KINDS, BITS_SHAPING), BITS_KINDS, 25);
   const sparks = new ParticlePool('fx.sparks', sparkCap, createSparkMaterial(SPARK_KINDS), SPARK_KINDS, 35);
   const skid = new SkidLayer(q.skidSegments);
@@ -265,8 +272,11 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
   const drawn = [skid.mesh, chunks.mesh, flakes.mesh, bits.mesh, soft.mesh, sparks.mesh] as const;
 
   let rateScale = 1;
+  let smokeSpacing = SMOKE_SPACING_M;
   const applyBudgetScales = (): void => {
     rateScale = Math.min(1.5, q.particleBudget / 3000);
+    // smaller budgets draw bigger puffs (sizeScale), so they can sit further apart
+    smokeSpacing = SMOKE_SPACING_M / Math.sqrt(Math.max(rateScale, 0.2));
     const sizeScale = Math.min(1.7, Math.max(1, Math.pow(3000 / q.particleBudget, 0.3)));
     (soft.mesh.material.uniforms.uSizeScale as { value: number }).value = sizeScale;
   };
@@ -740,9 +750,20 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
       // ---- particles (births spread over [t0, t1], positions lerped prev → current contact)
       const spin = omega >= 0 ? 1 : -1;
       if (fxFlags & WHEEL_SMOKE) {
+        // Puffs are spent by MASS (rate × time) but laid at least every SMOKE_SPACING_M along the
+        // contact path: a fast car at a low rate otherwise left discrete puffs metres apart. Extra
+        // puffs share the mass (lower opacity each), so the amount of smoke is unchanged.
         w.smokeAcc += smokeRate(slip, load) * rateScale * dtSim;
-        let n = Math.floor(w.smokeAcc);
-        w.smokeAcc -= n;
+        const pdx = cx - prevCx;
+        const pdz = cz - prevCz;
+        w.smokeDist += Math.sqrt(pdx * pdx + pdz * pdz) / smokeSpacing;
+        let n = Math.floor(Math.max(w.smokeAcc, w.smokeDist));
+        let opK = 1;
+        if (n > 0) {
+          opK = Math.min(1, w.smokeAcc / n);
+          w.smokeAcc = Math.max(0, w.smokeAcc - n * opK);
+          w.smokeDist = Math.max(0, w.smokeDist - n);
+        }
         n = Math.min(n, 48);
         const heat = Math.min(1, (slip - 3) / 5);
         const ej = Math.min(slip, 28) * 0.12 * spin;
@@ -763,7 +784,7 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
           spawnSoft(
             K_SMOKE, t0 + (t1 - t0) * f, 6 + rng.float() * 5,
             0.35 + rng.float() * 0.25, (2.4 + rng.float() * 2.0) * big,
-            (0.21 + rng.float() * 0.15) * (0.45 + 0.55 * heat),
+            (0.21 + rng.float() * 0.15) * (0.45 + 0.55 * heat) * opK,
             grey * 0.97, grey * 0.985, grey * 1.02, groundY,
           );
         }
@@ -1205,7 +1226,7 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
       for (const w of v.wheels) {
         w.strip = 0;
         w.valid = w.prevValid = false;
-        w.smokeAcc = w.sprayAcc = w.roostAcc = w.stampT = 0;
+        w.smokeAcc = w.smokeDist = w.sprayAcc = w.roostAcc = w.stampT = 0;
       }
     }
     lastDeathSoft = lastDeathBits = lastDeathSparks = -1e9;
@@ -1329,7 +1350,7 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
           hx: 0, hy: 0, hz: 0, cx: 0, cy: 0, cz: 0, valid: false, px: 0, py: 0, pz: 0, prevValid: false,
           wvx: 0, wvy: 0, wvz: 0, ahx: 1, ahz: 0, upright: false, groundY: 0,
           strip: 0, offT: 0, width: 0.2, tr: 1, tg: 1, tb: 1, sheen: 0, pcx: 0, pcz: 0, lx: 0, ly: 0, lz: 0, rx: 0, ry: 0, rz: 0, mx: 0, mz: 0, along: 0, lastS: 0,
-          smokeAcc: 0, sprayAcc: 0, roostAcc: 0, stampT: 0,
+          smokeAcc: 0, smokeDist: 0, sprayAcc: 0, roostAcc: 0, stampT: 0,
         };
       });
       const v: VehicleFx = {
@@ -1379,6 +1400,7 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
     },
     dispose(): void {
       soft.dispose();
+      softDepth.dispose();
       bits.dispose();
       sparks.dispose();
       skid.dispose();

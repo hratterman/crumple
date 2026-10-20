@@ -20,6 +20,8 @@ import {
   AddEquation,
   BufferAttribute,
   CustomBlending,
+  DepthStencilFormat,
+  DepthTexture,
   DoubleSide,
   DynamicDrawUsage,
   InstancedBufferGeometry,
@@ -31,10 +33,15 @@ import {
   ShaderMaterial,
   UniformsLib,
   UniformsUtils,
+  UnsignedByteType,
   Vector3,
   Vector4,
+  WebGLRenderTarget,
   ZeroFactor,
+  type Camera,
+  type PerspectiveCamera,
   type Texture,
+  type WebGLRenderer,
 } from 'three';
 
 import { LAYER_NO_REFLECTION } from '../types';
@@ -176,6 +183,9 @@ varying float vSoft;
 varying float vErode;
 varying float vFlat;
 varying float vSmoke;
+varying vec2 vRot;
+varying float vViewZ;
+varying float vSoftR;
 void main() {
   float age = uTime - iA.w;
   float life = iB.w;
@@ -200,6 +210,7 @@ void main() {
   float ca = cos( ang ), sa = sin( ang );
   vec2 c = position.xy;
   vUv = vec2( ca * c.x - sa * c.y, sa * c.x + ca * c.y ) * 0.5 + 0.5;
+  vRot = vec2( ca, sa );
   vCorner = c;
   vec3 right, up;
   if ( kb.w > 0.5 ) {
@@ -221,8 +232,15 @@ void main() {
   vColor = iE.rgb;
   vec4 mvPosition = viewMatrix * vec4( wp, 1.0 );
   float dcam = -mvPosition.z;
+  vViewZ = mvPosition.z;
+  // depth range over which the puff fades into geometry behind it (soft particles)
+  vSoftR = max( size * 0.45, 0.2 );
   // particles around the camera dissolve instead of slicing through the near plane
   vAlpha = opacity * fadeIn * fadeOut * smoothstep( 0.25, 0.9 + size * 0.6, dcam );
+  // a puff filling the screen is a flat wall with a visible rim: thin it by its projected radius
+  // (projectionMatrix[1][1] = 1 / tan(fov / 2); 1 = half the screen height)
+  float rNdc = size * projectionMatrix[ 1 ][ 1 ] / max( dcam, 1e-3 );
+  vAlpha *= 1.0 - 0.75 * smoothstep( 0.55, 1.6, rNdc ) * ( 1.0 - kb.w );
   if ( uFocus.w > 0.0 && kb.w < 0.5 ) {
     // keep the player's car readable: billboards in front of it along the view ray thin out
     vec3 toF = uFocus.xyz - cameraPosition;
@@ -241,8 +259,12 @@ void main() {
 
 const SOFT_FRAGMENT = /* glsl */ `
 #include <common>
+#include <packing>
 #include <fog_pars_fragment>
 uniform sampler2D uPuff;
+// scene depth copied before the particles draw (soft particles): x enabled, y near, z far
+uniform highp sampler2D uSceneDepth;
+uniform vec4 uSoftDepth;
 uniform vec3 uSunDir;
 uniform vec3 uSunColor;
 uniform vec3 uSkyAmb;
@@ -257,29 +279,48 @@ varying float vSoft;
 varying float vErode;
 varying float vFlat;
 varying float vSmoke;
+varying vec2 vRot;
+varying float vViewZ;
+varying float vSoftR;
 void main() {
   float vFlatInv = 1.0 - vFlat;
   float d;
+  // density gradient in corner space (lighting normal bend). Finite differences in TEXTURE
+  // space, not dFdx/dFdy: screen derivatives are constant over each 2×2 pixel quad (always
+  // under SwiftShader, on many GPUs coarse), which lit every quad flat → blocky, dithered-
+  // looking smoke, worst on big near puffs and at reduced render scale.
+  vec2 g = vec2( 0.0 );
+  float rC = length( vCorner );
   if ( vFlat > 0.5 ) {
     // expanding splash ring: thin bright annulus with a broken crest
-    float r = length( vCorner );
-    float ring = smoothstep( 0.72, 0.9, r ) * ( 1.0 - smoothstep( 0.9, 1.0, r ) );
+    float ring = smoothstep( 0.72, 0.9, rC ) * ( 1.0 - smoothstep( 0.9, 1.0, rC ) );
     float brk = 0.6 + 0.4 * sin( atan( vCorner.y, vCorner.x ) * 11.0 + vColor.r * 40.0 );
     d = ring * brk;
   } else {
+    const float H = 0.07;
     d = dot( texture2D( uPuff, vUv ), vChannel );
+    float dx = dot( texture2D( uPuff, vUv + vec2( vRot.x, vRot.y ) * ( 0.5 * H ) ), vChannel );
+    float dy = dot( texture2D( uPuff, vUv + vec2( -vRot.y, vRot.x ) * ( 0.5 * H ) ), vChannel );
+    g = ( vec2( dx, dy ) - d ) / H;
     // tyre smoke: half the billow pattern traded for a smooth radial body (wispy, no visible noise)
     float r2 = dot( vCorner, vCorner );
     float body = clamp( 1.0 - r2, 0.0, 1.0 );
-    d = mix( d, body * body * 0.8, 0.45 * vSmoke );
+    float k = 0.45 * vSmoke;
+    d = mix( d, body * body * 0.8, k );
+    g = mix( g, -3.2 * body * vCorner, k );
+    g = clamp( g, -4.0, 4.0 ) * ( 1.0 - 0.65 * vSmoke );
   }
-  // derivatives before any discard (helper lanes stay well-defined)
-  float px = max( length( vec2( dFdx( vCorner.x ), dFdy( vCorner.x ) ) ), 1e-4 );
-  vec2 g = clamp( vec2( dFdx( d ), dFdy( d ) ) / px, -4.0, 4.0 ) * ( 1.0 - 0.65 * vSmoke );
   float den = smoothstep( vErode * ( 1.0 - 0.3 * vSmoke ), vErode + 0.5 + 0.35 * vSmoke, d );
-  // soft rim on smoke billboards
-  den *= 1.0 - vSmoke * smoothstep( 0.35, 1.0, length( vCorner ) );
+  // soft rim on every billboard (smoke wider): a magnified puff never shows the edge of its disc
+  den *= 1.0 - vFlatInv * smoothstep( mix( 0.55, 0.35, vSmoke ), 1.0, rC );
   float a = vAlpha * den * clamp( vSoft, 0.0, 1.0 );
+  // soft particles: fade where the puff meets geometry behind it (car bodies, walls, ground)
+  if ( uSoftDepth.x > 0.5 && a >= 0.003 ) {
+    float sd = texelFetch( uSceneDepth, ivec2( gl_FragCoord.xy ), 0 ).r;
+    float sceneZ = perspectiveDepthToViewZ( sd, uSoftDepth.y, uSoftDepth.z );
+    float gap = vViewZ - sceneZ;
+    a *= smoothstep( 0.0, 1.0, clamp( gap / vSoftR, 0.0, 1.0 ) );
+  }
   if ( a < 0.003 ) discard;
   // lighting: a camera-facing sphere normal bent by the puff's density
   // gradient (screen-space derivatives → lumpy billows), wrapped diffuse
@@ -485,7 +526,16 @@ export function createSoftMaterial(
     name: 'fx.soft',
     vertexShader: SOFT_VERTEX,
     fragmentShader: SOFT_FRAGMENT,
-    uniforms: { ...UniformsUtils.clone(UniformsLib.fog), ...motionUniforms(kinds, shaping), uPuff: { value: puff }, uSizeScale: { value: 1 }, uFocus: { value: new Vector4(0, 0, 0, 0) }, ...light },
+    uniforms: {
+      ...UniformsUtils.clone(UniformsLib.fog),
+      ...motionUniforms(kinds, shaping),
+      uPuff: { value: puff },
+      uSizeScale: { value: 1 },
+      uFocus: { value: new Vector4(0, 0, 0, 0) },
+      uSceneDepth: { value: null },
+      uSoftDepth: { value: new Vector4(0, 0.1, 1000, 0) },
+      ...light,
+    },
     transparent: true,
     depthWrite: false,
     depthTest: true,
@@ -521,6 +571,71 @@ export function createSparkMaterial(kinds: readonly KindMotion[]): ShaderMateria
   });
   setBlend(m, true);
   return m;
+}
+
+// ------------------------------------------------------------------ soft-particle depth
+/**
+ * Soft particles need the scene depth while they draw into the same target,
+ * whose depth attachment cannot also be sampled (feedback loop). Right before
+ * the soft pool draws (its onBeforeRender, once per render call) the current
+ * target's depth texture is blitted into a private depth texture of the same
+ * size and format (`copyTextureToTexture` → blitFramebuffer DEPTH_BUFFER_BIT,
+ * one copy per frame) and the target is re-bound. Targets without a depth
+ * texture (the canvas, other passes) leave soft depth off for that draw: the
+ * shader falls back to its ground-height fade.
+ */
+export class SceneDepthCopy {
+  private target: WebGLRenderTarget | null = null;
+  private readonly uDepth: { value: Texture | null };
+  private readonly uSoft: { value: Vector4 };
+  /** Copies done (tests / stats). */
+  copies = 0;
+
+  constructor(material: ShaderMaterial) {
+    this.uDepth = material.uniforms.uSceneDepth as { value: Texture | null };
+    this.uSoft = material.uniforms.uSoftDepth as { value: Vector4 };
+  }
+
+  /** Install on the mesh drawing `material` (replaces its onBeforeRender). */
+  attach(mesh: Mesh): void {
+    mesh.onBeforeRender = (renderer, _scene, camera) => this.prepare(renderer, camera);
+  }
+
+  prepare(renderer: WebGLRenderer, camera: Camera): void {
+    const rt = renderer.getRenderTarget();
+    const src = rt?.depthTexture ?? null;
+    const persp = camera as PerspectiveCamera;
+    if (!rt || !src || !persp.isPerspectiveCamera || rt.samples > 0) {
+      this.uSoft.value.x = 0;
+      return;
+    }
+    const w = rt.width;
+    const h = rt.height;
+    let dst = this.target;
+    if (!dst || dst.depthTexture!.type !== src.type || dst.depthTexture!.format !== src.format) {
+      dst?.dispose();
+      const dt = new DepthTexture(w, h, src.type);
+      dt.format = src.format;
+      dst = new WebGLRenderTarget(w, h, { depthBuffer: true, stencilBuffer: src.format === DepthStencilFormat, depthTexture: dt, type: UnsignedByteType });
+      dst.texture.name = 'fx.softDepth.color';
+      dt.name = 'fx.softDepth';
+      this.target = dst;
+    } else if (dst.width !== w || dst.height !== h) {
+      dst.setSize(w, h);
+    }
+    renderer.initRenderTarget(dst);
+    renderer.copyTextureToTexture(src, dst.depthTexture!);
+    // the blit left the read/draw framebuffers unbound: restore the target being drawn
+    renderer.setRenderTarget(rt, renderer.getActiveCubeFace(), renderer.getActiveMipmapLevel());
+    this.copies++;
+    this.uDepth.value = dst.depthTexture;
+    this.uSoft.value.set(1, persp.near, persp.far, 0);
+  }
+
+  dispose(): void {
+    this.target?.dispose();
+    this.target = null;
+  }
 }
 
 // ------------------------------------------------------------------ pool
