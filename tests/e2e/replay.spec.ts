@@ -90,6 +90,17 @@ test('replay: wall hit at speed, seek to the impact, 1/4× slow-mo, scrub back, 
   expect(vMax * 3.6).toBeGreaterThan(80);
   expect(crashed.damage).toBeGreaterThan(0.03);
 
+  // place() armed main's spawn parking-brake hold, and the raw worker input drove with the render loop held,
+  // so main never saw the throttle that releases it: release it as a player does (a handbrake tap with frames
+  // running), or main sends the hold's brake + handbrake on replay exit, between the pause and resume hashes.
+  await page.evaluate(() => {
+    (window as unknown as { __crumple: G }).__crumple.hold = false;
+  });
+  await page.keyboard.down('Space');
+  await page.waitForTimeout(1500);
+  await page.keyboard.up('Space');
+  await page.waitForTimeout(1500);
+
   // ---- enter: the worker pauses (hash reported), playhead at the end
   const entered = await page.evaluate(() => {
     const c = (window as unknown as { __crumple: G }).__crumple;
