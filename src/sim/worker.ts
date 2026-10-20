@@ -23,6 +23,8 @@ import { scatterVegetation } from '../world/vegetation';
 import { resolveWater } from '../world/water';
 import { resolvePropInstances } from './props/placement';
 import { SIM_DT, SIM_HZ, SimCommandError, SimEngine } from './engine';
+import { hashSimState } from './replay/hash';
+import { ReplayLog } from './replay/log';
 
 export const MAX_STEPS_PER_WAKE = 200;
 
@@ -90,6 +92,10 @@ export class WorkerHost {
   droppedSteps = 0;
   snapshotsSent = 0;
   dead = false;
+  /** P7: stepping frozen by `replayPause` (independent of timeScale). */
+  paused = false;
+  /** P7: deterministic command + input log since init (ReplayFile). */
+  readonly log = new ReplayLog();
 
   private acc = 0;
   private lastWall = 0;
@@ -124,9 +130,6 @@ export class WorkerHost {
         case 'setBubble':
         case 'keyframeRequest':
         case 'replaySeek':
-        case 'replayPause':
-        case 'stateHashRequest':
-        case 'replayFileRequest':
           this.post({ type: 'unimplemented', command: msg.type });
           return;
         case 'returnBuffer':
@@ -144,7 +147,22 @@ export class WorkerHost {
       }
       const engine = this.engine;
       if (!engine) throw new SimCommandError('not initialized');
+      this.log.command(engine.tick, msg);
       switch (msg.type) {
+        case 'replayPause':
+          this.paused = !!msg.paused;
+          this.lastWall = this.scheduler.now();
+          this.post({ type: 'replayPaused', paused: this.paused, tick: engine.tick, stateHash: hashSimState(engine) });
+          return;
+        case 'stateHashRequest':
+          this.post({ type: 'stateHash', requestId: msg.requestId, tick: engine.tick, hash: hashSimState(engine) });
+          return;
+        case 'replayFileRequest': {
+          const file = this.log.build(engine);
+          const i = file.inputs;
+          this.post({ type: 'replayFile', requestId: msg.requestId, file }, [i.tick.buffer, i.objectId.buffer, i.action.buffer, i.value.buffer] as ArrayBuffer[]);
+          return;
+        }
         case 'ground':
           if (msg.mode === 'plane') {
             engine.setGroundPlane(msg.y, msg.materialId);
@@ -168,9 +186,13 @@ export class WorkerHost {
           engine.reset(msg.objectId, msg.transform);
           this.dirty = true;
           return;
-        case 'input':
+        case 'input': {
+          const obj = engine.arena.get(msg.objectId);
+          if (obj) this.log.inputBefore(obj.actions);
           engine.setInput(msg.objectId, msg.actions);
+          if (obj) this.log.inputAfter(engine.tick, msg.objectId, obj.actions, msg.actions);
           return;
+        }
         case 'spawnVehicle':
           engine.spawnVehicle(msg.objectId, msg.vehicle, msg.transform, msg.transmission, msg.catalogId);
           this.dirty = true;
@@ -248,6 +270,8 @@ export class WorkerHost {
       engine.debugStrains,
     );
     this.engine = engine;
+    this.paused = false;
+    this.log.reset(msg, capacity, hz);
     this.pool = new BufferPool(layout.totalBytes);
     this.writer = new SnapshotWriter(layout);
     this.snapshotHz = hz;
@@ -335,6 +359,7 @@ export class WorkerHost {
     const t1 = this.scheduler.now();
     this.lastWall = t1;
     this.dirty = true;
+    this.log.setLayout(terrain.layoutId, terrain.layoutVersion, hash);
     const matched = expected !== 0 && hash === expected;
     const ready: WorkerToMain = {
       type: 'terrainReady',
@@ -380,7 +405,7 @@ export class WorkerHost {
       const now = this.scheduler.now();
       let elapsed = (now - this.lastWall) / 1000;
       this.lastWall = now;
-      if (!(elapsed > 0)) elapsed = 0;
+      if (!(elapsed > 0) || this.paused) elapsed = 0;
       this.acc += elapsed * this.timeScale;
       let steps = Math.floor(this.acc / SIM_DT);
       this.acc -= steps * SIM_DT;
