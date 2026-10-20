@@ -62,6 +62,7 @@ export const TERRAIN_MATERIAL_COUNT = 7;
  * | 3   | handbrake  | 0..1     | parking/hand brake lever                        |
  * | 4   | clutch     | 0..1     | 0 engaged, 1 fully disengaged (pedal depressed) |
  * | 5   | gearSelect | integer  | -1 reverse, 0 neutral, 1..n forward gears       |
+ * | 6   | horn       | 0..1     | P8 (additive): ≥ 0.5 sounds the horn             |
  *
  * The worker clamps to these ranges (gearSelect is rounded, then clamped to
  * the vehicle's gear count). Unset actions default to 0.
@@ -73,6 +74,8 @@ export interface ActionState {
   handbrake: number;
   clutch: number;
   gearSelect: number;
+  /** P8 (additive, optional): horn button; recorded in the replay input log like any action. */
+  horn?: number;
 }
 export const Action = {
   throttle: 0,
@@ -81,9 +84,10 @@ export const Action = {
   handbrake: 3,
   clutch: 4,
   gearSelect: 5,
+  horn: 6,
 } as const satisfies Record<keyof ActionState, number>;
 export type ActionIndex = (typeof Action)[keyof typeof Action];
-export const ACTION_COUNT = 6;
+export const ACTION_COUNT = 7;
 /** Action names in index order. */
 export const ACTION_NAMES: readonly (keyof ActionState)[] = [
   'throttle',
@@ -92,6 +96,7 @@ export const ACTION_NAMES: readonly (keyof ActionState)[] = [
   'handbrake',
   'clutch',
   'gearSelect',
+  'horn',
 ];
 /** Inclusive [min, max] per action index (gearSelect max is per-vehicle; 16 is the protocol cap). */
 export const ACTION_RANGES: readonly (readonly [number, number])[] = [
@@ -101,6 +106,7 @@ export const ACTION_RANGES: readonly (readonly [number, number])[] = [
   [0, 1],
   [0, 1],
   [-1, 16],
+  [0, 1],
 ];
 
 // ============================================================ shared shapes

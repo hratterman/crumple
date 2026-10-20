@@ -560,7 +560,7 @@ function spawnCube(): void {
 }
 
 // ------------------------------------------------------------ input plumbing
-const lastSent: ActionState = { throttle: NaN, brake: NaN, steer: NaN, handbrake: NaN, clutch: NaN, gearSelect: NaN };
+const lastSent: ActionState = { throttle: NaN, brake: NaN, steer: NaN, handbrake: NaN, clutch: NaN, gearSelect: NaN, horn: NaN };
 function sendInput(a: ActionState): void {
   if (
     a.throttle === lastSent.throttle &&
@@ -568,7 +568,8 @@ function sendInput(a: ActionState): void {
     a.steer === lastSent.steer &&
     a.handbrake === lastSent.handbrake &&
     a.clutch === lastSent.clutch &&
-    a.gearSelect === lastSent.gearSelect
+    a.gearSelect === lastSent.gearSelect &&
+    a.horn === lastSent.horn
   ) {
     return;
   }

@@ -12,7 +12,7 @@ import {
   IMPACT_CAPACITY,
   SKID_CAPACITY,
 } from '../protocol/events';
-import { TELEMETRY_SLOTS } from '../protocol/layout';
+import { OBJECT_FLAG_HORN, TELEMETRY_SLOTS } from '../protocol/layout';
 import {
   ACTION_NAMES,
   ACTION_RANGES,
@@ -1047,7 +1047,8 @@ export class SimEngine {
     writer.begin(this.tick, this.simTime, timeScale);
     for (let o = 0; o < objs.length; o++) {
       const obj = objs[o]!;
-      const i = writer.addObject(obj.objectId, obj.flags, obj.nodeCount, obj.beamCount);
+      // P8: the horn travels as an object flag (snapshot + live replay buffer)
+      const i = writer.addObject(obj.objectId, obj.flags | (obj.actions[Action.horn]! >= 0.5 ? OBJECT_FLAG_HORN : 0), obj.nodeCount, obj.beamCount);
       writer.writeNodesSoA(i, s.posX, s.posY, s.posZ, obj.nodeStart);
       writer.writeStrains(i, s.strainOut, obj.beamStart);
       writer.writeBrokenBeams(i, s.active, obj.beamStart);

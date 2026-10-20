@@ -53,7 +53,7 @@ interface Result {
 function replay(fx: Fixture, fps: number): Result {
   const tel = new Float32Array(32);
   const nodes = new Float32Array(3 * 8);
-  const ranges = [{ objectId: 1, nodeOffset: 0, nodeCount: 8 }];
+  const ranges = [{ objectId: 1, flags: 0, nodeOffset: 0, nodeCount: 8 }];
   const cam = new Float32Array(16);
   cam[0] = cam[5] = cam[10] = cam[15] = 1;
   const shots = new Map<string, number>();

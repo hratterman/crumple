@@ -72,7 +72,7 @@ function paramMap(node: AudioWorkletNode, names: readonly string[], taus: Readon
 export class WorkletEngineVoice implements EngineVoiceIO {
   private readonly s: ParamSlot[];
   constructor(readonly node: AudioWorkletNode) {
-    this.s = paramMap(node, ENGINE_PARAMS, { rpm: 0.025, throttle: 0.02, load: 0.04, gate: 0.05, pitch: 0.08, limiter: 0.005, crank: 0.005, shift: 0.005, damage: 0.5 });
+    this.s = paramMap(node, ENGINE_PARAMS, { rpm: 0.025, throttle: 0.02, load: 0.04, gate: 0.05, pitch: 0.08, limiter: 0.005, crank: 0.005, shift: 0.005, damage: 0.5, horn: 0.005 });
   }
   setInputs(i: Readonly<EngineInput>, now: number): void {
     const s = this.s;
@@ -85,6 +85,7 @@ export class WorkletEngineVoice implements EngineVoiceIO {
     s[6]!.jump(i.crank >= 0.5 ? 1 : 0, now);
     s[7]!.jump(i.shift >= 0.5 ? 1 : 0, now);
     s[8]!.set(i.damage, now);
+    s[9]!.jump(i.horn >= 0.5 ? 1 : 0, now);
   }
   setProfile(p: EngineProfile): void {
     this.node.port.postMessage({ type: 'profile', profile: p });
@@ -209,7 +210,27 @@ export class FallbackEngineVoice implements EngineVoiceIO {
     this.rg = new ParamSlot(this.raspGain.gain, 0.04);
     this.g = new ParamSlot(this.gate.gain, 0.05);
     this.rf = new ParamSlot(this.rasp.frequency, 0.1, 1);
+    // horn: square-wave pair through a trumpet band-pass
+    const hb = ctx.createBiquadFilter();
+    hb.type = 'bandpass';
+    hb.frequency.value = profile.horn.formantHz;
+    hb.Q.value = 0.9;
+    this.hornGain = ctx.createGain();
+    this.hornGain.gain.value = 0;
+    hb.connect(this.hornGain).connect(this.out);
+    this.hornOsc = profile.horn.freqs.slice(0, 2).map((f) => {
+      const o = ctx.createOscillator();
+      o.type = 'square';
+      o.frequency.value = f;
+      o.connect(hb);
+      o.start();
+      return o;
+    });
+    this.hg = new ParamSlot(this.hornGain.gain, 0.015);
   }
+  private readonly hornGain: GainNode;
+  private hornOsc: OscillatorNode[];
+  private readonly hg: ParamSlot;
   static wave(ctx: BaseAudioContext, p: EngineProfile): PeriodicWave {
     // harmonics of the half firing frequency: even = firing orders (strong), odd = half orders (V8 lumps)
     const n = 40;
@@ -228,10 +249,12 @@ export class FallbackEngineVoice implements EngineVoiceIO {
     this.rf.set(p.exhaust.raspHz * pitch, now);
     const amp = (0.3 + 0.7 * i.load) * (0.5 + 0.5 * Math.min(1, i.rpm / p.redlineRpm)) * (i.limiter >= 0.5 ? 0.7 : 1);
     this.g.set(i.gate * amp * (i.crank >= 0.5 ? 0.4 : 1), now);
+    this.hg.set(i.horn >= 0.5 ? 0.25 * p.horn.level : 0, now);
   }
   setProfile(p: EngineProfile): void {
     this.p = p;
     this.osc.setPeriodicWave(FallbackEngineVoice.wave(this.osc.context, p));
+    this.hornOsc.forEach((o, k) => (o.frequency.value = p.horn.freqs[k] ?? p.horn.freqs[0]!));
   }
 }
 

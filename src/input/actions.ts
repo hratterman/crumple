@@ -49,7 +49,7 @@ export type InputCommand =
   /** P7: open the live replay. */
   | 'replay';
 
-type HeldControl = 'throttle' | 'brake' | 'left' | 'right' | 'handbrake';
+type HeldControl = 'throttle' | 'brake' | 'left' | 'right' | 'handbrake' | 'horn';
 export type InputControl = HeldControl | InputCommand;
 
 export const KEY_BINDINGS: Readonly<Record<string, InputControl>> = {
@@ -79,6 +79,8 @@ export const KEY_BINDINGS: Readonly<Record<string, InputControl>> = {
   KeyX: 'toggleTractionControl',
   // P7 (R2, additive): the live replay.
   Backspace: 'replay',
+  // P8 (additive): horn (held). H only hides the UI while the replay is open (its own key handler).
+  KeyH: 'horn',
 };
 
 /** Standard-mapping gamepad button → command (rising edge). */
@@ -97,6 +99,8 @@ export const GAMEPAD_COMMAND_BUTTONS: Readonly<Record<number, InputCommand>> = {
 export const GAMEPAD_BUTTON_THROTTLE = 7;
 export const GAMEPAD_BUTTON_BRAKE = 6;
 export const GAMEPAD_BUTTON_HANDBRAKE = 0;
+/** P8: horn on either stick click (L3 / R3). */
+export const GAMEPAD_BUTTONS_HORN: readonly number[] = [10, 11];
 export const GAMEPAD_AXIS_STEER = 0;
 
 export interface InputTuning {
@@ -263,7 +267,7 @@ export function createInputMapper(opts: InputMapperOptions = {}): InputMapper {
   let kbBrake = 0;
   let reversing = false;
   let manualGear = 1;
-  const out: ActionState = { throttle: 0, brake: 0, steer: 0, handbrake: 0, clutch: 0, gearSelect: 1 };
+  const out: ActionState = { throttle: 0, brake: 0, steer: 0, handbrake: 0, clutch: 0, gearSelect: 1, horn: 0 };
 
   function command(c: InputCommand): void {
     commands.push(c);
@@ -281,7 +285,7 @@ export function createInputMapper(opts: InputMapperOptions = {}): InputMapper {
   function keyDown(code: string, repeat = false): boolean {
     const c = KEY_BINDINGS[code];
     if (c === undefined) return false;
-    if (c === 'throttle' || c === 'brake' || c === 'left' || c === 'right' || c === 'handbrake') {
+    if (c === 'throttle' || c === 'brake' || c === 'left' || c === 'right' || c === 'handbrake' || c === 'horn') {
       heldCodes.add(code);
       held.add(c);
     } else if (!repeat && !heldCodes.has(code)) {
@@ -295,7 +299,7 @@ export function createInputMapper(opts: InputMapperOptions = {}): InputMapper {
     const c = KEY_BINDINGS[code];
     if (c === undefined) return false;
     heldCodes.delete(code);
-    if (c === 'throttle' || c === 'brake' || c === 'left' || c === 'right' || c === 'handbrake') {
+    if (c === 'throttle' || c === 'brake' || c === 'left' || c === 'right' || c === 'handbrake' || c === 'horn') {
       if (!anyCodeHeld(c)) held.delete(c);
     }
     return true;
@@ -378,6 +382,7 @@ export function createInputMapper(opts: InputMapperOptions = {}): InputMapper {
       out.handbrake = held.has('handbrake') || !!padButton(GAMEPAD_BUTTON_HANDBRAKE)?.pressed ? 1 : 0;
       out.clutch = 0;
       out.gearSelect = gear;
+      out.horn = held.has('horn') || !!padButton(GAMEPAD_BUTTONS_HORN[0]!)?.pressed || !!padButton(GAMEPAD_BUTTONS_HORN[1]!)?.pressed ? 1 : 0;
       return out;
     },
     drainCommands() {

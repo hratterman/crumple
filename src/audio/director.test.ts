@@ -35,8 +35,10 @@ class FakeEngine {
   limiter = 0;
   crank = 0;
   shift = 0;
+  horn = 0;
   profile = '';
   setInputs(i: Readonly<EngineInput>): void {
+    this.horn = i.horn;
     this.rpm = i.rpm;
     this.gate = i.gate;
     this.load = i.load;
@@ -79,6 +81,7 @@ class FakeGhost implements GhostVoiceLike {
   }
 }
 
+let hornFlag = 0;
 const SETTINGS = { volume: 0.8, engineVolume: 1, effectsVolume: 1, ambienceVolume: 1, muted: false };
 const VOICES = { awake: 2, ghosts: 2 };
 
@@ -114,7 +117,7 @@ function setup() {
       nodes[3 * (2 * w + k) + 2] = z!;
     }
   });
-  const ranges = [{ objectId: 1, nodeOffset: 0, nodeCount: 8 }];
+  const ranges = [{ objectId: 1, flags: 0, nodeOffset: 0, nodeCount: 8 }];
   const deps: AudioDeps = {
     sim: {
       telemetry: (id) => (id === 1 || id === 100 ? tel : null),
@@ -125,7 +128,7 @@ function setup() {
           const o = out[i]!;
           o.agent = a.agent;
           o.objectId = a.objectId;
-          o.flags = a.awake ? TRAFFIC_FLAG_AWAKE : 0;
+          o.flags = (a.awake ? TRAFFIC_FLAG_AWAKE : 0) | hornFlag;
           o.pos[0] = a.pos[0];
           o.pos[1] = a.pos[1];
           o.pos[2] = a.pos[2];
@@ -222,7 +225,7 @@ function setup() {
     oneShots: shots,
   };
   const dir = new AudioDirector(graph, deps);
-  return { dir, tel, agents, replay, state, graph, mix, shots, surface, ambience, awake, ghosts, engine: graph.engine as FakeEngine };
+  return { dir, tel, agents, replay, state, graph, mix, shots, surface, ambience, awake, ghosts, ranges, engine: graph.engine as FakeEngine };
 }
 
 function impact(objectId: number, x: number, y: number, z: number, impulse: number): ImpactEvent {
@@ -357,6 +360,26 @@ describe('AudioDirector', () => {
     expect(g).toBeDefined();
     expect(g.pitch).toBeGreaterThan(1.05);
     expect(s.ghosts.filter((v) => v.spatial.x === 500)).toHaveLength(0);
+  });
+
+  it('horn: the player horn follows the object flag (live and replay alike), traffic honks from its agent flag', async () => {
+    const s = setup();
+    s.tel[1] = 900;
+    s.dir.update(1 / 60, 0, true);
+    expect(s.engine.horn).toBe(0);
+    s.ranges[0]!.flags = 2; // OBJECT_FLAG_HORN
+    s.dir.update(1 / 60, 0.02, true);
+    expect(s.engine.horn).toBe(1);
+    s.ranges[0]!.flags = 0;
+    s.dir.update(1 / 60, 0.04, true);
+    expect(s.engine.horn).toBe(0);
+    s.agents.push({ agent: 0, objectId: 100, awake: true, pos: [0, 0, -30], speed: 0, yawFwd: [0, -1] });
+    s.dir.update(1 / 60, 0.06, true);
+    expect(s.awake[0]!.engine.horn).toBe(0);
+    hornFlag = 1 << 10;
+    s.dir.update(1 / 60, 0.08, true);
+    expect(s.awake[0]!.engine.horn).toBe(1);
+    hornFlag = 0;
   });
 
   it('runs with (near-)zero steady-state allocation: at most one minor GC per ~50 k frames', async () => {

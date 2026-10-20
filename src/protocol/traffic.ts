@@ -145,6 +145,8 @@ export const TRAFFIC_FLAG_TELEPORTED = 1 << 7;
 export const TRAFFIC_FLAG_WRECKED = 1 << 8;
 /** Waiting at a junction to give way. */
 export const TRAFFIC_FLAG_YIELDING = 1 << 9;
+/** P8 (additive): the AI is sounding its horn (the focus blocked or cut it off; worker-side, deterministic). */
+export const TRAFFIC_FLAG_HORN = 1 << 10;
 
 /** Driver state (word 4). */
 export const TrafficAiState = {

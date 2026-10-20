@@ -7,6 +7,7 @@ import { AmbienceDsp, createAmbienceInput } from './dsp/ambience';
 import { createEngineInput, EngineDsp, type EngineInput } from './dsp/engine';
 import { ONE_SHOT_KINDS, synthOneShot, type OneShotKind } from './dsp/oneshots';
 import { createSurfaceInput, SurfaceDsp, type SurfaceInput } from './dsp/surface';
+import { HornDsp } from './dsp/horn';
 import { ENGINE_PROFILES, type EngineProfile } from './profiles';
 
 export const BLOCK = 128;
@@ -264,6 +265,37 @@ export function renderScenarios(sr: number): RenderedScenario[] {
       amb.process(l.subarray(o, o + BLOCK), r.subarray(o, o + BLOCK), BLOCK, inp);
     }
     out.push({ name: 'ambience_valley_lake', channels: [l, r] });
+  }
+  // horns: a short tap, then a 1.4 s press (the air horn's two pressure stages show in the hold)
+  for (const id of ['sedan', 'coupe', 'pickup', 'boxtruck', 'beater']) {
+    const p = ENGINE_PROFILES[id]!;
+    const h = new HornDsp(p.horn, sr, 3);
+    const n = Math.ceil((2.6 * sr) / BLOCK) * BLOCK;
+    const x = new Float32Array(n);
+    for (let o = 0; o < n; o += BLOCK) {
+      const t = o / sr;
+      h.process(x.subarray(o, o + BLOCK), BLOCK, (t > 0.05 && t < 0.3) || (t > 0.75 && t < 2.15), 1);
+    }
+    out.push({ name: `horn_${id}`, channels: [x] });
+  }
+  // a traffic sedan passing at 25 m/s, honking: light voice, Doppler pitch 343/(343∓25) through the pass
+  {
+    const p = ENGINE_PROFILES.sedanTraffic!;
+    const [ex, fr] = renderEngine(p, sr, 4, (t, inp) => {
+      inp.rpm = 2300;
+      inp.throttle = 0.3;
+      inp.load = 0.3;
+      inp.horn = t > 0.8 && t < 3.2 ? 1 : 0;
+      const x = (t - 2) * 25; // along the road, the listener 6 m off it
+      const cos = x / Math.sqrt(x * x + 36);
+      inp.pitch = 343 / (343 + 25 * cos);
+    }, 9, true);
+    const mix = engineMix(ex, fr);
+    for (let i = 0; i < mix.length; i++) {
+      const x = (i / sr - 2) * 25;
+      mix[i] = mix[i]! * Math.min(1, 8 / Math.sqrt(x * x + 36));
+    }
+    out.push({ name: 'horn_traffic_passby_doppler', channels: [mix] });
   }
   // crashes: heavy at 1×, the same at the crash cam's 1/4× (pitch 0.25^0.75), light knock; every one-shot kind
   out.push({ name: 'crash_heavy', channels: [renderCrash(sr, 1, 3)] });

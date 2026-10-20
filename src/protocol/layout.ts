@@ -153,6 +153,8 @@ export const OBJ_RECORD_WORDS = OBJ_TELEMETRY + TELEMETRY_SLOTS; // 40
 export const OBJ_RECORD_BYTES = OBJ_RECORD_WORDS * 4; // 160
 
 export const OBJECT_FLAG_SLEEPING = 1 << 0;
+/** P8 (additive): the object's horn action is ≥ 0.5 (audio; replays from the recorded flags). */
+export const OBJECT_FLAG_HORN = 1 << 1;
 
 /**
  * Telemetry slot indices (f32, relative to OBJ_TELEMETRY). All zeros in P1;

@@ -195,6 +195,7 @@ export class Hud {
       ['W/S', 'throttle / brake'],
       ['A/D', 'steer'],
       ['Space', 'handbrake'],
+      ['H', 'horn'],
       ['R', 'recover'],
       ['F', 'repair'],
       ['C', 'camera'],

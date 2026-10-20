@@ -27,7 +27,8 @@ import { crashGain, dopplerFactor, duckGain, engineLoad, roarGain, scrubGain, sl
 import { VoicePool } from './pool';
 import { engineProfileFor, withDrivetrain, type EngineProfile } from './profiles';
 import type { AudioDeps, AudioPlayerInfo } from './types';
-import { createTrafficAgentFrame, TRAFFIC_FLAG_AWAKE, type TrafficAgentFrame } from '../protocol/traffic';
+import { createTrafficAgentFrame, TRAFFIC_FLAG_AWAKE, TRAFFIC_FLAG_HORN, type TrafficAgentFrame } from '../protocol/traffic';
+import { OBJECT_FLAG_HORN } from '../protocol/layout';
 import type { BeamBreakEvent, ImpactEvent, SkidEvent } from '../protocol/events';
 
 export interface SpatialLike {
@@ -474,6 +475,15 @@ export class AudioDirector {
     const dop = dopplerFactor(cx, cy, cz, vx * rate, vy * rate, vz * rate, lpos[0]!, lpos[1]!, lpos[2]!, lvel[0]!, lvel[1]!, lvel[2]!);
     this.dopPlayer += (dop - this.dopPlayer) * Math.min(1, dt * 6);
     eng.pitch = pitchW * this.dopPlayer;
+    // the horn travels as an object flag (live snapshots and the replay buffer alike)
+    eng.horn = 0;
+    const rs = this.deps.sim.objectRanges();
+    for (let i = 0; i < rs.length; i++) {
+      if (rs[i]!.objectId === this.deps.playerObjectId) {
+        eng.horn = (rs[i]!.flags & OBJECT_FLAG_HORN) !== 0 ? 1 : 0;
+        break;
+      }
+    }
     g.engine.setInputs(eng, now);
     const len = info.length;
     g.exhaust.setPosition(cx - fx * len * 0.45, cy - 0.25, cz - fz * len * 0.45, now);
@@ -663,6 +673,7 @@ export class AudioDirector {
         ti.gate = 1;
         ti.pitch = pitch;
         ti.damage = tel ? (tel[T_DAMAGE] ?? 0) : 0;
+        ti.horn = (a.flags & TRAFFIC_FLAG_HORN) !== 0 ? 1 : 0;
         voice.engine.setInputs(ti, now);
         voice.spatial.setPosition(a.pos[0], a.pos[1] + 0.5, a.pos[2], now);
         voice.spatial.setGain(0.8, now);

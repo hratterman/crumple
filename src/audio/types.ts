@@ -33,7 +33,7 @@ export interface AudioSimSource {
   telemetry(objectId: number): Float32Array | null;
   readTrafficAgents(renderSimTime: number, out: TrafficAgentFrame[]): number;
   renderTime(): number;
-  objectRanges(): readonly { objectId: number; nodeOffset: number; nodeCount: number }[];
+  objectRanges(): readonly { objectId: number; flags: number; nodeOffset: number; nodeCount: number }[];
 }
 
 export interface AudioDeps {

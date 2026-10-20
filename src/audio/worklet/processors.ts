@@ -43,7 +43,7 @@ import type { EngineProcessorOptions } from '../voiceParams';
 
 class EngineProcessor extends AudioWorkletProcessor {
   static get parameterDescriptors() {
-    return [k('rpm', 800, 0, 20000), k('throttle', 0, 0, 1), k('load', 0, 0, 1), k('gate', 0, 0, 1), k('pitch', 1, 0.05, 8), k('limiter', 0, 0, 1), k('crank', 0, 0, 1), k('shift', 0, 0, 1), k('damage', 0, 0, 1)];
+    return [k('rpm', 800, 0, 20000), k('throttle', 0, 0, 1), k('load', 0, 0, 1), k('gate', 0, 0, 1), k('pitch', 1, 0.05, 8), k('limiter', 0, 0, 1), k('crank', 0, 0, 1), k('shift', 0, 0, 1), k('damage', 0, 0, 1), k('horn', 0, 0, 1)];
   }
   private readonly dsp: EngineDsp;
   private readonly inp = createEngineInput();
@@ -79,6 +79,7 @@ class EngineProcessor extends AudioWorkletProcessor {
     inp.crank = last(p, 'crank', 0);
     inp.shift = last(p, 'shift', 0);
     inp.damage = last(p, 'damage', 0);
+    inp.horn = last(p, 'horn', 0);
     this.dsp.process(ex, fr, ex.length, inp);
     return true;
   }

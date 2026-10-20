@@ -27,6 +27,7 @@
  */
 import type { EngineProfile } from '../profiles';
 import { Biquad, clamp01, DcBlock, Delay, Noise, OnePole, sin01, softClip, Svf } from './core';
+import { HornDsp } from './horn';
 
 /** Block inputs (targets for the END of the block; ramped from the previous block's values). */
 export interface EngineInput {
@@ -46,10 +47,12 @@ export interface EngineInput {
   shift: number;
   /** 0..1 vehicle damage (adds misfires and roughness). */
   damage: number;
+  /** ≥ 0.5: the horn sounds (front output; mixed into the light voice). */
+  horn: number;
 }
 
 export function createEngineInput(): EngineInput {
-  return { rpm: 800, throttle: 0, load: 0, gate: 1, pitch: 1, limiter: 0, crank: 0, shift: 0, damage: 0 };
+  return { rpm: 800, throttle: 0, load: 0, gate: 1, pitch: 1, limiter: 0, crank: 0, shift: 0, damage: 0, horn: 0 };
 }
 
 const SPEED_OF_SOUND = 343;
@@ -142,6 +145,7 @@ export class EngineDsp {
     this.loop = [new OnePole(), new OnePole()];
     this.rasp = [new Svf(), new Svf()];
     this.clat = [new Svf(), new Svf(), new Svf()];
+    this.hornDsp = new HornDsp(profile.horn, sampleRate, seed + 3);
     this.setProfile(profile);
   }
 
@@ -149,8 +153,11 @@ export class EngineDsp {
     return this.p;
   }
 
+  private readonly hornDsp: HornDsp;
+
   setProfile(p: EngineProfile): void {
     this.p = p;
+    this.hornDsp?.setProfile(p.horn);
     const n = Math.min(16, p.cylinders);
     for (let k = 0; k < n; k++) this.slotPos[k] = k / n + (p.cylTiming[k] ?? 0) / 720;
     this.slot = 0;
@@ -437,6 +444,9 @@ export class EngineDsp {
       x0 = ev;
     }
     void x0;
+    // the horn: front of the car (light voice: its single output); keeps sounding while gated by the gate
+    const hornOn = inp.horn >= 0.5 && gate1 > 0.01;
+    if (hornOn || this.hornDsp.active) this.hornDsp.process(light || alias ? exhaust : front, n, hornOn, pitch1);
     this.dumpEnv *= dumpDecay;
     this.rpm0 = rpm1;
     this.thr0 = thr1;

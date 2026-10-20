@@ -593,6 +593,7 @@ export class PauseMenu {
       ['Throttle / brake', 'W S · ↑ ↓', 'RT · LT'],
       ['Steer', 'A D · ← →', 'Left stick'],
       ['Handbrake', 'Space', 'A'],
+      ['Horn', 'H', 'L3 · R3'],
       ['Shift up / down', 'E Q · Shift Ctrl', 'RB · LB'],
       ['Recover upright', 'R', 'Y'],
       ['Full repair', 'F', 'D-pad ↑'],

@@ -4,7 +4,7 @@
  */
 import type { EngineProfile } from './profiles';
 
-export const ENGINE_PARAMS = ['rpm', 'throttle', 'load', 'gate', 'pitch', 'limiter', 'crank', 'shift', 'damage'] as const;
+export const ENGINE_PARAMS = ['rpm', 'throttle', 'load', 'gate', 'pitch', 'limiter', 'crank', 'shift', 'damage', 'horn'] as const;
 export const SURFACE_PARAMS = [
   'pitch',
   'speed',

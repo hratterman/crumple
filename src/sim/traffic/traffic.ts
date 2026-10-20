@@ -28,6 +28,7 @@ import {
   TRAFFIC_CONTACT_M,
   TRAFFIC_FLAG_AWAKE,
   TRAFFIC_FLAG_BRAKE,
+  TRAFFIC_FLAG_HORN,
   TRAFFIC_FLAG_HAZARD,
   TRAFFIC_FLAG_HEADLIGHTS,
   TRAFFIC_FLAG_INDICATOR_L,
@@ -177,6 +178,10 @@ export class TrafficAgent {
   lcT = 0;
   lcDir = 0;
   lcCooldown = 0;
+  /** P8 horn: seconds left honking, cooldown, time held up by a stopped focus (AI ticks). */
+  honkS = 0;
+  honkCool = 0;
+  blockedS = 0;
   // awake
   piI = 0;
   /** Cross-track integral (steer units). */
@@ -676,12 +681,14 @@ export class TrafficSim {
       if (gap < FAR) break;
     }
     const f = this.focus;
+    let focusLead = false;
     if (f.present) {
       const dx = f.x - a.pos[0];
       const dz = f.z - a.pos[2];
       if (dx * dx + dz * dz < (look + 15) * (look + 15)) {
         const g = this.corridorGap(a, base, look, f.pts, 5, variant.front);
         if (g < gap) {
+          focusLead = true;
           gap = g;
           const p = net.paths[a.plan[0]!]!;
           sampleRoute(p, a.s, this.smp);
@@ -757,6 +764,17 @@ export class TrafficSim {
     let acc = idmAccel(v, v0, a.T, gap, vLead);
     if (a.wrecked || a.stuck || a.hold) acc = -IDM_B;
     a.a = acc;
+
+    // ---- P8 horn: the focus (player) cuts in / brakes in front (a hard brake forced by it), or blocks
+    // the lane while stopped for 2.5 s. Brief, at most every 8 s per agent; pure AI state (deterministic).
+    if (a.honkS > 0) a.honkS -= AI_DT;
+    if (a.honkCool > 0) a.honkCool -= AI_DT;
+    a.blockedS = focusLead && v < 0.5 && gap < 12 ? a.blockedS + AI_DT : 0;
+    if (focusLead && !a.wrecked && a.honkCool <= 0 && ((acc < -3 && v > 3 && gap < 25) || a.blockedS > 2.5)) {
+      a.honkS = a.blockedS > 2.5 ? 0.9 : 0.45;
+      a.honkCool = 8;
+      a.blockedS = 0;
+    }
 
     if (!a.awake) {
       // Ghost: kinematic route follower.
@@ -1480,6 +1498,7 @@ export class TrafficSim {
       if (a.wrecked || a.stuck) flags |= TRAFFIC_FLAG_HAZARD;
       if (a.wrecked) flags |= TRAFFIC_FLAG_WRECKED;
       if (a.yielding) flags |= TRAFFIC_FLAG_YIELDING;
+      if (a.honkS > 0) flags |= TRAFFIC_FLAG_HORN;
       if (a.teleported) flags |= TRAFFIC_FLAG_TELEPORTED;
       a.teleported = false;
       rec.flags = flags;

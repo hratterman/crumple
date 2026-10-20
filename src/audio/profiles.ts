@@ -1,3 +1,5 @@
+import type { HornProfile } from './dsp/horn';
+
 /**
  * Per-vehicle engine sound profiles (P8 audio; pure data, owned by src/audio).
  *
@@ -105,6 +107,8 @@ export interface EngineProfile {
   squealHz: number;
   /** Starter crank speed, rpm. */
   crankRpm: number;
+  /** P8: the horn (dsp/horn.ts). */
+  horn: HornProfile;
 }
 
 const V8_BANKS = [0, 1, 0, 1, 1, 0, 1, 0];
@@ -137,6 +141,7 @@ export const COUPE_ENGINE: EngineProfile = {
   bankBalance: 0.82,
   squealHz: 980,
   crankRpm: 230,
+  horn: { kind: 'disc', freqs: [435, 528], level: 0.5, formantHz: 2600 },
 };
 
 /** Pickup: 5.0 L cross-plane V8, long pipes, deep and lazy. */
@@ -165,6 +170,7 @@ export const PICKUP_ENGINE: EngineProfile = {
   bankBalance: 0.78,
   squealHz: 820,
   crankRpm: 200,
+  horn: { kind: 'disc', freqs: [330, 412], level: 0.55, formantHz: 1900 },
 };
 
 /** Box truck: 6.7 L turbo-diesel I6 — combustion clatter, turbo whistle, wastegate flutter. */
@@ -193,6 +199,7 @@ export const BOXTRUCK_ENGINE: EngineProfile = {
   bankBalance: 0.96,
   squealHz: 640,
   crankRpm: 170,
+  horn: { kind: 'air', freqs: [165, 208, 247], level: 0.65, formantHz: 700 },
 };
 
 /** Sedan: 3.0 L inline-6 (the catalog's engine): smooth, silky, a bit of induction howl. */
@@ -221,6 +228,7 @@ export const SEDAN_ENGINE: EngineProfile = {
   bankBalance: 0.97,
   squealHz: 900,
   crankRpm: 220,
+  horn: { kind: 'disc', freqs: [410, 497], level: 0.5, formantHz: 2400 },
 };
 
 /** Beater: 1.6 L inline-4, tired — rough idle, the odd misfire, a rattling heat shield, a leaky exhaust. */
@@ -249,6 +257,7 @@ export const BEATER_ENGINE: EngineProfile = {
   bankBalance: 1,
   squealHz: 1050,
   crankRpm: 180,
+  horn: { kind: 'sick', freqs: [372], level: 0.3, formantHz: 2100 },
 };
 
 /** Traffic sedan: the sedan's I6, lighter voice. */
