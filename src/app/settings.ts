@@ -24,8 +24,13 @@ export interface GameSettings {
   chase: ChaseFraming;
   /** Chase camera base field of view, degrees. */
   fov: number;
-  /** 0..1, reserved for the P8 synthesized audio. */
+  /** P8 audio: master volume 0..1. */
   volume: number;
+  /** P8 audio: bus volumes 0..1 and mute. */
+  engineVolume: number;
+  effectsVolume: number;
+  ambienceVolume: number;
+  muted: boolean;
   /** P7: a severe crash plays back as an instant replay (crash cam) before driving on. */
   crashCam: boolean;
 }
@@ -42,6 +47,10 @@ export const DEFAULT_SETTINGS: Readonly<GameSettings> = {
   chase: 'normal',
   fov: 60,
   volume: 0.8,
+  engineVolume: 1,
+  effectsVolume: 1,
+  ambienceVolume: 0.8,
+  muted: false,
   crashCam: true,
 };
 
@@ -84,7 +93,8 @@ function pick<T>(allowed: readonly T[], v: unknown, fallback: T): T {
 export function sanitizeSettings(raw: unknown): GameSettings {
   const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
   const d = DEFAULT_SETTINGS;
-  const vol = typeof o.volume === 'number' && Number.isFinite(o.volume) ? Math.min(1, Math.max(0, o.volume)) : d.volume;
+  const unit = (v: unknown, f: number): number => (typeof v === 'number' && Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : f);
+  const vol = unit(o.volume, d.volume);
   return {
     units: pick(SPEED_UNITS, o.units, d.units),
     traffic: pick(TRAFFIC_SETTINGS, o.traffic, d.traffic),
@@ -92,6 +102,10 @@ export function sanitizeSettings(raw: unknown): GameSettings {
     chase: pick(CHASE_FRAMINGS, o.chase, d.chase),
     fov: pick(FOV_CHOICES, o.fov, d.fov),
     volume: vol,
+    engineVolume: unit(o.engineVolume, d.engineVolume),
+    effectsVolume: unit(o.effectsVolume, d.effectsVolume),
+    ambienceVolume: unit(o.ambienceVolume, d.ambienceVolume),
+    muted: typeof o.muted === 'boolean' ? o.muted : d.muted,
     crashCam: typeof o.crashCam === 'boolean' ? o.crashCam : d.crashCam,
   };
 }

@@ -85,6 +85,7 @@ import { PauseMenu, type QualityLevelName } from './ui/pause';
 import { Showroom, type ShowroomStage } from './ui/showroom/showroom';
 import { createReplaySession, type ReplaySession } from './ui/replay/session';
 import type { PerfOverlay, PerfOverlayData } from './ui/perfOverlay';
+import type { AudioPlayerInfo, AudioSystem } from './audio/types';
 import { colliderWorldAabb, resolveColliders } from './world/colliders';
 import { DEFAULT_LAYOUT } from './world/layout';
 import { createTerrainSampler } from './world/sampler';
@@ -355,6 +356,29 @@ function updateNearCasters(lighting: Parameters<typeof setNearCasters>[0]): void
   setNearCasters(lighting, renderer, camera, root, 0.5 * (d - NEAR_CASTER_REACH_M), d + NEAR_CASTER_REACH_M);
 }
 
+// ------------------------------------------------------------ P8 audio (src/audio, lazy chunk; set by boot())
+let audio: AudioSystem | null = null;
+/** The player facts the audio needs, cached per player vehicle. */
+let audioPlayerFor: { p: PlayerVehicle; info: AudioPlayerInfo } | null = null;
+function audioPlayerInfo(): AudioPlayerInfo | null {
+  if (!player) return null;
+  if (audioPlayerFor?.p !== player) {
+    const a = player.assets;
+    const hubs = playerHubs();
+    audioPlayerFor = {
+      p: player,
+      info: {
+        id: player.id,
+        drivetrain: a.sim.drivetrain,
+        hubs: hubs ? hubs.hubs : new Int32Array(0),
+        wheelRadius: hubs ? hubs.radius : 0.33,
+        length: a.entry.extent.max[2] - a.entry.extent.min[2],
+      },
+    };
+  }
+  return audioPlayerFor.info;
+}
+
 // ------------------------------------------------------------ P5 world layer (props, FX; set by boot())
 let fx: FxSystem | null = null;
 let props: PropRenderer | null = null;
@@ -371,18 +395,21 @@ let propBoxes: readonly Aabb[] = [];
  */
 const eventSink = {
   impact(e: Readonly<ImpactEvent>): void {
+    audio?.onImpact(e);
     if (e.objectId === VEHICLE_ID) playerVisual()?.onImpact(e);
     else if (isPropObjectId(e.objectId)) props?.onImpact(e);
     else if (traffic?.owns(e.objectId)) return traffic.onImpact(e);
     fx?.onImpact(e);
   },
   beamBreak(e: Readonly<BeamBreakEvent>): void {
+    audio?.onBeamBreak(e);
     if (e.objectId === VEHICLE_ID) playerVisual()?.onBeamBreak(e);
     else if (isPropObjectId(e.objectId)) props?.onBeamBreak(e);
     else if (traffic?.owns(e.objectId)) return traffic.onBeamBreak(e);
     fx?.onBeamBreak(e);
   },
   skid(e: Readonly<SkidEvent>): void {
+    audio?.onSkid(e);
     if (e.objectId === VEHICLE_ID) playerVisual()?.onSkid(e);
     else if (traffic?.owns(e.objectId)) return traffic.onSkid(e);
     fx?.onSkid(e);
@@ -1129,6 +1156,10 @@ const crumple = {
   get replay() {
     return replay.debug;
   },
+  /** P8 synthesized audio (src/audio/types.ts AudioDebug), null until its chunk loaded. */
+  get audio() {
+    return audio ? audio.debug : null;
+  },
   /** P7 (R2) replay UI / cameras / crash cam / photo mode (ui/replay/session.ts ReplaySessionDebug), null before boot. */
   get replayUi() {
     return replaySession ? replaySession.debug : null;
@@ -1425,6 +1456,45 @@ async function boot(): Promise<void> {
     units: () => settings.units,
   });
 
+  // P8: synthesized audio (lazy chunk + AudioWorklet module); the context resumes on the first gesture.
+  if (params.get('audio') !== '0') {
+    const propKeys = new Map(propInstances.map((p) => [p.objectId, p.prop as string]));
+    const fwdTmp = new Vector3();
+    void import('./audio')
+      .then((m) =>
+        m.createAudioSystem({
+          sim: client,
+          cameraMatrix: () => camera.matrixWorld.elements,
+          replay,
+          playerObjectId: VEHICLE_ID,
+          player: audioPlayerInfo,
+          nodes: () => positions,
+          playerForward: (out) => {
+            if (!poseValid) return false;
+            fwdTmp.copy(pose.forward);
+            out[0] = fwdTmp.x;
+            out[1] = fwdTmp.y;
+            out[2] = fwdTmp.z;
+            return true;
+          },
+          materialAt: (x, z) => smp.materialAt(x, z),
+          layoutZones: LAYOUT.zones,
+          heightAt: (x, z) => smp.heightAt(x, z),
+          propKey: (id) => propKeys.get(id) ?? null,
+          settings: () => settings,
+          timeScale: () => (paused ? 0 : slowMo ? SLOW_MO_SCALE : 1),
+          crashCam: () => replaySession?.crashCam.phase === 'playing',
+          playerDamage: () => (playerVisual()?.damage as { onFx: ((fx: { type: string; pos: ArrayLike<number> }) => void) | null } | undefined) ?? null,
+          hrtf: () => ctx.quality.level !== 'low',
+          trafficVoices: () => (ctx.quality.level === 'low' ? { awake: 2, ghosts: 2 } : { awake: 4, ghosts: 4 }),
+        }),
+      )
+      .then((a) => {
+        audio = a;
+      })
+      .catch((e: unknown) => console.warn('[audio] unavailable', e));
+  }
+
   const hudStatus = { paused: false, slowMo: false, camera: 'chase', transmission, beamView: true, view: debugView as string, tractionControl };
   const bootTime = performance.now();
   const worldFrame: WorldFrame = {
@@ -1550,6 +1620,9 @@ async function boot(): Promise<void> {
     hudStatus.tractionControl = tractionControl;
     hudView.update(client.telemetry(VEHICLE_ID), hudStatus, dt);
     prof.lap('hud');
+    // P8: audio follows the presented frame (live or replay), after the camera is final
+    audio?.update(dt);
+    prof.lap('audio');
     perfOverlay?.update(perfData);
     // P7 (R2): replay UI, crash cam (after the frame is drawn).
     if (input) replaySession?.frame(dt);

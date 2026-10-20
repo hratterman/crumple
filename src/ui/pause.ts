@@ -3,7 +3,7 @@
  * (timescale 0) while it is open and the world shows frozen behind a
  * blurred glass overlay. Sections: resume, replay & photo (P7), choose vehicle (showroom), spawn
  * point (the layout's named spawns), settings (quality preset, traffic,
- * units, TC default, camera framing / FOV, audio placeholder), controls
+ * units, TC default, camera framing / FOV, P8 sound: mute + master / engine / effects / ambience volumes), controls
  * and restart (full repair at the current spawn point, props re-placed).
  *
  * Navigation: ↑/↓ menu, → / Enter into a section, ← / Esc back out, Esc in
@@ -57,7 +57,7 @@ const SUBS: Readonly<Record<PauseSection, string>> = {
   replay: 'Rewind · slow-mo · photo mode',
   vehicle: 'Showroom · paint',
   spawn: 'Teleport anywhere',
-  settings: 'Graphics · traffic · camera',
+  settings: 'Graphics · traffic · camera · sound',
   controls: 'Keyboard · gamepad',
   restart: 'Repair at the start',
 };
@@ -72,6 +72,9 @@ function zoneOf(id: string): string {
   if (/town|street/.test(id)) return 'Town';
   return 'Valley';
 }
+
+/** Settings rows drawn as level meters (P8 audio volumes). */
+const METER_ROWS = new Set(['volume', 'engineVolume', 'effectsVolume', 'ambienceVolume']);
 
 interface Row<T extends string | number | boolean> {
   key: string;
@@ -471,13 +474,30 @@ export class PauseMenu {
         set: (v) => set({ crashCam: v as boolean }),
       },
       {
-        key: 'volume',
-        label: 'Master volume',
-        note: 'Synthesized audio arrives in a later update',
-        options: [0, 0.2, 0.4, 0.6, 0.8, 1].map((x) => ({ value: x, label: `${Math.round(x * 100)}` })),
-        get: () => Math.round(o.settings().volume * 5) / 5,
-        set: (v) => set({ volume: v as number }),
+        key: 'muted',
+        label: 'Sound',
+        note: 'Fully synthesized: engines, tyres, crashes, world',
+        options: [
+          { value: false, label: 'On' },
+          { value: true, label: 'Off' },
+        ],
+        get: () => o.settings().muted,
+        set: (v) => set({ muted: v as boolean }),
       },
+      ...(
+        [
+          ['volume', 'Master volume'],
+          ['engineVolume', 'Engine'],
+          ['effectsVolume', 'Effects'],
+          ['ambienceVolume', 'Ambience'],
+        ] as const
+      ).map(([key, label]) => ({
+        key,
+        label,
+        options: [0, 0.2, 0.4, 0.6, 0.8, 1].map((x) => ({ value: x, label: `${Math.round(x * 100)}` })),
+        get: () => Math.round(o.settings()[key] * 5) / 5,
+        set: (v: string | number | boolean) => set({ [key]: v as number }),
+      })),
     ];
     this.rows = rows;
     const list = h('div', 'pm-rows', p);
@@ -490,7 +510,7 @@ export class PauseMenu {
       const lab = h('div', 'pm-row-label', row);
       h('span', '', lab, r.label);
       if (r.note) h('small', '', lab, r.note);
-      const seg = h('div', `pm-seg${r.key === 'volume' ? ' pm-seg--meter' : ''}`, row);
+      const seg = h('div', `pm-seg${METER_ROWS.has(r.key) ? ' pm-seg--meter' : ''}`, row);
       seg.setAttribute('role', 'radiogroup');
       seg.setAttribute('aria-label', r.label);
       for (const opt of r.options) {
@@ -521,7 +541,7 @@ export class PauseMenu {
       const row = this.panel.querySelector<HTMLElement>(`[data-row="${r.key}"]`);
       if (!row) continue;
       const cur = r.get();
-      const meter = r.key === 'volume';
+      const meter = METER_ROWS.has(r.key);
       const idx = r.options.findIndex((o) => o.value === cur);
       row.querySelectorAll<HTMLButtonElement>('.pm-seg-opt').forEach((b, i) => {
         const on = meter ? i <= idx : i === idx;
