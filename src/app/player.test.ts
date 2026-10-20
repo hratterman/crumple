@@ -98,6 +98,7 @@ describe('per-vehicle HUD / camera facts', () => {
 });
 
 describe('player assets', () => {
+  // load() evaluates the sedan's visual def (lofts the LOD0 body, ~1 s idle): an explicit budget.
   it('loads + compiles the sedan once (cached) in the worker canonical order', async () => {
     const a = await loadPlayerAssets(sedan);
     expect(await loadPlayerAssets(sedan)).toBe(a);
@@ -110,7 +111,7 @@ describe('player assets', () => {
     expect(p.palette.id).toBe('crimson');
     expect(p.broken.length).toBe(a.compiled.rig.beamCount);
     expect(new PlayerVehicle(a, 'nope', null).palette.id).toBe(sedan.palettes[0]!.id);
-  });
+  }, 30_000);
 
   it('rejects unbuilt entries (and does not cache the failure)', async () => {
     if (!unbuilt) return;

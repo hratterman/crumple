@@ -39,13 +39,18 @@ interface G {
   tick: number;
   hold: boolean;
   debug: {
-    client: { despawn(id: number): void; input(id: number, a: Record<string, number>): void };
+    client: { despawn(id: number): void; input(id: number, a: Record<string, number>): void; setTimescale(v: number): void };
     camera: unknown;
   };
   position: [number, number, number] | null;
   vehicle: { speed: number; damage: number } | null;
   place(x: number, z: number, yawDeg?: number): void;
-  replay: { state: ReplayState; seek(t: number, settle?: boolean): void; controller: { targets(out: { position: number[] }[]): number } };
+  replay: {
+    state: ReplayState;
+    seek(t: number, settle?: boolean): void;
+    markers(): { time: number; severity: number; objectId: number }[];
+    controller: { targets(out: { position: number[] }[]): number };
+  };
   replayUi: {
     state: UiState;
     setPhoto(p: Record<string, unknown>): void;
@@ -55,6 +60,15 @@ interface G {
 
 const ui = (page: Page): Promise<UiState> => page.evaluate(() => (window as unknown as { __crumple: G }).__crumple.replayUi!.state);
 const rs = (page: Page): Promise<ReplayState> => page.evaluate(() => (window as unknown as { __crumple: G }).__crumple.replay.state);
+/** Buffer span and marker times (sim s) — the crash must still be inside the low preset's 20 s buffer. */
+const span = (page: Page): Promise<string> =>
+  page.evaluate(() => {
+    const r = (window as unknown as { __crumple: G }).__crumple.replay;
+    return `buffer ${r.state.start.toFixed(2)}..${r.state.end.toFixed(2)}, markers [${r
+      .markers()
+      .map((m) => `${m.time.toFixed(2)} (${m.severity.toFixed(2)})`)
+      .join(', ')}]`;
+  });
 const waitFor = (page: Page, fn: string, timeout = 60_000) =>
   page.waitForFunction(`(() => { const c = window.__crumple; return ${fn}; })()`, null, { timeout, polling: 100 });
 
@@ -99,14 +113,23 @@ test('replay UI: crash cam, timeline markers, scrub, cameras, photo mode + PNG',
   await page.evaluate(() => (window as unknown as { __crumple: G }).__crumple.debug.client.input(1, { throttle: 0 }));
   await page.waitForTimeout(1500);
   expect((await ui(page)).crashCam).toBe('armed');
+  // From here to the reopened replay the live sim runs on through the crash cam's arm delay, the skip
+  // back to live and Backspace: ~20 s of sim on a loaded box under software GL (each of those steps
+  // waits on a rendered frame), which is the low preset's whole 20 s buffer — the crash (and its
+  // marker) was evicted just before Backspace (buffer 41.77..61.33 s, crash at 41.23 s). The live sim
+  // runs at 1/10 speed meanwhile (the worker paces fixed steps: physics unchanged), as a player would
+  // press Backspace within seconds; the replay itself is main-side and unaffected.
   await page.evaluate(() => {
-    (window as unknown as { __crumple: G }).__crumple.hold = false;
+    const c = (window as unknown as { __crumple: G }).__crumple;
+    c.debug.client.setTimescale(0.1);
+    c.hold = false;
   });
 
   // ---- Crash cam: auto-enters as a letterboxed instant replay at 1/4×.
   await waitFor(page, 'c.replayUi.state.highlight', 60_000);
   await page.waitForTimeout(1200);
   const hl = await rs(page);
+  console.log(`[e2e] crash cam: ${await span(page)}`);
   expect(hl.phase).toBe('replay');
   expect(hl.speed).toBe(0.25);
   expect(hl.markers).toBeGreaterThan(0);
@@ -123,12 +146,15 @@ test('replay UI: crash cam, timeline markers, scrub, cameras, photo mode + PNG',
   await expect(page.locator('.hud')).toBeVisible();
 
   // ---- Backspace (at once: the low preset holds only 20 s and the live sim runs on meanwhile): the replay, paused at the end, the crash on the timeline.
+  console.log(`[e2e] back live: ${await span(page)}`);
   expect((await rs(page)).markers).toBeGreaterThan(0);
   await page.keyboard.press('Backspace');
   await waitFor(page, 'c.replayUi.state.open && c.replay.state.phase === "replay"', 30_000);
+  console.log(`[e2e] replay open: ${await span(page)}`);
   await expect(page.getByTestId('replay-ui')).toBeVisible();
   await expect(page.locator('.hud')).toBeHidden();
   await expect(page.getByTestId('replay-marker').first()).toBeAttached();
+  await page.evaluate(() => (window as unknown as { __crumple: G }).__crumple.debug.client.setTimescale(1)); // paused while replaying
   await page.waitForTimeout(800);
   await shot('02-replay-open');
 

@@ -101,17 +101,25 @@ describe('generateTerrain (DEFAULT_LAYOUT)', () => {
   beforeAll(() => {
     // Two runs: the second is the determinism check; the budget is asserted on
     // the faster one so a transient load spike on a shared runner cannot flake it.
+    // The budget is CPU time of this process (generation is synchronous on one thread), so a
+    // descheduled run on an oversubscribed box does not count against it; wall time is logged too.
+    const cpuMs = (): number => {
+      const u = (globalThis as unknown as { process: { cpuUsage(): { user: number; system: number } } }).process.cpuUsage();
+      return (u.user + u.system) / 1000;
+    };
     for (let k = 0; k < 2; k++) {
       const t0 = performance.now();
+      const c0 = cpuMs();
       const r = generateTerrain(DEFAULT_LAYOUT);
+      const cpu = cpuMs() - c0;
       const dt = performance.now() - t0;
       if (k === 0) t = r;
       else again = r;
-      ms = Math.min(ms, dt);
+      ms = Math.min(ms, cpu);
       const stages = Object.entries(lastTerrainTimings)
         .map(([n, v]) => `${n} ${v.toFixed(0)}`)
         .join(', ');
-      console.log(`generateTerrain(${DEFAULT_LAYOUT.id}) run ${k + 1}: ${dt.toFixed(0)} ms, hash 0x${r.hash.toString(16)}, h ${r.minHeight.toFixed(1)}..${r.maxHeight.toFixed(1)} [${stages}]`);
+      console.log(`generateTerrain(${DEFAULT_LAYOUT.id}) run ${k + 1}: ${dt.toFixed(0)} ms (cpu ${cpu.toFixed(0)}), hash 0x${r.hash.toString(16)}, h ${r.minHeight.toFixed(1)}..${r.maxHeight.toFixed(1)} [${stages}]`);
     }
   }, 120_000);
 
@@ -416,7 +424,8 @@ describe('generateTerrain (DEFAULT_LAYOUT)', () => {
 });
 
 describe('generateTerrain (small layout)', () => {
-  it('is deterministic and the hash follows the seed', () => {
+  // Three generations of the 257² layout (~1 s idle): an explicit budget, not the 5 s default.
+  it('is deterministic and the hash follows the seed', { timeout: 60_000 }, () => {
     const a = generateTerrain(smallLayout(1));
     const b = generateTerrain(smallLayout(1));
     const c = generateTerrain(smallLayout(2));

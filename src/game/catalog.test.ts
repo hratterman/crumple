@@ -67,8 +67,12 @@ describe('vehicle catalog (P6 contract)', () => {
   });
 
   // Runs for every AVAILABLE entry: a fleet unit flipping `available` is covered automatically.
-  it('available entries load defs that match their card and budget', async () => {
-    for (const e of entries.filter((x) => x.available)) {
+  // One case per vehicle with its own budget: load() imports the visual def, whose module evaluation
+  // lofts and tessellates the whole LOD0 body (0.4–1.7 s per vehicle on an idle core, the bulk of
+  // this file; 3–4 s for all six together, which crossed vitest's 5 s default on a loaded box).
+  it.each(entries.filter((x) => x.available).map((e) => [e.id, e] as const))(
+    'available entry %s loads defs that match its card and budget',
+    async (_id, e) => {
       const { sim, visual } = await e.load();
       expect(visual.vehicle, e.id).toBe(sim.name);
       expect(visual.paint, `${e.id} palettes[0] = the visual def's paint`).toEqual(e.palettes[0]!.paint);
@@ -82,6 +86,7 @@ describe('vehicle catalog (P6 contract)', () => {
       const report = validateVehicle(sim, e.beamBudget);
       expect(report.errors, e.id).toEqual([]);
       expect(cv.rig.beamCount, `${e.id} beams`).toBeLessThanOrEqual(e.beamBudget);
-    }
-  });
+    },
+    30_000,
+  );
 });

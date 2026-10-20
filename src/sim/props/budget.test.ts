@@ -17,6 +17,15 @@ import { WorkerHost } from '../worker';
 
 const STEPS_PER_S = 2000;
 
+/**
+ * CPU ms of this process: stepping is synchronous on one thread, so this is the step cost even when
+ * an oversubscribed box deschedules the test (wall time then overstates it several times over).
+ */
+function cpuMs(): number {
+  const u = (globalThis as unknown as { process: { cpuUsage(): { user: number; system: number } } }).process.cpuUsage();
+  return (u.user + u.system) / 1000;
+}
+
 function awakeProps(eng: SimEngine): number {
   let n = 0;
   for (const o of eng.objects) if (o.objectId >= 4096 && (o.flags & SIM_OBJECT_FLAG_SLEEPING) === 0) n++;
@@ -52,12 +61,12 @@ function plough(host: WorkerHost, x: number, z: number, fx: number, fz: number, 
   let maxAwake = 0;
   let pairsMax = 0;
   for (let s = 0; s < seconds * 4; s++) {
-    const t0 = performance.now();
+    const t0 = cpuMs();
     for (let i = 0; i < STEPS_PER_S / 4; i++) {
       eng.step();
       if (eng.contacts.pairCount > pairsMax) pairsMax = eng.contacts.pairCount;
     }
-    const dt = performance.now() - t0;
+    const dt = cpuMs() - t0;
     eng.events.clear();
     total += dt;
     worst = Math.max(worst, dt * 4);

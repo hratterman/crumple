@@ -231,7 +231,8 @@ describe('createTerrainSampler', () => {
     expect(() => createTerrainSampler({ ...t, spacing: 0 })).toThrow(RangeError);
   });
 
-  it('hot path does not allocate (no GC during 3 M warmed-up calls, incl. a second sampler instance)', async () => {
+  // 15 M sampler calls (warm-up included): ~0.8 s idle, far more on a loaded box — an explicit budget.
+  it('hot path does not allocate (no GC during 3 M warmed-up calls, incl. a second sampler instance)', { timeout: 60_000 }, async () => {
     // node:v8 via a computed specifier: the project has no @types/node.
     const v8 = (await import(/* @vite-ignore */ ['node', 'v8'].join(':'))) as {
       GCProfiler: new () => { start(): void; stop(): { statistics: unknown[] } | undefined };
@@ -259,15 +260,24 @@ describe('createTerrainSampler', () => {
     // switch instance: the inlined code goes generic (see INLINING).
     run(samplers[0]!, 2000);
     run(samplers[1]!, 2000);
+    // Best of 3 measured passes per instance. Optimization is a background (concurrent) compile: on a
+    // starved box the first pass can still run in baseline code, which boxes doubles and allocates.
+    // An allocating hot path allocates on EVERY call (3 M × ≥ 16 B ≫ the young generation), so it
+    // GCs in every pass and still fails.
     for (const s of samplers) {
-      const heap0 = proc.memoryUsage().heapUsed;
-      const prof = new v8.GCProfiler();
-      prof.start();
-      run(s, 1000);
-      const stats = prof.stop();
-      const heap1 = proc.memoryUsage().heapUsed;
-      expect(stats?.statistics.length ?? 0).toBe(0);
-      expect(heap1 - heap0).toBeLessThan(256 * 1024);
+      let best = { gcs: Infinity, heap: Infinity };
+      for (let attempt = 0; attempt < 3 && best.gcs > 0; attempt++) {
+        const heap0 = proc.memoryUsage().heapUsed;
+        const prof = new v8.GCProfiler();
+        prof.start();
+        run(s, 1000);
+        const stats = prof.stop();
+        const heap1 = proc.memoryUsage().heapUsed;
+        const gcs = stats?.statistics.length ?? 0;
+        if (gcs < best.gcs) best = { gcs, heap: heap1 - heap0 };
+      }
+      expect(best.gcs).toBe(0);
+      expect(best.heap).toBeLessThan(256 * 1024);
     }
   });
 

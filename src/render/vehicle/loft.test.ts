@@ -120,6 +120,7 @@ describe('loft core', () => {
     expect(loft.vKnots[2]!).toBeCloseTo(0.4, 3);
   });
 
+  // A full mirrored shell at 6 cm resolution (~1 s idle): an explicit budget.
   it('tessellates a LoftSurface: finite, unit normals, CCW outward, mirror seam bit-equal', () => {
     const surface: LoftSurface = { type: 'loft', sections: shell(), resolution: 0.06, mirrorX: true };
     const g = tessellateSurface('shell', surface);
@@ -149,7 +150,7 @@ describe('loft core', () => {
         maxEdge = Math.max(maxEdge, Math.hypot(g.position[a]! - g.position[b]!, g.position[a + 1]! - g.position[b + 1]!, g.position[a + 2]! - g.position[b + 2]!));
       }
     expect(maxEdge).toBeLessThan(0.06 * Math.SQRT2 + 1e-3);
-  });
+  }, 30_000);
 
   it('windows cut from one master leave a shut gap ≈ VISUAL_DEFAULTS.shutGap between neighbours', () => {
     const base = { type: 'loft' as const, sections: shell(), resolution: 0.05 };

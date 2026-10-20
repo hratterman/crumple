@@ -6,6 +6,12 @@ import { expect, test, type Page } from '@playwright/test';
  * and check it runs to a result: countdown → GO, combo popups, the HUD, the
  * results screen with a medal + PB, and that the PB (with its ghost) is
  * stored. Screenshots of the HUD, a popup and the results are attached.
+ *
+ * The bot is closed-loop on main (snapshot listener, every 4th snapshot) while the worker paces the
+ * sim in real time, so each command lands a main-thread latency after the snapshot it answers. A run
+ * whose outcome is sensitive to that (the barrel roll: which wheels climb the kicker, at what speed)
+ * passes `timescale`: the sim runs slowed for the scripted part, the bot still samples every 4th
+ * snapshot (fixed sim ticks), and the same wall-clock latency shrinks to a fraction of a bot period.
  */
 interface ChallengeApi {
   phase: string;
@@ -27,6 +33,7 @@ interface G {
   challenges: ChallengeApi | null;
   openChallenges(): void;
   mode: string;
+  debug: { client: { setTimescale(v: number): void } };
 }
 const api = (page: Page) =>
   page.evaluate(() => {
@@ -39,18 +46,29 @@ async function draw(page: Page): Promise<void> {
   await page.waitForTimeout(300);
 }
 
-async function runChallenge(page: Page, id: string, query: string, bot: Record<string, unknown>, shots: (name: string) => Promise<void>): Promise<{ popups: string[]; result: NonNullable<ChallengeApi['result']> }> {
+async function runChallenge(
+  page: Page,
+  id: string,
+  query: string,
+  bot: Record<string, unknown>,
+  shots: (name: string) => Promise<void>,
+  timescale = 1,
+): Promise<{ popups: string[]; result: NonNullable<ChallengeApi['result']> }> {
   await page.goto(`/crumple/?q=low&traffic=0&challenge=${id}&${query}`);
   await page.waitForFunction(() => (window as unknown as { __crumple?: G }).__crumple?.ready === true, null, { timeout: 180_000 });
   await page.waitForFunction(() => {
     const c = (window as unknown as { __crumple: G }).__crumple.challenges;
     return !!c && c.phase !== 'idle';
   }, null, { timeout: 120_000 });
-  await page.evaluate((cfg) => {
-    const g = (window as unknown as { __crumple: G }).__crumple;
-    g.challenges!.bot(true, cfg);
-    g.hold = true;
-  }, bot);
+  await page.evaluate(
+    ([cfg, ts]) => {
+      const g = (window as unknown as { __crumple: G }).__crumple;
+      g.challenges!.bot(true, cfg);
+      g.hold = true;
+      if (ts !== 1) g.debug.client.setTimescale(ts);
+    },
+    [bot, timescale] as const,
+  );
   let hud = false;
   let pop = false;
   const t0 = Date.now();
@@ -72,6 +90,7 @@ async function runChallenge(page: Page, id: string, query: string, bot: Record<s
     expect(Date.now() - t0, `${id} finishes`).toBeLessThan(360_000);
     await page.waitForTimeout(150);
   }
+  if (timescale !== 1) await page.evaluate(() => (window as unknown as { __crumple: G }).__crumple.debug.client.setTimescale(1));
   await page.waitForTimeout(2600); // medal animation
   await draw(page);
   await shots(`${id}-results`);
@@ -125,7 +144,10 @@ test.describe('stunt challenges', () => {
       await page.screenshot({ path });
       await info.attach(name, { path, contentType: 'image/png' });
     };
-    const r = await runChallenge(page, 'barrel-roll', 'spawn=arena', { speedKmh: 65, latAcc: 50 }, shots);
+    // 62 km/h: the middle of the clean-roll window (headless playtest: 50–70 km/h roll once or nearly,
+    // 75 over-rotates onto the roof); the sim at 1/4 speed makes the bot's command timing match it.
+    const r = await runChallenge(page, 'barrel-roll', 'spawn=arena', { speedKmh: 62, latAcc: 50 }, shots, 0.25);
+    console.log(`[e2e] barrel roll: ${r.result.scoreText} (${r.result.medal}); popups ${JSON.stringify(r.popups)}`);
     expect(r.result.completed).toBe(true);
     expect(r.result.score).toBeGreaterThanOrEqual(0.25);
     expect(r.popups.some((p) => /ROLL/.test(p))).toBe(true);
