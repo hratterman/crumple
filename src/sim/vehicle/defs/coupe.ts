@@ -88,7 +88,8 @@ export const COUPE_TYRE = {
   rays: 12,
   tireNodeRadius: 0.045,
   tireContactSpring: 8e4,
-  treadBrushStiffness: 8.5e4,
+  // R-PHYS: 8.5e4 → 1.9e5: a 255/35R19-class performance tyre, C_α/Fz ≈ 18–22/rad, peak ≈ 5–7°
+  treadBrushStiffness: 1.9e5,
   treadBrushDamping: 30,
   rimHoopTension: 1,
   treadHoopTension: 0.5,
@@ -102,7 +103,16 @@ export const COUPE_TYRE = {
   hubMass: 10,
   rimMass: 24,
   tireMass: 9.4,
-  friction: 1.35,
+  // R-PHYS: 1.35 → 1.6 μ_x with μ_y = 0.81 μ_x (a 255/35R19 max-performance tyre): ABS stops ≈ 1.15–1.2 g
+  // (100–0 ≈ 34 m), skidpad ≈ 1.03 g
+  friction: 1.6,
+  tyreLateralMu: 0.81,
+  // R-PHYS tyre model (tyre.ts)
+  tyreLoadSensitivity: 0.06,
+  // max-performance tyres keep ≈ 0.85 of their peak sliding
+  tyreSlideRatio: 0.85,
+  tyrePeakSlip: 0.06,
+  tyreSlideSlip: 0.45,
 } as const satisfies Partial<WheelDef>;
 /**
  * Rear lateral brush stiffness, N/m per tread node (front: COUPE_TYRE's).
@@ -111,7 +121,7 @@ export const COUPE_TYRE = {
  * grew from 260 km/h (±0.09 rad/s at 278 km/h); at 1.15e5 the 10 s
  * full-throttle run from 245 km/h holds |r| < 0.01 rad/s.
  */
-const REAR_BRUSH = 1.15e5;
+const REAR_BRUSH = 2.3e5; // R-PHYS: 1.15e5 × 2 with the front's realism scaling
 
 const Z_F = -COUPE_TARGETS.wheelbase / 2; // front axle
 const Z_R = COUPE_TARGETS.wheelbase / 2; // rear axle
@@ -482,7 +492,7 @@ const DRIVETRAIN: DrivetrainDef = {
   clutchMaxTorque: 800,
   transmission: 'auto',
   // The soft tyre needs ~20 % slip for 0.65 g of drive (TC off: ~0.7 g with the rears spinning).
-  tractionControl: 0.2,
+  tractionControl: 0.1,
 };
 
 // ====================================================================== generator
@@ -557,6 +567,14 @@ export interface CoupeDesign {
   gapAxialK: number[];
   gapYieldTravel: number[];
 }
+
+/**
+ * R-PHYS rolling-loss correction (tyre.ts): the 12/10-ray tread polygon's excess loss over a real tyre's
+ * f_r = 0.011·(1 + V/160 km/h) (Wong, "Theory of Ground Vehicles" eq. 1.12), per unit load, every 20 km/h
+ * of tread speed from 0 — measured by coasting this car in neutral (realism/coastdown calibration), kept
+ * conservative (0.85 × the lower of the bin and its neighbours' mean) so it never propels a coasting car.
+ */
+export const COUPE_ROLLING_LOSS: readonly number[] = [0.0,  0.0086,  0.0172,  0.026,  0.0306,  0.0279,  0.0471,  0.0663,  0.1056,  0.0986,  0.0909,  0.0554,  0.054,  0.09,  0.1054,  0.11];
 
 function buildCoupe(): { def: VehicleDef; design: CoupeDesign } {
   const nodes: RigNodeDef[] = [];
@@ -664,6 +682,7 @@ function buildCoupe(): { def: VehicleDef; design: CoupeDesign } {
     const c = corners.get(id)!;
     return {
       ...COUPE_TYRE,
+      rollingLossComp: COUPE_ROLLING_LOSS,
       treadBrushStiffness: front ? COUPE_TYRE.treadBrushStiffness : REAR_BRUSH,
       hubMass: hubMass(front),
       id,
@@ -1308,7 +1327,7 @@ function buildCoupe(): { def: VehicleDef; design: CoupeDesign } {
     },
     wheels,
     drivetrain: DRIVETRAIN,
-    brakes: { frontBias: 0.64, handbrakeTorqueMax: 1800 },
+    brakes: { frontBias: 0.64, handbrakeTorqueMax: 1800, abs: true, esc: true },
     // Low, wide fastback with a ducktail and diffuser: net downforce. CdA 0.68 (Cd ≈ 0.35
     // × 1.95 m²) also caps v_max at ≈ 285 km/h (a 40 s run settles there, |r| < 0.02 rad/s):
     // at 0.58 it reached 288 km/h and slowly yawed off line (wheel speed far beyond the tread

@@ -37,7 +37,9 @@ import type {
   VehicleRuntime,
   WheelRuntime,
 } from './types';
-import { applyHoopTension, applyParkingClamp, applyTreadBrush, applyWheelTorques, estimateWheelOmega } from './wheels';
+import { applyHoopTension, applyParkingClamp, applyTreadBrush, applyWheelTorques, estimateWheelOmega, setDriveOnUpright } from './wheels';
+import { createBrakeSystem, resetBrakeSystem, stepBrakes, type BrakeSystemState } from './brakes';
+import { createTyreState, resetTyreState, stepTyre, type TyreState } from './tyre';
 
 /** Air density, kg/m³ (AeroDef contract). */
 export const AIR_DENSITY = 1.225;
@@ -68,6 +70,10 @@ export interface VehicleRuntimeEx extends VehicleRuntime {
   bodyMass: number;
   /** Feel pass: rigid shell cluster runtimes (one per cluster). */
   shell: ShellRuntime[];
+  /** R-PHYS: hydraulic brakes, ABS / EBD / ESC (brakes.ts). */
+  brakeSys: BrakeSystemState;
+  /** R-PHYS: per-wheel tyre friction state (tyre.ts), declaration order. */
+  tyres: TyreState[];
 }
 
 // ------------------------------------------------------------ create / rebase
@@ -82,9 +88,56 @@ export function rollingRadius(w: CompiledWheel): number {
   return (w.tireRingRadius * w.rays * Math.sin(Math.PI / w.rays)) / Math.PI;
 }
 
+/** Minimum distance (m) of an upright node from the axle to carry the reaction couple. */
+const REACT_MIN_ARM = 0.06;
+
+/**
+ * Upright nodes for the brake / live-axle reaction couple (wheels.ts
+ * applyUprightReaction): the WheelDef.attach nodes (the upright top) when
+ * they sit ≥ REACT_MIN_ARM off the axle, else the far ends of the hub-link
+ * beams (kingpin knuckle, axle-end brackets) that do. Spawn time only.
+ */
+function reactionNodes(vehicle: CompiledVehicle, cw: CompiledWheel): Int32Array {
+  const p = vehicle.rig.nodePos;
+  const cx = (p[3 * cw.hubI]! + p[3 * cw.hubO]!) / 2;
+  const cy = (p[3 * cw.hubI + 1]! + p[3 * cw.hubO + 1]!) / 2;
+  const cz = (p[3 * cw.hubI + 2]! + p[3 * cw.hubO + 2]!) / 2;
+  let sx = p[3 * cw.hubO]! - p[3 * cw.hubI]!;
+  let sy = p[3 * cw.hubO + 1]! - p[3 * cw.hubI + 1]!;
+  let sz = p[3 * cw.hubO + 2]! - p[3 * cw.hubI + 2]!;
+  const sl = Math.hypot(sx, sy, sz) || 1;
+  sx /= sl;
+  sy /= sl;
+  sz /= sl;
+  const arm = (i: number): number => {
+    const rx = p[3 * i]! - cx;
+    const ry = p[3 * i + 1]! - cy;
+    const rz = p[3 * i + 2]! - cz;
+    const a = rx * sx + ry * sy + rz * sz;
+    return Math.sqrt(Math.max(0, rx * rx + ry * ry + rz * rz - a * a));
+  };
+  const att = Array.from(cw.attachNodes).filter((i) => arm(i) >= REACT_MIN_ARM);
+  if (att.length > 0) return Int32Array.from(att);
+  const out: number[] = [];
+  const a = vehicle.rig.beamA;
+  const b = vehicle.rig.beamB;
+  for (const bi of cw.hubLinkBeams) {
+    const x = a[bi]!;
+    const y = b[bi]!;
+    const far = x === cw.hubI || x === cw.hubO ? y : x;
+    if (!out.includes(far) && arm(far) >= REACT_MIN_ARM) out.push(far);
+  }
+  return Int32Array.from(out);
+}
+
 function makeWheel(vehicle: CompiledVehicle, index: number): WheelRuntime {
   const cw = vehicle.wheels[index]!;
+  const reactLocal = reactionNodes(vehicle, cw);
   return {
+    reactLocal,
+    reactNodes: new Int32Array(reactLocal.length),
+    caliperInboard: cw.caliperInboard ?? 0.5,
+    latMu: cw.tyre?.lateralMu ?? 1,
     wheel: cw,
     hubI: cw.hubI,
     hubO: cw.hubO,
@@ -139,7 +192,24 @@ export function createVehicleRuntime(
     damageBeams: Int32Array.from(dmg),
     bodyMass,
     shell: vehicle.shell.map((c) => createShellRuntime(c, rig)),
+    brakeSys: undefined as unknown as BrakeSystemState,
+    tyres: vehicle.wheels.map((cw) => {
+      const ring = 2 * cw.rays;
+      const base = new Float64Array(ring);
+      for (let j = 0; j < ring; j++) base[j] = rig.nodeFriction[cw.tireStart + j]!;
+      // design load: the car's weight shared over its wheels
+      const t = cw.tyre;
+      const fz0 = t && t.designLoad > 0 ? t.designLoad : (vehicle.totalMass * 9.81) / vehicle.wheels.length;
+      return createTyreState(base, fz0, {
+        tyreLoadSensitivity: t?.loadSensitivity,
+        tyreSlideRatio: t?.slideRatio,
+        tyrePeakSlip: t?.peakSlip,
+        tyreSlideSlip: t?.slideSlip,
+        rollingLossComp: t?.rollingLossComp,
+      });
+    }),
   };
+  rt.brakeSys = createBrakeSystem(rt);
   rebaseVehicle(rt, nodeStart, beamStart);
   return rt;
 }
@@ -158,6 +228,9 @@ export const rebaseVehicle: RebaseVehicle = (vehicle, nodeStart, beamStart) => {
     w.tireStart = nodeStart + cw.tireStart;
     for (let j = 0; j < cw.hubLinkBeams.length; j++) w.hubLinkBeams[j] = beamStart + cw.hubLinkBeams[j]!;
     for (let j = 0; j < cw.attachNodes.length; j++) w.attachNodes[j] = nodeStart + cw.attachNodes[j]!;
+    const rl = w.reactLocal;
+    const rn = w.reactNodes;
+    if (rl && rn) for (let j = 0; j < rl.length; j++) rn[j] = nodeStart + rl[j]!;
   }
 };
 
@@ -176,6 +249,10 @@ export function resetVehicleRuntime(vehicle: VehicleRuntime): void {
     w.treadBrush.fill(0);
   }
   resetDrivetrainState(vehicle.drivetrain as DrivetrainStateEx, vehicle.vehicle.drivetrain);
+  const bs = (vehicle as VehicleRuntimeEx).brakeSys;
+  if (bs) resetBrakeSystem(bs);
+  const ty = (vehicle as VehicleRuntimeEx).tyres;
+  if (ty) for (const t of ty) resetTyreState(t);
   vehicle.telemetry.fill(0);
   const sh = (vehicle as VehicleRuntimeEx).shell;
   if (sh) for (const c of sh) resetShell(c);
@@ -266,14 +343,108 @@ export function vehiclePreStep(state: SimState, vehicle: VehicleRuntime, actions
   const wheels = vehicle.wheels;
   for (let w = 0; w < wheels.length; w++) estimateWheelOmega(state, wheels[w]!);
   stepDrivetrain(state, vehicle, actions, dt, vehicle.telemetry);
+  const bs = (vehicle as VehicleRuntimeEx).brakeSys;
+  if (bs) stepBrakes(state, vehicle, actions, dt, bs);
+  const onAxle = vehicle.vehicle.drivetrain.driveReaction === 'axle';
+  setDriveOnUpright(onAxle);
+  const ty = (vehicle as VehicleRuntimeEx).tyres;
   for (let w = 0; w < wheels.length; w++) {
     const wr = wheels[w]!;
+    if (ty) wr.extraTorque = stepTyre(state, wr, ty[w]!, dt);
     applyWheelTorques(state, wr, wr.driveTorque, wr.brakeTorque);
     applyTreadBrush(state, wr, dt);
     applyHoopTension(state, wr);
   }
+  if (!onAxle) applyDriveReaction(state, vehicle);
   applyParkingClamp(state, vehicle, actions, dt);
   applyAero(state, vehicle);
+}
+
+/**
+ * Body-mounted differential (DrivetrainDef.driveReaction 'body'): the drive
+ * torques' reaction T = −Σ τ_i·s_i acts on the sprung body as a pure couple,
+ * spread as the rigid-body angular acceleration it gives the body:
+ * F_j = m_j·(|T|/I)·(T̂ × ρ_j⊥), ρ from the body's centre of mass, I = Σ m|ρ⊥|²
+ * (zero net force; moment T up to the body's small products of inertia). On
+ * three frame nodes it loaded the radiator-support node of the beater's soft
+ * crumple zone with ~1.4 kN in first gear and yielded its fender beams.
+ * Hot path: + − × ÷ sqrt, no allocation (two passes over the body nodes, as aero).
+ */
+export function applyDriveReaction(state: SimState, vehicle: VehicleRuntime): void {
+  const { posX, posY, posZ, frcX, frcY, frcZ, invMass } = state;
+  const wheels = vehicle.wheels;
+  let Tx = 0;
+  let Ty = 0;
+  let Tz = 0;
+  for (let w = 0; w < wheels.length; w++) {
+    const wr = wheels[w]!;
+    const d = wr.driveTorque;
+    if (d === 0 || wr.detached !== 0) continue;
+    const hi = wr.hubI;
+    const ho = wr.hubO;
+    const sx = posX[ho]! - posX[hi]!;
+    const sy = posY[ho]! - posY[hi]!;
+    const sz = posZ[ho]! - posZ[hi]!;
+    const l = Math.sqrt(sx * sx + sy * sy + sz * sz);
+    if (!(l > 1e-9)) continue;
+    const k = (wr.wheel.spinSign / l) * -d;
+    Tx += sx * k;
+    Ty += sy * k;
+    Tz += sz * k;
+  }
+  const tl = Math.sqrt(Tx * Tx + Ty * Ty + Tz * Tz);
+  if (!(tl > 1e-9)) return;
+  const ux = Tx / tl;
+  const uy = Ty / tl;
+  const uz = Tz / tl;
+  const start = vehicle.nodeStart;
+  const end = start + vehicle.vehicle.bodyNodeCount;
+  let m = 0;
+  let cx = 0;
+  let cy = 0;
+  let cz = 0;
+  for (let i = start; i < end; i++) {
+    const im = invMass[i]!;
+    if (im === 0) continue;
+    m += 1 / im;
+    cx += posX[i]! / im;
+    cy += posY[i]! / im;
+    cz += posZ[i]! / im;
+  }
+  if (!(m > 0)) return;
+  cx /= m;
+  cy /= m;
+  cz /= m;
+  let I = 0;
+  for (let i = start; i < end; i++) {
+    const im = invMass[i]!;
+    if (im === 0) continue;
+    const rx = posX[i]! - cx;
+    const ry = posY[i]! - cy;
+    const rz = posZ[i]! - cz;
+    const a = rx * ux + ry * uy + rz * uz;
+    const px = rx - a * ux;
+    const py = ry - a * uy;
+    const pz = rz - a * uz;
+    I += (px * px + py * py + pz * pz) / im;
+  }
+  if (!(I > 1e-9)) return;
+  const g = tl / I;
+  for (let i = start; i < end; i++) {
+    const im = invMass[i]!;
+    if (im === 0) continue;
+    const rx = posX[i]! - cx;
+    const ry = posY[i]! - cy;
+    const rz = posZ[i]! - cz;
+    const a = rx * ux + ry * uy + rz * uz;
+    const px = rx - a * ux;
+    const py = ry - a * uy;
+    const pz = rz - a * uz;
+    const k = g / im;
+    frcX[i] = frcX[i]! + k * (uy * pz - uz * py);
+    frcY[i] = frcY[i]! + k * (uz * px - ux * pz);
+    frcZ[i] = frcZ[i]! + k * (ux * py - uy * px);
+  }
 }
 
 // ------------------------------------------------------------ damage / telemetry

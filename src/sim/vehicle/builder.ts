@@ -277,6 +277,16 @@ function compileWheels(def: VehicleDef, rig: CompiledRig, bodyNodeCount: number,
       rimHoop: (wd.rimHoopTension ?? 0) / (2 * Math.sin(Math.PI / n)),
       treadHoop: (wd.treadHoopTension ?? 0) / (2 * Math.sin(Math.PI / n)),
       friction: wd.friction,
+      tyre: {
+        loadSensitivity: wd.tyreLoadSensitivity ?? 0,
+        slideRatio: wd.tyreSlideRatio ?? 1,
+        peakSlip: wd.tyrePeakSlip ?? 0.1,
+        slideSlip: wd.tyreSlideSlip ?? 0.6,
+        rollingLossComp: wd.rollingLossComp ? [...wd.rollingLossComp] : [],
+        designLoad: wd.tyreDesignLoad ?? 0,
+        lateralMu: wd.tyreLateralMu ?? 1,
+      },
+      caliperInboard: wd.caliperInboard ?? 0.5,
     });
     nodeStart += nodeCount;
     beamStart += beamCount;
@@ -315,6 +325,7 @@ function compileDrivetrain(def: VehicleDef): CompiledDrivetrain {
     tcSlip: d.tractionControl ?? 0,
     drivenWheels: Int32Array.from(driven),
     transmission: d.transmission ?? 'auto',
+    driveReaction: d.driveReaction ?? 'body',
   };
 }
 

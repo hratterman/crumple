@@ -93,7 +93,14 @@ export const PICKUP_TIRE = {
   hubMass: 40,
   rimMass: 44,
   tireMass: 22,
-  friction: 1.0,
+  // R-PHYS: 1.0 → 1.1 μ_x with μ_y = 0.85 μ_x (an all-season LT tyre): ABS ≈ 0.95 g, skidpad ≈ 0.8 g
+  friction: 1.13,
+  tyreLateralMu: 0.85,
+  // R-PHYS tyre model (tyre.ts): LT tyre
+  tyreLoadSensitivity: 0.07,
+  tyreSlideRatio: 0.82,
+  tyrePeakSlip: 0.08,
+  tyreSlideSlip: 0.55,
 } as const satisfies Partial<WheelDef>;
 
 /**
@@ -108,8 +115,9 @@ export const PICKUP_TIRE = {
  * load transfer and the truck held R40 at 0.947 g (target 0.75–0.92); a softer front brush
  * (more understeer at the limit) brings it back to 0.91 g.
  */
-const FRONT_BRUSH = 3.3e4;
-const REAR_BRUSH = 4e4;
+// R-PHYS: × 2.3 (3.3e4 / 4e4 before): an LT265/70R17-class tyre, C_α/Fz ≈ 11–13/rad, peak ≈ 7–10° (bench)
+const FRONT_BRUSH = 7.6e4;
+const REAR_BRUSH = 9.2e4;
 const WHEEL_RADIUS = PICKUP_TIRE.radius;
 const Y_W = WHEEL_RADIUS;
 
@@ -479,6 +487,8 @@ const DRIVETRAIN: DrivetrainDef = {
   clutchMaxTorque: 850,
   transmission: 'auto',
   tractionControl: 0.14,
+  // R-PHYS: live rear axle — the differential's drive-torque reaction acts on the axle housing.
+  driveReaction: 'body',
 };
 
 // ====================================================================== generator helpers
@@ -553,6 +563,14 @@ export interface PickupDesign {
   /** Front bumper straps (the tear-off beams; the render detaches the bar on them). */
   bumperStraps: [string, string][];
 }
+
+/**
+ * R-PHYS rolling-loss correction (tyre.ts): the 12/10-ray tread polygon's excess loss over a real tyre's
+ * f_r = 0.011·(1 + V/160 km/h) (Wong, "Theory of Ground Vehicles" eq. 1.12), per unit load, every 20 km/h
+ * of tread speed from 0 — measured by coasting this car in neutral (realism/coastdown calibration), kept
+ * conservative (0.85 × the lower of the bin and its neighbours' mean) so it never propels a coasting car.
+ */
+export const PICKUP_ROLLING_LOSS: readonly number[] = [0.0,  0.0027,  0.0053,  0.0055,  0.0074,  0.0093,  0.0173,  0.0253,  0.0317,  0.038,  0.034];
 
 function buildPickup(): { def: VehicleDef; design: PickupDesign } {
   const nodes: RigNodeDef[] = [];
@@ -693,6 +711,7 @@ function buildPickup(): { def: VehicleDef; design: PickupDesign } {
     const kU = front ? corners.get(id)!.kU : axle.get(s)!.kU;
     return {
       ...PICKUP_TIRE,
+      rollingLossComp: PICKUP_ROLLING_LOSS,
       hubMass: front ? FRONT_HUB_MASS : REAR_HUB_MASS,
       id,
       hubInner: pos.get(wheelNodeId(id, 'hubI'))!,
@@ -1445,7 +1464,7 @@ function buildPickup(): { def: VehicleDef; design: PickupDesign } {
     },
     wheels,
     drivetrain: DRIVETRAIN,
-    brakes: { frontBias: 0.64, handbrakeTorqueMax: 2200 },
+    brakes: { frontBias: 0.64, handbrakeTorqueMax: 2200, abs: true, esc: true },
     aero: { dragCoeffArea: 1.45, liftCoeffArea: 0.1 },
     steering: { maxWheelAngleDeg: round((PICKUP_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
     frame: { origin: sid('c2', 'tn'), front: sid('s0', 'rs'), top: sid('c2', 'rf') },

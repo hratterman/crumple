@@ -485,7 +485,13 @@ export const applyColliderContacts: ApplyColliderContacts = (state, first, count
         if (C.active[c] === 0) continue;
         const c3 = 3 * c;
         if (aMin[c3]! > x1 || aMax[c3]! < x0 || aMin[c3 + 1]! > y1 || aMax[c3 + 1]! < y0 || aMin[c3 + 2]! > z1 || aMax[c3 + 2]! < z0) continue;
-        if (nc >= cap) throw new Error(`applyColliderContacts: more than ${cap} candidate colliders for object ${objectId}`);
+        // R-PHYS (R-WORLD ask): an overflow truncates instead of killing the worker — the `cap` lowest collider
+        // indices are kept (deterministic), the rest skipped this tick and counted in `world.overflow`.
+        if (nc >= cap) {
+          world.overflow = (world.overflow ?? 0) + 1;
+          if (c > cand[cap - 1]!) continue;
+          nc--;
+        }
         // Insertion keeps candidates ascending (fixed contact order).
         let j = nc++;
         while (j > 0 && cand[j - 1]! > c) {

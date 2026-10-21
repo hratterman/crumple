@@ -319,15 +319,38 @@ export const applyGroundContacts: ApplyGroundContacts = (
     const az = frcZ[i]! + m * gz;
     const an = ax * nx + ay * ny + az * nz;
     const mdt = m * invDt;
-    const rx = -(mdt * tx + ax - an * nx);
-    const ry = -(mdt * ty + ay - an * ny);
-    const rz = -(mdt * tz + az - an * nz);
+    let rx = -(mdt * tx + ax - an * nx);
+    let ry = -(mdt * ty + ay - an * ny);
+    let rz = -(mdt * tz + az - an * nz);
     let cone = friction[i]! * matFriction[mat]! * fn;
     if ((f & NODE_FLAG_TREAD) !== 0) {
       // The tread brush's lateral force on this node shares the circle.
       const fb = treadF[i]!;
+      const muN = cone;
       const rem = cone * cone - fb * fb;
       cone = rem > 0 ? Math.sqrt(rem) : 0;
+      // R-PHYS: the brush takes the tread's lateral friction first; the stick's lateral part (along the
+      // brush axis â) only gets what the brush leaves, |F_lat| ≤ μN − F_b, so brush + stick never exceed μN
+      // sideways. Before, the stick's lateral share came from the quadrature remainder √((μN)² − F_b²)
+      // (flat-track bench: Fy/Fz 1.24 at μ 1.1); with no lateral stick at all a parked truck's heavy tread
+      // nodes fluttered sideways (2.5 m/s).
+      // treadAx = the brush axis scaled by the tyre's μ_y/μ_x (wheels.ts applyTreadBrush)
+      let lx = state.treadAxX[i]!;
+      let ly = state.treadAxY[i]!;
+      let lz = state.treadAxZ[i]!;
+      const la = Math.sqrt(lx * lx + ly * ly + lz * lz);
+      if (la > 0) {
+        lx /= la;
+        ly /= la;
+        lz /= la;
+      }
+      const rl = rx * lx + ry * ly + rz * lz;
+      const latCap = la * muN - fb > 0 ? la * muN - fb : 0;
+      const rlc = rl > latCap ? latCap : rl < -latCap ? -latCap : rl;
+      const dl = rlc - rl;
+      rx += dl * lx;
+      ry += dl * ly;
+      rz += dl * lz;
     }
     const r2 = rx * rx + ry * ry + rz * rz;
     if (r2 > 0) {

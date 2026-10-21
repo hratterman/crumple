@@ -306,6 +306,9 @@ export interface SetAssistsMsg {
   type: 'setAssists';
   objectId: number;
   tractionControl?: boolean;
+  /** R-PHYS (additive): ABS / ESC on or off (effective only on cars that have them; default on). */
+  abs?: boolean;
+  esc?: boolean;
 }
 /**
  * Recover (R): rigidly re-place the CURRENT (deformed) node set upright —

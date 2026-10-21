@@ -18,6 +18,8 @@ import { SEDAN } from './defs/sedan';
 import type { DrivetrainStateEx } from './drivetrain';
 import { RPM_PER_RAD_S } from './drivetrain';
 import type { CompiledVehicle, TransmissionMode, VehicleDef, VehicleRuntime } from './types';
+import type { VehicleRuntimeEx } from './runtime';
+import { resetBrakeSystem } from './brakes';
 
 export const G = 9.81;
 
@@ -247,6 +249,13 @@ export function setMotion(sim: HandlingSim, speed: number, gear?: number): void 
   dt.autoEngage = 1;
   dt.clutchWind = 0;
   for (const wr of sim.veh.wheels) wr.omega = speed / wr.rollRadius;
+  // a teleport: no caliper pressure carried over from before (R-PHYS brake hydraulics), reference speed seeded
+  const bs = (sim.veh as VehicleRuntimeEx).brakeSys;
+  if (bs) {
+    resetBrakeSystem(bs);
+    bs.vRef = Math.abs(speed);
+    bs.vPrev.fill(Math.abs(speed));
+  }
 }
 
 // ------------------------------------------------------------ scenario

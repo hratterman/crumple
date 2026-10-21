@@ -127,6 +127,8 @@ export interface ColliderWorld {
   /** Per-object candidate scratch (COLLIDER_MAX_CANDIDATES) + a visited-stamp per collider for dedup. */
   candidates: Int32Array;
   stamp: Uint32Array;
+  /** R-PHYS (additive): candidate overflows so far (an object near more than COLLIDER_MAX_CANDIDATES colliders; truncated, never thrown). */
+  overflow?: number;
 }
 
 /** Builds the SoA + grid (not a hot path; allocates). Order = input order. */

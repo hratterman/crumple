@@ -711,6 +711,14 @@ export interface SedanTrafficDesign {
   gapYieldTravel: number[];
 }
 
+/**
+ * R-PHYS rolling-loss correction (tyre.ts): the 12/10-ray tread polygon's excess loss over a real tyre's
+ * f_r = 0.01·(1 + V/160 km/h) (Wong, "Theory of Ground Vehicles" eq. 1.12), per unit load, every 20 km/h
+ * of tread speed from 0 — measured by coasting this car in neutral (realism/coastdown calibration), kept
+ * conservative (0.85 × the lower of the bin and its neighbours' mean) so it never propels a coasting car.
+ */
+export const SEDAN_TRAFFIC_ROLLING_LOSS: readonly number[] = [0.0,  0.0047,  0.0093,  0.0119,  0.0145,  0.0265,  0.0445,  0.0626,  0.099,  0.0793,  0.0489,  0.0489];
+
 function buildSedanTraffic(): { def: VehicleDef; design: SedanTrafficDesign } {
   const nodes: RigNodeDef[] = [];
   const pos = new Map<string, V3>();
@@ -797,6 +805,7 @@ function buildSedanTraffic(): { def: VehicleDef; design: SedanTrafficDesign } {
     const c = corners.get(id)!;
     return {
       ...WHEEL_TUNING_TRAFFIC_10,
+      rollingLossComp: SEDAN_TRAFFIC_ROLLING_LOSS,
       hubMass: hubMass(front),
       id,
       hubInner: pos.get(c.hubI)!,
@@ -1390,7 +1399,7 @@ function buildSedanTraffic(): { def: VehicleDef; design: SedanTrafficDesign } {
     },
     wheels,
     drivetrain: DRIVETRAIN,
-    brakes: { frontBias: 0.6, handbrakeTorqueMax: 1500 },
+    brakes: { frontBias: 0.6, handbrakeTorqueMax: 1500, abs: true, esc: true },
     aero: { dragCoeffArea: 0.65, liftCoeffArea: 0.08 },
     steering: { maxWheelAngleDeg: round((SEDAN_TRAFFIC_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
     frame: { origin: sid(7, 'tn'), front: sid(2, 'rs'), top: sid(7, 'rf') },

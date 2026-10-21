@@ -460,9 +460,11 @@ export class SimClient {
   }
 
   /** Driver assists (SetAssistsMsg): traction control on/off. */
-  setAssists(objectId: number, assists: { tractionControl?: boolean }): void {
+  setAssists(objectId: number, assists: { tractionControl?: boolean; abs?: boolean; esc?: boolean }): void {
     const msg: MainToWorker = { type: 'setAssists', objectId };
     if (assists.tractionControl !== undefined) msg.tractionControl = assists.tractionControl;
+    if (assists.abs !== undefined) msg.abs = assists.abs;
+    if (assists.esc !== undefined) msg.esc = assists.esc;
     this.post(msg);
   }
 

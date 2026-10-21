@@ -114,12 +114,21 @@ export const BOXTRUCK_TIRE = {
   hubMass: 50,
   rimMass: 88,
   tireMass: 52,
-  friction: 0.65,
+  // R-PHYS: 0.65 → 0.8 (a truck tyre on dry asphalt, μ_peak ≈ 0.75–0.85): with the slip fall-off and the
+  // brush-only lateral friction the 0.65 tyre slid out below the truck's 0.5–0.6 g rollover threshold
+  friction: 0.8,
+  // R-PHYS tyre model (tyre.ts): truck tyres are more load sensitive
+  tyreLoadSensitivity: 0.08,
+  tyreSlideRatio: 0.8,
+  tyrePeakSlip: 0.09,
+  tyreSlideSlip: 0.6,
 } as const satisfies Partial<WheelDef>;
 
 /** Lateral tread-brush stiffness per tread node, N/m, per axle (the rear has four tyres). */
-const FRONT_BRUSH = 1.2e5;
-const REAR_BRUSH = 3e5;
+// R-PHYS: front × 1.33, rear × 1.2 (1.2e5 / 3e5 before): a 245/70R19.5-class truck tyre, C_α/Fz ≈ 4–6/rad,
+// peak ≈ 7–10° (bench); a stiffer front (2.16e5) dipped the inner rear dual to 0 load in the 0.06 step steer
+const FRONT_BRUSH = 1.6e5;
+const REAR_BRUSH = 3.6e5;
 const WHEEL_RADIUS = BOXTRUCK_TIRE.radius;
 const Y_W = WHEEL_RADIUS;
 
@@ -638,6 +647,8 @@ const DRIVETRAIN: DrivetrainDef = {
   clutchMaxTorque: 1600,
   transmission: 'auto',
   tractionControl: 0.15,
+  // R-PHYS: live rear axle — the differential's drive-torque reaction acts on the axle housing.
+  driveReaction: 'axle',
 };
 
 // ====================================================================== generator helpers
@@ -708,6 +719,14 @@ export interface BoxtruckDesign {
   /** Dual-pair coupling beams. */
   dualLinks: [string, string][];
 }
+
+/**
+ * R-PHYS rolling-loss correction (tyre.ts): the 12/10-ray tread polygon's excess loss over a real tyre's
+ * f_r = 0.0065·(1 + V/160 km/h) (Wong, "Theory of Ground Vehicles" eq. 1.12), per unit load, every 20 km/h
+ * of tread speed from 0 — measured by coasting this car in neutral (realism/coastdown calibration), kept
+ * conservative (0.85 × the lower of the bin and its neighbours' mean) so it never propels a coasting car.
+ */
+export const BOXTRUCK_ROLLING_LOSS: readonly number[] = [0.0,  0.0043,  0.0062,  0.0081,  0.0072,  0.0135,  0.0155];
 
 function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
   const nodes: RigNodeDef[] = [];
@@ -934,6 +953,7 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
     const front = id[0] === 'F';
     return {
       ...BOXTRUCK_TIRE,
+      rollingLossComp: BOXTRUCK_ROLLING_LOSS,
       hubMass: front ? FRONT_HUB_MASS : REAR_HUB_MASS,
       id,
       hubInner: pos.get(wheelNodeId(id, 'hubI'))!,
@@ -1856,7 +1876,7 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
     },
     wheels,
     drivetrain: DRIVETRAIN,
-    brakes: { frontBias: 0.55, handbrakeTorqueMax: 4000 },
+    brakes: { frontBias: 0.55, handbrakeTorqueMax: 4000, abs: true },
     aero: { dragCoeffArea: 5.6, liftCoeffArea: 0 },
     steering: { maxWheelAngleDeg: round((BOXTRUCK_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
     frame: { origin: 'f7_x', front: 'f3_x', top: sid('c3', 'rf') },

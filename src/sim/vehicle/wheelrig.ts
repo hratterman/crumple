@@ -59,7 +59,9 @@ export const WHEEL_TUNING_205_55R16 = {
   rays: 12,
   tireNodeRadius: 0.045,
   tireContactSpring: 8e4,
-  treadBrushStiffness: 7e4,
+  // R-PHYS: 7e4 → 1.6e5 (flat-track bench, realism/tyreSweeps.ts): cornering stiffness C_α/Fz 8.8 → 15.2/rad and
+  // peak slip angle 11.9° → 7.3° at 4 kN (205/55R16 data: C_α/Fz 15–20/rad, peak 6–9°; Pacejka §4.3)
+  treadBrushStiffness: 1.6e5,
   treadBrushDamping: 30,
   rimHoopTension: 1,
   treadHoopTension: 0.5,
@@ -73,7 +75,16 @@ export const WHEEL_TUNING_205_55R16 = {
   hubMass: 10,
   rimMass: 24,
   tireMass: 9.4,
-  friction: 1.1,
+  // R-PHYS: 1.1 → 1.25 (μ_x of a summer 205/55R16 on dry asphalt; μ_y = 0.85 of it, tyreLateralMu): ABS stops
+  // ≈ 1.0 g, skidpad ≈ 0.9 g (in-car braking reaches ≈ 0.85 μ_x: load sensitivity and dive camber)
+  friction: 1.25,
+  // R-PHYS tyre model (tyre.ts): μ load sensitivity, sliding fall-off to 0.8 of peak (dry asphalt 0.7–0.85)
+  tyreLoadSensitivity: 0.1,
+  tyreSlideRatio: 0.8,
+  tyrePeakSlip: 0.07,
+  tyreSlideSlip: 0.5,
+  // μ_y/μ_x: summer car tyres corner at ≈ 0.85–0.95 of their braking μ (skidpad ≈ 0.9 g vs ABS ≈ 1.0 g)
+  tyreLateralMu: 0.85,
 } as const satisfies Partial<WheelDef>;
 
 function fail(wheel: string, msg: string): never {

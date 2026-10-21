@@ -630,6 +630,14 @@ export interface SedanDesign {
   gapYieldTravel: number[];
 }
 
+/**
+ * R-PHYS rolling-loss correction (tyre.ts): the 12/10-ray tread polygon's excess loss over a real tyre's
+ * f_r = 0.01·(1 + V/160 km/h) (Wong, "Theory of Ground Vehicles" eq. 1.12), per unit load, every 20 km/h
+ * of tread speed from 0 — measured by coasting this car in neutral (realism/coastdown calibration), kept
+ * conservative (0.85 × the lower of the bin and its neighbours' mean) so it never propels a coasting car.
+ */
+export const SEDAN_ROLLING_LOSS: readonly number[] = [0.0,  0.0024,  0.0062,  0.0089,  0.0116,  0.0245,  0.0533,  0.0821,  0.0768,  0.0714,  0.0753,  0.1121,  0.1291,  0.1103];
+
 function buildSedan(): { def: VehicleDef; design: SedanDesign } {
   const nodes: RigNodeDef[] = [];
   const pos = new Map<string, V3>();
@@ -736,6 +744,7 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
     const c = corners.get(id)!;
     return {
       ...WHEEL_TUNING_205_55R16,
+      rollingLossComp: SEDAN_ROLLING_LOSS,
       hubMass: hubMass(front),
       id,
       hubInner: pos.get(c.hubI)!,
@@ -748,6 +757,9 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
       brakeTorqueMax: 2500,
       handbrake: !front,
       attach: [c.kU],
+      // R-PHYS: caliper bracket bias (wheels.ts applyUprightReaction): brake compliance toe-in ≈ 0.2° per wheel
+      // in a 0.9 g stop (0.9° at 0.5 front; rear 0.7° at 0.5 → 0.4°)
+      caliperInboard: front ? 0.75 : 0.3,
       attachSpring: ATTACH_SPRING * linkFactor(front),
       attachDamp: ATTACH_DAMP,
       attachBreakF: 1.0e5,
@@ -1369,7 +1381,7 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
     },
     wheels,
     drivetrain: DRIVETRAIN,
-    brakes: { frontBias: 0.6, handbrakeTorqueMax: 1500 },
+    brakes: { frontBias: 0.6, handbrakeTorqueMax: 1500, abs: true, esc: true },
     aero: { dragCoeffArea: 0.65, liftCoeffArea: 0.08 },
     steering: { maxWheelAngleDeg: round((SEDAN_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
     frame: { origin: sid(7, 'tn'), front: sid(2, 'rs'), top: sid(7, 'rf') },

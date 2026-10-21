@@ -46,7 +46,8 @@ export const WHEEL_TUNING_BEATER_10 = {
   rimRadius: 0.178,
   width: 0.14,
   rays: 10,
-  treadBrushStiffness: WHEEL_TUNING_205_55R16.treadBrushStiffness * RAY_SCALE,
+  // R-PHYS: a 175/70R13-class budget tyre: C_α/Fz ≈ 13–14/rad (bench)
+  treadBrushStiffness: 1e5,
   treadBrushDamping: WHEEL_TUNING_205_55R16.treadBrushDamping * RAY_SCALE,
   tireRingSpring: WHEEL_TUNING_205_55R16.tireRingSpring * RAY_SCALE,
   tireRingDamp: WHEEL_TUNING_205_55R16.tireRingDamp * RAY_SCALE,
@@ -58,7 +59,9 @@ export const WHEEL_TUNING_BEATER_10 = {
   // halves the tread-impact rolling loss at speed (2.0 → 1.7 m/s² at 150 km/h)
   tireContactSpring: WHEEL_TUNING_205_55R16.tireContactSpring * RAY_SCALE * 0.5,
   rollingResistance: 0.011,
-  friction: 0.95,
+  // R-PHYS: 0.95 → 1.1 μ_x, μ_y 0.85 μ_x (fresh budget tyres on the old car: ABS stops ≈ 0.9 g, skidpad ≈ 0.8 g)
+  friction: 1.1,
+  tyreLateralMu: 0.85,
 } as const satisfies Partial<WheelDef>;
 
 // ====================================================================== targets
@@ -687,6 +690,14 @@ export interface BeaterDesign {
   gapYieldTravel: number[];
 }
 
+/**
+ * R-PHYS rolling-loss correction (tyre.ts): the 12/10-ray tread polygon's excess loss over a real tyre's
+ * f_r = 0.012·(1 + V/160 km/h) (Wong, "Theory of Ground Vehicles" eq. 1.12), per unit load, every 20 km/h
+ * of tread speed from 0 — measured by coasting this car in neutral (realism/coastdown calibration), kept
+ * conservative (0.85 × the lower of the bin and its neighbours' mean) so it never propels a coasting car.
+ */
+export const BEATER_ROLLING_LOSS: readonly number[] = [0.0,  0.0031,  0.0061,  0.0093,  0.0126,  0.0225,  0.0325,  0.055,  0.0549,  0.0423];
+
 function buildBeater(): { def: VehicleDef; design: BeaterDesign } {
   const nodes: RigNodeDef[] = [];
   const pos = new Map<string, V3>();
@@ -793,6 +804,7 @@ function buildBeater(): { def: VehicleDef; design: BeaterDesign } {
     const c = corners.get(id)!;
     return {
       ...WHEEL_TUNING_BEATER_10,
+      rollingLossComp: BEATER_ROLLING_LOSS,
       hubMass: hubMass(front),
       id,
       hubInner: pos.get(c.hubI)!,
@@ -1438,7 +1450,9 @@ function buildBeater(): { def: VehicleDef; design: BeaterDesign } {
     },
     wheels,
     drivetrain: DRIVETRAIN,
-    brakes: { frontBias: 0.65, handbrakeTorqueMax: 1000 },
+    // R-PHYS: a basic 4-channel ABS (optional on most 1990s compacts; no TC, no ESC): locked worn tyres
+    // (μ_slide ≈ 0.75) stopped from 100 km/h in ≈ 55 m
+    brakes: { frontBias: 0.65, handbrakeTorqueMax: 1000, abs: true },
     // boxy, no glass, a cage in the wind: Cd·A ≈ 0.37 × 1.85 m²
     aero: { dragCoeffArea: 0.68, liftCoeffArea: 0.1 },
     steering: { maxWheelAngleDeg: round((BEATER_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },

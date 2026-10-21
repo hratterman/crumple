@@ -55,13 +55,26 @@ export interface SkidpadResult {
  * tests use), slow speed ramp. Lateral g as in runCircle; the roll gradient
  * from the same run.
  */
-export function runSkidpad(def: VehicleDef, radius = 45.7, rampMs2 = 0.25): SkidpadResult {
-  const c = runCircle(def, radius, rampMs2, 10);
+export function runSkidpad(def: VehicleDef, radius = 45.7, rampMs2 = 0.3, startSpeed = 13): SkidpadResult {
+  // 13 → 25 m/s over the 40 s run: 0.38 → 1.4 g on the 45.7 m circle (the limit is always inside the ramp)
+  const c = runCircle(def, radius, rampMs2, startSpeed);
   const s = c.samples;
-  const win = 50; // 1 s at 50 Hz
-  const ay = rolling(s, win, (x) => x.speed * x.yawRate);
-  const roll = rolling(s, win, (x) => x.roll);
-  const steer = rolling(s, win, (x) => x.steer);
+  const win = 100; // 2 s at 50 Hz
+  // the MEASURED lateral acceleration (v·r overstates it while the slip angle changes, e.g. a spin starting)
+  const ay = rolling(s, win, (x) => x.latAcc);
+  const vr = rolling(s, win, (x) => x.speed);
+  const rr = rolling(s, win, (x) => x.yawRate);
+  const roll = rolling(s, 50, (x) => x.roll);
+  const steer = rolling(s, 50, (x) => x.steer);
+  let best = 0;
+  for (let i = win; i < s.length; i++) {
+    if (s[i]!.t < 4) continue;
+    const R = Math.abs(rr[i]!) > 1e-3 ? vr[i]! / Math.abs(rr[i]!) : Infinity;
+    const dBeta = Math.abs(s[i]!.sideslip - s[i - win]!.sideslip);
+    if (R > radius * 1.15 || R < radius * 0.85 || dBeta > (1.5 * Math.PI) / 180) continue;
+    const g = Math.abs(ay[i]!) / G;
+    if (g > best) best = g;
+  }
   const xs: number[] = [];
   const ys: number[] = [];
   const curve: [number, number][] = [];
@@ -73,10 +86,11 @@ export function runSkidpad(def: VehicleDef, radius = 45.7, rampMs2 = 0.25): Skid
     wheelbase = Math.max(...zs) - Math.min(...zs);
   }
   const maxWheel = def.steering.maxWheelAngleDeg;
-  for (let i = win; i < s.length; i += 10) {
-    const g = Math.abs(ay[i]!) / G;
+  const ay1 = rolling(s, 50, (x) => x.speed * x.yawRate);
+  for (let i = 50; i < s.length; i += 10) {
+    const g = Math.abs(ay1[i]!) / G;
     if (!Number.isFinite(g) || s[i]!.t < 4) continue;
-    if (g > c.maxLatG * 1.02) break;
+    if (g > best * 1.02) break;
     curve.push([g, Math.abs(roll[i]!) * RAD]);
     if (g >= 0.15 && g <= 0.55) {
       xs.push(g);
@@ -87,12 +101,94 @@ export function runSkidpad(def: VehicleDef, radius = 45.7, rampMs2 = 0.25): Skid
     }
   }
   return {
-    maxLatG: c.maxLatG,
+    maxLatG: best,
     rollGradient: linFit(xs, ys).b,
     rollCurve: curve,
     understeerGradient: linFit(sx, sy).b,
     samples: s,
   };
+}
+
+export interface SineDwellResult {
+  /** Steer amplitude used (action units). */
+  amplitude: number;
+  /** FMVSS 126: yaw rate 1.0 s / 1.75 s after the completion of steer, as a fraction of the peak yaw rate. */
+  ratio100: number;
+  ratio175: number;
+  /** Lateral displacement of the CG 1.07 s after the beginning of steer, m. */
+  lateral107: number;
+  peakYaw: number;
+  /** Max |sideslip| over the run, deg. */
+  maxSlipDeg: number;
+  samples: HandlingSample[];
+}
+
+/**
+ * FMVSS 126 / UN R140 Sine with Dwell: 80 km/h, coasting from the beginning
+ * of steer (BOS), steer A·sin(2π·0.7·t) through 3/4 of a period, a 0.5 s
+ * dwell at the second peak, then the last quarter; completion of steer
+ * (COS) at 1.929 s. Pass: yaw rate ≤ 35 % of the peak 1.0 s after COS,
+ * ≤ 20 % after 1.75 s; lateral displacement ≥ 1.83 m 1.07 s after BOS
+ * (responsiveness, vehicles ≤ 3.5 t).
+ */
+export function runSineWithDwell(def: VehicleDef, amplitude: number, kmh = 80): SineDwellResult {
+  const f = 0.7;
+  const w = 2 * Math.PI * f;
+  const t0 = 1; // BOS after 1 s of steady running
+  const tq = 0.75 / f;
+  const cos = t0 + 1 / f + 0.5;
+  const steerAt = (t: number): number => {
+    const u = t - t0;
+    if (u < 0) return 0;
+    if (u < tq) return amplitude * Math.sin(w * u);
+    if (u < tq + 0.5) return -amplitude;
+    if (u < 1 / f + 0.5) return amplitude * Math.sin(w * (u - 0.5));
+    return 0;
+  };
+  const v0 = kmh / 3.6;
+  const { samples } = runScenario({
+    def,
+    initialSpeed: v0,
+    durationS: cos + 2.2,
+    sampleHz: 100,
+    controlHz: 500,
+    control: (ctx) => {
+      const s = ctx.last;
+      const ev = s === null ? 0 : v0 - s.speed;
+      const thr = ctx.t < t0 ? Math.min(1, Math.max(0, 0.25 + 0.3 * ev)) : 0;
+      return { gearSelect: 1, throttle: thr, brake: 0, steer: steerAt(ctx.t) };
+    },
+  });
+  let peak = 0;
+  let maxSlip = 0;
+  for (const x of samples) {
+    if (x.t >= t0 + tq * 0.66 && x.t <= cos) peak = Math.max(peak, Math.abs(x.yawRate));
+    maxSlip = Math.max(maxSlip, Math.abs(x.sideslip));
+  }
+  const at = (t: number): HandlingSample => samples.find((x) => x.t >= t) ?? samples[samples.length - 1]!;
+  const s0 = at(t0);
+  const s107 = at(t0 + 1.07);
+  // lateral displacement perpendicular to the initial heading
+  const hx = Math.sin(s0.heading);
+  const hz = -Math.cos(s0.heading);
+  const lat = (s107.comX - s0.comX) * -hz + (s107.comZ - s0.comZ) * hx;
+  return {
+    amplitude,
+    ratio100: Math.abs(at(cos + 1).yawRate) / peak,
+    ratio175: Math.abs(at(cos + 1.75).yawRate) / peak,
+    lateral107: Math.abs(lat),
+    peakYaw: peak,
+    maxSlipDeg: (maxSlip * 180) / Math.PI,
+    samples,
+  };
+}
+
+/** Steer amplitude (action units) that gives ≈ 0.3 g steady state at `kmh` (linear range). */
+export function steerFor03g(def: VehicleDef, kmh = 80): number {
+  const probe = 0.03;
+  const r = runStepSteer(def, probe, kmh);
+  const g = Math.abs(r.latG);
+  return g > 0.01 ? (probe * 0.3) / g : probe * 3;
 }
 
 export interface BrakeMetrics {

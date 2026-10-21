@@ -244,6 +244,11 @@ export interface DrivetrainStateEx extends DrivetrainState {
   wheelInertia: Float64Array;
   /** Locked-diff angle deviation per wheel, rad. */
   diffPhi: Float64Array;
+  /** R-PHYS driver assists (setAssists): ABS / ESC switched on (effective only when BrakesDef fits them). */
+  abs: boolean;
+  esc: boolean;
+  /** ESC engine torque reduction request 0..1 (brakes.ts, applied next tick). */
+  escCut: number;
 }
 
 /**
@@ -284,6 +289,9 @@ export function createDrivetrainState(
     launchTrac: 0,
     wheelInertia,
     diffPhi: new Float64Array(wheelInertia.length),
+    abs: true,
+    esc: true,
+    escCut: 0,
   };
 }
 
@@ -313,6 +321,7 @@ export function resetDrivetrainState(s: DrivetrainStateEx, dt: CompiledDrivetrai
   s.tcI = 0;
   s.tcExcess = 0;
   s.launchTrac = 0;
+  s.escCut = 0;
   s.diffPhi.fill(0);
 }
 
@@ -615,6 +624,7 @@ export const stepDrivetrain: StepDrivetrain = (
     s.tcI = 0;
     s.tcExcess = 0;
   }
+  if (s.escCut > 0) throttle *= 1 - s.escCut;
   if (s.revLimiterActive) throttle = 0;
   // Launch control holds the engine near LAUNCH_RPM_FACTOR × idle while the clutch slips (from the limiter
   // the flywheel dumped its energy into the tyres when the clutch locked: wheelspin, TC cut, surging).

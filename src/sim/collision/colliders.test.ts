@@ -261,3 +261,33 @@ describe('engine + worker integration', () => {
     expect(r.objectRepairEpoch(0)).toBe(1);
   });
 });
+
+describe('candidate overflow (R-PHYS: R-WORLD ask)', () => {
+  it('more colliders than COLLIDER_MAX_CANDIDATES near one object truncates deterministically instead of throwing', () => {
+    // 100 small boxes in a 10 × 10 grid under a node spread over all of them
+    const defs: ColliderDef[] = [];
+    for (let i = 0; i < 100; i++) {
+      defs.push({ id: `b${i}`, kind: 'box', pos: [(i % 10) * 0.5, 0.25, Math.floor(i / 10) * 0.5], quat: [0, 0, 0, 1], size: [0.2, 0.25, 0.2], material: MaterialId.concrete });
+    }
+    const make = (): SimState => {
+      const s = makeState(2);
+      s.posX[0] = 0;
+      s.posY[0] = 0.52;
+      s.posZ[0] = 0;
+      s.posX[1] = 4.5;
+      s.posY[1] = 0.52;
+      s.posZ[1] = 4.5;
+      return s;
+    };
+    const a = make();
+    const b = make();
+    const wa = world(defs);
+    const wb = world(defs);
+    expect(() => run(a, wa, 200)).not.toThrow();
+    run(b, wb, 200);
+    expect(wa.overflow ?? 0).toBeGreaterThan(0);
+    // deterministic, and the node sitting on a kept (low-index) box still rests on it
+    expect(a.posY[0]).toBe(b.posY[0]);
+    expect(a.posY[0]!).toBeGreaterThan(0.5);
+  });
+});
