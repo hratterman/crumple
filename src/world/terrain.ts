@@ -32,12 +32,17 @@ import {
   headingToYaw,
   resolveRoadProfiles,
   sampleRoad,
+  structureAt,
 } from './roads';
 import { compileShape, smooth01, type CompiledShape } from './shapes';
+import { baseSurface } from './surfaces';
 import {
   ROAD_KIND_DEFAULTS,
+  ROAD_STATION_SPACING,
   ROAD_STATION_STRIDE,
   SPLAT_CHANNELS,
+  type RoadStructure,
+  type TerrainCover,
   type NoiseParams,
   type ResolvedSpawn,
   type RoadProfile,
@@ -54,6 +59,11 @@ const MAT_DIRT = 2;
 const MAT_ROCK = 3;
 const MAT_GRAVEL = 4;
 const MAT_CONCRETE = 5;
+// Layout v6 surfaces (protocol/messages.ts MaterialId 11..14).
+const MAT_MUD = 11;
+const MAT_SAND = 12;
+const MAT_WET_GRASS = 13;
+const MAT_ASPHALT_WORN = 14;
 
 /** Coarse grid factor (coarse spacing = COARSE × spacing). */
 const COARSE = 4;
@@ -866,9 +876,12 @@ function rasterRoad(
   const reach = b + PAD_RELEASE_M;
   const reach2 = reach * reach;
   const sv = ri + 1;
+  const spans = prof.structures ?? [];
   for (let k = 0; k < segs; k++) {
     const pa = k * ROAD_STATION_STRIDE;
     const pb = (k + 1 === n ? 0 : k + 1) * ROAD_STATION_STRIDE;
+    // Layout v6 bridges: no carve under the deck (segments wholly inside a span).
+    if (spans.length > 0 && inBridge(spans, k * ROAD_STATION_SPACING, Math.min((k + 1) * ROAD_STATION_SPACING, prof.length))) continue;
     const xa = st[pa]!;
     const za = st[pa + 2]!;
     const ex = st[pb]! - xa;
@@ -925,6 +938,138 @@ function rasterRoad(
         owner[i] = ri;
         const capped = (capStart && t <= 0) || (capEnd && t >= 1);
         absD[i] = capped ? Math.sqrt(d2) : d < 0 ? -d : d;
+      }
+    }
+  }
+}
+
+/** True when the station segment [sa, sb] lies inside a bridge span. */
+function inBridge(spans: readonly RoadStructure[], sa: number, sb: number): boolean {
+  for (const st of spans) if (st.kind === 'bridge' && sa >= st.s0 && sb <= st.s1) return true;
+  return false;
+}
+
+/** Lowers the natural terrain by depth·mask (surface patch depressions). */
+function depressPatch(nat: Float32Array, g: FullGrid, s: CompiledShape, depth: number): void {
+  const [c0, c1, r0, r1] = boxOf(g, s.minX, s.maxX, s.minZ, s.maxZ);
+  for (let r = r0; r <= r1; r++) {
+    const z = g.oz + r * g.sp;
+    for (let c = c0; c <= c1; c++) {
+      const m = s.mask(g.ox + c * g.sp, z);
+      if (m > 0) nat[r * g.cols + c] = nat[r * g.cols + c]! - depth * m;
+    }
+  }
+}
+
+/**
+ * Layout v6 SIDEWALKS (types.ts SidewalkDef): behind the kerb line b = width/2 + shoulder the
+ * band b < |d| < b + 1 becomes a road-level gutter core and b + 1 ≤ |d| ≤ b + sidewalk.width a
+ * core at the edge surface + kerb, so the 1 m grid ramp lies wholly inside [b, b + 2] — under
+ * the content's kerb colliders (SIDEWALK_RAMP_M). Only free / pad samples are taken (another
+ * road's carriageway always wins), never inside a bridge span or a junction mouth (dropped
+ * kerbs at crossings: radius = the widest road's half reach there + 5.5 m).
+ */
+function rasterSidewalk(
+  prof: RoadProfile,
+  ri: number,
+  layout: WorldLayout,
+  profiles: readonly RoadProfile[],
+  g: FullGrid,
+  owner: Uint8Array,
+  coreT: Float32Array,
+  absD: Float32Array,
+  arenas: readonly CompiledShape[],
+): void {
+  const sw = prof.sidewalk!;
+  const { cols, ox, oz, sp } = g;
+  const st = prof.stations;
+  const n = prof.stationCount;
+  const segs = prof.closed ? n : n - 1;
+  const a = prof.width / 2;
+  const b = a + prof.shoulder;
+  const outer = b + sw.width;
+  const outer2 = outer * outer;
+  const mouths: number[] = [];
+  for (const j of layout.junctions) {
+    if (!j.roads.includes(prof.id)) continue;
+    let r = 0;
+    for (const id of j.roads) {
+      const p = profiles[layout.roads.findIndex((q) => q.id === id)]!;
+      const h = p.width / 2 + p.shoulder;
+      if (h > r) r = h;
+    }
+    mouths.push(j.pos[0], j.pos[1], (r + 5.5) * (r + 5.5));
+  }
+  const spans = prof.structures ?? [];
+  const bestD2 = new Map<number, number>();
+  for (let k = 0; k < segs; k++) {
+    if (spans.length > 0 && inBridge(spans, k * ROAD_STATION_SPACING - 4, Math.min((k + 1) * ROAD_STATION_SPACING, prof.length) + 4)) continue;
+    const pa = k * ROAD_STATION_STRIDE;
+    const pb = (k + 1 === n ? 0 : k + 1) * ROAD_STATION_STRIDE;
+    const xa = st[pa]!;
+    const za = st[pa + 2]!;
+    const ex = st[pb]! - xa;
+    const ez = st[pb + 2]! - za;
+    const l2 = ex * ex + ez * ez;
+    const il2 = l2 > 0 ? 1 / l2 : 0;
+    const ya = st[pa + 1]!;
+    const dy = st[pb + 1]! - ya;
+    const ba = st[pa + 5]!;
+    const dbk = st[pb + 5]! - ba;
+    const rxa = -st[pa + 4]!;
+    const rza = st[pa + 3]!;
+    const drx = -st[pb + 4]! - rxa;
+    const drz = st[pb + 3]! - rza;
+    const [c0, c1, r0, r1] = boxOf(
+      g,
+      (ex < 0 ? xa + ex : xa) - outer - sp,
+      (ex > 0 ? xa + ex : xa) + outer + sp,
+      (ez < 0 ? za + ez : za) - outer - sp,
+      (ez > 0 ? za + ez : za) + outer + sp,
+    );
+    for (let r = r0; r <= r1; r++) {
+      const wz = oz + r * sp;
+      const pz = wz - za;
+      for (let c = c0; c <= c1; c++) {
+        const wx = ox + c * sp;
+        const px = wx - xa;
+        const t = (px * ex + pz * ez) * il2;
+        if (t < 0 || t > 1) continue; // perpendicular band only (no round caps at segment ends)
+        const qx = px - t * ex;
+        const qz = pz - t * ez;
+        const d2 = qx * qx + qz * qz;
+        if (d2 > outer2 || d2 <= b * b) continue;
+        const i = r * cols + c;
+        const ow = owner[i]!;
+        if (ow !== OWNER_NONE && ow !== OWNER_PAD && ow !== ri) continue;
+        const prev = bestD2.get(i);
+        if (prev !== undefined && prev <= d2) continue;
+        if (ow === ri && prev === undefined) continue; // already this road's carriageway / verge
+        let inMouth = false;
+        for (let m = 0; m < mouths.length; m += 3) {
+          const mx = wx - mouths[m]!;
+          const mz = wz - mouths[m + 1]!;
+          if (mx * mx + mz * mz < mouths[m + 2]!) {
+            inMouth = true;
+            break;
+          }
+        }
+        if (inMouth) continue;
+        let inArena = false;
+        for (const ar of arenas) if (ar.outside(wx, wz) <= 0) inArena = true;
+        if (inArena) continue; // the arena stays one flat concrete pad (crash-test furniture)
+        bestD2.set(i, d2);
+        let rx = rxa + drx * t;
+        let rz = rza + drz * t;
+        const rl = Math.sqrt(rx * rx + rz * rz);
+        rx /= rl;
+        rz /= rl;
+        const d = qx * rx + qz * rz;
+        const ad = d < 0 ? -d : d;
+        const edge = ya + dy * t + (ba + dbk * t) * (d < 0 ? -a : a);
+        coreT[i] = ad >= b + 1 ? edge + sw.kerb : edge;
+        owner[i] = ri;
+        absD[i] = ad;
       }
     }
   }
@@ -1108,6 +1253,8 @@ function smoothGraded(heights: Float32Array, owner: Uint8Array, mask: Uint8Array
 }
 
 const BIG = 1e9;
+/** Slope-envelope band around the cores, m (layout v6: skips the far field of the 2560 m map). */
+const ENV_BAND_M = 160;
 
 /** Embankment / cutting profile: g(d) = max_k(m_k·d − c_k) (1:2, then 1:1, then 2:1). */
 function envG(d: number): number {
@@ -1168,7 +1315,9 @@ function slopeEnvelope(
       for (let cc = 0; cc < cols; cc++) {
         const c = fwd ? cc : cols - 1 - cc;
         const i = r * cols + c;
-        if (owner[i] !== OWNER_NONE) continue;
+        // Beyond ENV_BAND_M from every core no bound can bind (g(160 m) = 282 m > any relief here),
+        // and the best source of a sample inside the band propagates along paths inside it.
+        if (owner[i] !== OWNER_NONE || dist[i]! > ENV_BAND_M) continue;
         let bl = srcL[i]!;
         let bu = srcU[i]!;
         let vl = -BIG;
@@ -1527,12 +1676,19 @@ function paintRoads(
   const isSplat = new Uint8Array(nr);
   const roadCh = new Int32Array(nr);
   const roadA = new Float64Array(nr);
+  const roadB = new Float64Array(nr);
+  const sidewalk = new Uint8Array(nr);
+  const pavedOf = new Uint8Array(nr);
   for (let k = 0; k < nr; k++) {
     const rd = layout.roads[k]!;
     isConcrete[k] = rd.material === MAT_CONCRETE ? 1 : 0;
     isSplat[k] = profiles[k]!.surface === 'splat' ? 1 : 0;
     roadCh[k] = chanOfMat(rd.material);
     roadA[k] = rd.width / 2;
+    roadB[k] = rd.width / 2 + rd.shoulder;
+    sidewalk[k] = rd.sidewalk ? 1 : 0;
+    // Layout v6: worn town streets carry the worn-asphalt material (grip 0.93).
+    pavedOf[k] = isConcrete[k] ? MAT_CONCRETE : rd.wear === 'worn' || rd.wear === 'patched' ? MAT_ASPHALT_WORN : MAT_ASPHALT;
   }
   for (let r = 0; r < rows; r++) {
     const z = oz + r * sp;
@@ -1565,7 +1721,11 @@ function paintRoads(
           if (fd < 0.5) over(-1, smooth01(0.2 + 0.5 * nB) * 0.35);
         } else if (fd <= a) {
           over(0, 1);
-          pavedMat = isConcrete[own] ? MAT_CONCRETE : MAT_ASPHALT;
+          pavedMat = pavedOf[own]!;
+        } else if (sidewalk[own] && fd > roadB[own]!) {
+          // Layout v6 sidewalk (the content draws the slabs): paved concrete underfoot.
+          over(0, 1);
+          pavedMat = MAT_CONCRETE;
         } else {
           over(3, 1);
         }
@@ -1573,6 +1733,168 @@ function paintRoads(
       store(splat, material, i, pavedMat);
     }
   }
+}
+
+/** Splat channel a v6 surface paints (−1 = grass): mud → dirt, sand → gravel, wet grass → grass, worn asphalt → paved. */
+function patchChannel(m: number): number {
+  switch (m) {
+    case MAT_MUD:
+      return 1;
+    case MAT_SAND:
+      return 3;
+    case MAT_WET_GRASS:
+      return -1;
+    case MAT_ASPHALT_WORN:
+      return 0;
+    default:
+      return chanOfMat(m);
+  }
+}
+
+/**
+ * Layout v6 surface patch paint (after the roads): noisy-edged core over the patch's base
+ * channel, material byte = the patch material where it dominates. Ribbon carriageways keep
+ * their surface; dirt trails and verges take the patch (a rally stage through a mud hole).
+ */
+function paintPatch(
+  g: FullGrid,
+  s: CompiledShape,
+  mat: number,
+  profiles: readonly RoadProfile[],
+  owner: Uint8Array,
+  absD: Float32Array,
+  splat: Uint8Array,
+  material: Uint8Array,
+  pB: Noise2,
+): void {
+  const ch = patchChannel(mat);
+  const [c0, c1, r0, r1] = boxOf(g, s.minX, s.maxX, s.minZ, s.maxZ);
+  for (let r = r0; r <= r1; r++) {
+    const z = g.oz + r * g.sp;
+    for (let c = c0; c <= c1; c++) {
+      const x = g.ox + c * g.sp;
+      const m = s.mask(x, z);
+      if (m <= 0) continue;
+      const i = r * g.cols + c;
+      const ow = owner[i]!;
+      if (ow < OWNER_PAD && profiles[ow]!.surface === 'ribbon' && absD[i]! <= profiles[ow]!.width / 2 + 0.25) continue;
+      const cov = smooth01((m - 0.3) / 0.4 + 0.3 * pB(x * 0.16, z * 0.16));
+      if (cov <= 0) continue;
+      load(splat, i);
+      over(ch, cov);
+      if (mat === MAT_SAND) over(1, 0.35 * cov);
+      store(splat, material, i, mat === MAT_ASPHALT_WORN ? MAT_ASPHALT_WORN : MAT_ASPHALT);
+      // The surface takes the sample only where its base channel dominates (material ≡ splat contract).
+      if (cov >= 0.5 && material[i] === baseSurface(mat)) material[i] = mat;
+    }
+  }
+}
+
+/** projectToRoad restricted to stations [k0, k1] (open polyline; s, signed d, plan dist, surface y). */
+function projectSpan(prof: RoadProfile, x: number, z: number, k0: number, k1: number, out: { s: number; d: number; dist: number; y: number }): void {
+  const st = prof.stations;
+  const S = ROAD_STATION_STRIDE;
+  let best = Infinity;
+  for (let k = k0; k < k1; k++) {
+    const ax = st[k * S]!;
+    const az = st[k * S + 2]!;
+    const ex = st[(k + 1) * S]! - ax;
+    const ez = st[(k + 1) * S + 2]! - az;
+    const l2 = ex * ex + ez * ez;
+    let t = l2 > 0 ? ((x - ax) * ex + (z - az) * ez) / l2 : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const qx = x - ax - t * ex;
+    const qz = z - az - t * ez;
+    const d2 = qx * qx + qz * qz;
+    if (d2 < best) {
+      best = d2;
+      const sa = k * ROAD_STATION_SPACING;
+      const sb = Math.min((k + 1) * ROAD_STATION_SPACING, prof.length);
+      out.s = sa + (sb - sa) * t;
+      const tx = st[k * S + 3]!;
+      const tz = st[k * S + 4]!;
+      out.d = qx * -tz + qz * tx;
+      out.dist = Math.sqrt(d2);
+      out.y = st[k * S + 1]! + (st[(k + 1) * S + 1]! - st[k * S + 1]!) * t + st[k * S + 5]! * out.d;
+    }
+  }
+}
+
+/** Half width of a tunnel cover beyond the verge, m (the cut slopes of a ≤ 40 m deep cutting). */
+const COVER_REACH_M = 60;
+/** Lateral fade of the cover back to the carved terrain at its edge, m. */
+const COVER_FADE_M = 14;
+/** Minimum rock / earth over the tunnel crown drawn by the cover, m above the road. */
+const COVER_MIN_ROOF_M = 8;
+
+/**
+ * Render-only ridge over a tunnel span (types.ts TerrainCover): within [s0, s1] (sharp at the
+ * portals) and |d| ≤ verge + COVER_REACH_M the natural (pre-carve) terrain, faded back to the
+ * carved heights over the last COVER_FADE_M and never lower than the carved terrain; over the
+ * bore at least COVER_MIN_ROOF_M above the road. Splat: rock above the macro rock slope, else
+ * grass with dirt breaks.
+ */
+function tunnelCover(g: FullGrid, prof: RoadProfile, st: RoadStructure, heights: Float32Array, nat: Float32Array, rockSlope: number): TerrainCover {
+  const reach = prof.width / 2 + prof.shoulder + COVER_REACH_M;
+  const smp = createRoadSample();
+  const proj = { s: 0, d: 0, dist: 0, y: 0 };
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minZ = Infinity;
+  let maxZ = -Infinity;
+  for (let s = st.s0; s <= st.s1 + 1e-9; s += 2) {
+    sampleRoad(prof, s, smp);
+    minX = Math.min(minX, smp.x - reach);
+    maxX = Math.max(maxX, smp.x + reach);
+    minZ = Math.min(minZ, smp.z - reach);
+    maxZ = Math.max(maxZ, smp.z + reach);
+  }
+  const [c0, c1, r0, r1] = boxOf(g, minX, maxX, minZ, maxZ);
+  const cw = c1 - c0 + 1;
+  const ch = r1 - r0 + 1;
+  const hc = new Float32Array(cw * ch).fill(NaN);
+  const sc = new Uint8Array(cw * ch * SPLAT_CHANNELS);
+  const core = prof.width / 2 + prof.shoulder + 3;
+  const k0 = Math.max(0, Math.floor((st.s0 - reach) / ROAD_STATION_SPACING));
+  const k1 = Math.min(prof.stationCount - 1, Math.ceil((st.s1 + reach) / ROAD_STATION_SPACING));
+  for (let r = r0; r <= r1; r++) {
+    const z = g.oz + r * g.sp;
+    for (let c = c0; c <= c1; c++) {
+      const x = g.ox + c * g.sp;
+      projectSpan(prof, x, z, k0, k1, proj);
+      if (proj.s < st.s0 || proj.s > st.s1) continue;
+      const ad = proj.d < 0 ? -proj.d : proj.d;
+      if (ad > reach || proj.dist > reach) continue;
+      const i = r * g.cols + c;
+      const w = smooth01((reach - ad) / COVER_FADE_M);
+      let h = heights[i]! + (Math.max(nat[i]!, heights[i]!) - heights[i]!) * w;
+      if (ad <= core && h < proj.y + COVER_MIN_ROOF_M) h = proj.y + COVER_MIN_ROOF_M;
+      hc[(r - r0) * cw + (c - c0)] = h;
+    }
+  }
+  // Splat from the cover's own slope (central differences inside the patch, terrain outside).
+  for (let r = 0; r < ch; r++) {
+    for (let c = 0; c < cw; c++) {
+      const k = r * cw + c;
+      if (Number.isNaN(hc[k]!)) continue;
+      const at = (cc: number, rr: number): number => {
+        const v = cc >= 0 && rr >= 0 && cc < cw && rr < ch ? hc[rr * cw + cc]! : NaN;
+        if (!Number.isNaN(v)) return v;
+        const gc = Math.min(Math.max(c0 + cc, 0), g.cols - 1);
+        const gr = Math.min(Math.max(r0 + rr, 0), g.rows - 1);
+        return heights[gr * g.cols + gc]!;
+      };
+      const gx = (at(c + 1, r) - at(c - 1, r)) / (2 * g.sp);
+      const gz = (at(c, r + 1) - at(c, r - 1)) / (2 * g.sp);
+      const slope = Math.sqrt(gx * gx + gz * gz);
+      const o = k * SPLAT_CHANNELS;
+      const rock = smooth01((slope - rockSlope * 0.75) / (rockSlope * 0.5));
+      const dirt = (1 - rock) * 0.18 * smooth01(slope / rockSlope);
+      sc[o + 2] = Math.round(rock * 230);
+      sc[o + 1] = Math.round(dirt * 255);
+    }
+  }
+  return { id: st.id, col0: c0, row0: r0, cols: cw, rows: ch, heights: hc, splat: sc };
 }
 
 // ------------------------------------------------------------ driver
@@ -1702,7 +2024,8 @@ export function generateTerrain(layout: WorldLayout): TerrainData {
 
   // ---------------------------------------------------------- erosion
   const hC0 = Float64Array.from(F.hC);
-  const droplets = Math.round((DEFAULT_EROSION.droplets * NC) / (353 * 353));
+  // Layout v6: 0.6 × the P3 density (per coarse cell; the 2560 m map would need 3.3× the droplets).
+  const droplets = Math.round((DEFAULT_EROSION.droplets * NC * 0.6) / (353 * 353));
   erodeHeightfield(F.hC, nc, nc, rng.fork(S_EROSION), { ...DEFAULT_EROSION, droplets }, F.spawnC);
   for (let i = 0; i < NC; i++) F.eroC[i] = F.hC[i]! - hC0[i]!;
   smoothCoarse(F.eroC, new Float32Array(NC), nc);
@@ -1730,7 +2053,7 @@ export function generateTerrain(layout: WorldLayout): TerrainData {
   const lakebed = noiseFor(S_LAKEBED);
   const lakeWarp = noiseFor(S_LAKE_WARP);
   layout.zones.forEach((z, zi) => {
-    if (z.kind === 'lake') carveLake(nat, g, zones[zi]!.shape, wl, z.params.depth, z.params.shoreLift, lakebed, lakeWarp);
+    if (z.kind === 'lake') carveLake(nat, g, zones[zi]!.shape, z.params.level ?? wl, z.params.depth, z.params.shoreLift, lakebed, lakeWarp);
   });
   const owner = new Uint8Array(N).fill(OWNER_NONE);
   const coreT = new Float32Array(N);
@@ -1749,6 +2072,9 @@ export function generateTerrain(layout: WorldLayout): TerrainData {
     flatten(nat, owner, coreT, g, s, H);
     flats.push({ shape: s, height: H, kind: 'pad', material: p.material });
   }
+  // Layout v6 surface patches: optional gentle depressions (mud pits, gravel traps) before the roads.
+  const patches = (layout.surfaces ?? []).map((sp0) => ({ def: sp0, shape: compileShape(sp0.shape) }));
+  for (const sp0 of patches) if (sp0.def.depth) depressPatch(nat, g, sp0.shape, sp0.def.depth);
   mark('flats');
 
   // ---------------------------------------------------------- roads
@@ -1767,6 +2093,9 @@ export function generateTerrain(layout: WorldLayout): TerrainData {
     .sort((a, b) => a.p - b.p || b.i - a.i)
     .map((o) => o.i);
   for (const ri of carveOrder) rasterRoad(profiles[ri]!, ri, g, owner, coreT, absD, stamp, s1);
+  // Layout v6: raised sidewalks behind the kerb lines (only on ground no carriageway owns).
+  const arenaShapes = flats.filter((f) => f.kind === 'arena').map((f) => f.shape);
+  for (const ri of carveOrder) if (profiles[ri]!.sidewalk) rasterSidewalk(profiles[ri]!, ri, layout, profiles, g, owner, coreT, absD, arenaShapes);
   releasePads(owner, absD, N);
   mark('roadRaster');
   const heights = new Float32Array(N);
@@ -1787,13 +2116,20 @@ export function generateTerrain(layout: WorldLayout): TerrainData {
   for (let r = 0; r < nc; r++) for (let c = 0; c < nc; c++) nAC[r * nc + c] = pA((ox + c * cs) * 0.035, (oz + r * cs) * 0.035);
   paintNatural(g, cg, F, nAC, heights, splat, material, pB, rockSlope);
   layout.zones.forEach((z, zi) => {
-    if (z.kind === 'lake') paintLake(g, zones[zi]!.shape, heights, wl, splat, material, pB, lakeWarp);
+    if (z.kind === 'lake') paintLake(g, zones[zi]!.shape, heights, z.params.level ?? wl, splat, material, pB, lakeWarp);
   });
   for (const f of flats) {
     if (f.kind === 'arena' || (f.kind === 'pad' && f.material !== undefined)) paintFlat(g, f, splat, material, pB);
   }
   paintRoads(g, layout, profiles, owner, absD, heights, nat, splat, material, pB, pC);
+  for (const sp0 of patches) paintPatch(g, sp0.shape, sp0.def.material, profiles, owner, absD, splat, material, pB);
   mark('paint');
+  // Layout v6: render-only ridge covers over tunnel spans.
+  const covers: TerrainCover[] = [];
+  for (const prof of profiles) {
+    for (const st of prof.structures ?? []) if (st.kind === 'tunnel') covers.push(tunnelCover(g, prof, st, heights, nat, rockSlope));
+  }
+  mark('covers');
 
   // ---------------------------------------------------------- spawns, stats
   const smp = createRoadSample();
@@ -1803,7 +2139,9 @@ export function generateTerrain(layout: WorldLayout): TerrainData {
       sampleRoad(profiles[ri]!, s.road.s, smp);
       const x = smp.x + smp.rx * s.road.d;
       const z = smp.z + smp.rz * s.road.d;
-      const y = bilinear(heights, cols, cols, ox, oz, sp, x, z);
+      // Layout v6: a spawn on a bridge deck stands on the deck (the profile surface), not the lake bed.
+      const onDeck = structureAt(profiles[ri]!, s.road.s)?.kind === 'bridge';
+      const y = onDeck ? smp.y + smp.bank * s.road.d : bilinear(heights, cols, cols, ox, oz, sp, x, z);
       const yaw = s.road.reverse ? headingToYaw(-smp.tx, -smp.tz) : headingToYaw(smp.tx, smp.tz);
       return { id: s.id, name: s.name, pos: [x, y, z] as const, yaw };
     }
@@ -1830,6 +2168,7 @@ export function generateTerrain(layout: WorldLayout): TerrainData {
     spawns,
     hash: 0,
   };
+  if (covers.length > 0) terrain.covers = covers;
   terrain.hash = hashTerrain(terrain);
   mark('hash');
   return terrain;

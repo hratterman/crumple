@@ -467,8 +467,10 @@ export interface VegetationScatter {
   /** hashVegetation(this). */
   hash: number;
 }
-export const VEG_MAX_INSTANCES = 60000;
-export const VEG_MAX_COLLIDERS = 2500;
+/** Layout v6: 60 k → 200 k (the map grew 3.3×; the render keeps density by rank and distance). */
+export const VEG_MAX_INSTANCES = 200000;
+/** Layout v6: 2500 → 7000 (more roads, three times the land). */
+export const VEG_MAX_COLLIDERS = 7000;
 export const VEG_COLLIDER_REACH_M = 25;
 export const VEG_TREE_MIN_SPACING_M = 4;
 export const VEG_TRUNK_HALF_HEIGHT_M = 2.5;
@@ -486,6 +488,12 @@ export interface VegetationExtra {
   colliders: readonly ColliderDef[];
   props: readonly PropPlacement[];
   exclusions: readonly { cx: number; cz: number; ax: number; az: number; hx: number; hz: number }[];
+  /**
+   * Hand-placed plantings (street trees, yard trees, hedges): appended after the natural scatter,
+   * rank 0 (always drawn), same collider rule (a tree within VEG_COLLIDER_REACH_M of a road becomes
+   * a trunk collider). kind = VegetationKind; scale ≈ 0.6–1.6.
+   */
+  plantings?: readonly { kind: number; x: number; z: number; scale: number }[];
 }
 export type ScatterVegetation = (layout: WorldLayout, terrain: TerrainData, extra?: VegetationExtra | null) => VegetationScatter;
 /** FNV-1a 32 word-wise over count, kind, x, y, z, scale, collider (U4). */

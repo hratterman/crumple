@@ -166,7 +166,7 @@ export interface DecalInstance {
 }
 
 export interface StripInstance {
-  kind: 'sidewalk' | 'kerbRedWhite' | 'kerbConcrete' | 'gutter' | 'tape';
+  kind: 'sidewalk' | 'kerbRedWhite' | 'kerbConcrete' | 'fencePicket' | 'fenceRail' | 'fenceChain' | 'tape' | 'armco' | 'tyreWall';
   /** Polyline along the strip's inner edge: x, y, z triples; the strip extends `width` to the right of travel (`side` +1) or left (−1). */
   points: number[];
   width: number;
@@ -183,7 +183,7 @@ export interface CableInstance {
 
 export interface StructureInstance {
   id: string;
-  kind: 'bridge' | 'tunnel' | 'overpass' | 'gantry' | 'startGantry' | 'tree' | 'crane' | 'mast';
+  kind: 'bridge' | 'tunnel' | 'overpass' | 'gantry' | 'startGantry' | 'tree' | 'crane' | 'mast' | 'grandstand';
   road?: string;
   s0?: number;
   s1?: number;
@@ -201,6 +201,8 @@ export interface WorldContent {
   colliders: ColliderDef[];
   props: PropPlacement[];
   exclusions: ContentExclusion[];
+  /** Street / yard trees for the vegetation scatter (VegetationExtra.plantings). */
+  plantings: { kind: number; x: number; z: number; scale: number }[];
   /** Signal plans (buildSignalPlans): the same array the route network's RoutePath.signal indexes. */
   signals: SignalPlan[];
   lights: WorldLight[];

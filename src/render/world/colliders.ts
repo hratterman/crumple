@@ -62,7 +62,7 @@ export interface ColliderRenderer {
 const TEX = 256;
 
 /** Tileable value noise: lattice of `period` cells wrapping over [0, 1). */
-function periodicNoise(seed: number, period: number): (u: number, v: number) => number {
+export function periodicNoise(seed: number, period: number): (u: number, v: number) => number {
   const rng = createRng(seed);
   const lat = new Float32Array(period * period);
   for (let i = 0; i < lat.length; i++) lat[i] = rng.float() * 2 - 1;
@@ -82,7 +82,7 @@ function periodicNoise(seed: number, period: number): (u: number, v: number) => 
   };
 }
 
-function tileableFbm(seed: number, base: number, octaves: number): (u: number, v: number) => number {
+export function tileableFbm(seed: number, base: number, octaves: number): (u: number, v: number) => number {
   const layers = Array.from({ length: octaves }, (_, k) => periodicNoise(seed + k * 101, base << k));
   return (u, v) => {
     let s = 0;
@@ -97,7 +97,7 @@ function tileableFbm(seed: number, base: number, octaves: number): (u: number, v
   };
 }
 
-function makeTexture(data: Uint8Array, size: number, srgb: boolean, repeatU: number, repeatV: number): DataTexture {
+export function makeTexture(data: Uint8Array, size: number, srgb: boolean, repeatU: number, repeatV: number): DataTexture {
   const t = new DataTexture(data, size, size, RGBAFormat, UnsignedByteType);
   t.wrapS = RepeatWrapping;
   t.wrapT = RepeatWrapping;
@@ -112,7 +112,7 @@ function makeTexture(data: Uint8Array, size: number, srgb: boolean, repeatU: num
 }
 
 /** Height field (0..1) → tangent-space normal map (tileable central differences). */
-function normalFromHeight(h: Float32Array, size: number, strength: number): Uint8Array {
+export function normalFromHeight(h: Float32Array, size: number, strength: number): Uint8Array {
   const out = new Uint8Array(size * size * 4);
   const H = (x: number, y: number): number => h[((y + size) % size) * size + ((x + size) % size)]!;
   for (let y = 0; y < size; y++) {
@@ -130,7 +130,7 @@ function normalFromHeight(h: Float32Array, size: number, strength: number): Uint
   return out;
 }
 
-interface ConcreteStyle {
+export interface ConcreteStyle {
   seed: number;
   /** Base linear-ish grey (sRGB byte). */
   tone: number;
@@ -145,7 +145,7 @@ interface ConcreteStyle {
 }
 
 /** Concrete albedo (sRGB) + normal map, one tile. */
-function concreteTextures(style: ConcreteStyle): { albedo: Uint8Array; normal: Uint8Array } {
+export function concreteTextures(style: ConcreteStyle): { albedo: Uint8Array; normal: Uint8Array } {
   const fine = tileableFbm(style.seed, 16, 4);
   const coarse = tileableFbm(style.seed + 7, 4, 3);
   const streakN = periodicNoise(style.seed + 13, 24);
@@ -216,7 +216,7 @@ function concreteTextures(style: ConcreteStyle): { albedo: Uint8Array; normal: U
 const clampByte = (v: number): number => (v < 0 ? 0 : v > 255 ? 255 : Math.round(v));
 
 /** Black/yellow 45° hazard stripes, one stripe pair per tile. */
-function hazardStripes(): Uint8Array {
+export function hazardStripes(): Uint8Array {
   const n = 64;
   const out = new Uint8Array(n * n * 4);
   for (let y = 0; y < n; y++)
@@ -826,7 +826,7 @@ function buildGrandstand(g: Group, c: ResolvedCollider, M: Mats): void {
 }
 
 /** Vertical corrugation normal map (trapezoid ribs), one rib per tile. */
-function corrugationNormal(): Uint8Array {
+export function corrugationNormal(): Uint8Array {
   const n = 64;
   const hgt = new Float32Array(n * n);
   for (let y = 0; y < n; y++)
@@ -839,7 +839,7 @@ function corrugationNormal(): Uint8Array {
 }
 
 /** Diamond-plate normal map: raised lozenges in a staggered grid. */
-function diamondPlateNormal(): Uint8Array {
+export function diamondPlateNormal(): Uint8Array {
   const n = 64;
   const hgt = new Float32Array(n * n);
   for (let y = 0; y < n; y++)
@@ -861,7 +861,7 @@ function diamondPlateNormal(): Uint8Array {
 }
 
 /** Tyre tread / sidewall grain normal map. */
-function treadNormal(): Uint8Array {
+export function treadNormal(): Uint8Array {
   const n = 64;
   const f = tileableFbm(91, 8, 3);
   const hgt = new Float32Array(n * n);
@@ -870,7 +870,7 @@ function treadNormal(): Uint8Array {
 }
 
 /** Grime / weathering albedo multiplier (greyscale sRGB around 0.85–1). */
-function grimeTexture(seed: number): Uint8Array {
+export function grimeTexture(seed: number): Uint8Array {
   const n = 128;
   const f = tileableFbm(seed, 4, 4);
   const s = periodicNoise(seed + 5, 32);
@@ -892,8 +892,10 @@ function grimeTexture(seed: number): Uint8Array {
 
 /** Every collider's visual group, placed in world space (one per collider, `collider:<id>`). */
 function placedGroups(resolved: readonly ResolvedCollider[], mats: Mats): Group[] {
-  // Layout v6: world-content visuals (buildings, kerbs, structures…) are the content renderer's.
-  return resolved.filter((c) => c.visual === undefined || !CONTENT_VISUALS.has(c.visual)).map((c) => {
+  // Layout v6: world-content colliders (ids 'w:*') and content visuals (buildings, kerbs, structures…) are the content
+  // renderer's, except plain content ramps / blocks, which keep this renderer's stunt-park look.
+  const generic = (c: ResolvedCollider): boolean => (c.id.startsWith('w:') ? c.visual === 'ramp' || (c.visual === 'block' && c.kind === 'box') : c.visual === undefined || !CONTENT_VISUALS.has(c.visual));
+  return resolved.filter(generic).map((c) => {
     const g = buildCollider(c, mats);
     g.position.set(c.pos[0], c.pos[1], c.pos[2]);
     g.quaternion.set(c.quat[0], c.quat[1], c.quat[2], c.quat[3]);

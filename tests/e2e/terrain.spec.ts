@@ -60,7 +60,7 @@ test('terrain preview: chunked LOD terrain renders, streams and follows presets'
     p.renderFrames(1);
     return p.stats();
   });
-  expect(low.chunks).toBe(22 * 22);
+  expect(low.chunks).toBe(40 * 40); // layout v6: 2560 m map
   expect(low.visibleChunks).toBeGreaterThan(0);
   expect(low.triangles).toBeGreaterThan(10_000);
   expect(low.triangles).toBeLessThan(1_500_000);

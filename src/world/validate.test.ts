@@ -34,7 +34,7 @@ describe('validateLayout', () => {
     rejects((l) => (l.roads[1].id = l.roads[0].id), /duplicate id/);
     rejects((l) => (l.roads[0].kind = 'freeway'), /unknown road kind/);
     rejects((l) => (l.roads[0].material = 9), /MaterialId/);
-    rejects((l) => (l.roads[2].points[0] = [900, null, 0]), /outside the map/);
+    rejects((l) => (l.roads[2].points[0] = [1500, null, 0]), /outside the map/);
     rejects((l) => (l.roads[2].points[1] = l.roads[2].points[0]), /duplicate of the previous point/);
     rejects((l) => (l.roads[0].width = -1), /width/);
     rejects((l) => (l.junctions[0].roads = ['highway', 'nope']), /unknown road 'nope'/);
@@ -51,12 +51,19 @@ describe('validateLayout', () => {
     const cone = { id: 'c', prop: 'cone', pos: [10, null, 10] };
     rejects((l) => (l.props = [cone, { ...cone }]), /props: duplicate id/);
     rejects((l) => (l.props = [{ ...cone, prop: '' }]), /catalog key/);
-    rejects((l) => (l.props = [{ ...cone, pos: [900, null, 0] }]), /outside the map/);
+    rejects((l) => (l.props = [{ ...cone, pos: [1500, null, 0] }]), /outside the map/);
     rejects((l) => (l.props = [{ ...cone, facing: [1, 1] }]), /unit vector/);
     rejects((l) => (l.props = [{ ...cone, stack: 0 }]), /stack/);
     rejects((l) => (l.props = [{ ...cone, row: { count: 2.5, step: [1, 0] } }]), /row.count/);
     rejects((l) => (l.props = [{ ...cone, row: { count: 400, step: [1, 0] } }]), /row.count/);
     rejects((l) => (l.props = [{ ...cone, row: { count: 200, step: [10, 0] } }]), /last row copy/);
+    // Layout v6 additions.
+    rejects((l) => (l.roads[0].structures = [{ id: 's', kind: 'viaduct', from: [0, 0], to: [10, 0] }]), /unknown kind 'viaduct'/);
+    rejects((l) => (l.roads[0].sidewalk = { width: 3, kerb: 0.5 }), /kerb/);
+    rejects((l) => (l.junctions[0].control = 'roundabout'), /unknown control/);
+    rejects((l) => (l.areas[0].spawn = 'nope'), /unknown spawn 'nope'/);
+    rejects((l) => (l.pois[0].area = 'nope'), /unknown area 'nope'/);
+    rejects((l) => (l.surfaces[0].material = 9), /terrain MaterialId/);
     rejects((l) => (l.props = [{ ...cone, padId: 'nope' }]), /unknown pad/);
     const ok = clone() as Mut;
     ok.props = [{ ...cone, facing: [0.6, -0.8], stack: 1, row: { count: 3, step: [1, 0] }, padId: ok.pads[0].id }];
@@ -81,6 +88,9 @@ describe('validateLayout', () => {
       junctions: [{ id: 'j', pos: [0, 0], roads: ['a', 'b'] }],
       spawnPoints: [],
       props: [],
+      areas: [],
+      pois: [],
+      surfaces: [],
     };
     expect(() => generateTerrain(small)).toThrow(/junction 'j': road 'b' passes 6\.00 m/);
     small.junctions = [{ id: 'j', pos: [0, 6], roads: ['b', 'a'] }];

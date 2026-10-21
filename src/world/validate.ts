@@ -164,6 +164,7 @@ export function validateLayout(layout: WorldLayout): void {
         if (z.shape.type !== 'circle' && z.shape.type !== 'ellipse') fail(`${w}: lake shape must be a circle or ellipse`);
         if (!(finite(z.params.depth, `${w}.params.depth`) >= 0)) fail(`${w}.params.depth must be >= 0`);
         if (!(finite(z.params.shoreLift, `${w}.params.shoreLift`) >= 0)) fail(`${w}.params.shoreLift must be >= 0`);
+        if (z.params.level !== undefined) finite(z.params.level, `${w}.params.level`);
         break;
       case 'arena':
         finite(z.params.height, `${w}.params.height`);
@@ -205,6 +206,25 @@ export function validateLayout(layout: WorldLayout): void {
     if (r.bank !== undefined && !(finite(r.bank, `${w}.bank`) >= 0 && r.bank <= 0.2)) fail(`${w}.bank must be in [0, 0.2]`);
     checkMaterial(r.material, `${w}.material`);
     if (!['highway', 'center', 'edge', 'none'].includes(r.markings)) fail(`${w}: unknown markings '${r.markings}'`);
+    // Layout v6 additions.
+    if (r.oneWay !== undefined && typeof r.oneWay !== 'boolean') fail(`${w}.oneWay must be a boolean`);
+    if (r.oneWay && r.closed) fail(`${w}: a one-way road cannot be closed`);
+    if (r.sidewalk !== undefined) {
+      const sw = r.sidewalk;
+      if (!(finite(sw.width, `${w}.sidewalk.width`) >= 2.5)) fail(`${w}.sidewalk.width must be >= 2.5`);
+      const k = finite(sw.kerb, `${w}.sidewalk.kerb`);
+      if (!(k >= 0.05 && k <= 0.25)) fail(`${w}.sidewalk.kerb must be in [0.05, 0.25]`);
+    }
+    if (r.wear !== undefined && !['fresh', 'worn', 'patched'].includes(r.wear)) fail(`${w}: unknown wear '${r.wear}'`);
+    if (r.structures !== undefined) {
+      if (!Array.isArray(r.structures)) fail(`${w}.structures must be an array`);
+      uniqueIds(r.structures, `${w}.structures`);
+      r.structures.forEach((st, k) => {
+        if (st.kind !== 'bridge' && st.kind !== 'tunnel') fail(`${w}.structures[${k}]: unknown kind '${String(st.kind)}'`);
+        checkVec2(st.from, `${w}.structures[${k}].from`, half);
+        checkVec2(st.to, `${w}.structures[${k}].to`, half);
+      });
+    }
   });
 
   layout.junctions.forEach((j, i) => {
@@ -217,6 +237,7 @@ export function validateLayout(layout: WorldLayout): void {
       if (seen.has(id)) fail(`${w}: road '${id}' listed twice`);
       seen.add(id);
     }
+    if (j.control !== undefined && !['none', 'signal', 'stop', 'allStop', 'yield'].includes(j.control)) fail(`${w}: unknown control '${j.control}'`);
   });
 
   // Props (P5): shape checks only — the catalog key, stackability and proxy
@@ -250,7 +271,40 @@ export function validateLayout(layout: WorldLayout): void {
     if (p.padId !== undefined && !padIds.has(p.padId)) fail(`${w}: unknown pad '${p.padId}'`);
   });
 
+  // Layout v6: surface patches, areas, POIs.
+  const surfaces = layout.surfaces ?? [];
+  uniqueIds(surfaces, 'surfaces');
+  surfaces.forEach((sp, i) => {
+    const w = `surfaces[${i}] '${sp.id}'`;
+    checkShape(sp.shape, `${w}.shape`, half);
+    checkMaterial(sp.material, `${w}.material`);
+    if (sp.depth !== undefined && !(finite(sp.depth, `${w}.depth`) >= 0 && sp.depth <= 3)) fail(`${w}.depth must be in [0, 3]`);
+  });
+  const spawnIds = new Set(layout.spawnPoints.map((s) => s.id));
+  const areas = layout.areas ?? [];
+  uniqueIds(areas, 'areas');
+  const areaIds = new Set(areas.map((a) => a.id));
+  areas.forEach((a, i) => {
+    const w = `areas[${i}] '${a.id}'`;
+    checkShape(a.bounds, `${w}.bounds`, half);
+    if (!spawnIds.has(a.spawn)) fail(`${w}: unknown spawn '${a.spawn}'`);
+  });
+  const pois = layout.pois ?? [];
+  uniqueIds(pois, 'pois');
+  pois.forEach((p, i) => {
+    const w = `pois[${i}] '${p.id}'`;
+    if (!areaIds.has(p.area)) fail(`${w}: unknown area '${p.area}'`);
+    if (!Array.isArray(p.pos) || p.pos.length !== 3) fail(`${w}.pos: expected [x, y|null, z]`);
+    checkVec2([p.pos[0], p.pos[2]], `${w}.pos`, half);
+    if (p.pos[1] !== null) finite(p.pos[1], `${w}.pos[1]`);
+    if (p.heading !== undefined) {
+      const hx = finite(p.heading[0], `${w}.heading[0]`);
+      const hz = finite(p.heading[1], `${w}.heading[1]`);
+      if (Math.abs(Math.sqrt(hx * hx + hz * hz) - 1) > 1e-3) fail(`${w}.heading must be a unit vector`);
+    }
+  });
   layout.spawnPoints.forEach((s, i) => {
+    if (s.area !== undefined && areas.length > 0 && !areaIds.has(s.area)) fail(`spawnPoints[${i}] '${s.id}': unknown area '${s.area}'`);
     const w = `spawnPoints[${i}] '${s.id}'`;
     if (s.road) {
       if (!roadIds.has(s.road.id)) fail(`${w}: unknown road '${s.road.id}'`);

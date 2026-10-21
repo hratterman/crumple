@@ -10,6 +10,9 @@
  * above IMPACT_LIMIT. Plus: the settle window is exact (thresholds lifted,
  * then the rig's values back) and part of the replay log.
  */
+import { buildWorldContent } from '../world/content';
+import { resolveColliders } from '../world/colliders';
+import { placementGround } from '../world/surface';
 import { describe, expect, it } from 'vitest';
 
 import { placeOnGround } from './spawn';
@@ -98,8 +101,11 @@ describe('spawn settle: every vehicle × every spawn point stays pristine', () =
       const { host, out } = valleyHost();
       const eng = host.engine!;
       const s = eng.state;
+      // Layout v6: the same placement ground as main (bridge decks / kerbs over the terrain).
+      const content = buildWorldContent(DEFAULT_LAYOUT, terrain, { render: false });
+      const ground = placementGround(resolveColliders(content.colliders, (x, z) => eng.sampler!.heightAt(x, z)), (x, z) => eng.sampler!.heightAt(x, z));
       terrain.spawns.forEach((sp, si) => {
-        const t = placeOnGround(rig, eng.sampler!, sp.pos[0], sp.pos[2], sp.yaw);
+        const t = placeOnGround(rig, ground, sp.pos[0], sp.pos[2], sp.yaw);
         // First spawn, then alternate teleports (reset) and showroom-style respawns (despawn + spawnVehicle).
         const method: Method = si === 0 ? 'spawn' : si % 2 === 1 ? 'teleport' : 'respawn';
         if (method === 'teleport') host.handle({ type: 'reset', objectId: 1, transform: t, settle: SPAWN_SETTLE_S });

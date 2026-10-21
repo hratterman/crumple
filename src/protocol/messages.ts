@@ -147,7 +147,8 @@ export const DEFAULT_CAPACITY: SnapshotCapacity = {
  * DEFAULT_CAPACITY stays the P1 value for tests.
  */
 export const GAME_CAPACITY: SnapshotCapacity = {
-  maxObjects: 320,
+  // Layout v6 (R-WORLD): 320 → 640 (the town's soft street lights / signs / mailboxes add ≈ 100 layout props).
+  maxObjects: 640,
   nodeCapacity: 32768,
   beamCapacity: 131072,
 };
@@ -162,7 +163,8 @@ export const GAME_CAPACITY: SnapshotCapacity = {
  *   [PROP_DYNAMIC_ID_BASE, +MAX)        props spawned by `spawnProps` (challenge set-ups, debug)
  */
 export const PROP_LAYOUT_ID_BASE = 4096;
-export const PROP_LAYOUT_MAX_INSTANCES = 256;
+/** Layout v6 (R-WORLD): 256 → 512 (still below PROP_DYNAMIC_ID_BASE). */
+export const PROP_LAYOUT_MAX_INSTANCES = 512;
 export const PROP_DYNAMIC_ID_BASE = 8192;
 export const PROP_DYNAMIC_MAX = 4096;
 export function isLayoutPropId(objectId: number): boolean {

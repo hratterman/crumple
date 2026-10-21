@@ -88,6 +88,7 @@ import { createReplaySession, type ReplaySession } from './ui/replay/session';
 import type { PerfOverlay, PerfOverlayData } from './ui/perfOverlay';
 import type { AudioPlayerInfo, AudioSystem } from './audio/types';
 import { colliderWorldAabb, resolveColliders } from './world/colliders';
+import { placementGround } from './world/surface';
 import { createTerrainSampler } from './world/sampler';
 import { resolveWater } from './world/water';
 import type { ColliderDef, TerrainData, TerrainSampler, WorldLayout } from './world/types';
@@ -100,6 +101,12 @@ const layoutP: Promise<WorldLayout> = import('./world/layout').then((m) => m.DEF
 let LAYOUT: WorldLayout;
 /** Layout + generated world-content colliders (what the worker installs before the vegetation). */
 let worldColliders: readonly ColliderDef[] = [];
+/**
+ * Placement ground (spawns, teleports, F, `place`): the terrain, or the top of a drivable content
+ * collider over it (layout v6 bridge decks, kerbs) — a car spawned on the causeway stands on the
+ * deck, not on the lake bed under it.
+ */
+let placeGround: { heightAt(x: number, z: number): number } | null = null;
 /** First view (layout spawn id; overridable with ?spawn=<id>). */
 const DEFAULT_SPAWN = 'highway';
 const VEHICLE_ID = 1;
@@ -534,7 +541,8 @@ function liveObstacles(x: number, z: number): Aabb[] {
  */
 function clearSpawnAt(rest: RestPose, x: number, z: number, yaw: number): Transform {
   const boxes = liveObstacles(x, z);
-  return (boxes.length > 0 ? repairSpot(rest, sampler!, x, z, yaw, boxes) : null) ?? placeOnGround(rest, sampler!, x, z, yaw);
+  const ground = placeGround ?? sampler!;
+  return (boxes.length > 0 ? repairSpot(rest, ground, x, z, yaw, boxes) : null) ?? placeOnGround(rest, ground, x, z, yaw);
 }
 
 /** Teleport (full repair) to layout spawn point `i` (keys 1–8). */
@@ -553,7 +561,7 @@ function teleport(i: number): void {
 /** Full repair at world (x, z) facing `yaw` (rad, 0 = −Z), dropped onto the terrain (tests, screenshots). */
 function placeVehicle(x: number, z: number, yaw: number): void {
   if (!sampler) return;
-  lastSpawn = placeOnGround(playerRest(), sampler, x, z, yaw);
+  lastSpawn = placeOnGround(playerRest(), placeGround ?? sampler, x, z, yaw);
   client.reset(VEHICLE_ID, lastSpawn, SPAWN_SETTLE_S);
   holdParked();
   lastSent.gearSelect = NaN;
@@ -569,7 +577,8 @@ function repairVehicle(): void {
     const f = pose.forward;
     const yaw = Math.hypot(f.x, f.z) > 0.2 ? yawOf(f.x, f.z) : 0;
     // Props return to their spawn poses at the same time: never repair the car inside one's spawn box.
-    t = propBoxes.length > 0 ? (repairSpot(sedanRig, sampler, pose.position.x, pose.position.z, yaw, propBoxes) ?? lastSpawn) : placeOnGround(sedanRig, sampler, pose.position.x, pose.position.z, yaw);
+    const ground = placeGround ?? sampler;
+    t = propBoxes.length > 0 ? (repairSpot(sedanRig, ground, pose.position.x, pose.position.z, yaw, propBoxes) ?? lastSpawn) : placeOnGround(sedanRig, ground, pose.position.x, pose.position.z, yaw);
   }
   client.reset(VEHICLE_ID, t, SPAWN_SETTLE_S);
   holdParked();
@@ -1321,6 +1330,8 @@ function loadWorldLayer() {
     // P8: static colliders + stunt-park decoration (procedural textures / geometry: ~40 kB off the app chunk)
     import('./render/world/colliders'),
     import('./render/world/stuntpark'),
+    // Layout v6: the generated world content (structures, town, areas, detail).
+    import('./render/world/content'),
   ]);
 }
 
@@ -1418,7 +1429,11 @@ async function boot(): Promise<void> {
   }
   await nextFrame();
 
-  const [loaded, materials, [{ createPropRenderer }, { createVegetationRenderer }, { createWaterRenderer }, { createFxSystem }, { createColliderRenderer }, { createStuntParkRenderer }]] = await Promise.all([
+  const [
+    loaded,
+    materials,
+    [{ createPropRenderer }, { createVegetationRenderer }, { createWaterRenderer }, { createFxSystem }, { createColliderRenderer }, { createStuntParkRenderer }, { createWorldContentRenderer, withTerrainCovers }],
+  ] = await Promise.all([
     terrainP,
     materialsP,
     worldLayerP,
@@ -1431,7 +1446,8 @@ async function boot(): Promise<void> {
   ctx.sampler = smp;
   await nextFrame();
 
-  const terrainR = createTerrainRenderer(ctx, world, materials, { lighting, patchMaterial });
+  // Layout v6: the terrain MESH draws the ridges over tunnels (render-only covers; the sampler keeps the bore).
+  const terrainR = createTerrainRenderer(ctx, withTerrainCovers(world), materials, { lighting, patchMaterial });
   scene.add(terrainR.object);
   mark('terrainRenderer');
   stats.stages.terrainTextureMs = Math.round(terrainR.stats.textureMs);
@@ -1442,6 +1458,10 @@ async function boot(): Promise<void> {
   // Static colliders (arena wall, poles, ramp, barriers): drawn exactly where the worker collides with them.
   // Layout v6: the generated world content's colliders follow the layout's (the worker's order).
   worldColliders = [...LAYOUT.colliders, ...loaded.content.colliders];
+  placeGround = placementGround(
+    resolveColliders(loaded.content.colliders, (x, z) => smp.heightAt(x, z)),
+    (x, z) => smp.heightAt(x, z),
+  );
   const collidersR = createColliderRenderer(ctx, resolveColliders(worldColliders, (x, z) => smp.heightAt(x, z)), {
     lighting,
     patchMaterial,
@@ -1455,6 +1475,13 @@ async function boot(): Promise<void> {
   });
   scene.add(stuntParkR.object);
   Object.assign(crumple.debug, { stuntPark: stuntParkR });
+  // Layout v6: the generated world content (bridges, tunnels, town, areas) from the helper worker's build.
+  const contentR = createWorldContentRenderer(ctx, loaded.content, world, smp, { lighting, patchMaterial });
+  scene.add(contentR.object);
+  stats.stages.contentMs = Math.round(loaded.contentMs);
+  stats.stages.contentRenderMs = Math.round(contentR.stats.buildMs);
+  Object.assign(crumple.debug, { worldContent: contentR });
+  Object.assign(crumple, { world: { lights: contentR.lights, content: loaded.content, layout: LAYOUT } });
   // P5 world layer (contracts: docs/CONTRACTS.md "P5 contracts"). Same pure inputs as the physics worker.
   const heightAt = (x: number, z: number): number => smp.heightAt(x, z);
   const waterBodies = resolveWater(LAYOUT, world);
@@ -1488,7 +1515,7 @@ async function boot(): Promise<void> {
   const trafficQ = { setQuality: (q: typeof ctx.quality) => trafficC.setQuality(trafficPreset(q)) };
   const qc = createQualityControllerWith(
     ctx,
-    { lighting, post: postStack, others: [terrainR, roadsR, collidersR, propsR, vegetationR, waterR, fxR, trafficQ, { setQuality: (q: typeof ctx.quality) => replay.setQuality(q.level) }] },
+    { lighting, post: postStack, others: [terrainR, roadsR, collidersR, contentR, propsR, vegetationR, waterR, fxR, trafficQ, { setQuality: (q: typeof ctx.quality) => replay.setQuality(q.level) }] },
     forcedLevel ? { initial: forcedLevel, storage: null, maxPixelRatio } : { maxPixelRatio },
   );
   quality = qc;
@@ -1806,6 +1833,9 @@ async function boot(): Promise<void> {
     prof.lap('props');
     vegetationR.update(worldFrame);
     prof.lap('vegetation');
+    // Layout v6 world content: item draw distances + signal heads (presented sim time).
+    contentR.update(camera, worldFrame.simTime);
+    prof.lap('worldContent');
     fxR.update(worldFrame);
     prof.lap('fx');
     waterR.update(worldFrame);

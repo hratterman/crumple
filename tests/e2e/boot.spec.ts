@@ -51,7 +51,7 @@ test('boot: loading screen → island, sim ticks on the heightfield, zero errors
     return { spawns: c.spawns, matched: c.stats.terrainMatched, loadMs: c.stats.loadMs };
   });
   expect(g.matched).toBe(true);
-  expect(g.spawns.length).toBe(8);
+  expect(g.spawns.length).toBe(23); // layout v6: the eight P3 spawns + fifteen mode-area spawns
   console.log(`island load ${(g.loadMs / 1000).toFixed(1)} s (SwiftShader)`);
   await expect(page.locator('#loading')).toHaveClass(/loading--fade/);
 

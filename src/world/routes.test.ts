@@ -26,7 +26,7 @@ let net: RouteNetwork;
 beforeAll(() => {
   terrain = generateTerrain(DEFAULT_LAYOUT);
   net = buildRouteNetwork(DEFAULT_LAYOUT, terrain);
-}, 60_000);
+}, 240_000); // layout v6: the 2560 m world takes a minute+ to generate on a loaded box
 
 const S = ROUTE_STATION_STRIDE;
 const last = (st: Float64Array, n: number, k: number): number => st[(n - 1) * S + k]!;
@@ -109,8 +109,14 @@ describe('buildRouteNetwork (Crumple Valley)', () => {
       if (p.kind !== 'lane') continue;
       const ri = DEFAULT_LAYOUT.roads.findIndex((r) => r.id === p.road);
       const road = terrain.roads[ri]!;
-      const laneW = road.width / (2 * road.lanes);
-      expect(p.offset).toBeCloseTo(p.dir * (p.lane + 0.5) * laneW, 9);
+      if (road.oneWay) {
+        // Layout v6 one-way ramps: lane k centred at (k + 0.5 − lanes/2)·width/lanes, dir +1 only.
+        expect(p.dir).toBe(1);
+        expect(p.offset).toBeCloseTo((p.lane + 0.5 - road.lanes / 2) * (road.width / road.lanes), 9);
+      } else {
+        const laneW = road.width / (2 * road.lanes);
+        expect(p.offset).toBeCloseTo(p.dir * (p.lane + 0.5) * laneW, 9);
+      }
       const mid = Math.floor(p.stationCount / 2) * S;
       projectToRoad(road, p.stations[mid]!, p.stations[mid + 2]!, proj);
       expect(Math.abs(proj.d - p.offset)).toBeLessThan(0.05);
@@ -136,8 +142,12 @@ describe('buildRouteNetwork (Crumple Valley)', () => {
         }
       }
     }
-    // Ridge Pass ends at the summit, Arena Gate at the arena: two dead ends, one 1-lane U-turn each.
-    expect(net.paths.filter((p) => p.turn === 'uturn').length).toBe(2);
+    // Dead ends (one 1-lane U-turn each): Ridge Pass at the summit, Arena Gate at the arena, and the
+    // v6 roads into areas — Raceway Road (paddock), West Road (rally service park), North Valley Road
+    // at both ends (the rally finish has no routed partner; the quarry yard), Airfield Road (apron),
+    // and Millbrook's residential lanes (Birch / Cedar Lane, both halves of Park Street).
+    const uturns = net.paths.filter((p) => p.turn === 'uturn').map((p) => net.paths[p.prev[0]!]!.road);
+    expect(uturns.sort()).toEqual(['airfieldRoad', 'birchLane', 'cedarLane', 'gateStreet', 'northValley', 'northValley', 'parkStreetE', 'parkStreetW', 'racewayRoad', 'ridgePass', 'westRoad']);
   }, 60_000);
 
   it('right of way: through straights/rights never yield, through lefts and every branch connector do; conflicts are symmetric', () => {

@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { DEFAULT_LAYOUT } from './layout';
-import { createRoadProjection, createRoadSample, projectToRoad, sampleRoad } from './roads';
+import { createRoadProjection, createRoadSample, projectToRoad, sampleRoad, structureAt } from './roads';
+import { baseSurface } from './surfaces';
 import { compileShape } from './shapes';
 import { dominantMaterial, generateTerrain, hashTerrain, lastTerrainTimings } from './terrain';
 import {
@@ -123,21 +124,23 @@ describe('generateTerrain (DEFAULT_LAYOUT)', () => {
     }
   }, 120_000);
 
-  // Target is < 2.5 s (~0.8 s on an idle core). The hard ceiling is loose
-  // because shared CI/dev machines are often oversubscribed; it only catches
-  // pathological regressions. Watch the logged timings for the real number.
-  it('runs within the regression ceiling (< 10 s; target < 2.5 s)', () => {
-    expect(ms).toBeLessThan(10_000);
+  // Layout v6 (2560 m, 3.3× the P3 samples): target < 6 s CPU (~8 s measured on a loaded 4-core
+  // box; the browser caches it per build). The hard ceiling is loose because shared CI/dev machines
+  // are often oversubscribed; it only catches pathological regressions. Watch the logged timings.
+  it('runs within the regression ceiling (< 25 s CPU; target < 6 s)', () => {
+    expect(ms).toBeLessThan(25_000);
   });
 
   it('has the contract grid dimensions', () => {
-    expect(t.cols).toBe(1409);
-    expect(t.rows).toBe(1409);
-    expect(t.heights.length).toBe(1409 * 1409);
-    expect(t.splat.length).toBe(1409 * 1409 * 4);
-    expect(t.material.length).toBe(1409 * 1409);
-    expect(t.originX).toBe(-704);
-    expect(t.originZ).toBe(-704);
+    const n = DEFAULT_LAYOUT.size + 1; // layout v6: 2560 m → 2561²
+    expect(n).toBe(2561);
+    expect(t.cols).toBe(n);
+    expect(t.rows).toBe(n);
+    expect(t.heights.length).toBe(n * n);
+    expect(t.splat.length).toBe(n * n * 4);
+    expect(t.material.length).toBe(n * n);
+    expect(t.originX).toBe(-DEFAULT_LAYOUT.size / 2);
+    expect(t.originZ).toBe(-DEFAULT_LAYOUT.size / 2);
     expect(t.layoutId).toBe(DEFAULT_LAYOUT.id);
     expect(t.roads.map((r) => r.id)).toEqual(DEFAULT_LAYOUT.roads.map((r) => r.id));
     expect(t.spawns.map((s) => s.id)).toEqual(DEFAULT_LAYOUT.spawnPoints.map((s) => s.id));
@@ -222,9 +225,9 @@ describe('generateTerrain (DEFAULT_LAYOUT)', () => {
     expect(worst).toBeLessThanOrEqual(0.02);
   });
 
-  it('keeps splat sums ≤ 255 and material = dominant splat channel', () => {
+  it('keeps splat sums ≤ 255 and material = dominant splat channel (v6 surfaces: their base)', () => {
     const { splat, material } = t;
-    const counts = new Array(7).fill(0);
+    const counts = new Array(15).fill(0);
     let over = 0;
     let mismatch = 0;
     for (let i = 0; i < material.length; i++) {
@@ -236,14 +239,15 @@ describe('generateTerrain (DEFAULT_LAYOUT)', () => {
       if (q0 + q1 + q2 + q3 > 255) over++;
       const m = material[i]!;
       counts[m]++;
-      const paved = m === 5 ? 5 : 0;
-      if (m !== dominantMaterial(q0, q1, q2, q3, paved)) mismatch++;
+      const b = baseSurface(m);
+      const paved = b === 5 ? 5 : 0;
+      if (b !== dominantMaterial(q0, q1, q2, q3, paved)) mismatch++;
     }
     expect(over).toBe(0);
     expect(mismatch).toBe(0);
-    console.log(`material share %: ${counts.map((c) => ((100 * c) / material.length).toFixed(1)).join(' / ')} (asphalt grass dirt rock gravel concrete metal)`);
-    // Every ground material occurs; grass dominates the map.
-    for (const m of [0, 1, 2, 3, 4, 5]) expect(counts[m]).toBeGreaterThan(1000);
+    console.log(`material share %: ${counts.map((c) => ((100 * c) / material.length).toFixed(2)).join(' / ')} (asphalt grass dirt rock gravel concrete metal · · · · mud sand wetGrass asphaltWorn)`);
+    // Every ground material occurs (v6: mud, sand, wet grass, worn asphalt too); grass dominates the map.
+    for (const m of [0, 1, 2, 3, 4, 5, 11, 12, 13, 14]) expect(counts[m], `material ${m}`).toBeGreaterThan(500);
     expect(counts[1]).toBeGreaterThan(material.length * 0.4);
   });
 
@@ -264,6 +268,10 @@ describe('generateTerrain (DEFAULT_LAYOUT)', () => {
         );
         if (nearJ) continue;
         if (!prof.closed && (s < 6 || s > prof.length - 6)) continue;
+        // Layout v6 bridges: the deck is the profile; the terrain below is not carved.
+        const st = structureAt(prof, s);
+        if (st && st.kind === 'bridge') continue;
+        if (prof.structures?.some((b) => b.kind === 'bridge' && s > b.s0 - 12 && s < b.s1 + 12)) continue;
         const d = 0.8 * a;
         const hl = at(t, smp.x - smp.rx * d, smp.z - smp.rz * d);
         const hr = at(t, smp.x + smp.rx * d, smp.z + smp.rz * d);
@@ -272,7 +280,9 @@ describe('generateTerrain (DEFAULT_LAYOUT)', () => {
         worstY = Math.max(worstY, Math.abs(hc - smp.y));
         checked++;
       }
-      if (prof.length > 120) expect(checked, prof.id).toBeGreaterThan(5);
+      let bridged = 0;
+      for (const b of prof.structures ?? []) if (b.kind === 'bridge') bridged += b.s1 - b.s0 + 24;
+      if (prof.length - bridged > 120) expect(checked, prof.id).toBeGreaterThan(5);
       expect(worstCross, `${prof.id} cross-slope`).toBeLessThanOrEqual(maxBank + 0.01);
       expect(worstY, `${prof.id} surface vs profile`).toBeLessThan(0.05);
     }
@@ -307,12 +317,15 @@ describe('generateTerrain (DEFAULT_LAYOUT)', () => {
         if (Math.abs(Math.hypot(st[o + RoadStation.tx]!, st[o + RoadStation.tz]!) - 1) > 1e-9) bad++;
         if (Math.abs(st[o + RoadStation.bank]!) > maxBank + 1e-9) bad++;
       }
-      // Station chord ≈ 2 m (3D arc spacing).
+      // Station chord ≈ 2 m (3D arc spacing). Terrain-following dirt roads through rough hills
+      // (the v6 rally stage) keep the spline's arc spacing while their final profile is smoothed and
+      // grade-limited, so their chords may shorten to 1.7 m.
+      const lo = prof.kind === 'dirt' ? 1.7 : 1.9;
       for (let i = 1; i < prof.stationCount - 1; i++) {
         const a = (i - 1) * ROAD_STATION_STRIDE;
         const b = i * ROAD_STATION_STRIDE;
         const d = Math.hypot(st[b]! - st[a]!, st[b + 1]! - st[a + 1]!, st[b + 2]! - st[a + 2]!);
-        if (d < 1.9 || d > 2.05) bad++;
+        if (d < lo || d > 2.05) bad++;
       }
       expect(bad, prof.id).toBe(0);
     }
@@ -353,6 +366,9 @@ describe('generateTerrain (DEFAULT_LAYOUT)', () => {
           const z = A.stations[i * ROAD_STATION_STRIDE + 2]!;
           projectToRoad(B, x, z, proj);
           if (proj.dist >= lim) continue;
+          // Layout v6 overpass exception: one road crosses the other on a bridge span.
+          const sA = i * 2;
+          if (structureAt(A, sA)?.kind === 'bridge' || structureAt(B, proj.s)?.kind === 'bridge') continue;
           const ok = DEFAULT_LAYOUT.junctions.some(
             (j) => j.roads.includes(A.id) && j.roads.includes(B.id) && Math.hypot(j.pos[0] - x, j.pos[1] - z) < 40,
           );
@@ -404,7 +420,9 @@ describe('generateTerrain (DEFAULT_LAYOUT)', () => {
       const def = DEFAULT_LAYOUT.spawnPoints[k]!;
       const [x, y, z] = s.pos;
       expect(Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z) && Number.isFinite(s.yaw)).toBe(true);
-      expect(Math.abs(y - at(t, x, z))).toBeLessThan(1e-3);
+      const prof0 = def.road ? t.roads.find((r) => r.id === def.road!.id)! : null;
+      const onDeck = prof0 !== null && structureAt(prof0, def.road!.s)?.kind === 'bridge';
+      if (!onDeck) expect(Math.abs(y - at(t, x, z))).toBeLessThan(1e-3);
       if (def.road) {
         const prof = t.roads.find((r) => r.id === def.road!.id)!;
         const proj = projectToRoad(prof, x, z, createRoadProjection());
