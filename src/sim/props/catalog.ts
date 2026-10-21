@@ -15,8 +15,9 @@ import type { CompiledRig, RigDef } from '../rig/types';
 import { BARREL_RIG } from './defs/barrel';
 import { BOX_CARDBOARD_RIG, BOX_WOOD_RIG, CONCRETE_BLOCK_RIG } from './defs/box';
 import { CONE_RIG } from './defs/cone';
-import { LIGHT_POLE_ANCHOR_BREAK_F, LIGHT_POLE_RIG, SIGN_POST_ANCHOR_BREAK_F, SIGN_POST_RIG } from './defs/posts';
+import { LIGHT_POLE_ANCHOR_BREAK_F, LIGHT_POLE_RIG, MAILBOX_ANCHOR_BREAK_F, MAILBOX_RIG, SIGN_POST_ANCHOR_BREAK_F, SIGN_POST_RIG, STOP_SIGN_RIG } from './defs/posts';
 import { TIRE_RIG } from './defs/tire';
+import { GUARDRAIL_ANCHOR_BREAK_F, GUARDRAIL_RIG } from './defs/guardrail';
 import { PROP_KEYS, PROP_SLEEP_DEFAULTS, type PropDef, type PropKey, type PropProxy } from './types';
 
 /** Worst-node beam ω·dt any catalog rig may have (contacts add ≤ sqrt(0.2) in quadrature). */
@@ -113,6 +114,30 @@ export const PROP_CATALOG: Readonly<Record<PropKey, PropDef>> = {
     stackHeight: 0,
     anchor: { nodes: 'anchor_*', breakF: LIGHT_POLE_ANCHOR_BREAK_F },
     frame: { origin: 'pole_s0', front: 'pole_0_0', top: 'pole_s1' },
+  }),
+  stopSign: def('stopSign', 'Stop sign', STOP_SIGN_RIG, {
+    surface: 'metal',
+    material: MaterialId.metal,
+    density: 7800,
+    stackHeight: 0,
+    anchor: { nodes: 'anchor_*', breakF: SIGN_POST_ANCHOR_BREAK_F },
+    frame: { origin: 'post_s0', front: 'post_0_0', top: 'post_s1' },
+  }),
+  guardrail: def('guardrail', 'Guardrail section', GUARDRAIL_RIG, {
+    surface: 'metal',
+    material: MaterialId.metal,
+    density: 7800,
+    stackHeight: 0,
+    anchor: { nodes: 'anchor_*', breakF: GUARDRAIL_ANCHOR_BREAK_F },
+    frame: { origin: 'p0_c', front: 'p0_0_0', top: 'p0_t' },
+  }),
+  mailbox: def('mailbox', 'Mailbox', MAILBOX_RIG, {
+    surface: 'wood',
+    material: MaterialId.wood,
+    density: 700,
+    stackHeight: 0,
+    anchor: { nodes: 'anchor_*', breakF: MAILBOX_ANCHOR_BREAK_F },
+    frame: { origin: 'post_s0', front: 'post_0_0', top: 'post_s1' },
   }),
   concreteBlock: def('concreteBlock', 'Concrete block', CONCRETE_BLOCK_RIG, {
     surface: 'concrete',

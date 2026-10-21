@@ -31,6 +31,9 @@ import type { RigDef } from '../rig/types';
  *  boxWood       0.8 m wooden crate, 25 kg, stacks, splinters (beams break)
  *  signPost      2.6 m steel post + 0.6 m sign plate, BREAKABLE ground anchor
  *  lightPole     8 m street light (pole + arm + lamp head), BREAKABLE ground anchor
+ *  mailbox       1 m timber post + 0.5 m steel box (layout v6, R-WORLD), BREAKABLE ground anchor
+ *  guardrail     4.1 m galvanised W-beam on three driven posts (layout v6, R-WORLD), BREAKABLE anchors, the rail yields
+ *  stopSign      the signPost rig with a 0.75 m octagonal STOP plate (layout v6, R-WORLD), BREAKABLE anchor
  *  concreteBlock 1.2 × 0.6 × 0.6 m precast block, 1000 kg (heavy, near-rigid)
  */
 export type PropKey =
@@ -41,6 +44,9 @@ export type PropKey =
   | 'boxWood'
   | 'signPost'
   | 'lightPole'
+  | 'stopSign'
+  | 'guardrail'
+  | 'mailbox'
   | 'concreteBlock';
 export const PROP_KEYS: readonly PropKey[] = [
   'cone',
@@ -50,6 +56,9 @@ export const PROP_KEYS: readonly PropKey[] = [
   'boxWood',
   'signPost',
   'lightPole',
+  'stopSign',
+  'guardrail',
+  'mailbox',
   'concreteBlock',
 ];
 
@@ -161,6 +170,9 @@ export const PROP_RIG_BUDGET: Readonly<Record<PropKey, { nodes: number; beams: n
   boxWood: { nodes: 14, beams: 60 },
   signPost: { nodes: 24, beams: 90 },
   lightPole: { nodes: 36, beams: 140 },
+  stopSign: { nodes: 24, beams: 90 },
+  guardrail: { nodes: 86, beams: 480 },
+  mailbox: { nodes: 24, beams: 110 },
   concreteBlock: { nodes: 14, beams: 60 },
 };
 /** Design budget for simultaneously awake prop beams (2 kHz). Not enforced in P5 (P6 governor). */

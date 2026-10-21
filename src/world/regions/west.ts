@@ -13,6 +13,8 @@ import { unit, type RegionData } from './types';
 const HWY_CROSS: readonly [number, number] = [-572.32, 390.29];
 /** Rally water splash (a ford): pond centre on the stage, at the profile's lowest point in the Hollow (natural road height 10.76 m). */
 export const RALLY_SPLASH: readonly [number, number] = [-630, -989];
+/** Silty ford / pond water: brown, opaque within ~0.5 m, small chop. */
+const MUDDY_WATER = { shallowColor: 0x7d6c4c, deepColor: 0x3b2f1f, absorption: [2.6, 3.1, 3.8] as const, foamDepth: 0.1, waveScale: 3, waveSpeed: 0.3 };
 /** Off-road park water crossing: a natural bowl (floor 8.1 m, rim ≥ 10.8 m). */
 export const OFFROAD_POND: readonly [number, number] = [-758, 940];
 
@@ -50,14 +52,14 @@ export const WEST: RegionData = {
       name: 'Hollow Ford',
       kind: 'lake',
       shape: { type: 'ellipse', center: RALLY_SPLASH, radiusX: 11, radiusZ: 16, blend: 10 },
-      params: { depth: 0.6, shoreLift: 0.3, level: 11.05 },
+      params: { depth: 0.6, shoreLift: 0.3, level: 11.05, water: MUDDY_WATER },
     },
     {
       id: 'offroadPond',
       name: 'Badlands Crossing',
       kind: 'lake',
       shape: { type: 'ellipse', center: OFFROAD_POND, radiusX: 26, radiusZ: 15, blend: 12 },
-      params: { depth: 1.0, shoreLift: 0.2, level: 9.6 },
+      params: { depth: 1.0, shoreLift: 0.2, level: 9.6, water: MUDDY_WATER },
     },
   ],
   pads: [

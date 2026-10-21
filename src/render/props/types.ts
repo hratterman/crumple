@@ -45,6 +45,7 @@ export type PropMaterialSlot =
   | 'concrete'
   | 'galvanized' //    pole / post steel
   | 'signFace' //      printed sign face (procedural canvas texture)
+  | 'stopFace' //      octagonal STOP face (layout v6)
   | 'lampLens'; //     light-pole lamp (emissive at night: off in golden hour)
 
 /** One prop's visual: panels bound to the catalog rig's nodes (node-id prefixes per PropDef doc). */
@@ -57,7 +58,7 @@ export interface PropVisualDef {
 export type PropSurfaceSpec = SurfaceSpec;
 
 export const PROP_FLEX_PATCH_KEY = 'flexI1';
-export const PROP_DRAW_BUDGET = 24;
+export const PROP_DRAW_BUDGET = 36; // layout v6: + stopSign, guardrail, mailbox (batches are culled per frame)
 export const PROP_SHADOW_CASCADES = 2;
 
 export interface PropRendererStats {

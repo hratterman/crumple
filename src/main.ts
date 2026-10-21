@@ -1591,7 +1591,7 @@ async function boot(): Promise<void> {
   stats.stages.contentMs = Math.round(loaded.contentMs);
   stats.stages.contentRenderMs = Math.round(contentR.stats.buildMs);
   Object.assign(crumple.debug, { worldContent: contentR });
-  Object.assign(crumple, { world: { lights: contentR.lights, content: loaded.content, layout: LAYOUT } });
+  Object.assign(crumple, { world: { lights: contentR.lights, content: loaded.content, layout: LAYOUT, heightAt: (x: number, z: number) => smp.heightAt(x, z) } });
   // P5 world layer (contracts: docs/CONTRACTS.md "P5 contracts"). Same pure inputs as the physics worker.
   const heightAt = (x: number, z: number): number => smp.heightAt(x, z);
   const waterBodies = resolveWater(LAYOUT, world);

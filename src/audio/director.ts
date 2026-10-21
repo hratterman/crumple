@@ -142,6 +142,9 @@ function propSound(key: string | null): OneShotKind {
     case 'boxWood':
       return 'wood';
     case 'signPost':
+    case 'stopSign':
+    case 'guardrail':
+    case 'mailbox':
     case 'lightPole':
       return 'pole';
     case 'concreteBlock':

@@ -37,7 +37,7 @@ const c = (page: Page) => page.evaluate(() => {
 });
 
 test('audio: boots, resumes on a gesture, voices run, a crash fires one-shots, replay pitch follows, no errors', async ({ page }) => {
-  test.setTimeout(300_000);
+  test.setTimeout(420_000);
   const errors: string[] = [];
   page.on('pageerror', (err) => errors.push(err.stack ?? String(err)));
   page.on('console', (msg) => {
@@ -48,7 +48,7 @@ test('audio: boots, resumes on a gesture, voices run, a crash fires one-shots, r
   await page.waitForFunction(() => {
     const g = (window as unknown as { __crumple?: G }).__crumple;
     return !!g && g.ready && g.vehicle !== null && g.audio !== null;
-  }, null, { timeout: 150_000 });
+  }, null, { timeout: 240_000 }); // layout v6: 2560 m world boot on a loaded box
 
   // a user gesture resumes the context (autoplay policy)
   await page.mouse.click(320, 180);

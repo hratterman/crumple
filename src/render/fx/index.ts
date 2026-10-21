@@ -59,6 +59,8 @@ import {
   objectMaterialSurface,
   roostRate,
   rutStrength,
+  persistentTrack,
+  REF_LOAD,
   rutTint,
   scrapeEffect,
   skidStrength,
@@ -748,13 +750,14 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
           w.tb = 0.24;
           w.sheen = 0.9;
         } else {
-          s = rutStrength(slip, load);
+          const track = persistentTrack(mat);
+          s = Math.max(rutStrength(slip, load), track * Math.min(Math.max(load / REF_LOAD, 0.4), 1.2));
           const tint = rutTint(mat);
           w.width = Math.max(0.1, sweptWidth(w.tread * 1.2, PATCH_LENGTH_M * 1.4, ahx, ahz, w.mx || -ahz, w.mz || ahx));
           w.tr = tint[0];
           w.tg = tint[1];
           w.tb = tint[2];
-          w.sheen = 0.15;
+          w.sheen = track > 0 ? -1 : 0.15;
         }
         if (w.strip !== markKind) {
           // start where the wheel was last frame (slow frames would otherwise lose a whole frame of path)

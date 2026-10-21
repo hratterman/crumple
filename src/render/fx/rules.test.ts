@@ -76,7 +76,9 @@ describe('fx rules — contract table (docs/CONTRACTS.md "FX event → effect")'
     expect(wheelEffects(MaterialId.asphalt, 10, 3000, 10, false)).toBe(0);
     expect(wheelEffects(MaterialId.dirt, 1.5, 3000, 10, true)).toBe(WHEEL_RUT | WHEEL_SPRAY | WHEEL_ROOST);
     expect(wheelEffects(MaterialId.gravel, 0, 3000, 7, true)).toBe(WHEEL_ROOST);
-    expect(wheelEffects(MaterialId.grass, 0, 3000, 20, true)).toBe(0);
+    // layout v6: track-keeping soft surfaces print a rolling tyre track (no spray without slip)
+    expect(wheelEffects(MaterialId.grass, 0, 3000, 20, true)).toBe(WHEEL_RUT);
+    expect(wheelEffects(MaterialId.sand, 0, 3000, 0.2, true)).toBe(0);
     expect(wheelEffects(MaterialId.grass, 2, 3000, 20, true)).toBe(WHEEL_RUT | WHEEL_SPRAY);
   });
 

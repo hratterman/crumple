@@ -387,6 +387,137 @@ function signPostVisual(rig: CompiledRig): PropVisual {
   return { prop: 'signPost', panels };
 }
 
+// ============================================================ stop sign (layout v6)
+/** Octagon (flats ⟂ X / Y) in the plane z, centre (0, yc), circumradius R; UV = full image (atlasless face) or metres. */
+function octPlate(b: MeshBuilder, yc: number, z: number, R: number, face: 1 | -1, uvImage: boolean): void {
+  const c = b.vert([0, yc, z], [0, 0, face], 0.5, 0.5);
+  const ring: number[] = [];
+  for (let k = 0; k < 8; k++) {
+    const a = Math.PI / 8 + (k * Math.PI) / 4;
+    const x = Math.cos(a) * R;
+    const y = Math.sin(a) * R;
+    // image u runs left → right as seen from the front (−Z face): mirror x for the front
+    const u = uvImage ? (face < 0 ? 0.5 - x / (2 * R) : 0.5 + x / (2 * R)) : x;
+    const v = uvImage ? 0.5 + y / (2 * R) : y;
+    ring.push(b.vert([x, yc + y, z], [0, 0, face], u, v));
+  }
+  for (let k = 0; k < 8; k++) {
+    const a = ring[k]!;
+    const d = ring[(k + 1) % 8]!;
+    if (face < 0) b.tri(c, d, a);
+    else b.tri(c, a, d);
+  }
+}
+
+function stopSignVisual(rig: CompiledRig): PropVisual {
+  const panels: PropPanelDef[] = [];
+  const levels = countLevels(rig, 'post_');
+  const top = rig.nodePos[3 * rig.nodeIds.indexOf(`post_${levels - 1}_0`) + 1]! + 0.04;
+  const post = new MeshBuilder();
+  const pts: ProfilePoint[] = profileRange(-0.05, top - 0.02, st(0.1), () => 0.03).map((p) => ({ ...p, n: [1, 0] as const }));
+  pts.push({ r: 0.028, y: top - 0.006 }, { r: 0.018, y: top }, { r: 0, y: top + 0.003, n: [0, 1] });
+  lathe(post, pts, { segments: seg(16), uRepeat: 0.4, vScale: 2 });
+  panels.push(panel('post', 'galvanized', post, ['post_*'], { chain: { prefix: 'post_' } }));
+  const sc = rig.nodeIds.indexOf('sign_c');
+  const yc = sc >= 0 ? rig.nodePos[3 * sc + 1]! : 2.3;
+  const zc = sc >= 0 ? rig.nodePos[3 * sc + 2]! : -0.1;
+  const R = 0.38; // 0.7 m across flats
+  const front = new MeshBuilder();
+  octPlate(front, yc, zc - 0.002, R, -1, true);
+  panels.push(panel('face', 'stopFace', front, ['sign_*']));
+  const back = new MeshBuilder();
+  octPlate(back, yc, zc + 0.002, R, 1, false);
+  for (const by of [yc - 0.16, yc + 0.16]) roundedBox(back, [0, by, (zc + 0.002 - 0.03) / 2], [0.07, 0.022, Math.abs(zc + 0.002 + 0.03) / 2], { radius: 0.006, step: st(0.05) });
+  panels.push(panel('back', 'galvanized', back, ['sign_*']));
+  return { prop: 'stopSign', panels };
+}
+
+// ============================================================ mailbox (layout v6)
+function mailboxVisual(): PropVisual {
+  const panels: PropPanelDef[] = [];
+  const post = new MeshBuilder();
+  roundedBox(post, [0, 0.47, 0], [0.07, 0.52, 0.07], { radius: 0.008, step: st(0.15) });
+  panels.push(panel('post', 'wood', post, ['post_*'], { chain: { prefix: 'post_' } }));
+  const box = new MeshBuilder();
+  // steel box with a rounded (barrel) top: a box body + a half-round lathe-free roof of quads
+  roundedBox(box, [0, 1.06, 0], [0.13, 0.1, 0.29], { radius: 0.01, step: st(0.08) });
+  const n = Math.max(4, Math.round(8 * Q));
+  for (let i = 0; i < n; i++) {
+    const a0 = (Math.PI * i) / n;
+    const a1 = (Math.PI * (i + 1)) / n;
+    const p = (a: number, z: number): [number, number, number] => [Math.cos(a) * 0.13, 1.16 + Math.sin(a) * 0.1, z];
+    const nn = (a: number): [number, number, number] => [Math.cos(a), Math.sin(a), 0];
+    const v0 = box.vert(p(a0, -0.29), nn(a0), i / n, 0);
+    const v1 = box.vert(p(a1, -0.29), nn(a1), (i + 1) / n, 0);
+    const v2 = box.vert(p(a1, 0.29), nn(a1), (i + 1) / n, 1);
+    const v3 = box.vert(p(a0, 0.29), nn(a0), i / n, 1);
+    box.quad(v0, v3, v2, v1);
+    // end caps (door at −Z, back at +Z)
+    const c0 = box.vert([0, 1.16, -0.29], [0, 0, -1], 0.5, 0.5);
+    const e0 = box.vert(p(a0, -0.29), [0, 0, -1], 0, 0);
+    const e1 = box.vert(p(a1, -0.29), [0, 0, -1], 1, 0);
+    box.tri(c0, e1, e0);
+    const c1 = box.vert([0, 1.16, 0.29], [0, 0, 1], 0.5, 0.5);
+    const f0 = box.vert(p(a0, 0.29), [0, 0, 1], 0, 0);
+    const f1 = box.vert(p(a1, 0.29), [0, 0, 1], 1, 0);
+    box.tri(c1, f0, f1);
+  }
+  // flag on the side
+  roundedBox(box, [0.145, 1.2, 0.12], [0.01, 0.07, 0.03], { radius: 0.003, step: st(0.05) });
+  panels.push(panel('box', 'barrelPaint', box, ['box_*']));
+  return { prop: 'mailbox', panels };
+}
+
+// ============================================================ guardrail (layout v6)
+function guardrailVisual(): PropVisual {
+  const panels: PropPanelDef[] = [];
+  // W-beam: profile (y, z) toward traffic (−Z); stations every 0.25 m so the skin bends with the rail nodes.
+  const prof: [number, number][] = [
+    [0.44, -0.17],
+    [0.5, -0.245],
+    [0.555, -0.205],
+    [0.605, -0.15],
+    [0.655, -0.205],
+    [0.71, -0.245],
+    [0.77, -0.17],
+  ];
+  const rail = new MeshBuilder();
+  const xs: number[] = [];
+  for (let i = 0; i <= 16; i++) xs.push(-2 + i * 0.25);
+  xs[0] = -2.05;
+  xs[16] = 2.05;
+  for (const face of [-1, 1] as const) {
+    const base = rail.vertexCount;
+    const off = face < 0 ? 0 : 0.004;
+    for (const x of xs) {
+      prof.forEach(([y, z], j) => {
+        const a = prof[Math.max(0, j - 1)]!;
+        const b = prof[Math.min(prof.length - 1, j + 1)]!;
+        const dy = b[0] - a[0];
+        const dz = b[1] - a[1];
+        const l = Math.hypot(dy, dz) || 1;
+        rail.vert([x, y, z + off], [0, (face * -dz) / l, (face * dy) / l], x, y);
+      });
+    }
+    const n = prof.length;
+    for (let i = 0; i + 1 < xs.length; i++) {
+      for (let j = 0; j + 1 < n; j++) {
+        const a = base + i * n + j;
+        if (face < 0) rail.quad(a, a + 1, a + n + 1, a + n);
+        else rail.quad(a, a + n, a + n + 1, a + 1);
+      }
+    }
+  }
+  panels.push(panel('rail', 'galvanized', rail, ['rail_*']));
+  [-1.9, 0, 1.9].forEach((px, k) => {
+    const post = new MeshBuilder();
+    roundedBox(post, [px, 0.36, 0], [0.075, 0.42, 0.05], { radius: 0.006, step: st(0.2) });
+    roundedBox(post, [px, 0.6, -0.11], [0.05, 0.15, 0.06], { radius: 0.004, step: st(0.1) });
+    panels.push(panel(`post${k}`, 'galvanized', post, [`p${k}_*`]));
+  });
+  return { prop: 'guardrail', panels };
+}
+
 // ============================================================ light pole
 function lightPoleVisual(rig: CompiledRig): PropVisual {
   const panels: PropPanelDef[] = [];
@@ -492,6 +623,12 @@ function build(key: PropKey, rig: CompiledRig): PropVisual {
       return signPostVisual(rig);
     case 'lightPole':
       return lightPoleVisual(rig);
+    case 'stopSign':
+      return stopSignVisual(rig);
+    case 'guardrail':
+      return guardrailVisual();
+    case 'mailbox':
+      return mailboxVisual();
   }
 }
 

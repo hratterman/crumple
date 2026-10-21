@@ -25,7 +25,7 @@ const traffic = (page: import('@playwright/test').Page) =>
   });
 
 test('traffic: AI cars appear and drive along the roads; zero console errors', async ({ page }) => {
-  test.setTimeout(240_000);
+  test.setTimeout(420_000); // layout v6: 2560 m world boot on a loaded box
   const errors: string[] = [];
   page.on('pageerror', (err) => errors.push(err.stack ?? String(err)));
   page.on('console', (msg) => {

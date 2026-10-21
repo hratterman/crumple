@@ -17,6 +17,9 @@ const NOMINAL_MASS: Record<PropKey, [number, number]> = {
   boxCardboard: [2.8, 3.2],
   boxWood: [24, 26],
   signPost: [14, 19],
+  stopSign: [14, 19],
+  guardrail: [98, 110],
+  mailbox: [10, 12],
   lightPole: [110, 140],
   concreteBlock: [990, 1010],
 };
@@ -28,6 +31,9 @@ const PREFIXES: Record<PropKey, RegExp> = {
   boxCardboard: /^[cf]_\d$/,
   boxWood: /^[cf]_\d$/,
   signPost: /^(anchor_\d|post_(\d_\d|s\d)|sign_(\d|c))$/,
+  stopSign: /^(anchor_\d|post_(\d_\d|s\d)|sign_(\d|c))$/,
+  guardrail: /^(anchor_\d|p\d_(\d_\d|c|t)|rail_\d+_\d)$/,
+  mailbox: /^(anchor_\d|post_(\d_\d|s\d)|box_\d)$/,
   lightPole: /^(anchor_\d|pole_(\d_\d|s\d)|arm_\d_\d|lamp_\d)$/,
   concreteBlock: /^[cf]_\d$/,
 };

@@ -66,7 +66,9 @@ void main() {
   float along = vMark.y;
   float age = uTime - vMark.w;
   // P7 replay: a mark born after the presented time is not there yet
-  float fade = ( 1.0 - smoothstep( uFade * 0.3, uFade, age ) ) * step( -1e-3, age );
+  // layout v6: a negative tint.a marks a PERSISTENT track (mud / sand / grass): 8× the lifetime, no sheen
+  float life = vTint.a < 0.0 ? uFade * 8.0 : uFade;
+  float fade = ( 1.0 - smoothstep( life * 0.3, life, age ) ) * step( -1e-3, age );
   float edge = 1.0 - smoothstep( 0.72, 1.0, abs( u ) );
   // tread striations along the travel direction + patchy rubber transfer
   float grooves = 0.88 + 0.12 * sin( u * 19.0 + 1.3 );
@@ -75,7 +77,7 @@ void main() {
   vec3 m = mix( vec3( 1.0 ), vTint.rgb, cov );
   vec3 V = normalize( cameraPosition - vWorld );
   vec3 H = normalize( V + uSunDir );
-  m += cov * vTint.a * pow( max( H.y, 0.0 ), 48.0 ) * vec3( 1.3, 1.2, 1.05 );
+  m += cov * max( vTint.a, 0.0 ) * pow( max( H.y, 0.0 ), 48.0 ) * vec3( 1.3, 1.2, 1.05 );
   float dist = length( cameraPosition - vWorld );
   m = mix( m, vec3( 1.0 ), smoothstep( 140.0, 240.0, dist ) );
   gl_FragColor = vec4( m, 1.0 );

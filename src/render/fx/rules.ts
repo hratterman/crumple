@@ -4,7 +4,7 @@
  * palettes. Everything here is unit-tested; index.ts only wires it to the
  * pools.
  */
-import { baseSurface } from '../../world/surfaces';
+import { baseSurface, SURFACE_PHYSICS } from '../../world/surfaces';
 import { MaterialId } from '../../protocol/messages';
 import type { PropSurface } from '../../sim/props/types';
 import {
@@ -132,6 +132,8 @@ export function wheelEffects(materialId: number, slip: number, load: number, gro
   let f = 0;
   if (g === GROUND_SOFT) {
     if (slip >= FX_RUT_SLIP) f |= WHEEL_RUT | WHEEL_SPRAY;
+    // Layout v6: soft surfaces that keep tracks (mud, sand, grass, dirt) print a rolling tyre track too.
+    else if (groundSpeed >= FX_TRACK_SPEED && persistentTrack(materialId) > 0) f |= WHEEL_RUT;
     if (materialId !== MaterialId.grass && groundSpeed >= FX_DUST_SPEED) f |= WHEEL_ROOST;
   } else {
     if (slip >= FX_TYRE_SMOKE_SLIP) f |= WHEEL_SMOKE;
@@ -156,6 +158,17 @@ export function skidStrength(slip: number, load: number): number {
   if (s <= 0) return 0;
   const l = Math.min(Math.max(0.4 + (0.6 * load) / REF_LOAD, 0), 1.2);
   return Math.min(Math.pow(Math.min(s, 1), 0.75) * l, 1);
+}
+/** Rolling speed (m/s) above which a persistent-track surface prints the tyre track without slip. */
+export const FX_TRACK_SPEED = 0.4;
+/**
+ * Layout v6: the rolling-track coverage floor of a surface that keeps tracks
+ * (SURFACE_PHYSICS.persistentRuts: deeper for the softer surfaces), 0 elsewhere.
+ */
+export function persistentTrack(materialId: number): number {
+  const s = SURFACE_PHYSICS[materialId];
+  if (!s || !s.persistentRuts) return 0;
+  return Math.min(0.75, 0.25 + s.sinkage * 4);
 }
 export function rutStrength(slip: number, load: number): number {
   const s = (slip - FX_RUT_SLIP) / 5;

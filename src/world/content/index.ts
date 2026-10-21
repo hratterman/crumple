@@ -6,6 +6,8 @@
 import { buildSignalPlans } from '../signals';
 import { buildStructures } from './structures';
 import { buildTown } from './town';
+import { buildAreas } from './areas';
+import { buildDetail } from './detail';
 import type { TerrainData, WorldLayout } from '../types';
 import type { ContentRender, WorldContent, WorldContentOptions } from './types';
 
@@ -116,6 +118,26 @@ export function buildWorldContent(layout: WorldLayout, terrain: TerrainData, opt
     render.strips.push(...town.strips);
     render.cables.push(...town.cables);
   }
+  // Mode areas, interchange furniture, landmarks.
+  const areas = buildAreas(layout, terrain, propBase + content.props.length);
+  content.colliders.push(...areas.colliders);
+  content.props.push(...areas.props);
+  content.exclusions.push(...areas.exclusions);
+  content.lights.push(...areas.lights);
+  content.plantings.push(...areas.plantings);
+  if (render) {
+    render.buildings.push(...areas.buildings);
+    render.items.push(...areas.items);
+    render.decals.push(...areas.decals);
+    render.strips.push(...areas.strips);
+    render.cables.push(...areas.cables);
+    render.structures.push(...areas.structures);
+  }
+  // Natural detail: fallen logs (solid) + render-only flowers, tussocks, rubbish, stones.
+  const detail = buildDetail(layout, terrain, content.exclusions, opts.render);
+  content.colliders.push(...detail.colliders);
+  content.exclusions.push(...detail.exclusions);
+  render?.items.push(...detail.items);
   content.hash = hashContent(content);
   return content;
 }

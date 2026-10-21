@@ -62,6 +62,8 @@ export const resolveWater: ResolveWater = (layout, terrain) => {
       maxDepth: level - minH,
       samples,
       optics: { ...WATER_OPTICS_DEFAULTS, ...(zone.params.water ?? {}) },
+      seedX: originX + c0 * spacing,
+      seedZ: originZ + r0 * spacing,
     });
   }
   return bodies;
@@ -117,6 +119,13 @@ export function waterField(terrain: TerrainData, body: WaterBody): WaterField {
       depth[k] = body.level - h;
       if (h < body.level && h < best) (best = h), (seed = k);
     }
+  }
+  // Seed at the body's own flood seed when it is inside the field (a pond's rectangle can hold lower,
+  // disconnected ground: the deepest sample would flood the wrong basin).
+  if (body.seedX !== undefined && body.seedZ !== undefined) {
+    const sc = Math.round((body.seedX - tx) / spacing) - c0;
+    const sr = Math.round((body.seedZ - tz) / spacing) - r0;
+    if (sc >= 0 && sc < cols && sr >= 0 && sr < rows && depth[sr * cols + sc]! > 0) seed = sr * cols + sc;
   }
   const mask = new Uint8Array(n);
   if (seed >= 0) {

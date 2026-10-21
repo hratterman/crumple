@@ -633,6 +633,46 @@ export function signImage(): PixelImage {
   return canvasImage(ctx, SIGN, SIGN);
 }
 
+/** Octagonal STOP face (layout v6): red octagon, white rim, white legend; the plate quad maps the full image. */
+export function stopImage(): PixelImage {
+  const N = 512;
+  const ctx = canvas2D(N, N);
+  if (!ctx) {
+    const img = image(N, N);
+    fill(img, 196, 24, 20);
+    return img;
+  }
+  ctx.fillStyle = '#d9d9d9';
+  ctx.fillRect(0, 0, N, N);
+  const oct = (r: number): void => {
+    ctx.beginPath();
+    for (let k = 0; k < 8; k++) {
+      const a = Math.PI / 8 + (k * Math.PI) / 4;
+      const x = N / 2 + Math.cos(a) * r;
+      const y = N / 2 + Math.sin(a) * r;
+      if (k === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+  };
+  oct(N * 0.5);
+  ctx.fillStyle = '#f4f4f2';
+  ctx.fill();
+  oct(N * 0.465);
+  ctx.fillStyle = '#c4181a';
+  ctx.fill();
+  ctx.fillStyle = '#f4f4f2';
+  ctx.font = `bold ${Math.round(N * 0.3)}px "Arial Black", Arial, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.save();
+  ctx.translate(N / 2, N / 2 + N * 0.01);
+  ctx.scale(0.86, 1.1);
+  ctx.fillText('STOP', 0, 0);
+  ctx.restore();
+  return canvasImage(ctx, N, N);
+}
+
 function roundRect(ctx: Ctx2D, x: number, y: number, w: number, h: number, r: number): void {
   ctx.beginPath();
   ctx.moveTo(x + r, y);
@@ -698,6 +738,7 @@ export const propTextures = {
   prism: (): DataTexture => cached('prism', false, prismSheetImage),
   rubber: (): { color: DataTexture; normal: DataTexture } => pair('rubber', rubberImages),
   sign: (): DataTexture => cached('sign', true, signImage),
+  stop: (): DataTexture => cached('stop', true, stopImage),
   grime: (): DataTexture => cached('grime', false, grimeImage),
   plasticGrain: (): DataTexture => cached('grain', false, () => grainNormalImage('plastic', 256, 33)),
   lens: (): DataTexture => cached('lens', false, () => lensNormalImage('prism', 5)),

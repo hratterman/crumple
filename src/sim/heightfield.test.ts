@@ -407,5 +407,5 @@ describe('WorkerHost groundHeightfield', () => {
     }
     console.log(`[heightfield] DEFAULT_LAYOUT worker load ${loadMs.toFixed(0)} ms, hash 0x${ready.terrainHash.toString(16)}`);
     expect(maxV).toBeLessThan(0.5);
-  }, 60_000);
+  }, 240_000); // layout v6: the 2560 m world + its content (minutes on a loaded box)
 });

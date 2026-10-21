@@ -379,6 +379,12 @@ export interface WaterBody {
   /** Flooded sample count (diagnostics / tests). */
   samples: number;
   optics: WaterOptics;
+  /**
+   * Layout v6: the flood-fill seed (the sample nearest the zone centre), world x / z. waterField
+   * seeds its mask here: a small pond's rectangle can hold lower, disconnected ground.
+   */
+  seedX?: number;
+  seedZ?: number;
 }
 export const WATER_AABB_MARGIN_M = 2;
 /** Pure, deterministic; one body per lake zone (declaration order). A lake whose centre sample is dry yields no body. */

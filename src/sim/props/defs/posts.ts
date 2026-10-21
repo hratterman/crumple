@@ -121,7 +121,7 @@ const SIGN_YT = 2.6 - SP_R;
 const SIGN_Z = -0.12;
 const SIGN_HALF = 0.3 - SP_R;
 
-function buildSignPost() {
+function buildSignPost(name: 'signPost' | 'stopSign' = 'signPost') {
   const nodes: PropNodeSpec[] = [];
   const beams: PropBeamSpec[] = [];
   const steel = { yieldStrain: 0.015, breakStrain: 0.1 };
@@ -162,7 +162,7 @@ function buildSignPost() {
   beams.push({ a: 'sign_0', b: 'post_2_2', w: 0.3, ...bracket }, { a: 'sign_1', b: 'post_2_1', w: 0.3, ...bracket });
   beams.push({ a: 'sign_c', b: 'post_s4', w: 0.5, ...bracket }, { a: 'sign_c', b: 'post_2_0', w: 0.5, ...bracket });
   anchorBeams('post_', beams, SIGN_POST_ANCHOR_BREAK_F, [1]);
-  return buildPropRig(nodes, beams, { name: 'signPost', r: SP_R, friction: 0.5, omegaDt: 0.45, zeta: 0.45 });
+  return buildPropRig(nodes, beams, { name, r: SP_R, friction: 0.5, omegaDt: 0.45, zeta: 0.45 });
 }
 
 // ------------------------------------------------------------------ light pole
@@ -237,5 +237,57 @@ function buildLightPole() {
   return buildPropRig(nodes, beams, { name: 'lightPole', r: LP_R, friction: 0.5, omegaDt: 0.48, zeta: 0.25 });
 }
 
+// ------------------------------------------------------------------ mailbox (layout v6, R-WORLD)
+export const MAILBOX_ANCHOR_BREAK_F = 5_000;
+const MB_R = 0.04;
+
+/** Rural mailbox: a 1 m timber post (truss column) with a 0.5 m steel box on a bracket; the post snaps out of the ground. */
+function buildMailbox() {
+  const nodes: PropNodeSpec[] = [];
+  const beams: PropBeamSpec[] = [];
+  const wood = { yieldStrain: 0.012, breakStrain: 0.05 };
+  column(
+    {
+      prefix: 'post_',
+      levels: [MB_R, 0.5, 0.96],
+      rho: [0.06, 0.06, 0.06],
+      levelMass: [0.9, 0.8, 0.7],
+      spine: [[0.27], [0.73]],
+      spineMass: 0.3,
+      r: MB_R,
+    },
+    nodes,
+    beams,
+    wood,
+  );
+  // Box corners (x ±0.09, y 1.0 … 1.22, z ±0.25), ≈ 2.8 kg sheet steel.
+  let k = 0;
+  for (const y of [1.0, 1.22]) for (const z of [-0.25, 0.25]) for (const x of [-0.09, 0.09]) nodes.push({ id: `box_${k++}`, pos: [x, y, z], mass: 0.35 });
+  const sheet = { yieldStrain: 0.01, breakStrain: 0.2 };
+  const edge = (a: number, b: number, w = 1): void => void beams.push({ a: `box_${a}`, b: `box_${b}`, w, ...sheet });
+  // 12 edges, 12 face diagonals, 4 body diagonals: a closed, crushable box
+  for (const [a, b] of [
+    [0, 1], [2, 3], [4, 5], [6, 7], [0, 2], [1, 3], [4, 6], [5, 7], [0, 4], [1, 5], [2, 6], [3, 7],
+  ] as const) edge(a, b);
+  for (const [a, b] of [
+    [0, 3], [1, 2], [4, 7], [5, 6], [0, 5], [1, 4], [2, 7], [3, 6], [0, 6], [2, 4], [1, 7], [3, 5],
+  ] as const) edge(a, b, 0.5);
+  for (const [a, b] of [
+    [0, 7], [1, 6], [2, 5], [3, 4],
+  ] as const) edge(a, b, 0.4);
+  // Bracket: the four bottom corners to the top level + the top spine node (screws pull out at 8 %).
+  const screw = { yieldStrain: 0.02, breakStrain: 0.08 };
+  for (const b of [0, 1, 2, 3]) {
+    for (let n = 0; n < 3; n++) beams.push({ a: `box_${b}`, b: `post_2_${n}`, w: 0.5, ...screw });
+    beams.push({ a: `box_${b}`, b: 'post_s2', w: 0.4, ...screw });
+  }
+  anchors(0.16, MB_R, nodes);
+  anchorBeams('post_', beams, MAILBOX_ANCHOR_BREAK_F, [1]);
+  return buildPropRig(nodes, beams, { name: 'mailbox', r: MB_R, friction: 0.6, omegaDt: 0.45, zeta: 0.45 });
+}
+
 export const SIGN_POST_RIG = buildSignPost().rig;
+export const MAILBOX_RIG = buildMailbox().rig;
+/** Layout v6 (R-WORLD): the same post with an octagonal STOP plate (the plate nodes are the same square). */
+export const STOP_SIGN_RIG = buildSignPost('stopSign').rig;
 export const LIGHT_POLE_RIG = buildLightPole().rig;
