@@ -321,6 +321,13 @@ export interface VehicleDef {
    * shell.ts defaults.
    */
   shell?: ShellDef | readonly ShellDef[] | false;
+  /**
+   * R-CRASH (additive, optional): unloading stiffness multiple α of the body's crush-yielded members
+   * (beams.ts CRUSH_UNLOAD_*). Default CRUSH_UNLOAD_DEFAULT; 1 = off (plain elastic unloading).
+   */
+  crushUnload?: number;
+  /** R-CRASH: the same for HELD / never-yielding members (temporary offset). Default crushUnload; 1 = off. */
+  crushUnloadHeld?: number;
 }
 
 // ====================================================================== compiled

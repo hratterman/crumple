@@ -50,6 +50,10 @@ function makeState(nodes: number): SimState {
     type: new Uint8Array(0),
     active: new Uint8Array(0),
     strainOut: new Float32Array(0),
+    unloadGain: new Float32Array(0),
+    unloadTrig: new Float32Array(0),
+    crushHold: new Uint16Array(0),
+    hystOff: new Float64Array(0),
   };
 }
 

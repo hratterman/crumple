@@ -57,6 +57,10 @@ function makeState(nodes: number, beams = 0): SimState {
     type: new Uint8Array(beams),
     active: new Uint8Array(beams).fill(1),
     strainOut: new Float32Array(beams),
+    unloadGain: new Float32Array(beams),
+    unloadTrig: new Float32Array(beams),
+    crushHold: new Uint16Array(beams),
+    hystOff: new Float64Array(beams),
   };
   return s;
 }

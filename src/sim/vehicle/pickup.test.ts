@@ -325,14 +325,15 @@ function expectNoExplosion(r: CrashResult): void {
 }
 
 describe('PICKUP crash harness (fleet targets)', () => {
-  it('50 km/h frontal: crush 30–55 cm, intrusion < 8 cm, spring-back ≤ 25 %, rebound 1–4 m/s, stable, wheels on, bed stays on', () => {
+  it('50 km/h frontal: crush 30–55 cm, intrusion < 8 cm, spring-back ≤ 25 %, rebound 5–15 % of the impact speed, stable, wheels on, bed stays on', () => {
     expect(f50.crush).toBeGreaterThanOrEqual(0.3);
     expect(f50.crush).toBeLessThanOrEqual(0.55);
     expect(f50.crushMax).toBeLessThanOrEqual(0.7);
     expect(f50.springback).toBeLessThanOrEqual(0.25);
     expect(f50.intrusion).toBeLessThan(0.08);
-    expect(f50.rebound).toBeGreaterThanOrEqual(1);
-    expect(f50.rebound).toBeLessThanOrEqual(4);
+    // R-CRASH: real cars rebound 5–15 % of the barrier speed (the old 1–4 m/s = 7–29 %).
+    expect(f50.rebound / f50.initialSpeed).toBeGreaterThanOrEqual(0.05);
+    expect(f50.rebound / f50.initialSpeed).toBeLessThanOrEqual(0.15);
     expectNoExplosion(f50);
     expect(f50.wheelsDetached).toBe(0);
     expect(f50Mounts.bed).toBeGreaterThanOrEqual(0);

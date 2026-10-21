@@ -51,11 +51,15 @@ export function createSimState(nodeCapacity: number, beamCapacity: number): SimS
     type: new Uint8Array(beamCapacity),
     active: new Uint8Array(beamCapacity),
     strainOut: new Float32Array(beamCapacity),
+    unloadGain: new Float32Array(beamCapacity),
+    unloadTrig: new Float32Array(beamCapacity),
+    crushHold: new Uint16Array(beamCapacity),
+    hystOff: new Float64Array(beamCapacity),
   };
 }
 
 type NodeArray = Float64Array | Uint8Array;
-type BeamArray = Float64Array | Float32Array | Int32Array | Uint8Array;
+type BeamArray = Float64Array | Float32Array | Int32Array | Uint8Array | Uint16Array;
 
 function nodeArrays(s: SimState): NodeArray[] {
   return [
@@ -67,7 +71,7 @@ function nodeArrays(s: SimState): NodeArray[] {
 function beamArrays(s: SimState): BeamArray[] {
   return [
     s.aIdx, s.bIdx, s.k, s.d, s.restLen, s.restLen0, s.k0, s.deform, s.breakF,
-    s.boundsLow, s.boundsHigh, s.preload, s.type, s.active, s.strainOut,
+    s.boundsLow, s.boundsHigh, s.preload, s.type, s.active, s.strainOut, s.unloadGain, s.unloadTrig, s.crushHold, s.hystOff,
   ];
 }
 
@@ -170,6 +174,10 @@ export function loadRigBeams(state: SimState, obj: SimObject, rig: CompiledRig):
     state.type[g] = rig.beamType[i]!;
     state.active[g] = 1;
     state.strainOut[g] = 0;
+    state.unloadGain[g] = rig.beamUnload ? rig.beamUnload[i]! : 0;
+    state.unloadTrig[g] = rig.beamUnloadTrig ? rig.beamUnloadTrig[i]! : Infinity;
+    state.crushHold[g] = 0;
+    state.hystOff[g] = 0;
   }
 }
 

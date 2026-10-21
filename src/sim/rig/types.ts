@@ -197,6 +197,13 @@ export interface CompiledRig {
   beamBoundsHigh: Float64Array;
   beamPreload: Float64Array;
   beamHydroTravel: Float64Array;
+  /**
+   * R-CRASH (additive, optional): per beam the crush-unloading gain α − 1 (beams.ts CRUSH_UNLOAD_HOLD;
+   * 0 = off, > 0 permanent, < 0 temporary) and its trigger force (N). Set by compileVehicle for the
+   * body structure; absent = off (props, test rigs).
+   */
+  beamUnload?: Float32Array;
+  beamUnloadTrig?: Float32Array;
 }
 
 /** Per-node stability analysis (validator, P2). Limit: ω·dt = sqrt(Σk/m)·dt ≤ limit. */

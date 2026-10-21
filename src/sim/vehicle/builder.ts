@@ -20,7 +20,7 @@ import {
   STRUCTURE_OMEGA_DT_LIMIT,
   withMasses,
 } from '../rig/builder';
-import { OBJ_RADIUS_MIN, type CompiledRig, type RigBeamDef, type RigDef, type RigNodeDef, type RigStats, type StabilityReport } from '../rig/types';
+import { OBJ_RADIUS_MIN, RIG_BEAM_TYPE_ID, type CompiledRig, type RigBeamDef, type RigDef, type RigNodeDef, type RigStats, type StabilityReport } from '../rig/types';
 import {
   DIFF_TYPE_ID,
   TORQUE_LUT_STEP_RPM,
@@ -38,7 +38,7 @@ import {
   type WheelDef,
 } from './types';
 import { buildWheelRig } from './wheelrig';
-import { compileShells } from './shellDefs';
+import { compileShells, type CompiledShell } from './shellDefs';
 
 /** Beam budgets (CLAUDE.md physics budgets). */
 export const PLAYER_BEAM_BUDGET = 3500;
@@ -425,6 +425,8 @@ export const compileVehicle: CompileVehicle = (def) => {
   const index = new Map<string, number>();
   for (let i = 0; i < bodyNodeCount; i++) index.set(rig.nodeIds[i]!, i);
   const frameNodes = Int32Array.from([def.frame.origin, def.frame.front, def.frame.top].map((id) => index.get(id)!));
+  const shell = compileShells(rig, bodyNodeCount, def.shell);
+  setCrushUnload(def, rig, shell);
 
   return {
     name: def.name,
@@ -439,9 +441,67 @@ export const compileVehicle: CompileVehicle = (def) => {
     frameNodes,
     totalMass: total,
     massDriftPct: declared > 0 ? ((total - declared) / declared) * 100 : 0,
-    shell: compileShells(rig, bodyNodeCount, def.shell),
+    shell,
   };
 };
+
+/** R-CRASH: default VehicleDef.crushUnload α (unloading stiffness multiple of a crash-loaded member; beams.ts CRUSH_UNLOAD_HOLD). */
+export const CRUSH_UNLOAD_DEFAULT = 40;
+/** A crumple-zone member is crash loaded from this fraction of its yield force (only while the car is in a crash). */
+export const CRUSH_TRIGGER_YIELD = 0.3;
+/** A held (cell / firewall / box / cab) or never-yielding member (engine block, subframe) is crash loaded from this force, N. */
+export const CRUSH_TRIGGER_HELD = 10e3;
+
+/**
+ * R-CRASH crush unloading (beams.ts CRUSH_UNLOAD_HOLD): per body beam of type normal, the unloading gain
+ * and trigger force. Crumple-zone members (finite yield, not both ends in a HELD shell tier) get +(α − 1);
+ * held / never-yielding members get −(α_held − 1) (temporary offsets only). Wheels, shocks, hydros and
+ * support rests are left out (their trigger loads are never reached in a crash, measured).
+ */
+/** Node groups of hinged closures (their body attachment beams take no crush unloading). */
+const CRUSH_CLOSURE_GROUPS: ReadonlySet<string> = new Set(['hood', 'door', 'trunk', 'tailgate']);
+/** Node groups of the running gear and powertrain (temporary unloading only). */
+const CRUSH_RUNNING_GEAR = /^(knuckle|wheel)/;
+function setCrushUnload(def: VehicleDef, rig: CompiledRig, shells: readonly CompiledShell[]): void {
+  const alpha = def.crushUnload ?? CRUSH_UNLOAD_DEFAULT;
+  const alphaHeld = def.crushUnloadHeld ?? alpha;
+  if (!(alpha > 1) && !(alphaHeld > 1)) return;
+  // HELD nodes: every zone tier except the crumple zones (yield + whole): the safety cell, the firewall
+  // ring, a truck box / pickup cab.
+  const held = new Uint8Array(rig.nodeCount);
+  for (const sh of shells) {
+    for (let k = 0; k < sh.nodes.length; k++) {
+      const t = sh.tier[k]!;
+      if (t > 0 && !(sh.yields[t] !== 0 && sh.whole[t] !== 0)) held[sh.nodes[k]!] = 1;
+    }
+  }
+  const gain = new Float32Array(rig.beamCount);
+  const trig = new Float32Array(rig.beamCount).fill(Infinity);
+  const n = def.body.beams.length;
+  const groupOf = (i: number): string => rig.groups[rig.nodeGroup[i]!] ?? '';
+  for (let b = 0; b < n; b++) {
+    if (rig.beamType[b] !== RIG_BEAM_TYPE_ID.normal) continue;
+    const df = rig.beamDeform[b]!;
+    const ga = groupOf(rig.beamA[b]!);
+    const gb = groupOf(rig.beamB[b]!);
+    // hinges / latches / rests of the closures and the hood: elastic until they bend or break (no set)
+    if (ga !== gb && (CRUSH_CLOSURE_GROUPS.has(ga) || CRUSH_CLOSURE_GROUPS.has(gb))) continue;
+    // suspension, subframe, engine mounts: forged / cast parts that bend or break, never take a crush
+    // set from a crash load (a permanent set there froze the crash's nose-dive into the suspension:
+    // the 58 km/h wall-hit sedan sat on its floor and could not drive away); temporary unloading only
+    const isHeld = (held[rig.beamA[b]!] !== 0 && held[rig.beamB[b]!] !== 0) || CRUSH_RUNNING_GEAR.test(ga) || CRUSH_RUNNING_GEAR.test(gb);
+    if (isHeld || !Number.isFinite(df)) {
+      if (!(alphaHeld > 1)) continue;
+      gain[b] = -(alphaHeld - 1);
+      trig[b] = CRUSH_TRIGGER_HELD;
+    } else if (alpha > 1) {
+      gain[b] = alpha - 1;
+      trig[b] = CRUSH_TRIGGER_YIELD * df;
+    }
+  }
+  rig.beamUnload = gain;
+  rig.beamUnloadTrig = trig;
+}
 
 // ------------------------------------------------------------------ validate
 export interface ValidateVehicleOptions {

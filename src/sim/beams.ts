@@ -60,6 +60,48 @@ export const PLASTIC_WEAKEN = 1;
 export const PLASTIC_REVERSE_FACTOR = 2;
 /** Plastic weakening never takes k below this fraction of k0. */
 export const PLASTIC_K_FLOOR = 0.25;
+/**
+ * R-CRASH CRUSH UNLOADING (per beam: SimState.unloadGain / unloadTrig, compiled by compileVehicle).
+ * WHY: real sheet steel unloads along its elastic modulus, so a member loaded to its crash force gives
+ * back only its tiny elastic strain (≈ 0.2 %). The sim's beams are stability-capped at 1–4e5 N/m, so a
+ * crash-loaded member carries its force at 1–20 % elastic strain (the sedan's rear bay "is strong" only
+ * by carrying 12 % elastic strain), and that energy — 17 kJ in a 50 km/h sedan frontal: rear-bay rails,
+ * rack / subframe links, engine mounts, cell spans; 27 kJ in the cell spans alone at 100 km/h — pushed
+ * the car back off the wall: rebound 21–23 % of the impact speed (real cars 5–15 %).
+ * ARMING: only while the object is in a crash (`crashArmed`: its shell has released nodes since the last
+ * capture, shell.ts shellCrashArmed — driving, kerbs and drops release nothing), a beam whose |F|
+ * exceeds unloadTrig is "crash loaded" for a hold window. While crash loaded, a member that is
+ * compressed and lengthening (or stretched and shortening) unloads with α = 1 + |unloadGain| times its
+ * stiffness: its effective rest length follows (α − 1)·Δlength toward the current length (never past
+ * it, never below the compression floor).
+ *   PERMANENT (plastic unloading, CRUSH_UNLOAD_HOLD): a crumple-zone member (unloadGain > 0) that has
+ *     yielded: the rest length itself moves. Bit 15 of crushHold.
+ *   TEMPORARY: every other crash-loaded member — held structure (safety cell, firewall, suspension
+ *     links: unloadGain < 0; the real car keeps those elastic and far stiffer; relax CRUSH_RELAX_TAU)
+ *     and crumple members loaded hard without yielding (relax CRUSH_RELAX_TAU_CRUMPLE), both held
+ *     CRUSH_HELD_HOLD after the load drops: the shift goes into hystOff, which relaxes back once the hold
+ *     ends, i.e. after the car has left the wall. The stored energy comes back as internal motion
+ *     (damped by the beams and the shell) instead of push-off, and the member ends in its own shape.
+ * A beam that yields folds its offset into the rest length (the ratchet works on the effective rest).
+ * Measured (crashRing.test.ts, rigid wall, 50 / 100 km/h): sedan 21 / 23 → 10 / 9 %, coupe 21 / 22 →
+ * 11 / 8 %, traffic 21 / 15 → 9 / 7 % (with the wall-contact hysteresis, colliders.ts).
+ */
+export const CRUSH_UNLOAD_HOLD = 600;
+/** Hold of a temporary offset, ticks: short, so the offsets are gone before the shell's post-impact set (≥ 0.15 s) recaptures the crushed shape. */
+export const CRUSH_HELD_HOLD = 100;
+/** Relaxation time constant of a temporary offset after its hold, s. */
+export const CRUSH_RELAX_TAU = 0.03;
+/**
+ * Relaxation time constant of a crumple member's temporary offset (loaded hard but not yielded), s:
+ * slower than the held members' (the stored energy comes back after the car has left the wall, as internal motion the
+ * beams damp out; τ 0.4 s left the crush creeping 2–3 cm half a second after the peak), and the member ends in its own shape (a permanent set there froze the crash's
+ * nose-dive into the front structure: the bumper dragged on the ground and slid under a wall).
+ */
+export const CRUSH_RELAX_TAU_CRUMPLE = 0.15;
+/** Fixed sim step (CLAUDE.md: dt = 1/2000 s): the unloading increment is vrel·dt. */
+const HYST_DT = 1 / 2000;
+const RELAX_KEEP = 1 - HYST_DT / CRUSH_RELAX_TAU;
+const RELAX_KEEP_CRUMPLE = 1 - HYST_DT / CRUSH_RELAX_TAU_CRUMPLE;
 /** Below this length a beam has no defined direction and exerts no force. */
 const MIN_DIST = 1e-9;
 
@@ -67,7 +109,7 @@ const T_BOUNDED = BeamType.bounded;
 const T_SUPPORT = BeamType.support;
 const T_SHOCK = BeamType.shock;
 
-export const applyBeamForces: ApplyBeamForces = (state, first, count, events, debugStrains) => {
+export const applyBeamForces: ApplyBeamForces = (state, first, count, events, debugStrains, crashArmed = false) => {
   const posX = state.posX;
   const posY = state.posY;
   const posZ = state.posZ;
@@ -92,6 +134,10 @@ export const applyBeamForces: ApplyBeamForces = (state, first, count, events, de
   const type = state.type;
   const active = state.active;
   const strainOut = state.strainOut;
+  const unloadGain = state.unloadGain;
+  const unloadTrig = state.unloadTrig;
+  const crushHold = state.crushHold;
+  const hystOff = state.hystOff;
   const end = first + count;
 
   for (let b = first; b < end; b++) {
@@ -108,7 +154,38 @@ export const applyBeamForces: ApplyBeamForces = (state, first, count, events, de
     }
     const inv = 1 / dist;
     const kb = kArr[b]!;
-    const rest = restLen[b]!;
+    let rest = restLen[b]!;
+    const gain = unloadGain[b]!;
+    if (gain !== 0) {
+      // crush unloading (see CRUSH_UNLOAD_HOLD); rest = the EFFECTIVE rest length below
+      let off = hystOff[b]!;
+      const hold = crushHold[b]!;
+      if (hold !== 0) {
+        // low 15 bits: ticks left; bit 15: permanent (plastic) unloading
+        const ticks = (hold & 0x7fff) - 1;
+        crushHold[b] = ticks > 0 ? (hold & 0x8000) | ticks : 0;
+        const re = rest + off;
+        const vr = ((velX[ib]! - velX[ia]!) * dx + (velY[ib]! - velY[ia]!) * dy + (velZ[ib]! - velZ[ia]!) * dz) * inv;
+        if ((dist < re && vr > 0) || (dist > re && vr < 0)) {
+          let r = re - (gain < 0 ? -gain : gain) * vr * HYST_DT;
+          if (vr > 0 ? r < dist : r > dist) r = dist;
+          const floor = PLASTIC_COMPRESS_FLOOR * restLen0[b]!;
+          if (r < floor) r = floor < re ? floor : re;
+          if ((hold & 0x8000) !== 0) {
+            rest = r - off;
+            restLen[b] = rest;
+          } else {
+            off = r - rest;
+            hystOff[b] = off;
+          }
+        }
+      } else if (off !== 0) {
+        off = off * (gain > 0 ? RELAX_KEEP_CRUMPLE : RELAX_KEEP);
+        if (off < 1e-7 && off > -1e-7) off = 0;
+        hystOff[b] = off;
+      }
+      rest += off;
+    }
     const stretch = dist - rest;
     const t = type[b]!;
 
@@ -133,6 +210,12 @@ export const applyBeamForces: ApplyBeamForces = (state, first, count, events, de
 
     const fAbs = fs < 0 ? -fs : fs;
     const bf = breakF[b]!;
+    if (crashArmed && gain !== 0 && fAbs > unloadTrig[b]!) {
+      // crash loaded: a crumple member that yielded or carries a real crash load unloads plastically
+      const perm = gain > 0 && restLen[b] !== restLen0[b];
+      const cur = crushHold[b]!;
+      crushHold[b] = perm || (cur & 0x8000) !== 0 ? 0x8000 | CRUSH_UNLOAD_HOLD  : CRUSH_HELD_HOLD;
+    }
     if (fAbs > bf && !(fs < 0 && rest <= PLASTIC_COMPRESS_FLOOR * restLen0[b]!)) {
       active[b] = 0;
       strainOut[b] = NaN;
@@ -162,6 +245,8 @@ export const applyBeamForces: ApplyBeamForces = (state, first, count, events, de
           const r = rest - PLASTIC_RATCHET * excess;
           restLen[b] = r > floor ? r : floor < rest ? floor : rest;
         }
+        // a yielding member's temporary crush offset becomes part of its (plastic) rest length
+        if (gain !== 0) hystOff[b] = 0;
         const kFloor = PLASTIC_K_FLOOR * k0Arr[b]!;
         const kNew = kb * PLASTIC_WEAKEN;
         kArr[b] = kNew > kFloor ? kNew : kFloor;

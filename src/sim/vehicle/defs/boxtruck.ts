@@ -1863,6 +1863,10 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
     // Feel pass: rigid shell clusters (shell.ts). Body-on-frame: the cab and the box are each a rigid
     // body on their breakable mounts; the ladder frame (+ its front horns) stays a beam lattice so it still
     // twists like a truck frame (the rollover targets depend on it).
+    // R-CRASH crush unloading off (wall contact hysteresis only): the truck's frontal is a two-phase shunt
+    // (the box slides forward on its mounts and re-loads the cab 0.3–0.7 s in) whose rebound any member
+    // hysteresis drains below the 5 % floor (α 1.1: 100 km/h 9.3 → 3.4 %).
+    crushUnload: 1,
     shell: [
       shellLayout({
         ids: ['c0_*', 'c1_*', 'c2_*', 'c3_*', 's0_*', 's1_*', 's2_*', 'hood_*'],

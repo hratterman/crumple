@@ -41,10 +41,10 @@
  * NUMERICS: hot loop: only + − × ÷ sqrt, fixed order, no allocation (all
  * scratch is preallocated in the ObjectContacts instance).
  */
-import { NODE_FLAG_OBJ_CONTACT, type EventSink, type SimState } from '../types';
+import { NODE_FLAG_OBJ_CONTACT, NODE_FLAG_OBJ_IMPACT, NODE_FLAG_OBJ_TOUCH, type EventSink, type SimState } from '../types';
 import { cooldownsFor, SKID_COOLDOWN_STEPS, SKID_MIN_LOAD, SKID_MIN_SLIP } from './ground';
 
-export const OBJ_KC_MAX = 1e6;
+export const OBJ_KC_MAX = 8e6;
 export const OBJ_KC_STABILITY = 0.2;
 export const OBJ_CONTACT_ZETA = 0.65;
 /** N·s: impacts below this approach momentum are not reported. */
@@ -58,6 +58,20 @@ export const OBJ_SLOW_SPEED = 2;
 export const OBJ_MARGIN = 0.02;
 /** The penalty spring uses min(depth, OBJ_DEPTH_CAP·min(r_a, r_b)): a tunnelled pair separates over a few ticks instead of exploding. */
 export const OBJ_DEPTH_CAP = 0.6;
+/**
+ * R-CRASH hysteretic contact (Walton–Braun, as colliders.ts CONTACT_UNLOAD_E2): a pair's spring loads at k
+ * and unloads at k/e² from the deepest (capped) depth of the contact, d0 = d_max·(1 − e²); the remembered
+ * depth relaxes toward the current one with OBJ_UNLOAD_RELAX_S. WHY: car-to-car the penalty springs of the
+ * touching node spheres (k ≤ 1 MN/m, 10–15 cm deep) gave their energy back: a 6.5 t truck at 50 km/h into
+ * a parked sedan's side threw the sedan off at 14 m/s, faster than the truck (restitution 0.29; real side
+ * impacts ≈ 0–0.1). Measured after: crashPair.test.ts.
+ */
+export const OBJ_UNLOAD_E2 = 0.05;
+/** Approach speed (m/s) from which a contact flags NODE_FLAG_OBJ_IMPACT (≈ 11 km/h: parking bumps stay below). */
+export const OBJ_IMPACT_RELEASE_SPEED = 3;
+export const OBJ_UNLOAD_RELAX_S = 0.2;
+/** Unloading stiffness cap × m_r/dt² (ω·dt = 1; see colliders.ts CONTACT_UNLOAD_STAB). */
+export const OBJ_UNLOAD_STAB = 1.0;
 
 const FLAG_STATIC_A = 1;
 const FLAG_STATIC_B = 2;
@@ -118,6 +132,8 @@ export class ObjectContacts {
   pairMatB: Uint8Array;
   pairMu: Float64Array;
   pairFlags: Uint8Array;
+  /** Deepest (capped) depth of the pair's current contact, m (OBJ_UNLOAD_E2); carried across rebuilds. */
+  pairDmax: Float64Array;
   pairCount = 0;
   /** Pair sort keys a·2^24 + b (exact in f64) + merge-sort scratch. */
   private keys: Float64Array;
@@ -127,10 +143,15 @@ export class ObjectContacts {
   private prevA: Int32Array;
   private prevB: Int32Array;
   private prevFlags: Uint8Array;
+  private prevDmax: Float64Array;
   // ---- per node scratch
   /** Contacts per node: previous tick (read) / this tick (written); swapped every tick. */
   private cntPrev: Uint8Array;
   private cntCur: Uint8Array;
+  /** Nodes flagged NODE_FLAG_OBJ_TOUCH on the previous tick (cleared at the next apply). */
+  private readonly touched: Int32Array;
+  private touchedCount = 0;
+  private staleTouch = false;
   private readonly listA: Int32Array;
   private readonly listB: Int32Array;
   // ---- hash (CSR over B's list)
@@ -172,13 +193,16 @@ export class ObjectContacts {
     this.pairMatB = new Uint8Array(pairCapacity);
     this.pairMu = new Float64Array(pairCapacity);
     this.pairFlags = new Uint8Array(pairCapacity);
+    this.pairDmax = new Float64Array(pairCapacity);
     this.keys = new Float64Array(pairCapacity);
     this.keysTmp = new Float64Array(pairCapacity);
     this.prevA = new Int32Array(pairCapacity);
     this.prevB = new Int32Array(pairCapacity);
     this.prevFlags = new Uint8Array(pairCapacity);
+    this.prevDmax = new Float64Array(pairCapacity);
     this.cntPrev = new Uint8Array(nodeCapacity);
     this.cntCur = new Uint8Array(nodeCapacity);
+    this.touched = new Int32Array(2 * pairCapacity);
     this.listA = new Int32Array(nodeCapacity);
     this.listB = new Int32Array(nodeCapacity);
     this.bucketStart = new Int32Array(HASH_MAX + 1);
@@ -190,6 +214,9 @@ export class ObjectContacts {
 
   /** Forgets every pair and contact flag (spawn/despawn shift global node indices). */
   clear(): void {
+    // node indices shift on spawn / despawn: drop the touched list (the re-packed flags are cleared lazily)
+    this.touchedCount = 0;
+    this.staleTouch = true;
     this.pairCount = 0;
     this.stats.pairs = 0;
     this.stats.active = 0;
@@ -309,6 +336,9 @@ export class ObjectContacts {
     const t8 = this.prevFlags;
     this.prevFlags = this.pairFlags;
     this.pairFlags = t8;
+    const t64 = this.prevDmax;
+    this.prevDmax = this.pairDmax;
+    this.pairDmax = t64;
     const prevCount = this.pairCount;
     this.pairCount = 0;
     this.keyCount = 0;
@@ -338,7 +368,10 @@ export class ObjectContacts {
       const a = pa[i]!;
       const b = pb[i]!;
       while (j < prevCount && (this.prevA[j]! < a || (this.prevA[j] === a && this.prevB[j]! < b))) j++;
-      if (j < prevCount && this.prevA[j] === a && this.prevB[j] === b) fl[i] = fl[i]! | (this.prevFlags[j]! & FLAG_IN_CONTACT);
+      if (j < prevCount && this.prevA[j] === a && this.prevB[j] === b) {
+        fl[i] = fl[i]! | (this.prevFlags[j]! & FLAG_IN_CONTACT);
+        this.pairDmax[i] = this.prevDmax[j]!;
+      }
     }
     // Fresh per-node contact counts for the new list's nodes.
     for (let i = 0; i < this.pairCount; i++) {
@@ -552,6 +585,7 @@ export class ObjectContacts {
       this.pairMatB[m] = this.oMat[q]!;
       this.pairMu[m] = Math.sqrt(friction[a]! * friction[b]!);
       this.pairFlags[m] = f;
+      this.pairDmax[m] = 0;
       m++;
     }
     this.pairCount = m;
@@ -576,15 +610,30 @@ export class ObjectContacts {
     const pb = this.pairB;
     const fl = this.pairFlags;
     const mu = this.pairMu;
+    const dmax = this.pairDmax;
+    const ie2 = 1 / OBJ_UNLOAD_E2;
+    const relax = dt / OBJ_UNLOAD_RELAX_S;
     const prev = this.cntPrev;
     const cur = this.cntCur;
     const n = this.pairCount;
     const invDt = 1 / dt;
+    const kuStab = OBJ_UNLOAD_STAB * invDt * invDt;
     const kStab = OBJ_KC_STABILITY * invDt * invDt;
     for (let i = 0; i < n; i++) {
       cur[pa[i]!] = 0;
       cur[pb[i]!] = 0;
     }
+    const nflags = state.flags;
+    const touched = this.touched;
+    for (let i = 0; i < this.touchedCount; i++) {
+      const t = touched[i]!;
+      nflags[t] = nflags[t]! & ~(NODE_FLAG_OBJ_TOUCH | NODE_FLAG_OBJ_IMPACT);
+    }
+    if (this.staleTouch) {
+      this.staleTouch = false;
+      for (let i = 0; i < state.nodeCount; i++) nflags[i] = nflags[i]! & ~(NODE_FLAG_OBJ_TOUCH | NODE_FLAG_OBJ_IMPACT);
+    }
+    let nt = 0;
     let active = 0;
     for (let i = 0; i < n; i++) {
       const a = pa[i]!;
@@ -599,11 +648,20 @@ export class ObjectContacts {
       const d2 = dx * dx + dy * dy + dz * dz;
       if (d2 >= rs * rs || d2 === 0) {
         fl[i] = f & ~FLAG_IN_CONTACT;
+        dmax[i] = 0;
         continue;
       }
       active++;
       cur[a]!++;
       cur[b]!++;
+      if ((nflags[a]! & NODE_FLAG_OBJ_TOUCH) === 0) {
+        nflags[a] = nflags[a]! | NODE_FLAG_OBJ_TOUCH;
+        touched[nt++] = a;
+      }
+      if ((nflags[b]! & NODE_FLAG_OBJ_TOUCH) === 0) {
+        nflags[b] = nflags[b]! | NODE_FLAG_OBJ_TOUCH;
+        touched[nt++] = b;
+      }
       const dist = Math.sqrt(d2);
       const inv = 1 / dist;
       const nx = dx * inv;
@@ -629,10 +687,26 @@ export class ObjectContacts {
       const rvy = (staticB ? 0 : velY[b]!) - vay;
       const rvz = (staticB ? 0 : velZ[b]!) - vaz;
       const vn = rvx * nx + rvy * ny + rvz * nz;
+      if (vn < -OBJ_IMPACT_RELEASE_SPEED) {
+        nflags[a] = nflags[a]! | NODE_FLAG_OBJ_IMPACT;
+        nflags[b] = nflags[b]! | NODE_FLAG_OBJ_IMPACT;
+      }
       let depth = rs - dist;
       const cap = OBJ_DEPTH_CAP * (ra < rb ? ra : rb);
       if (depth > cap) depth = cap;
-      let fn = k * depth - c * vn;
+      // hysteretic spring: unloads at k/e² below the contact's deepest point
+      const dm = dmax[i]!;
+      let fs = k * depth;
+      if (depth >= dm) dmax[i] = depth;
+      else {
+        let ku = k * ie2;
+        const kum = (kuStab * mr) / s;
+        if (ku > kum) ku = kum;
+        const fu = k * dm - ku * (dm - depth);
+        fs = fu < 0 ? 0 : fu;
+        dmax[i] = dm - (dm - depth) * relax;
+      }
+      let fn = fs - c * vn;
       if (fn < 0) fn = 0;
       // Implicit Coulomb on the relative tangential velocity.
       const tx = rvx - vn * nx;
@@ -689,6 +763,7 @@ export class ObjectContacts {
         }
       }
     }
+    this.touchedCount = nt;
     this.cntPrev = cur;
     this.cntCur = prev;
     this.stats.active = active;

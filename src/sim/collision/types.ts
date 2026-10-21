@@ -26,7 +26,7 @@
  *     outward normal n), depth = r − sd; contact iff depth > 0.
  *     kc = min(COLLIDER_KC_MAX, KC_STABILITY·m/dt²)    (KC_STABILITY 0.2 as ground)
  *     c_d = 2·CONTACT_ZETA·sqrt(kc·m)                   (ζ 0.65 two-sided, as ground)
- *     Fn = max(0, kc·depth − c_d·(v·n))
+ *     Fn = max(0, kc·depth − c_d·(v·n))   (R-CRASH: kc·depth → hysteretic spring, below)
  *     friction: implicit backward-Euler Coulomb, F_t = tangential part of
  *     (accumulated force + m·g), F_req = −(m·v_t/dt + F_t) clamped to
  *     μ·Fn with μ = node friction × materials.friction[c.material]
@@ -44,6 +44,13 @@
  * into a rigid barrier and through a 0.15 m pole (pull-through). The cap
  * here keeps ω·dt ≤ sqrt(0.2) ≈ 0.447 per node (same stability argument
  * as ground) while holding penetration to a few cm.
+ * R-CRASH 2e6 → 8e6: at 2 MN/m the heavy front nodes (engine block, suspension pivots, truck frame horns)
+ * still sank 4–9 cm into a rigid barrier at 50–100 km/h (box truck 22 cm) and the crumple zone's crush
+ * went partly into the wall. Nodes lighter than kc_max·dt²/0.2 = 10 kg stay at the 0.2·m/dt² stability
+ * bound (unchanged); heavier ones press in 4× less (fleet: 1.4–5.7 cm at 50–100 km/h).
+ * HYSTERETIC UNLOADING (colliders.ts CONTACT_UNLOAD_E2 / _RELAX_S): Fn's spring term unloads at kc/e²
+ * from the contact's deepest point (Walton–Braun), so a rigid barrier no longer returns the contact
+ * spring energy as rebound.
  *
  * SIGNED DISTANCE per kind (local frame, see ColliderDef):
  *   box/ramp: closest-feature distance outside the solid. For a node whose
@@ -69,7 +76,7 @@ export const ColliderKindId = { box: 0, cylinder: 1, sphere: 2, plane: 3, ramp: 
 export type ColliderKindId = (typeof ColliderKindId)[keyof typeof ColliderKindId];
 
 /** Penalty stiffness cap for collider contacts, N/m (see header WHY). */
-export const COLLIDER_KC_MAX = 2e6;
+export const COLLIDER_KC_MAX = 8e6;
 /** Plane colliders are a slab this deep below their surface, m. */
 export const COLLIDER_PLANE_DEPTH = 0.5;
 /** Broadphase grid cell edge (XZ), m. */

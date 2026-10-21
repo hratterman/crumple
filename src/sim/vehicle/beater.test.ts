@@ -255,8 +255,13 @@ describe('BEATER crash harness (vs the sedan, same run)', () => {
     expect(r.maxSpan).toBeLessThan(3);
     expect(r.wheelsDetached).toBe(0);
   });
-  it('30 km/h crush ≥ 1.5× the sedan’s; a 10 km/h tap leaves ≥ 2 cm permanent', () => {
-    expect(crash.f30!.crush).toBeGreaterThanOrEqual(1.5 * sedan.f30!.crush);
+  /*
+   * R-CRASH: 1.5× → 1.4× at 30 km/h. The sedan's crumple zone now unloads plastically (beams.ts crush
+   * unloading: 30 km/h spring-back 20 → 9 %), so its PERMANENT 30 km/h crush rose 26.8 → 28.4 cm while the
+   * beater (member unloading off, already 7–13 % rebound) is unchanged at ≈ 41 cm; peak crush ratios hold.
+   */
+  it('30 km/h crush ≥ 1.4× the sedan’s; a 10 km/h tap leaves ≥ 2 cm permanent', () => {
+    expect(crash.f30!.crush).toBeGreaterThanOrEqual(1.4 * sedan.f30!.crush);
     expect(crash.f10!.crush).toBeGreaterThanOrEqual(0.02);
   });
   it('30 km/h side pole: door intrusion ≥ 1.4× the sedan’s, nothing pulled through', () => {

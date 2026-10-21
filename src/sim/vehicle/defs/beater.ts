@@ -1446,6 +1446,9 @@ function buildBeater(): { def: VehicleDef; design: BeaterDesign } {
     // Feel pass: rigid shell cluster (shellDefs.ts). The beater folds like paper: rigid while driving, but
     // any real impact (a 1 cm dent or 2 m/s at a node) hands the WHOLE body back to its tired beams, so it
     // crashes exactly as tuned (no safety cell).
+    // R-CRASH: member crush unloading off — the paper-thin beater already rebounds 7–13 % (wall contact
+    // hysteresis only) and its fold ratios vs the sedan are tuned on plain elastic unloading.
+    crushUnload: 1,
     shell: { zones: [{ ids: ['*'], release: { lo: 0.01, hi: 0.02, vLo: 2, vHi: 3 }, whole: true, yield: true }] },
   };
   const design: BeaterDesign = {

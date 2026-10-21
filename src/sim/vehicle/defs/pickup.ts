@@ -304,7 +304,7 @@ const GLASS_BREAK_STRAIN = 0.03;
  * The windscreen (cw–rf) breaks earlier: the body-on-frame cab barely deforms in a frontal (the
  * frame takes it), so at 3 % only a third of its beams broke at 100 km/h.
  */
-const WINDSCREEN_BREAK_STRAIN = 0.016;
+const WINDSCREEN_BREAK_STRAIN = 0.006;
 const DOOR_NODES = /^c[13]_(dm|bt|sl)_/;
 const DOOR_YIELD_STRAIN = 0.04;
 const DOOR_MIN_DEFORM = 3.5e3;
@@ -1450,6 +1450,10 @@ function buildPickup(): { def: VehicleDef; design: PickupDesign } {
     steering: { maxWheelAngleDeg: round((PICKUP_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
     frame: { origin: sid('c2', 'tn'), front: sid('s0', 'rs'), top: sid('c2', 'rf') },
     // Feel pass: rigid shell cluster (shell.ts) — crumple zones released whole on impact, firewall, safety cell.
+    // R-CRASH crush unloading: gentle on the crumple members, off for the held cab / frame (the stiff
+    // body-on-frame front already rebounded 8–10 %; α 40 took it to 5 %, α 3: 6.6 / 7.2 % at 50 / 100 km/h).
+    crushUnload: 3,
+    crushUnloadHeld: 1,
     shell: shellLayout({
       front: ['f0_*', 'f1_*', 'f2_*', 'f3_*', 's0_*', 's1_*', 's2_*', 'bf_*', 'hood_*', 'FL_*', 'FR_*'],
       rear: ['b0_*', 'b1_*', 'b2_*', 'b3_*', 'br_*', 'tg_*', 'hitch*', 'f8_*', 'f9_*', 'f10_*', 'f11_*', 'RL_*', 'RR_*'],
