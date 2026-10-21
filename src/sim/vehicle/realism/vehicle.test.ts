@@ -18,6 +18,13 @@
  *  [FMVSS] FMVSS 126 / UN R140 Sine with Dwell (ESC): yaw rate ≤ 35 % of
  *       its peak 1.0 s after the completion of steer and ≤ 20 % after 1.75 s,
  *       lateral displacement ≥ 1.83 m 1.07 s after the beginning of steer.
+ *  [L]  R. Limpert, "Brake Design and Safety", 3rd ed. (2011) ch. 3: single-stop
+ *       disc temperature rise η·E_disc/(m·c) (sedan front disc, 65 % of the
+ *       work on the front axle: ≈ 45 K from 100 km/h).
+ *  [J2522] SAE J2522 (AK Master) fade section: 15 stops from 100 km/h take a
+ *       passenger-car rotor to ≈ 550 °C; OE pads keep 0.6–0.85 of their μ there.
+ *  [R13H] UN ECE R13-H Type-I: the hot brake keeps ≥ 60 % of the cold
+ *       deceleration at the same pedal force.
  * Set REALISM_OUT=<dir> to dump the traces for the plots.
  */
 import { describe, expect, it } from 'vitest';
@@ -31,7 +38,7 @@ import { PlaneSampler, groundNormalForce } from '../../collision/ground';
 import { createHandlingSim, kinematics, runScenario, setMotion, stepN } from '../handling';
 import type { VehicleDef } from '../types';
 import { dumpJson } from './dump';
-import { runBrakeMetrics, runSineWithDwell, runSkidpad, runStepMetrics, steerFor03g } from './vehicleMetrics';
+import { runBrakeMetrics, runRepeatedStops, runSineWithDwell, runSkidpad, runStepMetrics, steerFor03g } from './vehicleMetrics';
 
 interface Ref {
   def: VehicleDef;
@@ -143,6 +150,20 @@ describe('vehicle realism: assists and load transfer', () => {
     expect(ratio).toBeGreaterThan(0.85);
     expect(ratio).toBeLessThan(1.15);
   }, 60_000);
+
+  it('brake fade: 15 back-to-back ABS stops from 100 km/h heat the sedan front discs to 350–650 °C, the hot brake keeps 60–95 % of the cold light-pedal decel, stops stay within +15 % [L][J2522][R13H]', async () => {
+    const r = runRepeatedStops(SEDAN, 15, 0.3);
+    await dumpJson('fade_sedan', r);
+    const first = r.stops[0]!;
+    const last = r.stops[r.stops.length - 1]!;
+    expect(first.frontTemp - 25).toBeGreaterThan(25);
+    expect(first.frontTemp - 25).toBeLessThan(70);
+    expect(r.hotTemp).toBeGreaterThan(350);
+    expect(r.hotTemp).toBeLessThan(650);
+    expect(r.pedalDecelHot / r.pedalDecelCold).toBeGreaterThan(0.6);
+    expect(r.pedalDecelHot / r.pedalDecelCold).toBeLessThan(0.95);
+    expect(last.distance / first.distance).toBeLessThan(1.15);
+  }, 120_000);
 
   it('box truck: 80–0 km/h ≤ 48 m and ≥ 30 m (medium-duty truck with ABS ≈ 0.6–0.75 g) [RT]', () => {
     const v0 = 80 / 3.6;

@@ -143,6 +143,8 @@ export interface BrakeSystemState {
   latAcc: number;
   vxPrev: number;
   vzPrev: number;
+  /** Per wheel pad friction factor from the disc temperature (brakeHeat.ts brakeFade), 1 = nominal. */
+  fade: Float64Array;
 }
 
 export function createBrakeSystem(vehicle: VehicleRuntime): BrakeSystemState {
@@ -195,6 +197,7 @@ export function createBrakeSystem(vehicle: VehicleRuntime): BrakeSystemState {
     latAcc: 0,
     vxPrev: 0,
     vzPrev: 0,
+    fade: new Float64Array(n).fill(1),
   };
 }
 
@@ -464,7 +467,7 @@ export function stepBrakes(state: SimState, vehicle: VehicleRuntime, actions: Fl
       p = target;
     }
     b.pressure[w] = p;
-    const service = p * cw.brakeTorque;
+    const service = p * cw.brakeTorque * b.fade[w]!;
     const hb = cw.handbrake ? hand * cw.handbrakeTorque : 0;
     wr.brakeTorque = service > hb ? service : hb;
   }

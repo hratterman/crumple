@@ -1383,6 +1383,8 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
     drivetrain: DRIVETRAIN,
     brakes: { frontBias: 0.6, handbrakeTorqueMax: 1500, abs: true, esc: true },
     aero: { dragCoeffArea: 0.65, liftCoeffArea: 0.08 },
+    // R-PHYS: asymmetric digressive dampers (dampers.ts: rebound 2.6 : 1 bump, knee 0.1 m/s)
+    dampers: { front: true, rear: true },
     steering: { maxWheelAngleDeg: round((SEDAN_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
     frame: { origin: sid(7, 'tn'), front: sid(2, 'rs'), top: sid(7, 'rf') },
     // Feel pass: rigid shell cluster (shell.ts) — crumple zones released whole on impact, firewall, safety cell.

@@ -1455,6 +1455,8 @@ function buildBeater(): { def: VehicleDef; design: BeaterDesign } {
     brakes: { frontBias: 0.65, handbrakeTorqueMax: 1000, abs: true },
     // boxy, no glass, a cage in the wind: Cd·A ≈ 0.37 × 1.85 m²
     aero: { dragCoeffArea: 0.68, liftCoeffArea: 0.1 },
+    // R-PHYS: asymmetric digressive dampers (dampers.ts: rebound 2.6 : 1 bump, knee 0.1 m/s)
+    dampers: { front: true, rear: true },
     steering: { maxWheelAngleDeg: round((BEATER_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
     frame: { origin: sid(7, 'tn'), front: sid(2, 'rs'), top: sid(7, 'rf') },
     // Feel pass: rigid shell cluster (shellDefs.ts). The beater folds like paper: rigid while driving, but

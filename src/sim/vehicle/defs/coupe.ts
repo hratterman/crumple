@@ -1333,6 +1333,11 @@ function buildCoupe(): { def: VehicleDef; design: CoupeDesign } {
     // at 0.58 it reached 288 km/h and slowly yawed off line (wheel speed far beyond the tread
     // hoop-tension cap, wheels.ts HOOP_OMEGA_MAX).
     aero: { dragCoeffArea: 0.68, liftCoeffArea: -0.12 },
+    // R-PHYS: linear dampers for now. With any non-linear valving (dampers.ts) the 30 km/h side pole pulls
+    // s5_hp_R 1–3 cm past the pole axis ≈ 0.4 s after contact (it already does at 31 km/h with these linear
+    // dampers): a marginal pillar case for R-CRASH (CONTRACTS "R-PHYS ↔ R-CRASH"). Sports valving to fit then:
+    // { bump: 0.65, rebound: 1.2 } (rebound 1.8 : 1).
+
     steering: { maxWheelAngleDeg: round((COUPE_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
     frame: { origin: sid(7, 'tn'), front: sid(2, 'rs'), top: sid(7, 'rf') },
     // Feel pass: rigid shell cluster (shell.ts) — crumple zones released whole on impact, firewall, safety cell.

@@ -287,6 +287,8 @@ function compileWheels(def: VehicleDef, rig: CompiledRig, bodyNodeCount: number,
         lateralMu: wd.tyreLateralMu ?? 1,
       },
       caliperInboard: wd.caliperInboard ?? 0.5,
+      brakeDiscMass: wd.braked ? (wd.brakeDiscMass ?? (wd.brakeTorqueMax * brakeAxleFactor(def.brakes.frontBias, wd.axle)) / 300) : 0,
+      brakeDiscVented: wd.brakeDiscVented ?? wd.axle === 'front',
     });
     nodeStart += nodeCount;
     beamStart += beamCount;
@@ -451,6 +453,7 @@ export const compileVehicle: CompileVehicle = (def) => {
     totalMass: total,
     massDriftPct: declared > 0 ? ((total - declared) / declared) * 100 : 0,
     shell: compileShells(rig, bodyNodeCount, def.shell),
+    ...(def.dampers ? { dampers: def.dampers } : {}),
   };
 };
 

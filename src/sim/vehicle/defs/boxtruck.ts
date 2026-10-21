@@ -1878,6 +1878,10 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
     drivetrain: DRIVETRAIN,
     brakes: { frontBias: 0.55, handbrakeTorqueMax: 4000, abs: true },
     aero: { dragCoeffArea: 5.6, liftCoeffArea: 0 },
+    // R-PHYS: linear dampers. Non-linear valving (dampers.ts) on the truck's d (ζ 0.6, near the ω·dt budget
+    // of its light axle nodes) jittered the parked truck (0.19–0.21 m/s node speed vs 0.15) even with
+    // { bump: 0.5, rebound: 1 }, and a softer bump changed the 50 km/h box-side dent (12.9 vs ≥ 15 cm).
+
     steering: { maxWheelAngleDeg: round((BOXTRUCK_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
     frame: { origin: 'f7_x', front: 'f3_x', top: sid('c3', 'rf') },
     // Feel pass: rigid shell clusters (shell.ts). Body-on-frame: the cab and the box are each a rigid

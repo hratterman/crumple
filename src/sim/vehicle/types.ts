@@ -154,6 +154,14 @@ export interface WheelDef {
    * brake compliance steer of the beam upright (wheels.ts applyUprightReaction).
    */
   caliperInboard?: number;
+  /**
+   * R-PHYS (additive): brake disc (or drum) mass, kg, for the disc
+   * temperature / pad fade model (brakeHeat.ts). Default brakeTorque / 300
+   * N·m per kg (a 2500 N·m front caliper ↔ an 8.3 kg disc).
+   */
+  brakeDiscMass?: number;
+  /** R-PHYS (additive): ventilated disc (cools faster at speed). Default: front axle true, rear false. */
+  brakeDiscVented?: boolean;
   attachSpring?: number;
   attachDamp?: number;
   attachBreakF?: number;
@@ -356,6 +364,26 @@ export interface VehicleDef {
    * shell.ts defaults.
    */
   shell?: ShellDef | readonly ShellDef[] | false;
+  /**
+   * R-PHYS (additive, optional): asymmetric digressive dampers on the shock
+   * beams (dampers.ts), per axle; a shock beam belongs to the axle of the
+   * wheel whose hub is nearest. Omitted: linear symmetric d·v (pre-R-PHYS).
+   */
+  dampers?: VehicleDampersDef;
+}
+
+/** R-PHYS: per-axle damper characteristics (dampers.ts DamperDef; `true` = DAMPER_DEFAULTS). */
+export interface VehicleDampersDef {
+  front?: DamperCurveDef | true;
+  rear?: DamperCurveDef | true;
+}
+
+/** R-PHYS: see dampers.ts (bump / rebound low-speed rates as fractions of d, digressive knee m/s, high-speed slope fraction). */
+export interface DamperCurveDef {
+  bump?: number;
+  rebound?: number;
+  kneeSpeed?: number;
+  highSpeedRatio?: number;
 }
 
 // ====================================================================== compiled
@@ -437,6 +465,9 @@ export interface CompiledWheel {
   };
   /** WheelDef.caliperInboard ?? 0.5 (R-PHYS, additive optional). */
   caliperInboard?: number;
+  /** R-PHYS: disc mass kg (0 = unbraked) and ventilation (brakeHeat.ts). */
+  brakeDiscMass?: number;
+  brakeDiscVented?: boolean;
 }
 
 export interface CompiledDrivetrain {
@@ -489,6 +520,8 @@ export interface CompiledVehicle {
   massDriftPct: number;
   /** Feel pass: rigid shell clusters (empty = none). */
   shell: CompiledShell[];
+  /** R-PHYS: VehicleDef.dampers (undefined = linear dampers). */
+  dampers?: VehicleDampersDef;
 }
 
 /** Validator output (sedan agent). ok ⇔ errors.length === 0. */

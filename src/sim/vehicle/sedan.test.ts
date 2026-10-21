@@ -476,15 +476,17 @@ describe.skipIf(missing.length > 0)('SEDAN in the engine', () => {
     expect(ff).toBeLessThan(1.6);
     expect(fr).toBeGreaterThan(1.4);
     expect(fr).toBeLessThan(1.8);
-    // ζ ≈ 0.3: successive opposite peaks shrink by exp(−πζ/√(1−ζ²)) ≈ 0.37 (0.25 < ratio < 0.5 ⇔ 0.22 < ζ < 0.4).
+    // ζ ≈ 0.3: R-PHYS dampers are asymmetric (rebound 2.6× bump, dampers.ts), so one HALF cycle (compression
+    // then rebound) no longer measures ζ; a full period does: same-sign peaks shrink by exp(−2πζ/√(1−ζ²))
+    // (0.22 < ζ < 0.4 ⇔ 0.075 < ratio < 0.25; it was 0.25 < half-cycle ratio < 0.5 with linear dampers).
     for (const tr of [ft, rt]) {
       const ext: number[] = [];
-      for (let i = 1; i + 1 < tr.length && ext.length < 2; i++) {
+      for (let i = 1; i + 1 < tr.length && ext.length < 3; i++) {
         if ((tr[i]! - tr[i - 1]!) * (tr[i + 1]! - tr[i]!) < 0 && Math.abs(tr[i]!) > 1e-3) ext.push(tr[i]!);
       }
-      const ratio = Math.abs(ext[1]! / ext[0]!);
-      expect(ratio).toBeGreaterThan(0.25);
-      expect(ratio).toBeLessThan(0.5);
+      const ratio = Math.abs(ext[2]! / ext[0]!);
+      expect(ratio).toBeGreaterThan(0.075);
+      expect(ratio).toBeLessThan(0.25);
     }
   });
 });

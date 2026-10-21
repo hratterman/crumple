@@ -4,7 +4,8 @@
  * car through the P2 handling harness (handling.ts) and reduces the trace to
  * the number road tests and the vehicle-dynamics literature quote.
  */
-import { G, runBraking, runCircle, runScenario, runStepSteer, type HandlingSample } from '../handling';
+import { G, createHandlingSim, kinematics, runBraking, runCircle, runScenario, runStepSteer, setMotion, stepN, type HandlingSample } from '../handling';
+import type { VehicleRuntimeEx } from '../runtime';
 import type { VehicleDef } from '../types';
 
 const RAD = 180 / Math.PI;
@@ -271,13 +272,91 @@ export function runStepMetrics(def: VehicleDef, steer: number, kmh = 80): StepMe
   let t90 = Infinity;
   let tPeak = t50;
   let peak = 0;
-  for (const x of s) {
+  // ISO 7401 peak response time: the FIRST yaw-rate maximum after the step (a local maximum over
+  // ± 100 ms); a later, slower drift of the steady state (roll / compliance settling) is not the response
+  // peak. Falls back to the global maximum when the response rises monotonically.
+  let first = -1;
+  for (let i = 0; i < s.length; i++) {
+    const x = s[i]!;
     if (x.t < t50) continue;
-    if (t90 === Infinity && Math.abs(x.yawRate) >= 0.9 * Math.abs(ss)) t90 = x.t - t50;
-    if (Math.abs(x.yawRate) > peak) {
-      peak = Math.abs(x.yawRate);
+    const a = Math.abs(x.yawRate);
+    if (t90 === Infinity && a >= 0.9 * Math.abs(ss)) t90 = x.t - t50;
+    if (a > peak) {
+      peak = a;
       tPeak = x.t - t50;
     }
+    if (first < 0 && t90 !== Infinity) {
+      let held = true;
+      for (let j = i + 1; j < s.length && s[j]!.t <= x.t + 0.1; j++) if (Math.abs(s[j]!.yawRate) >= a) held = false;
+      let rising = true;
+      for (let j = i - 1; j >= 0 && s[j]!.t >= x.t - 0.1; j--) if (Math.abs(s[j]!.yawRate) > a) rising = false;
+      if (held && rising) first = i;
+    }
   }
+  if (first >= 0) tPeak = s[first]!.t - t50;
   return { t90, tPeak, overshoot: r.overshoot, latG: r.latG, spun: r.spun, samples: s };
+}
+
+export interface FadeMetrics {
+  /** Per stop: distance m, front disc temperature at the end of the stop, °C. */
+  stops: { distance: number; frontTemp: number }[];
+  /** Mean deceleration over the first 1 s at a fixed light pedal, cold and after the stops, m/s². */
+  pedalDecelCold: number;
+  pedalDecelHot: number;
+  /** Front disc temperature before the hot pedal check, °C. */
+  hotTemp: number;
+}
+
+/**
+ * Brake fade: `n` back-to-back full-pedal (ABS) stops from 100 km/h (each a
+ * teleport back to speed, so the discs only cool while stopping), then the
+ * same fixed light pedal from 100 km/h as on the cold car.
+ */
+export function runRepeatedStops(def: VehicleDef, n = 15, pedal = 0.3): FadeMetrics {
+  const v0 = 100 / 3.6;
+  const DT = 1 / 2000;
+  const pedalDecel = (sim: ReturnType<typeof createHandlingSim>): number => {
+    setMotion(sim, v0, 0);
+    const k0 = kinematics(sim);
+    for (let i = 0; i < 2000; i++) {
+      sim.eng.setInput(1, { gearSelect: 0, throttle: 0, brake: pedal });
+      sim.eng.step();
+    }
+    const k1 = kinematics(sim);
+    return Math.hypot(k0.vx, k0.vz) - Math.hypot(k1.vx, k1.vz);
+  };
+  const heat = (sim: ReturnType<typeof createHandlingSim>): Float64Array => (sim.veh as VehicleRuntimeEx).brakeHeat.temp;
+  const front = (sim: ReturnType<typeof createHandlingSim>): number => {
+    let t = 0;
+    let c = 0;
+    sim.veh.wheels.forEach((w, i) => {
+      if (w.wheel.axle === 'front') {
+        t += heat(sim)[i]!;
+        c++;
+      }
+    });
+    return t / c;
+  };
+  const cold = createHandlingSim({ def });
+  stepN(cold, 3000);
+  const pedalDecelCold = pedalDecel(cold);
+  const sim = createHandlingSim({ def });
+  stepN(sim, 3000);
+  const stops: { distance: number; frontTemp: number }[] = [];
+  for (let k = 0; k < n; k++) {
+    setMotion(sim, v0, 0);
+    const p0 = kinematics(sim);
+    let t = 0;
+    for (;;) {
+      sim.eng.setInput(1, { gearSelect: 0, throttle: 0, brake: 1 });
+      sim.eng.step();
+      t += DT;
+      const kk = kinematics(sim);
+      if (Math.hypot(kk.vx, kk.vz) < 0.1 || t > 8) break;
+    }
+    const p1 = kinematics(sim);
+    stops.push({ distance: Math.hypot(p1.cx - p0.cx, p1.cz - p0.cz), frontTemp: front(sim) });
+  }
+  const hotTemp = front(sim);
+  return { stops, pedalDecelCold, pedalDecelHot: pedalDecel(sim), hotTemp };
 }

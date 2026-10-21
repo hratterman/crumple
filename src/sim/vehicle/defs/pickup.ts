@@ -1466,6 +1466,8 @@ function buildPickup(): { def: VehicleDef; design: PickupDesign } {
     drivetrain: DRIVETRAIN,
     brakes: { frontBias: 0.64, handbrakeTorqueMax: 2200, abs: true, esc: true },
     aero: { dragCoeffArea: 1.45, liftCoeffArea: 0.1 },
+    // R-PHYS: asymmetric digressive dampers (dampers.ts: rebound 2.6 : 1 bump, knee 0.1 m/s)
+    dampers: { front: true, rear: true },
     steering: { maxWheelAngleDeg: round((PICKUP_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
     frame: { origin: sid('c2', 'tn'), front: sid('s0', 'rs'), top: sid('c2', 'rf') },
     // Feel pass: rigid shell cluster (shell.ts) — crumple zones released whole on impact, firewall, safety cell.

@@ -38,6 +38,8 @@ import type {
   WheelRuntime,
 } from './types';
 import { applyHoopTension, applyParkingClamp, applyTreadBrush, applyWheelTorques, estimateWheelOmega, setDriveOnUpright } from './wheels';
+import { brakeFade, createBrakeHeat, resetBrakeHeat, stepDiscTemp, type BrakeHeatState } from './brakeHeat';
+import { applyDampers, createVehicleDampers, rebaseDampers, type DamperState } from './dampers';
 import { createBrakeSystem, resetBrakeSystem, stepBrakes, type BrakeSystemState } from './brakes';
 import { createTyreState, resetTyreState, stepTyre, type TyreState } from './tyre';
 
@@ -74,6 +76,10 @@ export interface VehicleRuntimeEx extends VehicleRuntime {
   brakeSys: BrakeSystemState;
   /** R-PHYS: per-wheel tyre friction state (tyre.ts), declaration order. */
   tyres: TyreState[];
+  /** R-PHYS: asymmetric digressive dampers (dampers.ts); null = linear. */
+  dampers: DamperState | null;
+  /** R-PHYS: brake disc temperatures (brakeHeat.ts). */
+  brakeHeat: BrakeHeatState;
 }
 
 // ------------------------------------------------------------ create / rebase
@@ -193,6 +199,11 @@ export function createVehicleRuntime(
     bodyMass,
     shell: vehicle.shell.map((c) => createShellRuntime(c, rig)),
     brakeSys: undefined as unknown as BrakeSystemState,
+    dampers: null,
+    brakeHeat: createBrakeHeat(
+      vehicle.wheels.map((cw) => cw.brakeDiscMass ?? 0),
+      vehicle.wheels.map((cw) => cw.brakeDiscVented ?? cw.axle === 'front'),
+    ),
     tyres: vehicle.wheels.map((cw) => {
       const ring = 2 * cw.rays;
       const base = new Float64Array(ring);
@@ -210,6 +221,7 @@ export function createVehicleRuntime(
     }),
   };
   rt.brakeSys = createBrakeSystem(rt);
+  rt.dampers = createVehicleDampers(vehicle);
   rebaseVehicle(rt, nodeStart, beamStart);
   return rt;
 }
@@ -220,6 +232,8 @@ export const rebaseVehicle: RebaseVehicle = (vehicle, nodeStart, beamStart) => {
   vehicle.beamStart = beamStart;
   const sh = (vehicle as VehicleRuntimeEx).shell;
   if (sh) for (const c of sh) rebaseShell(c, nodeStart, beamStart);
+  const dm = (vehicle as VehicleRuntimeEx).dampers;
+  if (dm) rebaseDampers(dm, beamStart);
   for (const w of vehicle.wheels) {
     const cw = w.wheel;
     w.hubI = nodeStart + cw.hubI;
@@ -253,6 +267,8 @@ export function resetVehicleRuntime(vehicle: VehicleRuntime): void {
   if (bs) resetBrakeSystem(bs);
   const ty = (vehicle as VehicleRuntimeEx).tyres;
   if (ty) for (const t of ty) resetTyreState(t);
+  const bh = (vehicle as VehicleRuntimeEx).brakeHeat;
+  if (bh) resetBrakeHeat(bh);
   vehicle.telemetry.fill(0);
   const sh = (vehicle as VehicleRuntimeEx).shell;
   if (sh) for (const c of sh) resetShell(c);
@@ -355,7 +371,19 @@ export function vehiclePreStep(state: SimState, vehicle: VehicleRuntime, actions
     applyTreadBrush(state, wr, dt);
     applyHoopTension(state, wr);
   }
+  const bh = (vehicle as VehicleRuntimeEx).brakeHeat;
+  if (bh && bs) {
+    for (let w = 0; w < wheels.length; w++) {
+      const wr = wheels[w]!;
+      // after applyWheelTorques brakeTorque is the applied (signed, opposing ω) torque: friction power −τ·ω ≥ 0
+      const om = wr.omega < 0 ? -wr.omega : wr.omega;
+      const t = stepDiscTemp(bh, w, -wr.brakeTorque * wr.omega, om * wr.rollRadius, dt);
+      bs.fade[w] = brakeFade(t);
+    }
+  }
   if (!onAxle) applyDriveReaction(state, vehicle);
+  const dm = (vehicle as VehicleRuntimeEx).dampers;
+  if (dm) applyDampers(state, dm);
   applyParkingClamp(state, vehicle, actions, dt);
   applyAero(state, vehicle);
 }
