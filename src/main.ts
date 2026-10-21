@@ -21,6 +21,7 @@
  * world frame frozen behind the menu) and 'showroom' (ui/showroom + the
  * render/showroom studio drawn instead of the world, timescale 0).
  */
+import { SIGNAL_TICK_HZ, signalAspect } from './world/signals';
 import './style.css';
 import { MeshPhysicalMaterial, NoToneMapping, PerspectiveCamera, Scene, SRGBColorSpace, Vector3, WebGLRenderer } from 'three';
 import type { Mesh, Material } from 'three';
@@ -46,12 +47,18 @@ import { attachInputDevices } from './input/devices';
 import type { BeamBreakEvent, ImpactEvent, SkidEvent } from './protocol/events';
 import { GAME_CAPACITY, isPropObjectId, SPAWN_SETTLE_S, type ActionState, type Transform } from './protocol/messages';
 import { VehicleTelemetry } from './protocol/telemetry';
+import { TRAFFIC_FLAG_BRAKE, TRAFFIC_FLAG_HEADLIGHTS, type TrafficAgentFrame } from './protocol/traffic';
 import { DEFAULT_CHASE_OPTIONS, vehiclePoseFromNodes, type ChaseTarget } from './render/cameras/chase';
 import { CameraDirector } from './render/cameras/director';
 import { createAabbNearest, createAabbOccluder } from './render/cameras/occluder';
 import { createRoadside } from './render/cameras/roadside';
 import { BeamView } from './render/debug/beamview';
-import { createLightingStack, setNearCasters } from './render/lighting';
+import { addEnvApiHook, envDebugApi, type EnvDebugApi } from './render/lighting/envApi';
+import { ENV_UNIFORMS } from './render/lighting/envUniforms';
+import type { HeadlightState } from './render/lighting/headlights';
+import type { NightLights, TrafficLamp } from './render/lighting/nightLights';
+import type { RainFrame } from './render/fx/rain';
+import { createPuddleMap, PUDDLE_CELL_M } from './render/lighting/puddles';
 import { patchMaterial } from './render/material';
 import { createPostStack } from './render/post';
 import { createRoadRenderer } from './render/roads';
@@ -71,11 +78,13 @@ import {
   LAYER_NO_REFLECTION,
   QUALITY_LEVELS,
   QUALITY_PRESETS,
+  type LightingStack,
   type PostStack,
   type QualityController,
   type RenderContext,
   type WorldFrame,
 } from './render/types';
+import { compilePropRig } from './sim/props/catalog';
 import { resolvePropInstances } from './sim/props/placement';
 import { compileRig } from './sim/rig/builder';
 import { softCube } from './sim/rig/testrigs';
@@ -265,6 +274,16 @@ let terrain: TerrainData | null = null;
 let sampler: TerrainSampler | null = null;
 let quality: QualityController | null = null;
 let post: PostStack | null = null;
+/** R-GFX: the world lighting stack (time of day + weather live on `lightingStack.env`). */
+let lightingStack: LightingStack | null = null;
+/** R-GFX night lights (light grid + the player's shadowed headlights), null before boot. */
+let nightLights: NightLights | null = null;
+/** R-GFX player headlight switch: 'auto' follows dusk / rain / fog; J cycles, K toggles high beam. */
+let headlightMode: 'auto' | 'on' | 'off' = 'auto';
+let highBeam = false;
+const headState: HeadlightState = { on: false, high: false, brake: 0, reverse: false };
+const trafficLampFrames: TrafficAgentFrame[] = [];
+const trafficLamps: TrafficLamp[] = [];
 let running = false;
 let spawnIndex = 0;
 let lastSpawn: Transform = { pos: [0, 0, 0], quat: [0, 0, 0, 1] };
@@ -356,11 +375,14 @@ function updateVisuals(dt: number): void {
  */
 const NEAR_CASTER_REACH_M = 9;
 const casterPos = new Vector3();
-function updateNearCasters(lighting: Parameters<typeof setNearCasters>[0]): void {
+/** R-GFX: the lazily loaded lighting chunk (render/lighting/lazy.ts), set by boot(). */
+let lightingMod: typeof import('./render/lighting/lazy') | null = null;
+function updateNearCasters(lighting: LightingStack): void {
+  if (!lightingMod) return;
   const sedanVisual = playerVisual();
   const root = sedanVisual ? sedanVisual.object : null;
   const d = sedanVisual ? camera.position.distanceTo(sedanVisual.skin.object.getWorldPosition(casterPos)) : 0;
-  setNearCasters(lighting, renderer, camera, root, 0.5 * (d - NEAR_CASTER_REACH_M), d + NEAR_CASTER_REACH_M);
+  lightingMod.setNearCasters(lighting, renderer, camera, root, 0.5 * (d - NEAR_CASTER_REACH_M), d + NEAR_CASTER_REACH_M);
 }
 
 // ------------------------------------------------------------ P8 audio (src/audio, lazy chunk; set by boot())
@@ -697,6 +719,13 @@ window.addEventListener('keydown', (e) => {
   } else if (e.code === 'Backquote') {
     setProfiling(!prof.enabled);
     e.preventDefault();
+  } else if (e.code === 'KeyJ') {
+    // R-GFX headlights: auto → on → off
+    headlightMode = headlightMode === 'auto' ? 'on' : headlightMode === 'on' ? 'off' : 'auto';
+    hud?.showToast(`HEADLIGHTS ${headlightMode.toUpperCase()}`, 'J', 1400);
+  } else if (e.code === 'KeyK') {
+    highBeam = !highBeam;
+    hud?.showToast(highBeam ? 'HIGH BEAM' : 'LOW BEAM', 'K', 1400);
   } else if (e.code === 'KeyL' && quality) {
     const next = QUALITY_LEVELS[(QUALITY_LEVELS.indexOf(quality.preset.level) + 1) % QUALITY_LEVELS.length]!;
     quality.setLevel(next);
@@ -731,6 +760,15 @@ function applyPlayerSpec(assets: PlayerAssets): void {
   mapper.setGearCount(assets.sim.drivetrain.gearRatios.length);
   hud?.setSpec(hudSpecFor(assets));
   applyChaseFraming(assets);
+  applyLampMounts(assets);
+}
+
+/** R-GFX: the player's lamp positions for the headlight spots / light grid. */
+function applyLampMounts(assets: PlayerAssets): void {
+  if (!nightLights || !lightingMod) return;
+  const o = Math.max(0, assets.compiled.frameNodes[0] ?? 0);
+  const rest = assets.compiled.rig.nodePos;
+  nightLights.setPlayerMounts(lightingMod.lampMountsFor(assets.visual, [rest[3 * o]!, rest[3 * o + 1]!, rest[3 * o + 2]!]));
 }
 
 /** Traffic density for a preset under the player's traffic setting (the quality controller and the menu both route here). */
@@ -761,6 +799,13 @@ function setSetting(patch: Partial<GameSettings>): void {
   if (patch.traffic !== undefined) {
     if (trafficStarted) traffic?.setQuality(trafficPreset(ctx.quality));
     else startTraffic();
+  }
+  // R-GFX time of day / weather
+  const env = lightingStack?.env;
+  if (env) {
+    if (patch.timeOfDay !== undefined) env.setTime(patch.timeOfDay);
+    if (patch.timeSpeed !== undefined) env.setTimeSpeed(patch.timeSpeed);
+    if (patch.weather !== undefined) env.setWeather(patch.weather);
   }
 }
 
@@ -1256,6 +1301,10 @@ const crumple = {
   setVehicle(id: string, palette?: string, spawn?: number): Promise<void> {
     return swapVehicle({ id: id as VehicleChoice['id'], palette: palette ?? '' }, spawn ?? null);
   },
+  /** R-GFX time of day + weather (render/lighting/environment.ts), null before the lighting stack exists. */
+  get env(): EnvDebugApi | null {
+    return lightingStack?.env ? envDebugApi(lightingStack.env) : null;
+  },
   /** P7 live replay (app/replay/types.ts ReplayDebugApi). */
   get replay() {
     return replay.debug;
@@ -1343,7 +1392,11 @@ async function boot(): Promise<void> {
   // Road ribbons sample these directly: anisotropic taps are the low preset's (and SwiftShader's) worst cost.
   const materialsP = loadAllTerrainSets({ anisotropy: anisotropyFor(startLevel, renderer.capabilities.getMaxAnisotropy()) });
   // Before any material compiles: the stack installs the height-fog chunks and CSM.
-  const lightingP = createLightingStack(ctx);
+  const lightingModP = import('./render/lighting/lazy');
+  const lightingP = lightingModP.then((m) => {
+    lightingMod = m;
+    return m.createLightingStack(ctx, { time: settings.timeOfDay, timeSpeed: settings.timeSpeed, weather: settings.weather });
+  });
   void Promise.all([materialsP, lightingP]).then(() => loading.set('textures', 'done'));
 
   const mark = (name: string): void => {
@@ -1366,8 +1419,18 @@ async function boot(): Promise<void> {
   });
   const lighting = await lightingP;
   crumple.debug.lighting = lighting;
+  lightingStack = lighting;
+  // R-GFX: the headlight spots exist before any program compiles (the spot count is part of every lit program).
+  const nightR = lightingMod!.createNightLights(ctx.quality);
+  nightLights = nightR;
+  scene.add(nightR.object);
+  ENV_UNIFORMS.crumpleLightGrid.value = nightR.grid.texture;
+  crumple.debug.nightLights = nightR;
+  crumple.debug.envUniforms = ENV_UNIFORMS;
   const postStack = createPostStack(ctx);
   post = postStack;
+  // R-GFX: a time-of-day / weather jump (settings, photo mode, tests) skips the eye adaptation
+  lighting.env?.onChange(() => postStack.exposure?.snap());
   mark('postStack');
 
   // Flexbody bodies: built (tessellate + bind) while the terrain still generates in its worker (they
@@ -1431,6 +1494,13 @@ async function boot(): Promise<void> {
   ctx.sampler = smp;
   await nextFrame();
 
+  // R-GFX rain: where water pools on the carved heightfield (ground-mode wet surfaces sample it)
+  {
+    const pm = createPuddleMap(world);
+    const cell = Math.max(1, Math.round(PUDDLE_CELL_M / world.spacing)) * world.spacing;
+    ENV_UNIFORMS.crumplePuddleMap.value = pm;
+    ENV_UNIFORMS.crumplePuddleRect.value.set(world.originX - cell / 2, world.originZ - cell / 2, 1 / (pm.image.width * cell), 1 / (pm.image.height * cell));
+  }
   const terrainR = createTerrainRenderer(ctx, world, materials, { lighting, patchMaterial });
   scene.add(terrainR.object);
   mark('terrainRenderer');
@@ -1478,17 +1548,62 @@ async function boot(): Promise<void> {
   });
   fx = fxR;
   scene.add(fxR.object);
+  // R-GFX rain streaks (one instanced draw, only while it rains)
+  const rainR = lightingMod!.createRain(ctx.quality.level);
+  scene.add(rainR.object);
+  const rainFrame: RainFrame = {
+    camera,
+    dtS: 0,
+    intensity: 0,
+    wind: new Vector3(1.4, 0, 0.6),
+    time: 0,
+    ambient: new Vector3(),
+    keyColor: new Vector3(),
+    beam: null,
+  };
+  const rainBeam = { pos: new Vector3(), dir: new Vector3(), intensity: 0, cosOuter: 0.8 };
   fxR.addVehicle(VEHICLE_ID, bootAssets.compiled);
   fxR.addProps(propInstances);
   const trafficC = createTrafficController(ctx, { client, lighting, patchMaterial, fx: fxR, sampler: smp, focusObjectId: VEHICLE_ID });
   traffic = trafficC;
   scene.add(trafficC.object);
+  // R-GFX night lights: streetlights (light-pole props, live), floodlights, traffic + player lamps in one light grid.
+  const lampRig = ((): { nodes: number[]; rest: [number, number, number][] } | null => {
+    try {
+      const c = compilePropRig('lightPole');
+      const nodes = ['lamp_0', 'lamp_1', 'lamp_2', 'lamp_3'].map((id) => c.nodeIds.indexOf(id));
+      if (nodes.some((i) => i < 0)) return null;
+      return { nodes, rest: nodes.map((i) => [c.nodePos[3 * i]!, c.nodePos[3 * i + 1]!, c.nodePos[3 * i + 2]!] as [number, number, number]) };
+    } catch {
+      return null;
+    }
+  })();
+  nightR.setWorld({ props: propInstances, lampRig, colliders: resolveColliders(worldColliders, (x, z) => smp.heightAt(x, z)) });
+  {
+    // R-WORLD light sources (street / flood / tunnel / window / sign / beacon / signal heads); a signal lamp is lit while its leg
+    // shows that aspect at the presented sim time (called from nightR.update, after worldFrame exists).
+    const plans = loaded.content.signals;
+    nightR.setWorldLights(loaded.content.lights, (l) => {
+      const sg = l.signal;
+      const plan = sg ? plans[sg.plan] : undefined;
+      return !!sg && !!plan && signalAspect(plan, sg.leg, Math.floor(worldFrame.simTime * SIGNAL_TICK_HZ)) === sg.lamp;
+    });
+  }
+  addEnvApiHook((p) => {
+    if (p.headlights === 'off' || p.headlights === 'auto') {
+      headlightMode = p.headlights;
+      highBeam = false;
+    } else if (p.headlights === 'low' || p.headlights === 'high') {
+      headlightMode = 'on';
+      highBeam = p.headlights === 'high';
+    }
+  });
   stats.stages.vegetationMs = Math.round(loaded.vegetationMs);
   // P6: traffic follows the preset scaled by the player's traffic setting (off / light / normal / heavy).
   const trafficQ = { setQuality: (q: typeof ctx.quality) => trafficC.setQuality(trafficPreset(q)) };
   const qc = createQualityControllerWith(
     ctx,
-    { lighting, post: postStack, others: [terrainR, roadsR, collidersR, propsR, vegetationR, waterR, fxR, trafficQ, { setQuality: (q: typeof ctx.quality) => replay.setQuality(q.level) }] },
+    { lighting, post: postStack, others: [terrainR, roadsR, collidersR, propsR, vegetationR, waterR, fxR, trafficQ, nightR, { setQuality: (q: typeof ctx.quality) => rainR.setQuality(q.level) }, { setQuality: (q: typeof ctx.quality) => replay.setQuality(q.level) }] },
     forcedLevel ? { initial: forcedLevel, storage: null, maxPixelRatio } : { maxPixelRatio },
   );
   quality = qc;
@@ -1598,6 +1713,7 @@ async function boot(): Promise<void> {
     hoodMount: (id) => (id === VEHICLE_ID ? playerHoodMount() : null),
     subjectName: (t) => (t.objectId === VEHICLE_ID && player ? player.assets.entry.stats.name : t.kind === 'traffic' ? 'Traffic' : 'Object'),
     units: () => settings.units,
+    environment: lighting.env ? { time: () => lighting.env!.time, setTime: (h: number) => lighting.env!.setTime(h) } : undefined,
   });
 
   // P8: synthesized audio (lazy chunk + AudioWorklet module); the context resumes on the first gesture.
@@ -1780,6 +1896,8 @@ async function boot(): Promise<void> {
     } else if (replaySession?.ownsCamera) replaySession.updateCamera(dt);
     else director.update(dt, poseValid ? pose : null);
     prof.lap('camera');
+    // R-GFX: time of day advances with the world (frozen while paused or replaying)
+    lighting.env?.advance(paused || replay.active ? 0 : dt);
     lighting.update(camera);
     updateNearCasters(lighting);
     prof.lap('csm');
@@ -1810,6 +1928,57 @@ async function boot(): Promise<void> {
     prof.lap('fx');
     waterR.update(worldFrame);
     prof.lap('water');
+    // R-GFX night lights: player lamps (auto with dusk / rain / fog), traffic lamps, streetlights → light grid
+    {
+      const env = lighting.env;
+      const pl = player;
+      headState.on = headlightMode === 'on' || (headlightMode === 'auto' && !!env?.headlightsWanted);
+      headState.high = headState.on && highBeam;
+      const tel = client.telemetry(VEHICLE_ID);
+      headState.brake = tel ? Math.min(1, Math.max(0, tel[VehicleTelemetry.brake] ?? 0)) : 0;
+      headState.reverse = tel ? (tel[VehicleTelemetry.gear] ?? 0) < 0 : false;
+      if (pl) {
+        pl.lamps.head = headState.on;
+        pl.lamps.highBeam = headState.high;
+      }
+      const gain = env ? env.darkness : 0;
+      let nt = 0;
+      if (gain > 0.01 && trafficStarted) {
+        nt = client.readTrafficAgents(renderT, trafficLampFrames);
+        for (let i = 0; i < nt; i++) {
+          const a = trafficLampFrames[i]!;
+          const l = (trafficLamps[i] ??= { pos: a.pos, quat: a.quat, headlights: false, brake: 0 });
+          l.pos = a.pos;
+          l.quat = a.quat;
+          l.headlights = (a.flags & TRAFFIC_FLAG_HEADLIGHTS) !== 0 || gain > 0.3;
+          l.brake = (a.flags & TRAFFIC_FLAG_BRAKE) !== 0 ? 1 : 0;
+        }
+      }
+      nightR.update(worldFrame, { pose: poseValid ? pose : null, state: headState }, trafficLamps, nt, gain);
+      ENV_UNIFORMS.crumpleGridOrigin.value.copy(nightR.grid.origin);
+      // R-GFX weather: rain streaks (lit by the beam + light grid), tyre spray
+      const weather = env?.weather;
+      fxR.setWeather?.(weather ?? { wetness: 0, rain: 0 });
+      rainFrame.dtS = dt;
+      rainFrame.intensity = weather ? weather.rain : 0;
+      rainFrame.time = worldFrame.time;
+      const fogC = scene.fog ? scene.fog.color : null;
+      if (fogC) rainFrame.ambient.set(fogC.r, fogC.g, fogC.b).multiplyScalar(0.7);
+      rainFrame.keyColor.set(lighting.sun.color.r, lighting.sun.color.g, lighting.sun.color.b).multiplyScalar(lighting.sun.intensity);
+      const spot = nightR.headlights.spots[0];
+      if (spot && spot.intensity > 0) {
+        rainBeam.pos.copy(spot.position);
+        rainBeam.dir.copy(spot.target.position).sub(spot.position).normalize();
+        rainBeam.intensity = spot.intensity * nightR.headlights.spots.length;
+        rainBeam.cosOuter = Math.cos(spot.angle);
+        rainFrame.beam = rainBeam;
+      } else rainFrame.beam = null;
+      rainR.update(rainFrame);
+      // drops on the lens of the driving cameras only (never in replay / photo / a pinned shot)
+      const lensCam = !replay.active && !pinnedCamera && director.mode === 'chase';
+      postStack.setLensRain?.(lensCam && weather ? weather.rain * 0.8 : 0, worldFrame.time);
+    }
+    prof.lap('nightLights');
     qc.frame(dt);
     prof.lap('quality');
     if (passCounter.attached) {
@@ -1891,7 +2060,15 @@ async function boot(): Promise<void> {
   };
   const saveVisualState = () => {
     const pv = playerVisual();
-    return { pv, player: pv ? pv.damage.saveState() : null, props: propsR.saveState(), traffic: trafficC.saveReplayState(), fx: fxR.saveState() };
+    return {
+      pv,
+      player: pv ? pv.damage.saveState() : null,
+      props: propsR.saveState(),
+      traffic: trafficC.saveReplayState(),
+      fx: fxR.saveState(),
+      // R-GFX: the eye's adaptation (replay cameras meter other views)
+      exposure: postStack.exposure ? [postStack.exposure.value, postStack.exposure.target ?? postStack.exposure.value] : null,
+    };
   };
   let lastSavedLive: unknown = null;
   /** FNV-1a over every typed array / number of a saved visual state (object refs under `pv` skipped). */
@@ -1960,7 +2137,8 @@ async function boot(): Promise<void> {
       return lastSavedLive;
     },
     restoreLive(state) {
-      const st = state as { pv: ReturnType<typeof playerVisual>; player: DamageState | null; props: PropVisualState; traffic: unknown; fx: FxState };
+      const st = state as { pv: ReturnType<typeof playerVisual>; player: DamageState | null; props: PropVisualState; traffic: unknown; fx: FxState; exposure: [number, number] | null };
+      if (st.exposure) postStack.exposure?.set?.(st.exposure[0], st.exposure[1]);
       const pv = playerVisual();
       if (pv && pv === st.pv && st.player) {
         pv.damage.restoreState(st.player);

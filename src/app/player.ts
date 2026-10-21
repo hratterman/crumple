@@ -169,6 +169,8 @@ export class PlayerVehicle {
   private readonly telemetry = createVehicleTelemetryFrame();
   private brokenTick = -1;
   private readonly frame: VehicleFrameInput;
+  /** R-GFX: the player's lamp switches (headlights / high beam) merged over the telemetry lamps each frame. */
+  readonly lamps: { head: boolean; highBeam: boolean } = { head: true, highBeam: false };
 
   constructor(assets: PlayerAssets, paletteId: string | null, deps: PlayerVisualDeps | null) {
     this.assets = assets;
@@ -242,6 +244,7 @@ export class PlayerVehicle {
     f.telemetry = source.readTelemetry(objectId, this.telemetry) ? this.telemetry : null;
     f.dtS = dt;
     f.camera = camera;
+    f.lights = this.lamps;
     v.update(f);
   }
 

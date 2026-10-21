@@ -249,27 +249,46 @@ function applyColor(shader: WebGLProgramParametersWithUniforms, o: VegPatchOptio
       '#include <lights_physical_fragment>',
       `#include <lights_physical_fragment>
   {
-    float vegSpec = mix(1.0, 0.3, vVeg.x);
+    float vegSpec = mix(1.0, 0.14, vVeg.x);
     material.specularColor *= vegSpec;
     material.specularColorBlended *= vegSpec;
     material.specularF90 *= vegSpec;
   }`,
     );
-    // Leaf translucency: sun shining through the crown toward the viewer.
+    // Leaf translucency: shadowed, after the light loop (foliageTranslucency).
+    frag = frag.replace('#include <lights_fragment_end>', foliageTranslucency('vVeg.x', '0.25 + 0.75 * vVeg.y', 0.55, 0.06));
+    // bark: bounce + sky fill (sun-averted trunks under the crown went pitch black)
     frag = frag.replace(
       '#include <emissivemap_fragment>',
       `#include <emissivemap_fragment>
-  {
-    vec3 sunV = normalize((viewMatrix * vec4(uVegSun, 0.0)).xyz);
-    float bl = max(dot(normalize(-vViewPosition), sunV), 0.0);
-    bl = bl * bl * bl;
-    totalEmissiveRadiance += diffuseColor.rgb * uVegSunCol * (bl * 0.28 + 0.035) * vVeg.x * (0.35 + 0.65 * vVeg.y);
-    // bark: bounce + sky fill (sun-averted trunks under the crown went pitch black)
-    totalEmissiveRadiance += diffuseColor.rgb * uVegSunCol * 0.045 * (1.0 - vVeg.x);
-  }`,
+  totalEmissiveRadiance += diffuseColor.rgb * uVegSunCol * 0.045 * (1.0 - vVeg.x);`,
     );
   }
   shader.fragmentShader = frag;
+}
+
+/**
+ * Leaf / grass-blade translucency, added to the direct diffuse AFTER the light
+ * loop so it carries the key light's shadow (`crumpleKeyVis`, env patch):
+ * unshadowed emissive translucency made sun-backlit crowns glow white. Light
+ * through a leaf is filtered by it twice (albedo², a deeper yellow-green),
+ * with a forward lobe toward the viewer and a small wrap term. `amount`,
+ * `occ` are GLSL expressions (leaf mask, crown-depth occlusion).
+ */
+export function foliageTranslucency(amount: string, occ: string, lobe: number, wrap: number): string {
+  return /* glsl */ `#include <lights_fragment_end>
+  {
+    vec3 vegSunV = normalize((viewMatrix * vec4(uVegSun, 0.0)).xyz);
+    float vegBl = max(dot(normalize(-vViewPosition), vegSunV), 0.0);
+    vegBl *= vegBl;
+    vegBl *= vegBl;
+    float vegVis = 1.0;
+    #ifdef CRUMPLE_KEYVIS
+      vegVis = crumpleKeyVis;
+    #endif
+    vec3 vegTrans = min(diffuseColor.rgb * diffuseColor.rgb * 5.0, vec3(0.6));
+    reflectedLight.directDiffuse += vegTrans * uVegSunCol * (vegBl * ${lobe.toFixed(3)} + ${wrap.toFixed(3)}) * vegVis * (${amount}) * (${occ});
+  }`;
 }
 
 const NORMAL_BEGIN_NO_FLIP = /* glsl */ `

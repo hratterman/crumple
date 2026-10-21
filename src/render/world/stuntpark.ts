@@ -501,7 +501,7 @@ export function createStuntParkRenderer(_ctx: RenderContext, colliders: readonly
   steelMesh.matrixAutoUpdate = false;
   root.add(steelMesh);
   const lampMat = new MeshStandardMaterial({ name: 'stunt-lamp', color: 0xfff3dc, emissive: 0xffe2b0, emissiveIntensity: 2.2, roughness: 0.3, metalness: 0 });
-  opts.patchMaterial(lampMat, { csm });
+  opts.patchMaterial(lampMat, { csm, env: { lamp: 0.08 } }); // R-GFX: floodlights on at night
   materials.push(lampMat);
   const lampMesh = new Mesh(lamps.geometry(), lampMat);
   lampMesh.name = 'stuntpark:lamps';

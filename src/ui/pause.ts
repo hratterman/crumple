@@ -90,6 +90,14 @@ interface Row<T extends string | number | boolean> {
   options: readonly { value: T; label: string }[];
   get: () => T;
   set: (v: T) => void;
+  /** R-GFX: a continuous slider instead of option buttons (numeric rows; ← → step it, `wrap` cycles). */
+  range?: { min: number; max: number; step: number; wrap?: boolean; format: (v: number) => string };
+}
+
+/** 17.25 → "17:15". */
+export function formatHours(h: number): string {
+  const m = Math.round((((h % 24) + 24) % 24) * 60) % 1440;
+  return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 }
 
 function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls: string, parent?: Element | null, text?: string): HTMLElementTagNameMap[K] {
@@ -508,6 +516,43 @@ export class PauseMenu {
         set: (v) => set({ crashCam: v as boolean }),
       },
       {
+        key: 'timeOfDay',
+        label: 'Time of day',
+        note: 'Sun, moon, sky and lights follow it',
+        options: [],
+        range: { min: 0, max: 24, step: 0.25, wrap: true, format: formatHours },
+        get: () => o.settings().timeOfDay,
+        set: (v) => set({ timeOfDay: v as number }),
+      },
+      {
+        key: 'timeSpeed',
+        label: 'Time progression',
+        options: [
+          { value: 0, label: 'Frozen' },
+          { value: 1, label: 'Real' },
+          { value: 60, label: '1 min/s' },
+          { value: 120, label: '2 min/s' },
+          { value: 600, label: '10 min/s' },
+        ],
+        get: () => o.settings().timeSpeed,
+        set: (v) => set({ timeSpeed: v as number }),
+      },
+      {
+        key: 'weather',
+        label: 'Weather',
+        note: 'Rain makes roads wet (less grip)',
+        options: [
+          { value: 'clear', label: 'Clear' },
+          { value: 'cloudy', label: 'Cloudy' },
+          { value: 'overcast', label: 'Overcast' },
+          { value: 'rain', label: 'Rain' },
+          { value: 'storm', label: 'Storm' },
+          { value: 'fog', label: 'Fog' },
+        ],
+        get: () => o.settings().weather,
+        set: (v) => set({ weather: v as GameSettings['weather'] }),
+      },
+      {
         key: 'muted',
         label: 'Sound',
         note: 'Fully synthesized: engines, tyres, crashes, world',
@@ -544,6 +589,25 @@ export class PauseMenu {
       const lab = h('div', 'pm-row-label', row);
       h('span', '', lab, r.label);
       if (r.note) h('small', '', lab, r.note);
+      if (r.range) {
+        const rg = r.range;
+        const wrapEl = h('div', 'pm-range', row);
+        const input = h('input', 'pm-range-input', wrapEl);
+        input.type = 'range';
+        input.min = String(rg.min);
+        input.max = String(rg.max);
+        input.step = String(rg.step);
+        input.tabIndex = -1;
+        input.setAttribute('aria-label', r.label);
+        h('span', 'pm-range-value', wrapEl);
+        input.addEventListener('input', (ev) => {
+          ev.stopPropagation();
+          r.set(Number(input.value));
+        });
+        input.addEventListener('click', (ev) => ev.stopPropagation());
+        row.addEventListener('click', () => row.focus({ preventScroll: true }));
+        continue;
+      }
       const seg = h('div', `pm-seg${METER_ROWS.has(r.key) ? ' pm-seg--meter' : ''}`, row);
       seg.setAttribute('role', 'radiogroup');
       seg.setAttribute('aria-label', r.label);
@@ -565,6 +629,14 @@ export class PauseMenu {
 
   private stepRow(r: Row<string | number | boolean>, d: number): void {
     const cur = r.get();
+    if (r.range) {
+      const rg = r.range;
+      let v = (cur as number) + d * rg.step;
+      if (rg.wrap) v = rg.min + ((((v - rg.min) % (rg.max - rg.min)) + (rg.max - rg.min)) % (rg.max - rg.min));
+      else v = Math.min(rg.max, Math.max(rg.min, v));
+      r.set(v);
+      return;
+    }
     const i = r.options.findIndex((o) => o.value === cur);
     const n = r.options[Math.min(r.options.length - 1, Math.max(0, (i < 0 ? 0 : i) + d))]!;
     if (n.value !== cur) r.set(n.value);
@@ -575,6 +647,14 @@ export class PauseMenu {
       const row = this.panel.querySelector<HTMLElement>(`[data-row="${r.key}"]`);
       if (!row) continue;
       const cur = r.get();
+      if (r.range) {
+        const input = row.querySelector<HTMLInputElement>('.pm-range-input');
+        if (input && document.activeElement !== input) input.value = String(cur);
+        const val = row.querySelector<HTMLElement>('.pm-range-value');
+        if (val) val.textContent = r.range.format(cur as number);
+        row.dataset.value = String(cur);
+        continue;
+      }
       const meter = METER_ROWS.has(r.key);
       const idx = r.options.findIndex((o) => o.value === cur);
       row.querySelectorAll<HTMLButtonElement>('.pm-seg-opt').forEach((b, i) => {

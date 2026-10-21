@@ -59,6 +59,8 @@ export interface ReplaySessionDeps {
   subjectName?(t: Readonly<ReplayTarget>): string;
   units?(): 'kmh' | 'mph';
   parent?: HTMLElement;
+  /** R-GFX: the world's time of day (photo mode's light slider), absent without a lighting environment. */
+  environment?: { time(): number; setTime(hours: number): void };
 }
 
 /** e2e / console view of the session (`window.__crumple.replayUi`). */
@@ -274,6 +276,7 @@ export class ReplaySession {
     const s = this.photo.settings;
     s.fov = Math.round(Math.min(Math.max(this.d.camera.fov, 8), 100));
     s.roll = 0;
+    if (this.d.environment) s.timeOfDay = this.d.environment.time();
     this.rig.setMode('free', false);
     this.overlay.root.hidden = true;
     this.photo.open();
@@ -721,6 +724,7 @@ export class ReplaySession {
     this.photoFx.apply(this.photoLook());
     this.applyDof();
     if (key === 'aspect' || key === 'scale') this.layoutPhoto();
+    if (key === 'timeOfDay') this.d.environment?.setTime(s.timeOfDay);
   }
 
   private applyDof(): void {

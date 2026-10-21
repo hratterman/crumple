@@ -4,6 +4,7 @@ import type { WebGLProgramParametersWithUniforms, WebGLRenderer } from 'three';
 import { CSM } from 'three/examples/jsm/csm/CSM.js';
 
 import { isPatched, PATCH_INFO, patchMaterial } from './material';
+import './lighting/envPatch'; // registers the env patch injector (the lazily loaded lighting chunk does it in the app)
 import type { PatchInfo } from './material';
 import type { PatchTarget, ShaderPatch } from './types';
 
@@ -87,8 +88,35 @@ describe('patchMaterial', () => {
     const set = patchMaterial(m, { damage, flexbody: flex, csm });
     run(set.color);
     expect(log).toEqual(['flexbody@color', 'damage@color']);
-    expect((m as unknown as Record<symbol, PatchInfo>)[PATCH_INFO]!.features).toEqual(['csm', 'flexbody', 'damage']);
-    expect(m.customProgramCacheKey()).toMatch(/csm4f?\|flexbody:flexbody-v1\|damage:damage-v1$/);
+    // R-GFX: world-lit (csm) materials also get the environment patch, last
+    expect((m as unknown as Record<symbol, PatchInfo>)[PATCH_INFO]!.features).toEqual(['csm', 'flexbody', 'damage', 'env']);
+    expect(m.customProgramCacheKey()).toMatch(/csm4f?\|flexbody:flexbody-v1\|damage:damage-v1\|env:env\d+$/);
+  });
+
+  it('adds the env patch only with a csm, and env: false opts out', () => {
+    const withCommon = (): WebGLProgramParametersWithUniforms => {
+      const s = freshShader();
+      s.fragmentShader = `#include <common>\n${s.fragmentShader}`;
+      return s;
+    };
+    const a = new MeshStandardMaterial();
+    patchMaterial(a, { csm: makeCsm() });
+    const sa = run(a, withCommon());
+    expect(sa.fragmentShader).toContain('#define CRUMPLE_ENV');
+    expect(sa.uniforms.crumpleHazeSH).toBeDefined();
+    expect(sa.uniforms.crumpleLightGrid).toBeDefined();
+    const b = new MeshStandardMaterial();
+    patchMaterial(b, { csm: makeCsm(), env: false });
+    expect(run(b, withCommon()).fragmentShader).not.toContain('CRUMPLE_ENV');
+    const c = new MeshStandardMaterial();
+    patchMaterial(c, { damage: recorder('damage', ['color'], []) });
+    expect(run(c, withCommon()).fragmentShader).not.toContain('CRUMPLE_ENV');
+    // shared uniform objects: one write reaches every program
+    const d = new MeshStandardMaterial();
+    patchMaterial(d, { csm: makeCsm() });
+    expect(run(d, withCommon()).uniforms.crumpleSunDir).toBe(sa.uniforms.crumpleSunDir);
+    // a shader without <common> is left alone (no undeclared uniforms behind the define)
+    expect(run(new MeshStandardMaterial(), freshShader()).fragmentShader).not.toContain('CRUMPLE_ENV');
   });
 
   it('applies depth/distance-targeting features to the shadow twins only for their targets', () => {

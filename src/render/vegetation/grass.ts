@@ -14,7 +14,7 @@ import type { WebGLProgramParametersWithUniforms } from 'three';
 
 import type { TerrainSampler } from '../../world/types';
 import type { ShaderPatch } from '../types';
-import type { VegUniforms } from './shader';
+import { foliageTranslucency, type VegUniforms } from './shader';
 
 export const GRASS_TILE_M = 8;
 /** Candidate tufts per m² before the splat / slope tests. */
@@ -253,15 +253,7 @@ varying float vGrassT;`,
   material.specularColorBlended *= 0.3;
   material.specularF90 *= 0.3;`,
       );
-      f = f.replace(
-        '#include <emissivemap_fragment>',
-        `#include <emissivemap_fragment>
-  {
-    vec3 sunV = normalize((viewMatrix * vec4(uVegSun, 0.0)).xyz);
-    float bl = max(dot(normalize(-vViewPosition), sunV), 0.0);
-    totalEmissiveRadiance += diffuseColor.rgb * uVegSunCol * (bl * bl * 0.18 + 0.02) * vGrassT;
-  }`,
-      );
+      f = f.replace('#include <lights_fragment_end>', foliageTranslucency('vGrassT', '1.0', 0.5, 0.04));
       shader.fragmentShader = f;
     },
   };

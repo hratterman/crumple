@@ -167,7 +167,7 @@ export function createRoadMaterials(info: RoadRibbonInfo, seed: number, deps: Ro
     });
     mat.name = `road:${p.id}:${fringe ? 'fringe' : 'core'}`;
     mat.defines = { [styleDefine]: '', [markDefine]: '', ...(fringe ? { RD_FRINGE: '' } : {}) };
-    const patched = deps.patchMaterial(mat, { csm: deps.csm });
+    const patched = deps.patchMaterial(mat, { csm: deps.csm, env: { wet: 'road' } });
     installRoadHook(mat, uniforms, `${info.style}.${markDefine}.${fringe ? 'f' : 'c'}`);
     mat.needsUpdate = true;
     return { mat, set: patched };

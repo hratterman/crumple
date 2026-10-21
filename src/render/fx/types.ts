@@ -82,6 +82,8 @@ export interface FxSystem extends WorldLayerRenderer {
   onImpact(e: Readonly<ImpactEvent>): void;
   onBeamBreak(e: Readonly<BeamBreakEvent>): void;
   onSkid(e: Readonly<SkidEvent>): void;
+  /** R-GFX (additive): surface wetness / rain for tyre spray (lighting/environment.ts WeatherState). */
+  setWeather?(w: { wetness: number; rain: number }): void;
   /** Per-wheel effects + tyre classification for this vehicle object (CompiledVehicle = what the worker compiled). */
   addVehicle(objectId: number, compiled: CompiledVehicle): void;
   /** Surface classes (and debris colours) for props; unknown objects count as 'metal'. */

@@ -199,7 +199,7 @@ export function createTerrainRenderer(
   // ------------------------------------------------------------ materials
   const base = new MeshStandardMaterial({ color: 0xffffff, roughness: 1, metalness: 0 });
   base.name = 'terrain';
-  const patched = opts.patchMaterial(base, { csm: opts.lighting.csm });
+  const patched = opts.patchMaterial(base, { csm: opts.lighting.csm, env: { wet: 'ground' } });
   const color = patched.color;
   installTerrainHook(color, (shader) => applyTerrainColorPatch(shader, uniforms));
 

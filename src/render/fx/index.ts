@@ -86,6 +86,13 @@ import {
 
 // ------------------------------------------------------------------ kinds
 /** Soft pool kinds. */
+/** R-GFX wet-road spray: births per wheel per second per (m/s above 5) at full wetness. */
+export const WET_SPRAY_RATE = 7;
+/** Surfaces that hold a water film a tyre can lift (hard, sealed). */
+export function wetSurface(m: number): boolean {
+  return m === MaterialId.asphalt || m === MaterialId.concrete || m === MaterialId.metal || m === MaterialId.rock;
+}
+
 export const K_SMOKE = 0;
 export const K_DUST = 1;
 export const K_HAZE = 2;
@@ -215,6 +222,8 @@ interface WheelFx {
   smokeDist: number;
   sprayAcc: number;
   roostAcc: number;
+  /** R-GFX: accumulated wet-road spray births. */
+  wetAcc: number;
   /** Seconds of near-stationary skid slip since the last burnout stamp. */
   stampT: number;
 }
@@ -843,6 +852,25 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
           }
         }
       }
+      // R-GFX rain: tyres lift a mist of road water off wet hard surfaces (rate ∝ wetness × speed)
+      if (wetness > 0.2 && contact && gs > 5 && wetSurface(mat)) {
+        w.wetAcc += wetness * Math.min(gs - 5, 35) * WET_SPRAY_RATE * rateScale * dtSim;
+        let n = Math.floor(w.wetAcc);
+        w.wetAcc -= n;
+        n = Math.min(n, 24);
+        const inv = 1 / (gs || 1);
+        for (let k = 0; k < n; k++) {
+          const f = (k + rng.float()) / n;
+          const px = prevCx + (cx - prevCx) * f - gvx * inv * 0.45;
+          const pz = prevCz + (cz - prevCz) * f - gvz * inv * 0.45;
+          const py = prevCy + (cy - prevCy) * f + 0.08;
+          const tb = t0 + (t1 - t0) * f;
+          // flung up and back off the tread, then carried along in the car's wake
+          setSpawn(px, py, pz, gvx * 0.55 + (rng.float() - 0.5) * 1.6, 0.9 + rng.float() * 1.6, gvz * 0.55 + (rng.float() - 0.5) * 1.6);
+          const g = 0.8 + rng.float() * 0.08;
+          spawnSoft(K_HAZE, tb, 0.7 + rng.float() * 0.9, 0.35, 1.6 + rng.float() * 1.8 + gs * 0.05, (0.07 + rng.float() * 0.05) * Math.min(1, wetness * 1.3), g, g * 1.01, g * 1.04, groundY);
+        }
+      }
       if (fxFlags & WHEEL_ROOST) {
         w.roostAcc += roostRate(gs, slip) * rateScale * dtSim;
         let n = Math.floor(w.roostAcc);
@@ -1217,6 +1245,9 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
     }
   };
 
+  // ------------------------------------------------------------ R-GFX weather (wet spray)
+  let wetness = 0;
+
   // ------------------------------------------------------------ lighting uniforms
   const updateLight = (): void => {
     light.uSunDir.value.copy(lighting.sunDirection);
@@ -1260,7 +1291,7 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
       for (const w of v.wheels) {
         w.strip = 0;
         w.valid = w.prevValid = false;
-        w.smokeAcc = w.smokeDist = w.sprayAcc = w.roostAcc = w.stampT = 0;
+        w.smokeAcc = w.smokeDist = w.sprayAcc = w.roostAcc = w.wetAcc = w.stampT = 0;
       }
     }
     lastDeathSoft = lastDeathBits = lastDeathSparks = -1e9;
@@ -1384,7 +1415,7 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
           hx: 0, hy: 0, hz: 0, cx: 0, cy: 0, cz: 0, valid: false, px: 0, py: 0, pz: 0, prevValid: false,
           wvx: 0, wvy: 0, wvz: 0, ahx: 1, ahz: 0, upright: false, groundY: 0,
           strip: 0, offT: 0, width: 0.2, tr: 1, tg: 1, tb: 1, sheen: 0, pcx: 0, pcz: 0, lx: 0, ly: 0, lz: 0, rx: 0, ry: 0, rz: 0, mx: 0, mz: 0, along: 0, lastS: 0,
-          smokeAcc: 0, smokeDist: 0, sprayAcc: 0, roostAcc: 0, stampT: 0,
+          smokeAcc: 0, smokeDist: 0, sprayAcc: 0, roostAcc: 0, wetAcc: 0, stampT: 0,
         };
       });
       const v: VehicleFx = {
@@ -1478,6 +1509,9 @@ export const createFxSystem: CreateFxSystem = (ctx, opts): FxSystem => {
     setSkidmarksFrozen(frozen: boolean): void {
       skid.frozen = frozen;
       if (!frozen) for (const v of vehicles) for (const w of v.wheels) w.strip = 0;
+    },
+    setWeather(w: { wetness: number; rain: number }): void {
+      wetness = Math.max(0, Math.min(1, w.wetness));
     },
     clear(): void {
       clearTransient();

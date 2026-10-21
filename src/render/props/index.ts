@@ -274,7 +274,8 @@ export const createPropRenderer: CreatePropRenderer = (ctx: RenderContext, insta
       const inst = new InstancedBufferAttribute(new Float32Array(16 * 4), 4);
       inst.setUsage(DynamicDrawUsage);
       geometry.setAttribute('propInst', inst);
-      const set = opts.patchMaterial(cloneBase(materials.base(slot)) as MeshStandardMaterial, { csm: opts.lighting.csm, flexbody: patch });
+      // R-GFX: lamp lenses glow by night (env lamp option), dim by day
+      const set = opts.patchMaterial(cloneBase(materials.base(slot)) as MeshStandardMaterial, { csm: opts.lighting.csm, flexbody: patch, env: slot === 'lampLens' ? { lamp: 0.08 } : {} });
       set.color.shadowSide = DoubleSide;
       const mesh = new Mesh(geometry, set.color);
       if (set.depth) mesh.customDepthMaterial = set.depth;

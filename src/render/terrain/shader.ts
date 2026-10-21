@@ -272,6 +272,9 @@ vec3 tNormalW;
 float tRough;
 float tAO;
 float tSpec = uTSpec;
+// R-GFX wet film capacity (envPatch 'ground' mode): sealed / rock / packed ground holds a glossy water film, turf does not.
+float tWetFilm = 1.0;
+#define CRUMPLE_WET_FILM tWetFilm
 {
   vec3 P = vTPos;
   vec3 dPdx = dFdx(P);
@@ -304,6 +307,7 @@ float tSpec = uTSpec;
     w[1] += mv * (1.0 - clamp(rockShare, 0.0, 1.0));
   }
   float concrete = texture(tTConcrete, gridUv).r;
+  tWetFilm = 1.0 - (w[4] + 0.45 * w[1]) * (1.0 - concrete);
   // Concrete cast slabs (6 m): per-slab tone + antialiased saw-cut joints
   // (derivatives taken here, in uniform control flow).
   vec2 slab = P.xz / 6.0 + 0.5;

@@ -258,6 +258,7 @@ describe('shader patches compose with three r185 chunks', () => {
       expect(shader.vertexShader + shader.fragmentShader).not.toContain(`#include <${chunk}>`);
     }
     expect(shader.vertexShader).toContain('uniform vec4 uImpVar[6];');
-    expect(shader.fragmentShader).toContain('totalEmissiveRadiance +=');
+    // R-GFX: leaf translucency is shadowed direct light after the light loop (not unshadowed emissive)
+    expect(shader.fragmentShader).toContain('reflectedLight.directDiffuse += vegTrans');
   });
 });

@@ -945,10 +945,13 @@ export function createFlexSkin(binding: BindingSet, opts: FlexSkinOptions & Flex
       const geometry = buildSkinGeometry(parts, single ? 'single' : 'full');
       geometries.push(geometry);
       const base = opts.materials.base(first.panel.material as Parameters<typeof opts.materials.base>[0]);
+      const slot = first.panel.material;
       const set = opts.patchMaterial(cloneBaseMaterial(base), {
         csm,
         flexbody: single ? patchSingle : patch,
         damage: damagePatch ?? undefined,
+        // R-GFX rain: beads on the paint; the cabin stays dry
+        env: { wet: slot === 'paint' ? 'paint' : slot === 'interior' || slot === 'interiorTrim' ? 'none' : 'generic' },
       });
       // Panels are open shells: both faces must reach the shadow map.
       set.color.shadowSide = DoubleSide;

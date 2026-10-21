@@ -1,57 +1,53 @@
 /**
  * Lighting stack (contract: render/types.ts CreateLightingStack).
  *
- *  - HDRI (kiara_1_dawn), graded once on the CPU (white balance ENV_GRADE,
- *    soft highlight shoulder ENV_SHOULDER, scale ENV_SCALE against the sun)
- *    → PMREM → scene.environment (reflections + IBL fill).
- *  - Sky dome: the same graded HDRI drawn at infinity, a haze band at the
- *    horizon that is exactly the fog colour model below, and an analytic sun
- *    disc + corona at the key light. Sky, IBL and fog all follow
- *    scene.environmentIntensity.
- *  - Sun: direction estimated from the HDRI's brightest REGION (energy per
- *    solid-angle bin, so the moon/specks lose to the dawn glow), azimuth kept,
- *    elevation lifted to ≥ SUN_MIN_ELEVATION_DEG (the kiara sun sits behind
- *    the ridge at ~5°: at that angle flat ground gets 9 % of the key light).
+ *  - TIME OF DAY + WEATHER (lighting/environment.ts): the stack owns the
+ *    EnvironmentController (`stack.env`); sun and moon come from the time
+ *    (lighting/astro.ts), the key light from their transmittance through the
+ *    atmosphere (lighting/atmosphere.ts): the sun by day, the moon (cool, dim,
+ *    lifted by eye adaptation) by night, dimmed by cloud cover.
+ *  - SKY (lighting/sky.ts): Hillaire 2020 physically based atmosphere —
+ *    transmittance + multiple-scattering LUTs, a sky-view LUT re-rendered as
+ *    the sun moves, a dome with the sun disc, moon, stars and Milky Way.
+ *  - IBL: the same sky (plus a lit ground hemisphere) captured into a cube
+ *    and PMREM-filtered into one persistent target at a low cadence (sun moved
+ *    > IBL_RECAPTURE_DEG or the weather changed).
  *  - CSM (three/examples CSM) with custom practical splits, per-cascade
- *    normal bias in shadow texels, fade on.
- *  - Exponential HEIGHT fog with sun in-scattering. Implemented by replacing
- *    three's global fog_* chunks while the stack lives (scene.fog stays a
- *    FogExp2 so fogColor/fogDensity uniforms and n8ao's fog-aware AO keep
- *    working). Constants for the height falloff and sun lobe are baked into
- *    the chunk at creation: create the stack before compiling materials.
+ *    normal bias in shadow texels, fade on; the cascade lights follow the key
+ *    light's direction, colour and intensity.
+ *  - Exponential HEIGHT fog + AERIAL PERSPECTIVE: three's global fog_* chunks
+ *    are replaced while the stack lives (scene.fog stays a FogExp2 so the
+ *    fogDensity uniform and n8ao's fog-aware AO keep working). World-lit
+ *    materials (patchMaterial's env patch, lighting/envPatch.ts) fade toward
+ *    the sky-view LUT radiance in each fog ray's direction with Rayleigh +
+ *    height-Mie extinction; everything else mixes toward scene.fog.color (the
+ *    sky's mean horizon radiance, read back asynchronously).
  *
  * Every lit material must be patched with patchMaterial({ csm }): CSM's
  * global lights_* chunks make an UNPATCHED lit material sum all cascade
  * lights (N× too bright) — not only "no cascaded shadows".
+ *
+ * The HDRI helpers below (analysis, grading) are kept for the dev pages and
+ * the studio; the world sky is procedural.
  */
 import {
-  BackSide,
-  BoxGeometry,
   Color,
-  DataTexture,
   DataUtils,
-  EquirectangularReflectionMapping,
   DirectionalLight,
-  Euler,
-  FloatType,
   FogExp2,
-  HalfFloatType,
-  LinearFilter,
-  LinearSRGBColorSpace,
-  Matrix3,
-  Matrix4,
-  Mesh,
-  PMREMGenerator,
-  RGBAFormat,
   ShaderChunk,
-  ShaderMaterial,
-  SRGBColorSpace,
   Vector3,
 } from 'three';
-import type { Camera, Material, Object3D, Texture, WebGLRenderer } from 'three';
+import type { Camera, Material, Object3D, WebGLRenderer } from 'three';
 import { CSM } from 'three/examples/jsm/csm/CSM.js';
 
-import { loadEnvironmentHDR } from '../assets/loader';
+import { hourForSunElevation, moonDirectionAt, moonIllumination, sunDirectionAt } from './lighting/astro';
+import { ATMOSPHERE_BASE_ALTITUDE_M, bodyIlluminance, smoothstep, SUN_ILLUMINANCE_TOA } from './lighting/atmosphere';
+import { createCloudSystem, type CloudFrame } from './lighting/clouds';
+import { createEnvironment } from './lighting/environment';
+import { ENV_UNIFORMS } from './lighting/envPatch';
+import { createSkySystem } from './lighting/sky';
+import type { SkyFrameState, SkySystem } from './lighting/sky';
 import type { CreateLightingStack, LightingOptions, LightingStack, QualityPreset, RenderContext } from './types';
 
 // ============================================================ tuning
@@ -66,7 +62,7 @@ export const DEFAULT_SUN_INTENSITY = 6;
  * valley 800 m away (0.0012 washed the whole valley out from the summit).
  * Distant HDRI mountains fade through the sky's haze band, not this.
  */
-export const DEFAULT_FOG_DENSITY = 0.00045;
+export const DEFAULT_FOG_DENSITY = 0.00032;
 /** Height-fog falloff, 1/m: density halves every ln2/falloff ≈ 83 m of altitude. */
 export const FOG_HEIGHT_FALLOFF = 1 / 120;
 /** Altitude where fog density equals fogDensity, m. */
@@ -525,38 +521,20 @@ export function envYawFor(hdriDir: readonly number[], worldDir: readonly number[
 }
 
 // ============================================================ fog chunks (global while a stack lives)
-interface FogBake {
-  sunDir: Vector3;
-  sunColor: Color;
-  lobe: number;
-}
-
 const FOG_CHUNKS = ['fog_pars_vertex', 'fog_vertex', 'fog_pars_fragment', 'fog_fragment'] as const;
 type FogChunk = (typeof FOG_CHUNKS)[number];
 let savedFogChunks: Record<FogChunk, string> | null = null;
 
 const glslFloat = (x: number): string => (Number.isFinite(x) ? x.toPrecision(7) : '0.0').replace(/^(-?\d+)$/, '$1.0');
-const glslVec3 = (x: number, y: number, z: number): string => `vec3(${glslFloat(x)}, ${glslFloat(y)}, ${glslFloat(z)})`;
 
-/** GLSL for the shared haze colour model (fog + sky), with sun lobe constants baked. */
-function hazeGlsl(b: FogBake): string {
-  const h = new Vector3(b.sunDir.x, 0, b.sunDir.z).normalize();
-  return /* glsl */ `
-#ifndef CRUMPLE_HAZE
-#define CRUMPLE_HAZE
-const vec3 crumpleHazeSunDirH = ${glslVec3(h.x, 0, h.z)};
-const vec3 crumpleHazeSunColor = ${glslVec3(b.sunColor.r, b.sunColor.g, b.sunColor.b)};
-const float crumpleHazeLobe = ${glslFloat(b.lobe)};
-vec3 crumpleHaze( vec3 awayColor, vec3 dir ) {
-  vec2 dh = dir.xz;
-  float l = length( dh );
-  float c = l > 1e-4 ? max( dot( dh / l, crumpleHazeSunDirH.xz ), 0.0 ) : 0.0;
-  return mix( awayColor, crumpleHazeSunColor, pow( c, crumpleHazeLobe ) );
-}
-#endif`;
-}
-
-function installFogChunks(b: FogBake): void {
+/**
+ * Exponential HEIGHT fog for every fogged material. Env-patched (world-lit)
+ * materials get aerial perspective: Rayleigh + height-Mie extinction toward
+ * the sky radiance in the fog ray's own direction (sky-view LUT), so distant
+ * terrain fades into exactly the sky behind it at any time of day. Everything
+ * else (particles, unpatched helpers) mixes toward scene.fog.color.
+ */
+function installFogChunks(): void {
   if (!savedFogChunks) {
     savedFogChunks = {} as Record<FogChunk, string>;
     for (const k of FOG_CHUNKS) savedFogChunks[k] = ShaderChunk[k];
@@ -578,13 +556,11 @@ function installFogChunks(b: FogBake): void {
   varying vec3 vFogWorldOffset;
   #ifdef FOG_EXP2
     uniform float fogDensity;
-    ${hazeGlsl(b)}
   #else
     uniform float fogNear;
     uniform float fogFar;
   #endif
 #endif`;
-  // Exponential height fog: density(y) = fogDensity·exp(−b(y − y0)), integrated along the view ray.
   ShaderChunk.fog_fragment = /* glsl */ `
 #ifdef USE_FOG
   #ifdef FOG_EXP2
@@ -594,8 +570,14 @@ function installFogChunks(b: FogBake): void {
     float fogCamH = max( cameraPosition.y - ${glslFloat(FOG_BASE_HEIGHT)}, -200.0 );
     float fogRy = fogB * fogDir.y * fogDist;
     float fogShape = abs( fogRy ) > 1e-3 ? ( 1.0 - exp( - fogRy ) ) / fogRy : 1.0 - 0.5 * fogRy;
-    float fogFactor = 1.0 - exp( - fogDensity * fogDist * exp( - fogB * fogCamH ) * fogShape );
-    gl_FragColor.rgb = mix( gl_FragColor.rgb, crumpleHaze( fogColor, fogDir ), fogFactor );
+    float fogTauM = fogDensity * fogDist * exp( - fogB * fogCamH ) * fogShape;
+    #ifdef CRUMPLE_ENV
+      vec3 fogT = exp( - ( vec3( fogTauM ) + crumpleBetaR * fogDist ) );
+      vec3 fogSky = crumpleHaze( fogDir ) * crumpleEnvIntensity;
+      gl_FragColor.rgb = gl_FragColor.rgb * fogT + fogSky * ( 1.0 - fogT );
+    #else
+      gl_FragColor.rgb = mix( gl_FragColor.rgb, fogColor, 1.0 - exp( - fogTauM ) );
+    #endif
   #else
     float fogFactor = smoothstep( fogNear, fogFar, vFogDepth );
     gl_FragColor.rgb = mix( gl_FragColor.rgb, fogColor, fogFactor );
@@ -609,95 +591,66 @@ function restoreFogChunks(): void {
   savedFogChunks = null;
 }
 
-// ============================================================ sky dome
-function createSky(equirect: Texture, bake: FogBake, opts: { envRot: Matrix3; intensity: number }): Mesh<BoxGeometry, ShaderMaterial> {
-  const material = new ShaderMaterial({
-    name: 'crumple.sky',
-    side: BackSide,
-    depthWrite: false,
-    depthTest: true,
-    fog: false,
-    uniforms: {
-      tSky: { value: equirect },
-      uRot: { value: opts.envRot },
-      uIntensity: { value: opts.intensity },
-      uClamp: { value: SKY_RADIANCE_CLAMP * ENV_SCALE },
-      uHazeColor: { value: new Color() },
-      uHazeLow: { value: Math.sin((HAZE_LOW_DEG * Math.PI) / 180) },
-      uHazeHigh: { value: Math.sin((HAZE_HIGH_DEG * Math.PI) / 180) },
-      uSunDir: { value: bake.sunDir.clone() },
-      uSunColor: { value: new Color(1, 1, 1) },
-      uSunDisc: { value: 60 },
-      uSunCos: { value: Math.cos((0.45 * Math.PI) / 180) },
-    },
-    vertexShader: /* glsl */ `
-      varying vec3 vDir;
-      void main() {
-        vDir = position;
-        vec4 p = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
-        gl_Position = p.xyww; // on the far plane
-      }`,
-    fragmentShader: /* glsl */ `
-      #include <common>
-      ${hazeGlsl(bake)}
-      uniform sampler2D tSky;
-      uniform mat3 uRot;
-      uniform float uIntensity;
-      uniform float uClamp;
-      uniform vec3 uHazeColor;
-      uniform float uHazeLow;
-      uniform float uHazeHigh;
-      uniform vec3 uSunDir;
-      uniform vec3 uSunColor;
-      uniform float uSunDisc;
-      uniform float uSunCos;
-      varying vec3 vDir;
-      void main() {
-        vec3 d = normalize( vDir );
-        vec3 e = uRot * d;
-        vec2 uv = vec2( atan( e.z, e.x ) * RECIPROCAL_PI2 + 0.5, asin( clamp( e.y, -1.0, 1.0 ) ) * RECIPROCAL_PI + 0.5 );
-        vec3 sky = texture2D( tSky, uv ).rgb * uIntensity;
-        float l = dot( sky, vec3( 0.2126, 0.7152, 0.0722 ) );
-        sky *= min( 1.0, uClamp / max( l, 1e-5 ) );
-        float h = smoothstep( uHazeLow, uHazeHigh, d.y );
-        sky = mix( crumpleHaze( uHazeColor, d ), sky, h * h * ( 3.0 - 2.0 * h ) );
-        float cs = dot( d, uSunDir );
-        float disc = smoothstep( uSunCos - 4e-6, uSunCos + 4e-6, cs );
-        float corona = pow( max( cs, 0.0 ), 900.0 ) * 6.0 + pow( max( cs, 0.0 ), 60.0 ) * 0.6;
-        sky += uSunColor * ( disc * uSunDisc + corona ) * step( -0.02, d.y );
-        gl_FragColor = vec4( sky, 1.0 );
-        #include <colorspace_fragment>
-      }`,
-  });
-  const mesh = new Mesh(new BoxGeometry(1, 1, 1), material);
-  mesh.name = 'crumple.sky';
-  mesh.frustumCulled = false;
-  mesh.renderOrder = -1e6;
-  mesh.scale.setScalar(10);
-  mesh.matrixAutoUpdate = true;
-  return mesh;
+// ============================================================ time of day → light
+/** Moon illuminance at the top of the atmosphere (full moon), scene units: night stays dark, eye adaptation lifts it. */
+export const MOON_ILLUMINANCE_TOA = 0.045;
+/** Moonlight tint (the eye reads moonlight cool: Purkinje). */
+export const MOON_TINT: readonly [number, number, number] = [0.72, 0.84, 1.0];
+/** Direct light lost under full cloud cover (cloud shadows add the spatial part). */
+export const OVERCAST_DIRECT_LOSS = 0.82;
+/** Height-fog density at fog = 1 (weather), 1/m: ~150 m visibility at the valley floor. */
+export const FOG_DENSITY_DENSE = 0.016;
+/** IBL capture: re-capture once the sun moved this far (deg) or the weather changed. */
+export const IBL_RECAPTURE_DEG = 0.5;
+export const IBL_MIN_INTERVAL_S = 0.3;
+/** Analytic Mie glow of the haze toward the sun, × the key light (sky-SH haze cannot hold the sharp forward lobe). */
+export const HAZE_GLOW_STRENGTH = 0.035;
+/** Ground albedo for the IBL's lower hemisphere (grass / dirt / asphalt mix). */
+export const IBL_GROUND_ALBEDO: readonly [number, number, number] = [0.11, 0.12, 0.085];
+
+/** IBL cube face size per preset. */
+export function envSizeFor(q: QualityPreset): number {
+  return q.level === 'low' ? 64 : q.level === 'ultra' ? 256 : 128;
 }
 
-/** Returns `tex` if it already holds half/float data, else a linear HalfFloat copy (and disposes `tex`). */
-function toHalfFloatEquirect(tex: Texture): Texture {
-  if (tex.type === HalfFloatType || tex.type === FloatType) return tex;
-  const img = tex.image as { width: number; height: number; data: ArrayLike<number> };
-  const n = img.width * img.height;
-  const out = new Uint16Array(n * 4);
-  const srgb = tex.colorSpace === SRGBColorSpace;
-  for (let i = 0; i < n * 4; i += 4) {
-    for (let k = 0; k < 3; k++) {
-      const v = img.data[i + k]! / 255;
-      out[i + k] = DataUtils.toHalfFloat(srgb ? srgbLut[img.data[i + k]!]! : v);
-    }
-    out[i + 3] = DataUtils.toHalfFloat(1);
-  }
-  const copy = new DataTexture(out, img.width, img.height, RGBAFormat, HalfFloatType);
-  copy.mapping = EquirectangularReflectionMapping;
-  copy.colorSpace = LinearSRGBColorSpace;
-  tex.dispose();
-  return copy;
+export interface KeyLight {
+  /** Toward the light (sun by day, moon by night). */
+  dir: Vector3;
+  color: Color;
+  intensity: number;
+  isMoon: boolean;
 }
+
+const tmpA: [number, number, number] = [0, 0, 0];
+const tmpB: [number, number, number] = [0, 0, 0];
+
+/**
+ * Key light for sun / moon positions and cloud cover (pure apart from three
+ * value types). The sun owns the key light down to −1.7° elevation (its
+ * illuminance is already ~0 at −0.6°); below, the moon fades in by −5.7°.
+ */
+export function keyLightFor(sunDir: Vector3, moonDir: Vector3, moonFraction: number, cloudCover: number, out: KeyLight): KeyLight {
+  // broken cumulus shades through the cloud-shadow map; only a closing deck dims the light everywhere
+  const direct = 1 - OVERCAST_DIRECT_LOSS * smoothstep(0.7, 1.0, cloudCover);
+  if (sunDir.y > -0.03) {
+    bodyIlluminance([sunDir.x, sunDir.y, sunDir.z], SUN_ILLUMINANCE_TOA, ATMOSPHERE_BASE_ALTITUDE_M, tmpA);
+    out.dir.copy(sunDir);
+    out.isMoon = false;
+  } else {
+    bodyIlluminance([moonDir.x, moonDir.y, moonDir.z], MOON_ILLUMINANCE_TOA * moonFraction, ATMOSPHERE_BASE_ALTITUDE_M, tmpA);
+    const fade = smoothstep(-0.03, -0.1, sunDir.y);
+    tmpA[0] *= MOON_TINT[0] * fade;
+    tmpA[1] *= MOON_TINT[1] * fade;
+    tmpA[2] *= MOON_TINT[2] * fade;
+    out.dir.copy(moonDir.y > 0.02 ? moonDir : tmpV.set(moonDir.x, 0.02, moonDir.z).normalize());
+    out.isMoon = true;
+  }
+  const m = Math.max(tmpA[0], tmpA[1], tmpA[2], 1e-9);
+  out.color.setRGB(tmpA[0] / m, tmpA[1] / m, tmpA[2] / m);
+  out.intensity = m * direct;
+  return out;
+}
+const tmpV = new Vector3();
 
 // ============================================================ CSM plumbing
 /** Runtime members missing from @types/three (JS names are underscored). */
@@ -714,79 +667,51 @@ export const createLightingStack: CreateLightingStack = async (ctx: RenderContex
   const { renderer, scene } = ctx;
   renderer.shadowMap.enabled = true;
 
-  const env = await loadEnvironmentHDR(opts.hdri ?? 'kiara_1_dawn');
-  // The grade scales radiance far below 1: keep everything in half float (the procedural fallback is sRGB8).
-  const equirect = toHalfFloatEquirect(env.texture);
-  // Procedural fallback is a DataTexture written zenith-first; HDRLoader flips its rows the same way.
-  equirect.flipY = true;
-  equirect.magFilter = LinearFilter;
-  equirect.minFilter = LinearFilter;
-  equirect.generateMipmaps = false;
-  equirect.needsUpdate = true;
+  // The fog chunks must be in place before any material compiles.
+  installFogChunks();
+  const env = createEnvironment({ time: opts.time, timeSpeed: opts.timeSpeed, preset: opts.weather });
+  const clouds = createCloudSystem(ctx.quality.level);
+  ENV_UNIFORMS.crumpleCloudShadow.value = clouds.shadowTexture;
+  const sky = createSkySystem(renderer, { envSize: envSizeFor(ctx.quality), cloudUniforms: clouds.domeUniforms });
+  scene.add(sky.dome);
 
-  const img = equirect.image as { width: number; height: number; data: ArrayLike<number> };
-  const view: EquirectImage = {
-    width: img.width,
-    height: img.height,
-    data: img.data,
-    encoding: equirect.type === HalfFloatType ? 'half' : equirect.type === FloatType ? 'float' : 'srgb8',
-    channels: 4,
+  // ---- key light (sun by day, moon by night)
+  const fixedSun = opts.sunDirection ? new Vector3(...opts.sunDirection).normalize() : null;
+  const sunDir = new Vector3();
+  const moonDir = new Vector3();
+  const key: KeyLight = { dir: new Vector3(), color: new Color(), intensity: 0, isMoon: false };
+  const placeBodies = (): void => {
+    if (fixedSun) sunDir.copy(fixedSun);
+    else sunDir.fromArray(sunDirectionAt(env.time, tmpB));
+    moonDir.fromArray(moonDirectionAt(env.time, tmpB));
+    keyLightFor(sunDir, moonDir, moonIllumination(), env.weather.cloudCover, key);
+    if (opts.sunColor !== undefined && !key.isMoon) key.color.setHex(opts.sunColor, 'srgb-linear');
+    if (opts.sunIntensity !== undefined && !key.isMoon) key.intensity = opts.sunIntensity;
   };
-  // Analyse the graded-but-unclamped sky (the clamp would flatten the sun search), then clamp.
-  gradeEquirect(view, ENV_GRADE);
-  const analysis = analyzeEquirect(view);
-  gradeEquirect(view, [ENV_SCALE, ENV_SCALE, ENV_SCALE], ENV_SHOULDER);
-
-  // ---- sun
-  const hdriSun = liftSunElevation(analysis.sunDirection, SUN_MIN_ELEVATION_DEG);
-  const sunDirection = new Vector3(...(opts.sunDirection ?? hdriSun)).normalize();
-  const yaw = opts.sunDirection ? envYawFor(analysis.sunDirection, opts.sunDirection) : 0;
-  scene.environmentRotation.set(0, yaw, 0);
-  const envRot = new Matrix3().setFromMatrix4(new Matrix4().makeRotationFromEuler(new Euler(0, yaw, 0))).transpose();
-
-  const sunColor = new Color().setHex(opts.sunColor ?? DEFAULT_SUN_COLOR, 'srgb-linear');
-  const sunIntensity = opts.sunIntensity ?? DEFAULT_SUN_INTENSITY;
+  placeBodies();
+  /** Toward the key light (contract: `sunDirection`; the moon's at night). */
+  const sunDirection = key.dir.clone();
+  const sunColor = key.color.clone();
+  let sunIntensity = key.intensity;
   const sun = new DirectionalLight(sunColor, sunIntensity);
   sun.name = 'crumple.sun';
   sun.position.copy(sunDirection).multiplyScalar(500);
   sun.target.position.set(0, 0, 0);
 
-  // ---- environment
+  // ---- environment (IBL) + fog
   const envIntensity = opts.envIntensity ?? 1;
-  const pmrem = new PMREMGenerator(renderer);
-  const envRT = pmrem.fromEquirectangular(equirect);
-  pmrem.dispose();
-  const environment = envRT.texture;
-  scene.environment = environment;
   scene.environmentIntensity = envIntensity;
   scene.background = null;
-
-  // ---- haze model (fog colour = HDRI horizon band away from the sun; lobe toward it)
-  const hazeAway = new Color(...analysis.horizonAway).multiplyScalar(ENV_SCALE); // × scene.environmentIntensity at use
-  const hazeSun = new Color(...analysis.horizonSun).multiplyScalar(ENV_SCALE * envIntensity);
-  // the horizon toward a low sun can be 10× the away side: cap so fogged terrain never outshines the sky
-  const capL = Math.max(hazeAway.r, hazeAway.g, hazeAway.b) * HAZE_SUN_CAP;
-  const sunMax = Math.max(hazeSun.r, hazeSun.g, hazeSun.b);
-  if (sunMax > capL) hazeSun.multiplyScalar(capL / sunMax);
-  const bake: FogBake = { sunDir: sunDirection.clone(), sunColor: hazeSun, lobe: analysis.horizonLobe };
-  installFogChunks(bake);
-
-  const fogDensity = opts.fogDensity ?? DEFAULT_FOG_DENSITY;
+  const baseFog = opts.fogDensity ?? DEFAULT_FOG_DENSITY;
   const prevFog = scene.fog;
-  scene.fog = fogDensity > 0 ? new FogExp2(hazeAway.clone().multiplyScalar(envIntensity), fogDensity) : null;
-
-  // ---- sky
-  const sky = createSky(equirect, bake, { envRot, intensity: envIntensity });
-  sky.material.uniforms.uHazeColor!.value = hazeAway.clone().multiplyScalar(envIntensity);
-  (sky.material.uniforms.uSunColor!.value as Color).setRGB(...analysis.sunColor).lerp(sunColor, 0.5);
-  scene.add(sky);
+  const fog = baseFog > 0 ? new FogExp2(0x9aa8b8, baseFog) : null;
+  scene.fog = fog;
 
   // ---- CSM (fallback: a single shadowed sun when texture units are scarce)
   const maxTextures = renderer.capabilities.maxTextures;
   const useCsm = maxTextures >= 16;
   let quality = ctx.quality;
   let csm: CSM | null = null;
-  const lightDirection = sunDirection.clone().negate();
 
   const styleCsmLights = (): void => {
     if (!csm) return;
@@ -805,6 +730,17 @@ export const createLightingStack: CreateLightingStack = async (ctx: RenderContex
       l.name = `crumple.csm${i}`;
     });
   };
+  const colourCsmLights = (): void => {
+    if (!csm) {
+      sun.color.copy(sunColor);
+      sun.intensity = sunIntensity;
+      return;
+    }
+    for (const l of csm.lights) {
+      l.color.copy(sunColor);
+      l.intensity = sunIntensity;
+    }
+  };
 
   /** csm.updateFrustums + the throttled cascades' margin (CSM re-fits the boxes from scratch each call). */
   const fitCascades = (): void => {
@@ -812,7 +748,6 @@ export const createLightingStack: CreateLightingStack = async (ctx: RenderContex
     csm.updateFrustums();
     csm.lights.forEach((l, i) => {
       if (i < CSM_THROTTLE_FROM) return;
-      // throttled cascades: a little extra extent so a one-frame-old box still covers the slice
       const cam = l.shadow.camera;
       const mx = (cam.right - cam.left) * CSM_THROTTLE_MARGIN;
       const my = (cam.top - cam.bottom) * CSM_THROTTLE_MARGIN;
@@ -836,7 +771,7 @@ export const createLightingStack: CreateLightingStack = async (ctx: RenderContex
         cascadeSplits(n, near, far, CSM_SPLIT_LAMBDA, breaks);
       },
       shadowMapSize: quality.shadowMapSize,
-      lightDirection,
+      lightDirection: sunDirection.clone().negate(),
       lightIntensity: sunIntensity,
       lightNear: 1,
       lightFar: lightFarFor(quality),
@@ -886,8 +821,131 @@ export const createLightingStack: CreateLightingStack = async (ctx: RenderContex
     return changed;
   };
 
+  // ---- per-frame environment derivation
+  const skyState: SkyFrameState = {
+    sunDir,
+    moonDir,
+    cameraAltitude: 0,
+    starVisibility: 0,
+    moonIllumination: moonIllumination(),
+    time: 0,
+    ground: new Vector3(),
+  };
+  const fogColor = new Color();
+  const cloudFrame: CloudFrame = {
+    camPos: new Vector3(),
+    keyDir: new Vector3(),
+    keyColor: new Vector3(),
+    ambTop: new Vector3(),
+    ambBottom: new Vector3(),
+    cover: 0,
+    time: 0,
+  };
+  const lastIblSun = new Vector3(Number.NaN, 0, 0);
+  let lastIblWeather = Number.NaN;
+  let lastIblProbe = -2;
+  const iblHemi = [0, 0, 0];
+  let lastIblAt = -1e9;
+  let iblDirty = true;
+  let frameNo = 0;
+  const t0 = performance.now();
+  let lastEnvVersion = -1;
+
+  const deriveEnvironment = (camera: Camera): void => {
+    const w = env.weather;
+    placeBodies();
+    // key light: snap the CSM direction only when it moved (rotation shimmer), colour every frame
+    if (key.dir.angleTo(sunDirection) > 0.0004 || (key.isMoon && key.dir.distanceToSquared(sunDirection) > 1e-8)) {
+      sunDirection.copy(key.dir);
+      sun.position.copy(sunDirection).multiplyScalar(500);
+      if (csm) csm.lightDirection.copy(sunDirection).negate();
+    }
+    sunColor.copy(key.color);
+    sunIntensity = key.intensity;
+    colourCsmLights();
+
+    const nightness = smoothstep(-0.02, -0.16, sunDir.y);
+    const clear = 1 - w.cloudCover;
+    skyState.starVisibility = nightness * smoothstep(0.85, 0.35, w.cloudCover);
+    skyState.time = (performance.now() - t0) / 1000;
+    camera.getWorldPosition(tmpV);
+    skyState.cameraAltitude = tmpV.y;
+    // moonlit night sky: brighter under a high, full moon; a little brighter under cloud (town glow)
+    const moonUp = smoothstep(-0.05, 0.25, moonDir.y) * moonIllumination();
+    const nightK = 0.35 + 0.9 * moonUp;
+    ENV_UNIFORMS.crumpleNightZenith.value.set(0.0010, 0.0016, 0.0034).multiplyScalar(nightK * (0.6 + 0.4 * clear));
+    ENV_UNIFORMS.crumpleNightHorizon.value.set(0.0024, 0.0028, 0.0040).multiplyScalar(nightK);
+    ENV_UNIFORMS.crumpleMoonGlow.value.set(MOON_TINT[0], MOON_TINT[1], MOON_TINT[2]).multiplyScalar(0.004 * moonUp * clear);
+    // overcast deck: lit from above by what reaches the cloud tops, greyed
+    const sunUp = Math.max(sunDir.y + 0.08, 0);
+    const deckL = 0.06 * SUN_ILLUMINANCE_TOA * Math.min(1, sunUp * 1.6) * (0.35 + 0.65 * Math.min(1, sunUp * 3)) + 0.003 * nightK;
+    const cover = smoothstep(0.35, 1, w.cloudCover);
+    ENV_UNIFORMS.crumpleOvercast.value.set(deckL * 0.93, deckL * 0.97, deckL * 1.04, cover * 0.92);
+    ENV_UNIFORMS.crumpleEnvIntensity.value = scene.environmentIntensity;
+    ENV_UNIFORMS.crumpleLightGain.value = env.darkness;
+    ENV_UNIFORMS.crumpleWet.value.set(w.wetness, w.rain, skyState.time, 0);
+    // IBL ground: albedo × (direct + sky) / π
+    const hemi = sky.probe.hemisphere;
+    const keyE = sunIntensity * Math.max(sunDirection.y, 0);
+    skyState.ground.set(
+      IBL_GROUND_ALBEDO[0] * (keyE * sunColor.r / Math.PI + hemi[0]),
+      IBL_GROUND_ALBEDO[1] * (keyE * sunColor.g / Math.PI + hemi[1]),
+      IBL_GROUND_ALBEDO[2] * (keyE * sunColor.b / Math.PI + hemi[2]),
+    );
+    // clouds: lit by the key light, sky SH above (≈ zenith), the lit ground below
+    cloudFrame.camPos.copy(tmpV);
+    cloudFrame.keyDir.copy(sunDirection);
+    cloudFrame.keyColor.set(sunColor.r, sunColor.g, sunColor.b).multiplyScalar(sunIntensity / Math.max(1 - OVERCAST_DIRECT_LOSS * smoothstep(0.7, 1.0, w.cloudCover), 0.2));
+    const z = sky.probe.zenith;
+    const hm = sky.probe.hemisphere;
+    cloudFrame.ambTop.set(0.5 * (z[0] + hm[0]), 0.5 * (z[1] + hm[1]), 0.5 * (z[2] + hm[2])).multiplyScalar(Math.PI * 0.32);
+    // the ground's bounce under the cloud bases, mostly grey (a green field does not tint a cumulus)
+    const gl = (skyState.ground.x + skyState.ground.y + skyState.ground.z) / 3;
+    cloudFrame.ambBottom.set(gl, gl, gl).lerp(skyState.ground, 0.35).multiplyScalar(0.9);
+    cloudFrame.cover = w.cloudCover;
+    cloudFrame.time = env.clock; // drifts with live play only: a replay / pause shows the clouds it left
+    clouds.update(renderer, cloudFrame);
+    ENV_UNIFORMS.crumpleCloudRect.value.copy(clouds.shadowRect);
+    sky.update(skyState);
+    // haze of world-lit materials: the probed sky SH (windowed against ringing) + the sun's Mie glow
+    const sh = sky.probe.sh;
+    const win = [1, 0.92, 0.92, 0.92, 0.72, 0.72, 0.72, 0.72, 0.72];
+    for (let k = 0; k < 9; k++) ENV_UNIFORMS.crumpleHazeSH.value[k]!.set(sh[k]![0] * win[k]!, sh[k]![1] * win[k]!, sh[k]![2] * win[k]!);
+    const glowK = key.isMoon ? 0 : HAZE_GLOW_STRENGTH * clear;
+    ENV_UNIFORMS.crumpleHazeGlow.value.set(sunColor.r, sunColor.g, sunColor.b).multiplyScalar(sunIntensity * glowK);
+    // fog: the height-fog density follows the weather; its colour (unpatched materials, FX ambient) = the horizon
+    if (fog) {
+      fog.density = baseFog * (1 + 0.6 * w.cloudCover) + FOG_DENSITY_DENSE * w.fog * w.fog;
+      const hm = sky.probe.horizonMean;
+      fogColor.setRGB(hm[0], hm[1], hm[2]).multiplyScalar(scene.environmentIntensity);
+      fog.color.copy(fogColor);
+    }
+    // IBL re-capture: sun moved, weather changed, or night features faded
+    const wKey = w.cloudCover * 7 + skyState.starVisibility * 3 + w.fog;
+    if (lastIblSun.angleTo(sunDir) > (IBL_RECAPTURE_DEG * Math.PI) / 180 || Math.abs(wKey - lastIblWeather) > 0.03) iblDirty = true;
+    // the IBL ground is lit by the probed sky: a fresh probe that moved > 8 % re-captures it
+    if (sky.probe.age !== lastIblProbe) {
+      lastIblProbe = sky.probe.age;
+      const d = Math.abs(hemi[0] - iblHemi[0]!) + Math.abs(hemi[1] - iblHemi[1]!) + Math.abs(hemi[2] - iblHemi[2]!);
+      if (d > 0.08 * (hemi[0] + hemi[1] + hemi[2]) + 1e-6) iblDirty = true;
+    }
+    const now = skyState.time;
+    if (iblDirty && now - lastIblAt >= IBL_MIN_INTERVAL_S) {
+      sky.captureEnvironment();
+      iblHemi[0] = hemi[0];
+      iblHemi[1] = hemi[1];
+      iblHemi[2] = hemi[2];
+      lastIblSun.copy(sunDir);
+      lastIblWeather = wKey;
+      lastIblAt = now;
+      iblDirty = false;
+      if (scene.environment !== sky.environment) scene.environment = sky.environment;
+    }
+    if (frameNo % 12 === 0 || env.version !== lastEnvVersion) sky.readProbe();
+    lastEnvVersion = env.version;
+  };
+
   const fallbackTexel = new Vector3();
-  let lastEnvIntensity = Number.NaN;
   let disposed = false;
   let shadowFrame = 0;
   const lastCamPos = new Vector3(Number.NaN, 0, 0);
@@ -899,18 +957,15 @@ export const createLightingStack: CreateLightingStack = async (ctx: RenderContex
     get csm() {
       return csm;
     },
-    environment,
+    get environment() {
+      return sky.environment;
+    },
+    env,
     update(camera: Camera) {
+      frameNo++;
       camera.updateMatrixWorld();
-      sky.position.setFromMatrixPosition(camera.matrixWorld);
-      // sky + fog track scene.environmentIntensity so reflections, sky and haze always agree
-      const ei = scene.environmentIntensity;
-      if (ei !== lastEnvIntensity) {
-        lastEnvIntensity = ei;
-        sky.material.uniforms.uIntensity!.value = ei;
-        (sky.material.uniforms.uHazeColor!.value as Color).copy(hazeAway).multiplyScalar(ei);
-        if (scene.fog instanceof FogExp2) scene.fog.color.copy(hazeAway).multiplyScalar(ei);
-      }
+      sky.dome.position.setFromMatrixPosition(camera.matrixWorld);
+      deriveEnvironment(camera);
       if (csm) {
         if (csm.camera !== camera) {
           csm.camera = camera;
@@ -948,6 +1003,9 @@ export const createLightingStack: CreateLightingStack = async (ctx: RenderContex
     },
     setQuality(q: QualityPreset) {
       quality = q;
+      sky.setEnvironmentSize(envSizeFor(q));
+      clouds.setQuality(q.level);
+      if (scene.environment !== sky.environment) scene.environment = sky.environment;
       if (csm) reconfigureCsm(q);
       else {
         sun.shadow.mapSize.set(q.shadowMapSize, q.shadowMapSize);
@@ -965,40 +1023,48 @@ export const createLightingStack: CreateLightingStack = async (ctx: RenderContex
       }
       scene.remove(sun, sun.target);
       sun.dispose();
-      scene.remove(sky);
-      sky.geometry.dispose();
-      sky.material.dispose();
-      if (scene.environment === environment) scene.environment = null;
-      envRT.dispose();
-      equirect.dispose();
+      scene.remove(sky.dome);
+      if (scene.environment === sky.environment) scene.environment = null;
+      sky.dispose();
+      clouds.dispose();
       scene.fog = prevFog;
       restoreFogChunks();
     },
   };
 
+  // first frame's environment (the IBL exists before any material compiles against scene.environment)
+  deriveEnvironment(ctx.camera);
+  scene.environment = sky.environment;
+
   // debug handle for tools/dev pages (not part of the contract)
+  const analysisView = (): SkyAnalysis => {
+    const p = sky.probe;
+    return {
+      sunDirection: [sunDir.x, sunDir.y, sunDir.z],
+      sunColor: [key.color.r, key.color.g, key.color.b],
+      sunPeak: key.intensity,
+      horizonAway: p.horizon[2]!,
+      horizonSun: p.horizon[0]!,
+      horizonLobe: 8,
+      zenith: p.zenith,
+    };
+  };
   (stack as unknown as { debug: LightingDebug }).debug = {
-    analysis,
+    get analysis() {
+      return analysisView();
+    },
     sky,
-    hazeAway,
-    hazeSun,
-    procedural: env.procedural,
+    hazeAway: fogColor,
+    hazeSun: new Color(),
+    procedural: true,
+    key,
     setSunElevation(deg: number) {
-      const d = liftSunElevation([sunDirection.x, 0, sunDirection.z], deg);
-      const el = (deg * Math.PI) / 180;
-      const h = Math.hypot(d[0], d[2]) || 1;
-      sunDirection.set((d[0] / h) * Math.cos(el), Math.sin(el), (d[2] / h) * Math.cos(el));
-      sun.position.copy(sunDirection).multiplyScalar(500);
-      (sky.material.uniforms.uSunDir!.value as Vector3).copy(sunDirection);
-      if (csm) {
-        csm.lightDirection.copy(sunDirection).negate();
-        fitCascades();
-      }
+      // time of day whose sun reaches `deg` in the afternoon (or the closest noon/midnight)
+      const h = hourForSunElevation(deg, false);
+      env.setTime(h ?? (deg > 0 ? 12 : 0));
     },
     setSunColor(hex: number) {
-      sunColor.setHex(hex, 'srgb-linear');
-      sun.color.copy(sunColor);
-      styleCsmLights();
+      opts.sunColor = hex;
     },
   };
   return stack;
@@ -1006,11 +1072,12 @@ export const createLightingStack: CreateLightingStack = async (ctx: RenderContex
 
 /** Dev/test handle (not part of the contract). */
 export interface LightingDebug {
-  analysis: SkyAnalysis;
-  sky: Mesh<BoxGeometry, ShaderMaterial>;
+  readonly analysis: SkyAnalysis;
+  sky: SkySystem;
   hazeAway: Color;
   hazeSun: Color;
   procedural: boolean;
+  key: KeyLight;
   setSunElevation(deg: number): void;
   setSunColor(linearHex: number): void;
 }
@@ -1018,4 +1085,3 @@ export interface LightingDebug {
 export function lightingDebug(stack: LightingStack): LightingDebug {
   return (stack as unknown as { debug: LightingDebug }).debug;
 }
-

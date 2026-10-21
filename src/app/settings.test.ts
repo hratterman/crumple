@@ -20,7 +20,13 @@ describe('settings', () => {
       ambienceVolume: 0.8,
       muted: false,
       crashCam: true,
+      timeOfDay: DEFAULT_SETTINGS.timeOfDay,
+      timeSpeed: 0,
+      weather: 'clear',
     });
+    // R-GFX environment fields
+    expect(sanitizeSettings({ timeOfDay: 25.5, timeSpeed: 60, weather: 'rain' })).toMatchObject({ timeOfDay: 1.5, timeSpeed: 60, weather: 'rain' });
+    expect(sanitizeSettings({ timeOfDay: 'noon', timeSpeed: 7, weather: 'hail' })).toMatchObject({ timeOfDay: DEFAULT_SETTINGS.timeOfDay, timeSpeed: 0, weather: 'clear' });
     expect(sanitizeSettings({ engineVolume: 0.3, effectsVolume: 2, ambienceVolume: 'x', muted: true })).toMatchObject({ engineVolume: 0.3, effectsVolume: 1, ambienceVolume: 0.8, muted: true });
     expect(sanitizeSettings({ crashCam: false }).crashCam).toBe(false);
     expect(sanitizeSettings({ crashCam: 'no' }).crashCam).toBe(true);

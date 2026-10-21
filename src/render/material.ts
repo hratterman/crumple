@@ -11,10 +11,16 @@
  * patched material gets a customProgramCacheKey made of the prior key and
  * the feature keys, because the composed hook's toString() is identical for
  * all materials and would otherwise alias programs.
+ *
+ * R-GFX (additive): every material patched WITH a CSM (= world-lit) also gets
+ * the environment patch (lighting/envPatch.ts: aerial perspective, and the
+ * time-of-day / weather uniforms) after the PATCH_ORDER features, key
+ * `env:<ENV_PATCH_KEY>`; `features.env === false` opts out.
  */
 import { Material, MeshDepthMaterial, MeshDistanceMaterial, RGBADepthPacking } from 'three';
 import type { WebGLProgramParametersWithUniforms, WebGLRenderer } from 'three';
 
+import { envPatchFor } from './lighting/envUniforms';
 import { PATCH_ORDER } from './types';
 import type { MaterialFeatures, PatchedMaterialSet, PatchTarget, ShaderPatch } from './types';
 
@@ -101,6 +107,7 @@ export function patchMaterial<M extends Material>(material: M, features: Materia
   }
 
   const list = featureList(features);
+  if (csm && features.env !== false) list.push({ name: 'env', patch: envPatchFor(features.env ?? {}) });
   for (const f of list) keys.push(`${f.name}:${f.patch.key}`);
 
   const colorPatches = list.filter((f) => f.patch.targets.includes('color')).map((f) => f.patch);

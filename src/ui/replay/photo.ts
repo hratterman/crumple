@@ -25,6 +25,8 @@ export interface PhotoSettings {
   aspect: string;
   grid: boolean;
   scale: 1 | 2;
+  /** R-GFX: world time of day, local solar hours (the session seeds it from the world on entry). */
+  timeOfDay: number;
 }
 
 export const DEFAULT_PHOTO_SETTINGS: Readonly<PhotoSettings> = {
@@ -41,6 +43,7 @@ export const DEFAULT_PHOTO_SETTINGS: Readonly<PhotoSettings> = {
   aspect: 'free',
   grid: false,
   scale: 2,
+  timeOfDay: 17.25,
 };
 
 export interface PhotoHandlers {
@@ -180,6 +183,12 @@ export class PhotoPanel {
     this.slider(sec, 'exposure', 'Exposure', -2, 2, 0.05, (v) => `${v > 0 ? '+' : ''}${v.toFixed(1)} EV`);
     this.slider(sec, 'vignette', 'Vignette', 0, 1, 0.01, (v) => `${Math.round(v * 100)}`);
     this.slider(sec, 'grain', 'Film grain', 0, 1, 0.01, (v) => `${Math.round(v * 100)}`);
+    // ---- light (R-GFX): the sun, sky, shadows and lamps follow the world's time of day
+    sec = this.section(scroll, 'Light');
+    this.slider(sec, 'timeOfDay', 'Time of day', 0, 23.99, 0.05, (v) => {
+      const m = Math.round(v * 60) % 1440;
+      return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+    });
     // ---- frame
     sec = this.section(scroll, 'Frame');
     const chips = h('div', 'ph-chips', sec);

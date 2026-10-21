@@ -1,7 +1,12 @@
 /**
  * Post stack (contract: render/types.ts CreatePostStack).
  *
- *   RenderPass → N8AOPostPass → [Sanitize] → EffectPass(SMAA, Bloom, ToneMapping ACES, Vignette)
+ *   RenderPass → N8AOPostPass → Metering → [Sanitize] → EffectPass(SMAA, Bloom, Exposure, ToneMapping ACES, Vignette)
+ *
+ * R-GFX eye adaptation (post/exposure.ts): the Metering pass reduces the HDR
+ * frame to a 32×18 grid read back asynchronously; the adapted factor scales
+ * the frame in the Exposure effect (after bloom, before ACES) and divides the
+ * bloom threshold, so night scenes are lifted and lamps bloom.
  *
  * Sanitize (when bloom is on): a mirror-sharp surface reflecting the sun can
  * overflow the HalfFloat target (Inf) or produce NaN; bloom's mip blur then
@@ -40,6 +45,8 @@ import {
 import type { Effect } from 'postprocessing';
 import { N8AOPostPass } from 'n8ao';
 
+import { AutoExposure, ExposureEffect, MeteringPass } from './post/exposure';
+import { LensRainEffect } from './post/lensRain';
 import type { CreatePostStack, PostStack, QualityPreset, RenderContext } from './types';
 
 // ============================================================ tuning
@@ -141,10 +148,11 @@ export function aoSettings(q: QualityPreset): { aoSamples: number; denoiseSample
 }
 
 /** Effect list in the frozen order for the given flags (pure over effect instances). */
-export function orderedEffects<T>(flags: PostFlags, fx: { smaa: T; bloom: T; tone: T; vignette: T }): T[] {
+export function orderedEffects<T>(flags: PostFlags, fx: { smaa: T; bloom: T; exposure?: T; tone: T; vignette: T }): T[] {
   const out: T[] = [];
   if (flags.smaa) out.push(fx.smaa);
   if (flags.bloom) out.push(fx.bloom);
+  if (fx.exposure !== undefined) out.push(fx.exposure);
   out.push(fx.tone, fx.vignette);
   return out;
 }
@@ -179,15 +187,22 @@ export const createPostStack: CreatePostStack = (ctx: RenderContext): PostStack 
   ao.configuration.intensity = AO_INTENSITY;
   ao.configuration.depthAwareUpsampling = true;
   composer.addPass(ao);
+  // R-GFX eye adaptation: metering reads the HDR frame after AO (it never writes the composer's buffers)
+  const meter = new MeteringPass();
+  composer.addPass(meter);
+  const autoExposure = new AutoExposure();
 
   let toneMode: ToneMappingMode = TONE_MAPPING;
   let effectPass: EffectPass | null = null;
   let sanitizePass: ShaderPass | null = null;
-  let effects: { smaa: SMAAEffect; bloom: BloomEffect; tone: ToneMappingEffect; vignette: VignetteEffect } | null = null;
+  let effects: { smaa: SMAAEffect; bloom: BloomEffect; exposure: ExposureEffect; tone: ToneMappingEffect; vignette: VignetteEffect } | null = null;
   let flagsKey = '';
   // P7 photo mode: DoF in its own pass right before the EffectPass (SMAA and DoF are both convolution
   // effects and cannot share a pass); absent unless setDepthOfField is on, so the default path is unchanged.
   let dofPass: EffectPass | null = null;
+  // R-GFX: rain on the lens, its own pass at the end of the chain, only while it rains on a driving camera
+  let lensPass: EffectPass | null = null;
+  let lensEffect: LensRainEffect | null = null;
   let dofEffect: DepthOfFieldEffect | null = null;
   const placeDof = (): void => {
     if (!dofPass) return;
@@ -205,6 +220,7 @@ export const createPostStack: CreatePostStack = (ctx: RenderContext): PostStack 
       intensity: BLOOM_INTENSITY,
       radius: BLOOM_RADIUS,
     }),
+    exposure: new ExposureEffect(),
     tone: new ToneMappingEffect({ mode: toneMode }),
     vignette: new VignetteEffect({ offset: VIGNETTE_OFFSET, darkness: VIGNETTE_DARKNESS }),
   });
@@ -243,6 +259,11 @@ export const createPostStack: CreatePostStack = (ctx: RenderContext): PostStack 
     effectPass.dithering = true; // 8-bit output of half-float sky gradients bands without it
     composer.addPass(effectPass);
     placeDof();
+    if (lensPass) {
+      // keep the lens pass last after a rebuild
+      composer.removePass(lensPass);
+      composer.addPass(lensPass);
+    }
   };
 
   const setQuality = (q: QualityPreset): void => {
@@ -252,16 +273,57 @@ export const createPostStack: CreatePostStack = (ctx: RenderContext): PostStack 
   setQuality(ctx.quality);
   composer.setSize(Math.max(1, ctx.width), Math.max(1, ctx.height));
 
+  const applyExposure = (): void => {
+    if (!effects) return;
+    const f = autoExposure.value;
+    effects.exposure.exposure = f;
+    effects.exposure.purkinje = autoExposure.purkinje();
+    effects.bloom.luminanceMaterial.threshold = BLOOM_THRESHOLD / f;
+  };
   const stack: PostStack & { debug: PostDebug } = {
     composer,
     render(dtS: number) {
+      applyExposure();
       composer.render(dtS);
+      autoExposure.update(renderer, meter, dtS);
+    },
+    exposure: {
+      get value() {
+        return autoExposure.value;
+      },
+      snap() {
+        autoExposure.snapNext = 2;
+      },
+      get target() {
+        return autoExposure.target;
+      },
+      set(value: number, target?: number) {
+        autoExposure.set(value, target);
+      },
     },
     setSize(width: number, height: number) {
       // EffectComposer.setSize → renderer.setSize (keeps the renderer's pixel ratio) → every pass at drawing-buffer size
       composer.setSize(Math.max(1, width), Math.max(1, height));
     },
     setQuality,
+    setLensRain(amount: number, timeS: number) {
+      if (!(amount > 0.01)) {
+        if (lensPass) {
+          composer.removePass(lensPass);
+          lensPass.dispose();
+          lensPass = lensEffect = null;
+        }
+        return;
+      }
+      if (!lensPass || !lensEffect) {
+        lensEffect = new LensRainEffect();
+        lensPass = new EffectPass(camera, lensEffect);
+        composer.addPass(lensPass);
+        lensEffect.setSize(ctx.renderer.domElement.width, ctx.renderer.domElement.height);
+      }
+      lensEffect.amount = Math.min(1, amount);
+      lensEffect.time = timeS;
+    },
     setDepthOfField(opts) {
       if (!opts) {
         if (dofPass) {
@@ -286,11 +348,13 @@ export const createPostStack: CreatePostStack = (ctx: RenderContext): PostStack 
       effectPass?.dispose();
       sanitizePass?.dispose();
       ao.dispose();
+      meter.dispose();
       renderPass.dispose();
       composer.dispose();
     },
     debug: {
       ao,
+      autoExposure,
       get sanitize() {
         return sanitizePass;
       },
@@ -312,8 +376,9 @@ export const createPostStack: CreatePostStack = (ctx: RenderContext): PostStack 
 /** Dev/test handle (not part of the contract). */
 export interface PostDebug {
   readonly ao: N8AOPostPass;
+  readonly autoExposure: AutoExposure;
   readonly sanitize: ShaderPass | null;
-  readonly effects: { smaa: SMAAEffect; bloom: BloomEffect; tone: ToneMappingEffect; vignette: VignetteEffect } | null;
+  readonly effects: { smaa: SMAAEffect; bloom: BloomEffect; exposure: ExposureEffect; tone: ToneMappingEffect; vignette: VignetteEffect } | null;
   /** P7: the depth-of-field pass while setDepthOfField is on, else null. */
   readonly dof: EffectPass | null;
   setToneMapping(mode: ToneMappingMode): void;

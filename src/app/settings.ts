@@ -8,6 +8,7 @@
  */
 import type { TrafficDensity } from '../protocol/traffic';
 import { TRAFFIC_MAX_AGENTS } from '../protocol/traffic';
+import { DEFAULT_TIME_OF_DAY, WEATHER_PRESETS, type WeatherPreset } from '../render/lighting/environment';
 import type { StorageLike } from './quality';
 
 export const SETTINGS_KEY = 'crumple.settings.v1';
@@ -33,12 +34,20 @@ export interface GameSettings {
   muted: boolean;
   /** P7: a severe crash plays back as an instant replay (crash cam) before driving on. */
   crashCam: boolean;
+  /** R-GFX: time of day at load, local solar hours [0, 24). */
+  timeOfDay: number;
+  /** R-GFX: time progression, game seconds per real second (0 = frozen). */
+  timeSpeed: number;
+  /** R-GFX: weather preset. */
+  weather: WeatherPreset;
 }
 
 export const SPEED_UNITS: readonly SpeedUnits[] = ['kmh', 'mph'];
 export const TRAFFIC_SETTINGS: readonly TrafficSetting[] = ['off', 'light', 'normal', 'heavy'];
 export const CHASE_FRAMINGS: readonly ChaseFraming[] = ['near', 'normal', 'far'];
 export const FOV_CHOICES: readonly number[] = [55, 60, 65, 70, 75];
+/** R-GFX time progression choices (game s per real s): frozen, real time, 1 game min/s, 2, 10. */
+export const TIME_SPEED_CHOICES: readonly number[] = [0, 1, 60, 120, 600];
 
 export const DEFAULT_SETTINGS: Readonly<GameSettings> = {
   units: 'kmh',
@@ -52,6 +61,9 @@ export const DEFAULT_SETTINGS: Readonly<GameSettings> = {
   ambienceVolume: 0.8,
   muted: false,
   crashCam: true,
+  timeOfDay: DEFAULT_TIME_OF_DAY,
+  timeSpeed: 0,
+  weather: 'clear',
 };
 
 export const KMH_PER_MPH = 1.609344;
@@ -107,6 +119,9 @@ export function sanitizeSettings(raw: unknown): GameSettings {
     ambienceVolume: unit(o.ambienceVolume, d.ambienceVolume),
     muted: typeof o.muted === 'boolean' ? o.muted : d.muted,
     crashCam: typeof o.crashCam === 'boolean' ? o.crashCam : d.crashCam,
+    timeOfDay: typeof o.timeOfDay === 'number' && Number.isFinite(o.timeOfDay) ? ((o.timeOfDay % 24) + 24) % 24 : d.timeOfDay,
+    timeSpeed: pick(TIME_SPEED_CHOICES, o.timeSpeed, d.timeSpeed),
+    weather: pick(WEATHER_PRESETS, o.weather, d.weather),
   };
 }
 

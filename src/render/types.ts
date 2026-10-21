@@ -32,6 +32,8 @@ import type { EffectComposer } from 'postprocessing';
 import type { TerrainTextureSet } from '../assets/loader';
 import type { HdriName, TerrainSlug } from '../assets/manifest';
 import type { TerrainData, TerrainSampler } from '../world/types';
+import type { EnvironmentController, WeatherPreset } from './lighting/environment';
+import type { EnvOptions } from './lighting/envUniforms';
 
 // ============================================================ quality
 export type QualityLevel = 'low' | 'medium' | 'high' | 'ultra';
@@ -290,6 +292,12 @@ export interface LightingOptions {
   envIntensity?: number;
   /** Height-fog density (FogExp2) at the base height, 0 disables; default 0.00045 (gentle haze over 1.4 km). */
   fogDensity?: number;
+  /** R-GFX time of day: initial local solar hours (default DEFAULT_TIME_OF_DAY, golden afternoon). */
+  time?: number;
+  /** R-GFX: game seconds per real second (0 = frozen, the default). */
+  timeSpeed?: number;
+  /** R-GFX: initial weather preset (default 'clear'). */
+  weather?: WeatherPreset;
 }
 
 export interface LightingStack {
@@ -305,6 +313,11 @@ export interface LightingStack {
   readonly csm: CSM | null;
   /** PMREM-filtered environment (scene.environment). */
   readonly environment: Texture;
+  /**
+   * R-GFX (additive): time of day + weather controller (lighting/environment.ts).
+   * Absent on stand-in stacks (showroom studio, dev harnesses).
+   */
+  readonly env?: EnvironmentController;
   /** Fit cascades to the camera; call once per frame after the camera moved. */
   update(camera: Camera): void;
   /** Rebuild cascades / shadow maps for a new preset (re-patches CSM uniforms). */
@@ -333,6 +346,14 @@ export interface PostStack {
   setQuality(q: QualityPreset): void;
   /** Reserved P7 (photo mode / slow-mo DoF): null disables. */
   setDepthOfField?(opts: { focusDistance: number; focalLength: number; bokehScale: number } | null): void;
+  /**
+   * R-GFX (additive) eye adaptation: the current auto-exposure factor
+   * (applied after bloom, before tone mapping; renderer.toneMappingExposure
+   * stays the photo-mode EV) and `snap()` to skip the adaptation after a cut.
+   */
+  readonly exposure?: { readonly value: number; snap(): void; readonly target?: number; set?(value: number, target?: number): void };
+  /** R-GFX (additive): rain drops on the lens, 0 = off (the pass is removed). */
+  setLensRain?(amount: number, timeS: number): void;
   dispose(): void;
 }
 export type CreatePostStack = (ctx: RenderContext) => PostStack;
@@ -378,6 +399,13 @@ export interface MaterialFeatures {
   flexbody?: ShaderPatch;
   /** P4 damage (plastic strain → darken/roughen/normal perturb; uniforms + fragment chunks). Targets color only unless it displaces. */
   damage?: ShaderPatch;
+  /**
+   * R-GFX: the environment patch (aerial perspective + time-of-day / weather
+   * uniforms) is added automatically to every material patched with a CSM;
+   * false opts out (e.g. materials with their own sky handling); options:
+   * `lamp` = a lamp lens whose emissive runs at that fraction by day.
+   */
+  env?: false | EnvOptions;
 }
 
 /**

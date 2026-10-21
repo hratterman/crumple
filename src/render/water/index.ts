@@ -199,7 +199,7 @@ export const createWaterRenderer: CreateWaterRenderer = (ctx, bodies, terrain, o
     uniforms.uContacts.value = interaction.contacts;
     const material = createWaterMaterial(uniforms);
     material.userData.uniforms = uniforms; // console tuning
-    const set = opts.patchMaterial(material, { csm: opts.lighting.csm });
+    const set = opts.patchMaterial(material, { csm: opts.lighting.csm, env: { wet: 'none' } });
     const mesh = new Mesh(geometry, set.color);
     mesh.name = `water:${body.id}`;
     mesh.renderOrder = WATER_RENDER_ORDER;
@@ -219,7 +219,7 @@ export const createWaterRenderer: CreateWaterRenderer = (ctx, bodies, terrain, o
   // Reflection-only coarse terrain (replaces the terrain chunks + road ribbons in the planar pass).
   const proxy = draws.length ? buildReflectionProxy(terrain, bodies) : null;
   if (proxy) {
-    proxy.material = opts.patchMaterial(proxy.material, { csm: opts.lighting.csm }).color;
+    proxy.material = opts.patchMaterial(proxy.material, { csm: opts.lighting.csm, env: { wet: 'none' } }).color;
     object.add(proxy);
   }
   const hideInReflection: Object3D[] = [];

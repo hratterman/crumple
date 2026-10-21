@@ -34,7 +34,7 @@ import type { Texture, WebGLProgramParametersWithUniforms, WebGLRenderer } from 
 
 import type { ShaderPatch } from '../types';
 import type { VegMeshData } from './geometry';
-import { VEG_DITHER_GLSL, type VegUniforms } from './shader';
+import { foliageTranslucency, VEG_DITHER_GLSL, type VegUniforms } from './shader';
 
 export interface ImpostorAtlas {
   albedo: Texture;
@@ -347,22 +347,14 @@ ${VEG_DITHER_GLSL}`,
         '#include <lights_physical_fragment>',
         `#include <lights_physical_fragment>
   {
-    float vegSpec = mix(1.0, 0.3, impLeaf);
+    float vegSpec = mix(1.0, 0.14, impLeaf);
     material.specularColor *= vegSpec;
     material.specularColorBlended *= vegSpec;
     material.specularF90 *= vegSpec;
   }`,
       );
-      f = f.replace(
-        '#include <emissivemap_fragment>',
-        `#include <emissivemap_fragment>
-  {
-    vec3 sunV = normalize((viewMatrix * vec4(uVegSun, 0.0)).xyz);
-    float bl = max(dot(normalize(-vViewPosition), sunV), 0.0);
-    bl = bl * bl * bl;
-    totalEmissiveRadiance += diffuseColor.rgb * uVegSunCol * (bl * 0.28 + 0.035) * impLeaf;
-  }`,
-      );
+      // shadowed translucency after the light loop (impostors receive no crown self-shadow: weaker lobe)
+      f = f.replace('#include <lights_fragment_end>', foliageTranslucency('impLeaf', '0.6', 0.35, 0.05));
       shader.fragmentShader = f;
     },
   };
