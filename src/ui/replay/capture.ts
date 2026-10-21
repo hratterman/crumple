@@ -53,7 +53,8 @@ export function capturePhoto(deps: CaptureDeps, scale: number, aspect: number | 
     renderer.setPixelRatio(ratio);
     post.setSize(w, hgt);
     deps.resized?.();
-    deps.renderFrame();
+    // TAA: a still converges over one jitter cycle (the history restarted at the resize)
+    for (let i = 0, n = Math.max(1, post.stillFrames ?? 1); i < n; i++) deps.renderFrame();
     const src = renderer.domElement;
     const r = fitAspect(src.width, src.height, aspect);
     out.width = r.w;

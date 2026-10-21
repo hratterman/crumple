@@ -61,6 +61,10 @@ export interface QualityPreset {
   aoSamples: number;
   bloom: boolean;
   smaa: boolean;
+  /** R-GFX: temporal AA (jittered, reprojected with motion vectors); replaces SMAA when on. */
+  taa?: boolean;
+  /** R-GFX: motion blur strength (fraction of the frame's motion smeared; 0 = off, needs taa). */
+  motionBlur?: number;
   /** Multiplies terrain/road LOD switch distances (1 = TERRAIN_LOD_DISTANCES). */
   terrainLodBias: number;
   /** P5: 0..1 fraction of the vegetation instance budget (instance i drawn iff rank < density, or it is a collider). */
@@ -105,6 +109,8 @@ export const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualityPreset>> = {
     aoSamples: 8,
     bloom: false,
     smaa: true,
+    taa: true,
+    motionBlur: 0,
     terrainLodBias: 0.6,
     vegetationDensity: 0.25,
     particleBudget: 600,
@@ -130,6 +136,8 @@ export const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualityPreset>> = {
     aoSamples: 8,
     bloom: true,
     smaa: true,
+    taa: true,
+    motionBlur: 0,
     terrainLodBias: 1,
     vegetationDensity: 0.5,
     particleBudget: 1500,
@@ -155,6 +163,8 @@ export const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualityPreset>> = {
     aoSamples: 16,
     bloom: true,
     smaa: true,
+    taa: true,
+    motionBlur: 0.5,
     terrainLodBias: 1.4,
     vegetationDensity: 0.8,
     particleBudget: 3000,
@@ -180,6 +190,8 @@ export const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualityPreset>> = {
     aoSamples: 32,
     bloom: true,
     smaa: true,
+    taa: true,
+    motionBlur: 0.7,
     terrainLodBias: 2,
     vegetationDensity: 1,
     particleBudget: 6000,
@@ -354,6 +366,16 @@ export interface PostStack {
   readonly exposure?: { readonly value: number; snap(): void; readonly target?: number; set?(value: number, target?: number): void };
   /** R-GFX (additive): rain drops on the lens, 0 = off (the pass is removed). */
   setLensRain?(amount: number, timeS: number): void;
+  /**
+   * R-GFX (additive) temporal AA: the dynamic subtrees whose own motion the
+   * velocity pass draws this frame (player vehicle, pooled traffic); every
+   * other pixel reprojects through the depth buffer.
+   */
+  setMotionRoots?(roots: readonly (Object3D | null | undefined)[]): void;
+  /** R-GFX (additive): frames to render for a converged still (TAA accumulation; 1 without TAA). Photo capture renders this many. */
+  readonly stillFrames?: number;
+  /** R-GFX (additive): drop the TAA history (camera cut, teleport). */
+  resetHistory?(): void;
   dispose(): void;
 }
 export type CreatePostStack = (ctx: RenderContext) => PostStack;

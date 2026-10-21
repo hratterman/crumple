@@ -27,8 +27,8 @@
  * forced false. Exposure is renderer.toneMappingExposure: three uploads it to
  * every program that declares it, including the tone-mapping effect.
  */
-import { HalfFloatType, NoToneMapping, ShaderMaterial, SRGBColorSpace } from 'three';
-import type { Camera, Scene, WebGLRenderer } from 'three';
+import { HalfFloatType, Matrix4, NoToneMapping, ShaderMaterial, SRGBColorSpace, Vector2, Vector3 } from 'three';
+import type { Camera, PerspectiveCamera, Scene, WebGLRenderer } from 'three';
 import {
   BloomEffect,
   DepthOfFieldEffect,
@@ -47,6 +47,7 @@ import { N8AOPostPass } from 'n8ao';
 
 import { AutoExposure, ExposureEffect, MeteringPass } from './post/exposure';
 import { LensRainEffect } from './post/lensRain';
+import { applyJitter, createMotionVectors, jitterOffset, MotionBlurPass, TAA_SAMPLES, TAAPass, TaaState } from './post/taa';
 import type { CreatePostStack, PostStack, QualityPreset, RenderContext } from './types';
 
 // ============================================================ tuning
@@ -119,7 +120,7 @@ export interface PostFlags {
 
 /** Which effects a preset enables (pure; disabled effects are not in the pass). */
 export function postFlags(q: QualityPreset): PostFlags {
-  return { ao: q.aoEnabled, smaa: q.smaa, bloom: q.bloom, sanitize: q.bloom };
+  return { ao: q.aoEnabled, smaa: q.smaa && !q.taa, bloom: q.bloom, sanitize: q.bloom };
 }
 
 /** SMAA search quality per preset: the edge search dominates SMAA's cost on slow GPUs. */
@@ -191,6 +192,48 @@ export const createPostStack: CreatePostStack = (ctx: RenderContext): PostStack 
   const meter = new MeteringPass();
   composer.addPass(meter);
   const autoExposure = new AutoExposure();
+  // R-GFX temporal AA + motion blur (after AO + metering, on HDR, before bloom / tone mapping)
+  const taaState = new TaaState();
+  const motion = createMotionVectors();
+  let taaPass: TAAPass | null = null;
+  let blurPass: MotionBlurPass | null = null;
+  let frameIndex = 0;
+  const jitter = new Vector2();
+  const bufSize = new Vector2();
+  const savedProj = new Matrix4();
+  const lastCamPos = new Vector3();
+  const lastCamDir = new Vector3();
+  const camDir = new Vector3();
+  let haveCam = false;
+  const resetTemporal = (): void => {
+    if (taaPass) taaPass.reset = true;
+    taaState.reset();
+    haveCam = false;
+  };
+  const applyTemporal = (q: QualityPreset): void => {
+    const want = q.taa === true;
+    if (want && !taaPass) {
+      taaPass = new TAAPass(taaState, motion.texture);
+      composer.addPass(taaPass, composer.passes.indexOf(meter) + 1);
+    } else if (!want && taaPass) {
+      composer.removePass(taaPass);
+      taaPass.dispose();
+      taaPass = null;
+    }
+    const mb = taaPass ? (q.motionBlur ?? 0) : 0;
+    if (mb > 0 && taaPass) {
+      if (!blurPass) {
+        blurPass = new MotionBlurPass(taaState, motion.texture, mb);
+        composer.addPass(blurPass, composer.passes.indexOf(taaPass) + 1);
+      }
+      blurPass.strength = mb;
+    } else if (blurPass) {
+      composer.removePass(blurPass);
+      blurPass.dispose();
+      blurPass = null;
+    }
+    resetTemporal();
+  };
 
   let toneMode: ToneMappingMode = TONE_MAPPING;
   let effectPass: EffectPass | null = null;
@@ -269,9 +312,11 @@ export const createPostStack: CreatePostStack = (ctx: RenderContext): PostStack 
   const setQuality = (q: QualityPreset): void => {
     applyAo(q);
     rebuildEffects(q);
+    applyTemporal(q);
   };
   setQuality(ctx.quality);
   composer.setSize(Math.max(1, ctx.width), Math.max(1, ctx.height));
+  motion.setSize(...(renderer.getDrawingBufferSize(bufSize).toArray() as [number, number]));
 
   const applyExposure = (): void => {
     if (!effects) return;
@@ -284,9 +329,38 @@ export const createPostStack: CreatePostStack = (ctx: RenderContext): PostStack 
     composer,
     render(dtS: number) {
       applyExposure();
+      const cam = camera as PerspectiveCamera;
+      const temporal = taaPass !== null && cam.isPerspectiveCamera === true;
+      if (temporal) {
+        // a camera cut (director, respawn, photo-mode jump) restarts the history
+        cam.getWorldDirection(camDir);
+        if (haveCam && (cam.position.distanceToSquared(lastCamPos) > 12 * 12 || camDir.dot(lastCamDir) < 0.82)) resetTemporal();
+        taaState.update(cam);
+        motion.render(renderer, cam);
+        renderer.getDrawingBufferSize(bufSize);
+        jitterOffset(frameIndex++, jitter);
+        savedProj.copy(cam.projectionMatrix);
+        applyJitter(cam, jitter, bufSize.x, bufSize.y, 1);
+      }
       composer.render(dtS);
+      if (temporal) {
+        cam.projectionMatrix.copy(savedProj);
+        cam.projectionMatrixInverse.copy(savedProj).invert();
+        taaState.end();
+        motion.endFrame(cam);
+        lastCamPos.copy(cam.position);
+        lastCamDir.copy(camDir);
+        haveCam = true;
+      }
       autoExposure.update(renderer, meter, dtS);
     },
+    setMotionRoots(roots) {
+      motion.setRoots(roots);
+    },
+    get stillFrames() {
+      return taaPass ? TAA_SAMPLES : 1;
+    },
+    resetHistory: resetTemporal,
     exposure: {
       get value() {
         return autoExposure.value;
@@ -304,6 +378,8 @@ export const createPostStack: CreatePostStack = (ctx: RenderContext): PostStack 
     setSize(width: number, height: number) {
       // EffectComposer.setSize → renderer.setSize (keeps the renderer's pixel ratio) → every pass at drawing-buffer size
       composer.setSize(Math.max(1, width), Math.max(1, height));
+      motion.setSize(...(renderer.getDrawingBufferSize(bufSize).toArray() as [number, number]));
+      resetTemporal();
     },
     setQuality,
     setLensRain(amount: number, timeS: number) {
@@ -349,12 +425,19 @@ export const createPostStack: CreatePostStack = (ctx: RenderContext): PostStack 
       sanitizePass?.dispose();
       ao.dispose();
       meter.dispose();
+      taaPass?.dispose();
+      blurPass?.dispose();
+      motion.dispose();
       renderPass.dispose();
       composer.dispose();
     },
     debug: {
       ao,
       autoExposure,
+      get taa() {
+        return taaPass;
+      },
+      motion,
       get sanitize() {
         return sanitizePass;
       },
@@ -377,6 +460,8 @@ export const createPostStack: CreatePostStack = (ctx: RenderContext): PostStack 
 export interface PostDebug {
   readonly ao: N8AOPostPass;
   readonly autoExposure: AutoExposure;
+  readonly taa: TAAPass | null;
+  readonly motion: ReturnType<typeof createMotionVectors>;
   readonly sanitize: ShaderPass | null;
   readonly effects: { smaa: SMAAEffect; bloom: BloomEffect; exposure: ExposureEffect; tone: ToneMappingEffect; vignette: VignetteEffect } | null;
   /** P7: the depth-of-field pass while setDepthOfField is on, else null. */
