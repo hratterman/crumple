@@ -19,7 +19,7 @@ import { addBuilding, buildingAttrs, createFacadeMaterial, createRoofMaterial, n
 import { createItems, type ItemsRenderer } from './items';
 import { addCables, addDecals, addPuddles, addStrips, buildSigns, decalMaterial, puddleMaterial } from './surfaces';
 import { Geo as GeoBuilder } from './geo';
-import { addAreaColliders, addAreaRecords, addAreaStrips, type AreaGeos, type TextBoard } from './areas';
+import { addAreaColliders, addAreaRecords, addAreaStrips, type AreaGeos, type GeoAt, type TextBoard } from './areas';
 
 export interface WorldContentRendererOptions {
   lighting: LightingStack;
@@ -74,20 +74,34 @@ export function createWorldContentRenderer(
     me.updateMatrixWorld(true);
     root.add(me);
   };
-  // Mode-area solids, barriers and free-standing structures share the structure materials (+ painted).
-  const ag: AreaGeos = { concrete: sg.concrete, concreteDark: sg.concreteDark, steel: sg.steel, painted: new GeoBuilder(true), lamp: sg.lamp };
+  // Mode-area solids, barriers and free-standing structures: the structure materials (+ painted), batched
+  // per AREA_CELL_M cell so off-screen cells frustum- and shadow-cull (tyre walls alone are ~150 k tris).
+  const AREA_CELL_M = 256;
+  const cells = new Map<string, AreaGeos>();
+  const geoAt: GeoAt = (x, z) => {
+    const key = `${Math.floor(x / AREA_CELL_M)},${Math.floor(z / AREA_CELL_M)}`;
+    let g = cells.get(key);
+    if (!g) cells.set(key, (g = { concrete: new GeoBuilder(), concreteDark: new GeoBuilder(), steel: new GeoBuilder(), painted: new GeoBuilder(true), lamp: new GeoBuilder() }));
+    return g;
+  };
   const boards: TextBoard[] = [];
-  addAreaColliders(ag, resolved);
+  addAreaColliders(geoAt, resolved);
   if (content.render) {
-    addAreaStrips(ag, content.render.strips);
-    addAreaRecords(ag, content.render.structures, boards);
+    addAreaStrips(geoAt, content.render.strips);
+    addAreaRecords(geoAt, content.render.structures, boards);
   }
   add(sg.concrete, mats.concrete, 'concrete');
   add(sg.concreteDark, mats.concreteDark, 'concreteDark');
   add(sg.tile, mats.tile, 'tile', false);
   add(sg.steel, mats.steel, 'steel');
   add(sg.lamp, mats.lamp, 'lamp', false);
-  add(ag.painted, mats.painted, 'painted');
+  for (const [key, g] of cells) {
+    add(g.concrete, mats.concrete, `area:${key}:concrete`);
+    add(g.concreteDark, mats.concreteDark, `area:${key}:concreteDark`);
+    add(g.steel, mats.steel, `area:${key}:steel`);
+    add(g.painted, mats.painted, `area:${key}:painted`);
+    add(g.lamp, mats.lamp, `area:${key}:lamp`, false);
+  }
   if (sg.shade.vertexCount > 0) {
     // Shadow-only: writes nothing in the colour pass (one empty draw), casts in every cascade.
     const shadeMat = new MeshBasicMaterial({ colorWrite: false, depthWrite: false });

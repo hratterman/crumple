@@ -19,6 +19,9 @@ export interface AreaGeos {
   lamp: Geo;
 }
 
+/** The geometry set of the spatial cell holding (x, z) (per-cell batches cull and shadow-cull). */
+export type GeoAt = (x: number, z: number) => AreaGeos;
+
 /** A text board for the sign atlas (gantry signs, arches, banners). */
 export interface TextBoard {
   text: string;
@@ -63,10 +66,11 @@ function walk(pts: readonly V3[], step: number, fn: (p: V3, t: V3, s: number) =>
   }
 }
 
-export function addAreaStrips(g: AreaGeos, strips: readonly StripInstance[]): void {
+export function addAreaStrips(geoAt: GeoAt, strips: readonly StripInstance[]): void {
   for (const st of strips) {
     const pts = polyline(st);
     if (pts.length < 2) continue;
+    const g = geoAt(pts[0]![0], pts[0]![2]);
     switch (st.kind) {
       case 'armco': {
         // W-beam (two ribs + flat) 0.31 m tall at 0.45–0.76 m on C-posts every 2 m, faced toward the road side.
@@ -114,7 +118,7 @@ export function addAreaStrips(g: AreaGeos, strips: readonly StripInstance[]): vo
             for (let h = 0; h < 4; h++) {
               g.painted.color = h === 3 && k % 4 === 0 ? linear(0xe8e8e4) : h === 3 && k % 4 === 2 ? linear(0xc8281e) : linear(0x1d1e20);
               const y0 = c[1] - 0.05 + h * 0.235;
-              g.painted.cylinder([c[0], y0, c[2]], [c[0], y0 + 0.22, c[2]], 0.31, 10, h === 3);
+              g.painted.cylinder([c[0], y0, c[2]], [c[0], y0 + 0.22, c[2]], 0.31, 8, h === 3);
             }
           }
         });
@@ -165,9 +169,10 @@ export function addAreaStrips(g: AreaGeos, strips: readonly StripInstance[]): vo
 }
 
 /** Collider-driven solids of the mode areas. */
-export function addAreaColliders(g: AreaGeos, colliders: readonly ResolvedCollider[]): void {
+export function addAreaColliders(geoAt: GeoAt, colliders: readonly ResolvedCollider[]): void {
   for (const c of colliders) {
     const [hx, hy, hz] = c.size;
+    const g = geoAt(c.pos[0], c.pos[2]);
     switch (c.visual) {
       case 'crashBarrier':
         if (c.kind === 'cylinder') {
@@ -227,9 +232,10 @@ export function addAreaColliders(g: AreaGeos, colliders: readonly ResolvedCollid
 }
 
 /** Free-standing structure records (pos-based). Pushes text boards for the sign atlas. */
-export function addAreaRecords(g: AreaGeos, records: readonly StructureInstance[], boards: TextBoard[]): void {
+export function addAreaRecords(geoAt: GeoAt, records: readonly StructureInstance[], boards: TextBoard[]): void {
   for (const st of records) {
     if (!st.pos || !st.dir) continue;
+    const g = geoAt(st.pos[0], st.pos[2]);
     const prm = st.params ?? {};
     const o: V3 = [st.pos[0], st.pos[1], st.pos[2]];
     const f = norm([st.dir[0], 0, st.dir[1]]);

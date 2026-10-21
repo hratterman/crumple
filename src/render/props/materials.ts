@@ -28,6 +28,7 @@ export const PROP_MATERIAL_SLOTS: readonly PropMaterialSlot[] = [
   'concrete',
   'galvanized',
   'signFace',
+  'stopFace',
   'lampLens',
 ];
 
@@ -254,6 +255,14 @@ float propBare;
 		diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 0.55 ), propScuff() * 0.5 * g.g );
 	}`,
   },
+  stopFace: {
+    color: /* glsl */ `
+	{
+		vec3 g = propGrime( 2.0 );
+		diffuseColor.rgb *= 1.0 - 0.15 * g.r * ( 0.3 + propInstance().y ) - 0.3 * propStrain();
+		diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 0.55 ), propScuff() * 0.5 * g.g );
+	}`,
+  },
   lampLens: {
     emissive: /* glsl */ `
 	totalEmissiveRadiance *= 0.85 + 0.3 * propInstance().y;`,
@@ -330,6 +339,9 @@ export function createPropMaterials(_ctx: RenderContext | null): PropMaterialSet
       }
       case 'signFace':
         m = new MeshStandardMaterial({ color: 0xffffff, roughness: 0.32, metalness: 0, map: tex.sign() });
+        break;
+      case 'stopFace':
+        m = new MeshStandardMaterial({ color: 0xffffff, roughness: 0.3, metalness: 0, map: tex.stop() });
         break;
       case 'lampLens':
         m = new MeshStandardMaterial({

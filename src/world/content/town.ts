@@ -94,7 +94,8 @@ class Grid {
     }
   }
   /** Oriented rect test / mark: centre, unit axis (along +X local), half extents. */
-  rect(cx: number, cz: number, ax: number, az: number, hx: number, hz: number, mark: number | null): boolean {
+  /** Test (`mark` null: every cell ≤ `allow`, default FREE) or mark the oriented rect. */
+  rect(cx: number, cz: number, ax: number, az: number, hx: number, hz: number, mark: number | null, allow: number = FREE): boolean {
     const ex = Math.abs(ax) * hx + Math.abs(az) * hz;
     const ez = Math.abs(az) * hx + Math.abs(ax) * hz;
     const c0 = Math.floor((cx - ex - this.x0) / CELL);
@@ -111,7 +112,7 @@ class Grid {
         if (u < -hx || u > hx || v < -hz || v > hz) continue;
         const i = rr * this.cols + cc;
         if (mark === null) {
-          if (this.a[i] !== FREE) return false;
+          if (this.a[i]! > allow) return false;
         } else if (this.a[i]! < mark) this.a[i] = mark;
       }
     }
@@ -402,8 +403,7 @@ export function buildTown(layout: WorldLayout, t: TerrainData, signals: readonly
         const d = kerbLine(p) + (p.sidewalk ? 0.6 : 1.2);
         const x = f.x + rx * d;
         const z = f.z + rz * d;
-        o.props.push({ id: `w:stop:${j.id}:${p.id}:${side > 0 ? 'b' : 'a'}`, prop: 'signPost', pos: [mm(x), null, mm(z)], facing: [-tx, -tz] });
-        o.items.push({ kind: j.control === 'yield' ? 'signYield' : 'signStop', pos: [x, 0, z], dir: [-tx, -tz], scale: 1, variant: o.props.length - 1 + propBase });
+        o.props.push({ id: `w:stop:${j.id}:${p.id}:${side > 0 ? 'b' : 'a'}`, prop: j.control === 'yield' ? 'signPost' : 'stopSign', pos: [mm(x), null, mm(z)], facing: [-tx, -tz] });
       }
     }
   }
@@ -467,7 +467,7 @@ export function buildTown(layout: WorldLayout, t: TerrainData, signals: readonly
         const d = side * (kerbLine(main) + main.sidewalk.width - 0.7);
         const x = f.x + f.rx * d;
         const z = f.z + f.rz * d;
-        if (!g.rect(x, z, f.tx, f.tz, 1.2, 0.5, null)) continue;
+        if (!g.rect(x, z, f.tx, f.tz, 1.2, 0.5, null, ROAD)) continue; // the sidewalk is ROAD-marked; avoid poles / lots
         const kind = ['bench', 'bin', 'newsBox', 'planter', 'hydrant'][Math.floor(rng.float() * 5)]!;
         o.items.push({ kind, pos: [x, f.y + main.sidewalk.kerb, z], dir: [-side * f.rx, -side * f.rz], scale: 1, variant: Math.floor(rng.float() * 3) });
         g.disc(x, z, 1, BUILT);
@@ -540,9 +540,18 @@ function residentialLot(
     const pz = fd.z + fd.rz * side * (fe + 3.2);
     parkedCar(o, `${p.id}${Math.round(sMid)}`, px, pz, [-side * fd.rx, -side * fd.rz], rng);
   }
-  // Mailbox at the sidewalk's back edge beside the driveway (static here; soft mailboxes are a prop follow-up).
+  // Mailbox (soft prop: knocks over, the post snaps) at the sidewalk's back edge beside the driveway.
   const mb = roadFrame(p, sDw + dwSide * 2.2);
-  o.items.push({ kind: 'mailbox', pos: [mb.x + mb.rx * side * (fe + 0.4), 0, mb.z + mb.rz * side * (fe + 0.4)], dir: [-side * mb.rx, -side * mb.rz], scale: 1, variant: Math.floor(rng.float() * 3) });
+  const mfx = -side * mb.rx;
+  const mfz = -side * mb.rz;
+  const ml = Math.sqrt(mfx * mfx + mfz * mfz);
+  const mx = mm(mb.x + mb.rx * side * (fe + 0.4));
+  const mz = mm(mb.z + mb.rz * side * (fe + 0.4));
+  // neighbouring lots can put their mailboxes side by side: keep 1.2 m between any two props
+  if (!o.props.some((q) => Math.abs(q.pos[0] - mx) < 1.2 && Math.abs(q.pos[2] - mz) < 1.2)) {
+    o.props.push({ id: `w:mb:${o.props.length}`, prop: 'mailbox', pos: [mx, null, mz], facing: [mm(mfx / ml), mm(mfz / ml)] });
+  }
+  void rng.float(); // keeps the lot's random stream as before (the old static mailbox drew a variant)
   // Picket / rail fence along the front of the yard (render), gap at the driveway.
   if (rng.float() < 0.55) {
     const a = sMid - hw - 0.6 + (dwSide < 0 ? 3.6 : 0);

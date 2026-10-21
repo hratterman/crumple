@@ -45,6 +45,7 @@ export type PropMaterialSlot =
   | 'concrete'
   | 'galvanized' //    pole / post steel
   | 'signFace' //      printed sign face (procedural canvas texture)
+  | 'stopFace' //      octagonal STOP face (layout v6)
   | 'lampLens'; //     light-pole lamp (emissive at night: off in golden hour)
 
 /** One prop's visual: panels bound to the catalog rig's nodes (node-id prefixes per PropDef doc). */

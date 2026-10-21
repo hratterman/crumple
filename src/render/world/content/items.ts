@@ -26,6 +26,8 @@ import { signalAspect, SIGNAL_TICK_HZ, type SignalPlan } from '../../../world/si
 import { Geo, linear, type V3 } from './geo';
 
 const CELL_M = 192;
+/** Kinds whose variants are separate meshes (key `kind:variant`). */
+const VARIANT_KEYED = new Set(['parkedCar', 'boulder', 'litter', 'chevron']);
 
 interface Part {
   geo: Geo;
@@ -524,6 +526,109 @@ function kindDefs(): Map<string, KindDef> {
       }
     }, 200),
   );
+  // rally chevron board (variant 0 points right, 1 left), facing the approaching traffic
+  for (let v = 0; v < 2; v++) {
+    k.set(
+      `chevron:${v}`,
+      simple((g, m) => {
+        m.color = linear(0x8c9196);
+        m.box([0, 0.6, 0.03], I, 0.035, 0.6, 0.035);
+        g.color = linear(0xf0c020);
+        g.box([0, 1.25, 0], I, 0.42, 0.3, 0.015);
+        g.color = linear(0x15161a);
+        const sx = v === 0 ? 1 : -1;
+        for (let i = 0; i < 2; i++) {
+          const x = (i - 0.5) * 0.36;
+          const Z = (a: number): [number, number, number, number] => [0, 0, Math.sin(a / 2), Math.cos(a / 2)];
+          g.box([x, 1.33, -0.017], Z(sx * 0.6), 0.03, 0.1, 0.004);
+          g.box([x, 1.17, -0.017], Z(-sx * 0.6), 0.03, 0.1, 0.004);
+        }
+      }, 300),
+    );
+  }
+  // ---- natural detail (render-only; one mesh per kind per cell: few draws)
+  k.set('flowers', {
+    parts: (() => {
+      // a patch of ~14 flower heads on short stems in a 1.2 m disc; heads take the instance colour
+      const stems = part('paint');
+      const heads = part('paint', true);
+      heads.geo.color = [1, 1, 1];
+      for (let i = 0; i < 14; i++) {
+        const a = i * 2.39996;
+        const r = 0.15 + 0.6 * Math.sqrt((i + 0.5) / 14);
+        const x = Math.cos(a) * r;
+        const z = Math.sin(a) * r;
+        const h = 0.22 + ((i * 37) % 11) / 30;
+        stems.geo.color = linear(0x4c7a2a);
+        stems.geo.box([x, h / 2, z], Y(a), 0.008, h / 2, 0.008, 63 & ~12);
+        heads.geo.box([x, h + 0.02, z], Y(a), 0.035, 0.012, 0.035, 63 & ~8);
+      }
+      return [stems, heads];
+    })(),
+    far: 130,
+    shadows: false,
+  });
+  k.set(
+    'tussock',
+    simple((g) => {
+      // crossed blade fans (both windings), a few straw-coloured blades
+      const n = 9;
+      for (let i = 0; i < n; i++) {
+        const a = (i / n) * Math.PI;
+        const lean = 0.18 + ((i * 13) % 7) / 30;
+        const h = 0.6 + ((i * 7) % 5) / 20;
+        const dx = Math.cos(a) * 0.12;
+        const dz = Math.sin(a) * 0.12;
+        const tip: V3 = [Math.cos(a + 1.3) * lean, h, Math.sin(a + 1.3) * lean];
+        g.color = linear(i % 4 === 0 ? 0x9a9256 : 0x5d7a34);
+        const A: V3 = [-dx, 0, -dz];
+        const B: V3 = [dx, 0, dz];
+        g.poly([A, B, tip]);
+        g.poly([B, A, tip]);
+      }
+    }, 110, false),
+  );
+  k.set(
+    'stones',
+    simple((g) => {
+      for (let i = 0; i < 7; i++) {
+        const a = i * 2.1;
+        const r = 0.3 + ((i * 17) % 7) / 10;
+        const sz = 0.12 + ((i * 11) % 5) / 25;
+        g.color = linear(i % 2 === 0 ? 0x8d877c : 0x76726a);
+        g.box([Math.cos(a) * r, sz * 0.5, Math.sin(a) * r], Y(a * 1.7), sz * 1.2, sz, sz);
+      }
+    }, 160, false),
+  );
+  k.set(
+    'litter:0',
+    simple((g) => {
+      g.color = linear(0xc42a1e); // crushed can
+      g.cylinder([-0.06, 0.03, 0], [0.06, 0.03, 0.02], 0.032, 8, true, 0.026);
+    }, 60, false),
+  );
+  k.set(
+    'litter:1',
+    simple((g) => {
+      g.color = linear(0x3a6a3a); // bottle
+      g.cylinder([-0.12, 0.035, 0], [0.08, 0.035, 0], 0.035, 8, true);
+      g.cylinder([0.08, 0.035, 0], [0.15, 0.035, 0], 0.014, 6, true);
+    }, 60, false),
+  );
+  k.set(
+    'litter:2',
+    simple((g) => {
+      g.color = linear(0x1d1e20); // old tyre, half sunk
+      g.cylinder([0, -0.05, 0], [0, 0.12, 0], 0.32, 12, true);
+    }, 140, false),
+  );
+  k.set(
+    'litter:3',
+    simple((g) => {
+      g.color = linear(0xd8d4c8); // bag
+      g.box([0, 0.06, 0], Y(0.4), 0.18, 0.06, 0.12);
+    }, 60, false),
+  );
   return k;
 }
 
@@ -553,7 +658,7 @@ export function createItems(
   // group instances by (key, cell)
   const groups = new Map<string, { key: string; list: ItemInstance[] }>();
   for (const it of items) {
-    const key = it.kind === 'parkedCar' || it.kind === 'boulder' ? `${it.kind}:${it.variant}` : it.kind;
+    const key = VARIANT_KEYED.has(it.kind) ? `${it.kind}:${it.variant}` : it.kind;
     if (!defs.has(key)) continue;
     const cx = Math.floor(it.pos[0] / CELL_M);
     const cz = Math.floor(it.pos[2] / CELL_M);
