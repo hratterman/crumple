@@ -25,6 +25,7 @@ import {
   ROAD_STATION_STRIDE,
   WorldLayoutError,
   type RoadDef,
+  type RoadStructure,
   type RoadKindDefaults,
   type RoadProfile,
   type RoadProjection,
@@ -419,6 +420,39 @@ function packProfile(w: RoadWork): RoadProfile {
   };
 }
 
+/**
+ * Layout v6: copies the road's oneWay / sidewalk / wear and resolves its structure spans
+ * (RoadStructureDef from / to projected onto the finished centreline; s0 < s1, ascending s0).
+ */
+function decorateProfile(p: RoadProfile, def: RoadDef): RoadProfile {
+  if (def.oneWay) p.oneWay = true;
+  if (def.sidewalk) p.sidewalk = { width: def.sidewalk.width, kerb: def.sidewalk.kerb };
+  if (def.wear) p.wear = def.wear;
+  if (def.structures && def.structures.length > 0) {
+    const proj = createRoadProjection();
+    const spans: RoadStructure[] = def.structures.map((st) => {
+      const a = projectToRoad(p, st.from[0], st.from[1], proj).s;
+      const b = projectToRoad(p, st.to[0], st.to[1], proj).s;
+      if (!(Math.abs(b - a) > 4)) throw new WorldLayoutError(`roads '${def.id}': structure '${st.id}' spans ${Math.abs(b - a).toFixed(1)} m (min 4)`);
+      return { id: st.id, kind: st.kind, s0: a < b ? a : b, s1: a < b ? b : a };
+    });
+    spans.sort((u, v) => u.s0 - v.s0);
+    for (let k = 1; k < spans.length; k++) {
+      if (spans[k]!.s0 < spans[k - 1]!.s1) throw new WorldLayoutError(`roads '${def.id}': structures '${spans[k - 1]!.id}' and '${spans[k]!.id}' overlap`);
+    }
+    p.structures = spans;
+  }
+  return p;
+}
+
+/** The structure span containing road arc s (layout v6), or null. */
+export function structureAt(p: RoadProfile, s: number): RoadStructure | null {
+  const sp = p.structures;
+  if (!sp) return null;
+  for (const st of sp) if (s >= st.s0 && s <= st.s1) return st;
+  return null;
+}
+
 /** Writes the through road's carriageway surface (verge-level clamp) at (x, z) for easing. */
 function throughSurface(p: RoadProfile, x: number, z: number, proj: RoadProjection, smp: RoadSample): number {
   projectToRoad(p, x, z, proj);
@@ -681,7 +715,7 @@ export function resolveRoadProfiles(
       }
     }
     limitGrade(w, w.kd.maxGrade * 0.98, pinned, t1, t2, t3);
-    w.profile = packProfile(w);
+    w.profile = decorateProfile(packProfile(w), w.def);
     resolved.add(w);
   }
   return works.map((w) => w.profile!);

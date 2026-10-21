@@ -16,7 +16,7 @@ interface CrumpleGlobal {
 // viewport + low preset keep the software-rendered island load well under a minute.
 test('boot: loading screen → island, sim ticks on the heightfield, zero errors', async ({ page }) => {
   // P4: the skinned sedan adds ~a dozen programs; SwiftShader compiles them on the CPU.
-  test.setTimeout(180_000);
+  test.setTimeout(360_000);
   const pageErrors: string[] = [];
   const consoleErrors: string[] = [];
   page.on('pageerror', (err) => {
@@ -44,14 +44,14 @@ test('boot: loading screen → island, sim ticks on the heightfield, zero errors
 
   // Island loaded: game loop running, render + physics terrain identical.
   await page.waitForFunction(() => (window as unknown as { __crumple?: CrumpleGlobal }).__crumple?.ready === true, null, {
-    timeout: 110_000,
+    timeout: 240_000, // layout v6: the 2560 m world generates in ≈ 8 s CPU per worker, minutes on a loaded box
   });
   const g = await page.evaluate(() => {
     const c = (window as unknown as { __crumple: CrumpleGlobal }).__crumple;
     return { spawns: c.spawns, matched: c.stats.terrainMatched, loadMs: c.stats.loadMs };
   });
   expect(g.matched).toBe(true);
-  expect(g.spawns.length).toBe(8);
+  expect(g.spawns.length).toBe(23); // layout v6: the eight P3 spawns + fifteen mode-area spawns
   console.log(`island load ${(g.loadMs / 1000).toFixed(1)} s (SwiftShader)`);
   await expect(page.locator('#loading')).toHaveClass(/loading--fade/);
 

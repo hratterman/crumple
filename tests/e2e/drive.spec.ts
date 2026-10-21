@@ -29,7 +29,7 @@ const g = (page: import('@playwright/test').Page) =>
 
 test('drive: hold W on the spawn road accelerates the sedan; spawn keys teleport; zero errors', async ({ page }) => {
   // P4: the skinned sedan adds ~a dozen programs; SwiftShader compiles them on the CPU.
-  test.setTimeout(180_000);
+  test.setTimeout(360_000);
   const pageErrors: string[] = [];
   const consoleErrors: string[] = [];
   page.on('pageerror', (err) => pageErrors.push(err.stack ?? String(err)));
@@ -48,7 +48,7 @@ test('drive: hold W on the spawn road accelerates the sedan; spawn keys teleport
       return !!c && c.ready && c.vehicle !== null && c.position !== null;
     },
     null,
-    { timeout: 110_000 },
+    { timeout: 240_000 }, // layout v6: the 2560 m world takes minutes to generate on a loaded box
   );
   await page.waitForTimeout(1000);
 

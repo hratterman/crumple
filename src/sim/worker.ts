@@ -328,14 +328,12 @@ export class WorkerHost {
     const errors: string[] = [];
     // Layout v6 (R-WORLD): the generated world content (buildings, kerbs, structures, area
     // furniture; sim part only) — before the scatter, which keeps clear of it.
-    const contentFn = this.terrainDeps.buildWorldContent ?? null;
+    const contentFn = this.terrainDeps.buildWorldContent ?? buildWorldContent;
     let content: WorldContent | null = null;
-    if (contentFn) {
-      try {
-        content = contentFn(layout, terrain, { render: false });
-      } catch (e) {
-        errors.push(`world content not built: ${errMessage(e)}`);
-      }
+    try {
+      content = contentFn(layout, terrain, { render: false });
+    } catch (e) {
+      errors.push(`world content not built: ${errMessage(e)}`);
     }
     // P5: the vegetation scatter needs the splat weights, so it runs before they are dropped.
     const scatterFn = this.terrainDeps.scatterVegetation ?? scatterVegetation;

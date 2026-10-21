@@ -245,6 +245,9 @@ export function buildRouteNetwork(layout: WorldLayout, terrain: TerrainData): Ro
       sampleRoad(road, proj.s, smp);
       here.push({ ri, s: proj.s, tx: smp.tx, tz: smp.tz });
     }
+    // Layout v6: a junction with a single routed road (a routed road meeting only dirt trails /
+    // tracks) is no junction for traffic: no box, its open end is a dead end with a U-turn.
+    if (here.length < 2) return;
     for (const h of here) {
       const road = roads[h.ri]!;
       // Box: at least JUNCTION_BOX_M, and long enough that this road's lane ends clear every
@@ -423,6 +426,9 @@ export function buildRouteNetwork(layout: WorldLayout, terrain: TerrainData): Ro
       if (through < 0 || ROAD_KIND_DEFAULTS[roads[ri]!.kind].priority > ROAD_KIND_DEFAULTS[roads[through]!.kind].priority) through = ri;
     }
     throughOf[ji] = through;
+    let routedHere = 0;
+    for (const id of j.roads) if (routed[roadIndex.get(id)!]) routedHere++;
+    if (routedHere < 2) return; // no box (see the cuts above)
     const legs: Leg[] = [];
     for (const id of j.roads) {
       const ri = roadIndex.get(id)!;

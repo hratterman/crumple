@@ -4,6 +4,8 @@
  * Pure; generator numerics for everything hashed (colliders, props, signals).
  */
 import { buildSignalPlans } from '../signals';
+import { buildStructures } from './structures';
+import { buildTown } from './town';
 import type { TerrainData, WorldLayout } from '../types';
 import type { ContentRender, WorldContent, WorldContentOptions } from './types';
 
@@ -11,7 +13,7 @@ const FNV_OFFSET = 0x811c9dc5;
 const FNV_PRIME = 0x01000193;
 
 /** Word-wise FNV-1a over the sim-relevant content (ids as UTF-16 units, numbers as f64 words). */
-export function hashContent(c: Pick<WorldContent, 'colliders' | 'props' | 'signals'>): number {
+export function hashContent(c: Pick<WorldContent, 'colliders' | 'props' | 'signals' | 'plantings'>): number {
   let h = FNV_OFFSET;
   const f64 = new Float64Array(1);
   const u32 = new Uint32Array(f64.buffer);
@@ -47,6 +49,13 @@ export function hashContent(c: Pick<WorldContent, 'colliders' | 'props' | 'signa
     num(p.stack ?? 1);
     num(p.row ? p.row.count : 1);
   }
+  num(c.plantings.length);
+  for (const p of c.plantings) {
+    num(p.kind);
+    num(p.x);
+    num(p.z);
+    num(p.scale);
+  }
   num(c.signals.length);
   for (const s of c.signals) {
     str(s.junction);
@@ -63,18 +72,50 @@ export function emptyRender(): ContentRender {
 
 /** Pure, deterministic. `opts.render` false (physics worker) skips the render-only part. */
 export function buildWorldContent(layout: WorldLayout, terrain: TerrainData, opts: WorldContentOptions): WorldContent {
+  // A terrain that is not this layout's (test doubles: synthetic grids without the roads) gets no content.
+  const ours = terrain.roads.length === layout.roads.length && terrain.roads.every((r, i) => r.id === layout.roads[i]!.id);
+  if (!ours) {
+    const empty: WorldContent = { layoutId: layout.id, layoutVersion: layout.version, colliders: [], props: [], exclusions: [], plantings: [], signals: [], lights: [], render: opts.render ? emptyRender() : null, hash: 0 };
+    empty.hash = hashContent(empty);
+    return empty;
+  }
   const signals = buildSignalPlans(layout, terrain);
+  const render = opts.render ? emptyRender() : null;
   const content: WorldContent = {
     layoutId: layout.id,
     layoutVersion: layout.version,
     colliders: [],
     props: [],
     exclusions: [],
+    plantings: [],
     signals,
     lights: [],
-    render: opts.render ? emptyRender() : null,
+    render,
     hash: 0,
   };
+  // Bridges + tunnels (every RoadProfile.structures span).
+  const st = buildStructures(terrain);
+  content.colliders.push(...st.colliders);
+  content.lights.push(...st.lights);
+  content.exclusions.push(...st.exclusions);
+  render?.structures.push(...st.render);
+  // Millbrook (buildings, kerbs, furniture, lights, signals, trees). Content prop instance indices
+  // follow the layout's expanded props (rows × stacks), which the light records reference.
+  let propBase = 0;
+  for (const pr of layout.props) propBase += (pr.row ? pr.row.count : 1) * (pr.stack ?? 1);
+  const town = buildTown(layout, terrain, signals, propBase + content.props.length);
+  content.colliders.push(...town.colliders);
+  content.props.push(...town.props);
+  content.exclusions.push(...town.exclusions);
+  content.lights.push(...town.lights);
+  content.plantings.push(...town.plantings);
+  if (render) {
+    render.buildings.push(...town.buildings);
+    render.items.push(...town.items);
+    render.decals.push(...town.decals);
+    render.strips.push(...town.strips);
+    render.cables.push(...town.cables);
+  }
   content.hash = hashContent(content);
   return content;
 }

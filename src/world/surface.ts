@@ -70,3 +70,16 @@ export function surfaceIndex(colliders: readonly ResolvedCollider[], heightAt: (
   };
 }
 
+
+/**
+ * Layout v6 placement ground (spawns, teleports, repairs): the terrain, or the top of a drivable
+ * content surface over it — bridge decks (`deckSlab`) and kerbs / walkways (`kerb`). Main and the
+ * spawn tests place cars with it, so a car spawned on the causeway stands on the deck.
+ */
+export function placementGround(colliders: readonly ResolvedCollider[], heightAt: (x: number, z: number) => number): { heightAt(x: number, z: number): number } {
+  const idx = surfaceIndex(
+    colliders.filter((c) => c.visual === 'deckSlab' || c.visual === 'kerb'),
+    heightAt,
+  );
+  return { heightAt: (x, z) => idx.at(x, z) };
+}

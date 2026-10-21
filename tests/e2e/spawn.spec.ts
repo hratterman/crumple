@@ -80,7 +80,7 @@ async function settleAndCheck(page: Page, label: string, rows: Health[]): Promis
 }
 
 test('spawn: teleporting to every spawn point and swapping vehicles leaves the car pristine', async ({ page }) => {
-  test.setTimeout(env.SPAWN_FLEET ? 2_400_000 : 900_000);
+  test.setTimeout(env.SPAWN_FLEET ? 2_400_000 : 1_800_000); // layout v6: 23 spawns (was 8) across a 2560 m map
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.stack ?? String(e)));
   page.on('console', (m) => {

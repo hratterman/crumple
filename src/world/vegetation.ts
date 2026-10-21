@@ -571,13 +571,18 @@ export const scatterVegetation: ScatterVegetation = (layout, terrain, extra) => 
   let range: CompiledShape | null = null;
   let hills: CompiledShape | null = null;
   const lakes: CompiledShape[] = [];
+  const ponds: { s: CompiledShape; level: number }[] = [];
   const flats: CompiledShape[] = [];
   const arenas: CompiledShape[] = [];
   for (const zn of layout.zones) {
     const s = compileShape(zn.shape);
     if (zn.kind === 'mountains') range ??= s;
     else if (zn.kind === 'hills') hills ??= s;
-    else if (zn.kind === 'lake') lakes.push(s);
+    else if (zn.kind === 'lake') {
+      lakes.push(s);
+      // Layout v6: ponds / fords above the valley water plane keep their own shoreline clear.
+      if (zn.params.level !== undefined && zn.params.level > water) ponds.push({ s, level: zn.params.level });
+    }
     else if (zn.kind === 'town' || zn.kind === 'arena') {
       flats.push(s);
       if (zn.kind === 'arena') arenas.push(s);
@@ -614,6 +619,7 @@ export const scatterVegetation: ScatterVegetation = (layout, terrain, extra) => 
   /** Hard exclusions shared by every kind (water, flats, pads, colliders, props, spawns, map rim). */
   const blocked = (x: number, z: number, h: number, padMargin: number): boolean => {
     if (h < water + 0.4) return true;
+    for (const p of ponds) if (h < p.level + 0.6 && p.s.outside(x, z) < p.s.blend + 6) return true;
     if (x < originX + 4 || x > originX + size - 4 || z < originZ + 4 || z > originZ + size - 4) return true;
     for (const f of flats) if (f.mask(x, z) > 0.1) return true;
     for (const p of pads) if (p.outside(x, z) < padMargin) return true;
@@ -895,6 +901,21 @@ export const scatterVegetation: ScatterVegetation = (layout, terrain, extra) => 
   }
 
   lastScatterTimings.rocks = performance.now() - tStart;
+  // ================================================================ plantings (layout v6)
+  // Street / yard trees from the world content: always drawn (rank 0), the usual collider rule.
+  const pr = rng.fork(14);
+  for (const pl of extra?.plantings ?? []) {
+    if (out.n >= VEG_MAX_INSTANCES) break;
+    const h = hAt(pl.x, pl.z);
+    const kind = pl.kind;
+    const u = pr.float();
+    const variant = kind === VegetationKind.broadleaf ? (u < 0.45 ? VegVariant.oak : u < 0.75 ? VegVariant.beech : VegVariant.birch) : kind === VegetationKind.conifer ? (u < 0.5 ? VegVariant.spruce : VegVariant.fir) : Math.floor(u * VEG_VARIANTS[kind]!);
+    const i = out.push(kind, pl.x, h, pl.z, pl.scale, yawOf(pr.float()), variant, 0);
+    roadIdx.query(pl.x, pl.z);
+    if ((kind === VegetationKind.conifer || kind === VegetationKind.broadleaf) && colliders.length < VEG_MAX_COLLIDERS && inReach(pl.x, pl.z, roadIdx.d)) {
+      addCollider(i, kind, pl.x, pl.z, pl.scale, h);
+    }
+  }
   const n = out.n;
   const s: VegetationScatter = {
     count: n,

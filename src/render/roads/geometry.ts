@@ -30,6 +30,7 @@ import {
   type RoadProfile,
   type TerrainSampler,
 } from '../../world/types';
+import { createRoadSample, sampleRoad, structureAt } from '../../world/roads';
 import { detectJunctions, evalJunctionField, type JunctionSet } from './junctions';
 import { computePassing, type PassingFlags } from './markings';
 import type { CentrelineHit } from './spatial';
@@ -296,6 +297,24 @@ function buildPieceLod(
   const qv = new Float32Array(vc); // radial lateral (caps) for group classification
   const limit = new Float32Array(vc); // core limit at the vertex
   const hasPartners = junctions.partners[ri]!.length > 0;
+  // Layout v6: rows inside a bridge span take the deck (profile) height instead of the terrain.
+  const prof = profiles[ri]!;
+  const halfA = prof.width / 2;
+  let deck: Set<number> | null = null;
+  const deckY = new Float64Array(nRows);
+  const deckBank = new Float64Array(nRows);
+  if (prof.structures?.some((st) => st.kind === 'bridge')) {
+    const smp = createRoadSample();
+    for (let r = 0; r < nRows; r++) {
+      const st = structureAt(prof, seq[r]!.s);
+      if (!st || st.kind !== 'bridge') continue;
+      sampleRoad(prof, seq[r]!.s, smp);
+      deck ??= new Set();
+      deck.add(r);
+      deckY[r] = smp.y;
+      deckBank[r] = smp.bank;
+    }
+  }
   let minX = Infinity, minY = Infinity, minZ = Infinity;
   let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
 
@@ -318,8 +337,20 @@ function buildPieceLod(
       const x = s.x + rx * u;
       const z = s.z + rz * u;
       const outer = c === 0 || c === nCols - 1;
-      const y = sampler.heightAt(x, z) + (outer ? -FRINGE_TUCK_M : RIBBON_LIFT_M);
-      sampler.normalAt(x, z, nrm);
+      let y: number;
+      if (deck !== null && deck.has(r)) {
+        // Layout v6 bridge span: the deck surface IS the profile (the terrain below is the lake /
+        // the road passing under); the content's deck slabs sit exactly here.
+        const d = u < -halfA ? -halfA : u > halfA ? halfA : u;
+        y = deckY[r]! + deckBank[r]! * d + RIBBON_LIFT_M;
+        const nl = Math.sqrt(1 + deckBank[r]! * deckBank[r]!);
+        nrm[0] = (deckBank[r]! * rx) / -nl;
+        nrm[1] = 1 / nl;
+        nrm[2] = (deckBank[r]! * rz) / -nl;
+      } else {
+        y = sampler.heightAt(x, z) + (outer ? -FRINGE_TUCK_M : RIBBON_LIFT_M);
+        sampler.normalAt(x, z, nrm);
+      }
       positions[v * 3] = x;
       positions[v * 3 + 1] = y;
       positions[v * 3 + 2] = z;

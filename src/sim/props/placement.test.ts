@@ -93,7 +93,7 @@ describe('resolvePropInstances', () => {
     );
     throwsLayout(
       () => resolvePropInstances([{ id: 'r', prop: 'cone', pos: [0, null, 0], row: { count: PROP_LAYOUT_MAX_INSTANCES + 1, step: [1, 0] } }], flat),
-      /more than 256/,
+      new RegExp(`more than ${PROP_LAYOUT_MAX_INSTANCES}`),
     );
     throwsLayout(() => resolvePropInstances([{ id: 'f', prop: 'cone', pos: [0, null, 0], facing: [1, 1] }], flat), /unit vector/);
     throwsLayout(

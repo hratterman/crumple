@@ -11,6 +11,7 @@
  * curb-return fillet, a stop line and fading markings; the winner keeps a
  * continuous surface and breaks its edge line across the loser's mouth.
  */
+import { structureAt } from '../../world/roads';
 import type { RoadProfile } from '../../world/types';
 import { createCentrelineIndex, type CentrelineHit, type CentrelineIndex } from './spatial';
 import { kindPriority, ROAD_STYLE_PARAMS, styleForProfile } from './styles';
@@ -111,7 +112,11 @@ export function detectJunctions(roads: readonly RoadProfile[]): JunctionSet {
       for (let i = 0; i < pb.stationCount; i++) {
         const x = st[i * stride]!;
         const z = st[i * stride + 2]!;
-        if (indices[a]!.nearest(x, z, CONTACT_DIST, hit) && hit.beyond < 1) {
+        // Layout v6: a road crossing another on a bridge span is an overpass, not a junction.
+        const onBridge =
+          structureAt(pb, indices[b]!.stationS(i))?.kind === 'bridge' ||
+          (indices[a]!.nearest(x, z, CONTACT_DIST, hit) && structureAt(roads[a]!, hit.s)?.kind === 'bridge');
+        if (!onBridge && indices[a]!.nearest(x, z, CONTACT_DIST, hit) && hit.beyond < 1) {
           if (hit.dist < runBest) {
             runBest = hit.dist;
             run = { x, z, a, sa: hit.s, b, sb: indices[b]!.stationS(i) };

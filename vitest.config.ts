@@ -23,6 +23,9 @@ export default defineConfig({
         test: {
           name: 'app',
           include: ['src/**/*.test.ts'],
+          // Layout v6 (2560 m map): suites that generate the default world in beforeAll (routes,
+          // vegetation, terrain) need ~10 s of CPU, a minute or more on a loaded box.
+          hookTimeout: 240_000,
           exclude: [...configDefaults.exclude, 'tests/e2e/**', 'src/sim/**'],
         },
       },

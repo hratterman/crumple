@@ -48,8 +48,68 @@
  * three R16 hairpins.
  */
 import { MaterialId } from '../protocol/messages';
+import { EAST } from './regions/east';
+import { NORTH } from './regions/north';
+import { SOUTH } from './regions/south';
+import { TOWN, TOWN_SIDEWALK } from './regions/town';
+import type { RegionData } from './regions/types';
+import { WEST } from './regions/west';
 import { STUNT_PARK_COLLIDERS, STUNT_PARK_PROPS } from './stuntpark';
-import type { PropPlacement, WorldLayout } from './types';
+import type { PointOfInterest, PropPlacement, RoadDef, SpawnPoint, WorldArea, WorldLayout } from './types';
+
+/** Layout v6 regions beyond the P3–P8 core (src/world/regions/*). */
+const REGIONS: readonly RegionData[] = [TOWN, SOUTH, WEST, NORTH, EAST];
+const merged = <K extends keyof RegionData>(k: K): NonNullable<RegionData[K]> =>
+  REGIONS.flatMap((r) => (r[k] ?? []) as unknown[]) as NonNullable<RegionData[K]>;
+
+
+/** Spawn order after the eight P3 spawns (frozen: docs/CONTRACTS.md "R-WORLD contracts"). */
+const V6_SPAWN_ORDER = [
+  'interchange',
+  'causeway',
+  'tunnel',
+  'raceway',
+  'racewayGrid',
+  'rallyStart',
+  'rallyFinish',
+  'dragway',
+  'offroad',
+  'runway',
+  'crashLab',
+  'quarry',
+  'farm',
+  'campsite',
+  'northLookout',
+] as const;
+function v6Spawns(): SpawnPoint[] {
+  const all = merged('spawns');
+  return V6_SPAWN_ORDER.map((id) => {
+    const s = all.find((q) => q.id === id);
+    if (!s) throw new Error(`layout: v6 spawn '${id}' missing`);
+    return s;
+  });
+}
+
+/** Core areas (the P3–P8 map) — the regions add theirs. */
+const CORE_AREAS: WorldArea[] = [
+  { id: 'millbrook', name: 'Millbrook', kind: 'town', bounds: { type: 'rect', center: [112, 338], halfX: 160, halfZ: 145, blend: 0 }, spawn: 'town' },
+  { id: 'arena', name: 'Crash Test Arena & Stunt Park', kind: 'arena', bounds: { type: 'rect', center: [390, 330], halfX: 125, halfZ: 95, blend: 0 }, spawn: 'arena' },
+  { id: 'mirrorLake', name: 'Mirror Lake', kind: 'lake', bounds: { type: 'ellipse', center: [-330, 340], radiusX: 200, radiusZ: 170, blend: 0 }, spawn: 'lakeshore' },
+  { id: 'ridgePass', name: 'Ridge Pass', kind: 'mountain', bounds: { type: 'rect', center: [100, -260], halfX: 360, halfZ: 130, blend: 0 }, spawn: 'mountainBase' },
+  { id: 'hollowCreek', name: 'Hollow Creek Trail', kind: 'trail', bounds: { type: 'rect', center: [-400, -100], halfX: 140, halfZ: 280, blend: 0 }, spawn: 'dirtTrail' },
+  { id: 'highway', name: 'Valley Loop Highway', kind: 'highway', bounds: { type: 'rect', center: [0, 0], halfX: 620, halfZ: 630, blend: 0 }, spawn: 'highway' },
+  { id: 'summit', name: 'Summit Lookout', kind: 'landmark', bounds: { type: 'circle', center: [150, -372], radius: 40, blend: 0 }, spawn: 'summit' },
+];
+/** Core POIs (Millbrook depots + police, the summit). */
+const CORE_POIS: PointOfInterest[] = [
+  { id: 'delivery.warehouse', area: 'millbrook', kind: 'depot', name: 'Millbrook Freight', pos: [110, null, 395], radius: 12 },
+  { id: 'delivery.gasStation', area: 'millbrook', kind: 'fuel', name: 'Valley Gas', pos: [178, null, 262], radius: 10 },
+  { id: 'delivery.diner', area: 'millbrook', kind: 'delivery', name: 'Rosie\'s Diner', pos: [176, null, 368], radius: 8 },
+  { id: 'delivery.garage', area: 'millbrook', kind: 'repair', name: 'Hank\'s Garage', pos: [124, null, 300], radius: 8 },
+  { id: 'police.station', area: 'millbrook', kind: 'police', name: 'Millbrook Sheriff', pos: [124, null, 362], radius: 10 },
+  { id: 'police.speedTrap', area: 'highway', kind: 'police', name: 'Highway Speed Trap', pos: [585, null, 160], heading: [0, -1], radius: 30 },
+  { id: 'landmark.summit', area: 'summit', kind: 'lookout', name: 'Summit Lookout', pos: [150, null, -372], radius: 20 },
+];
 
 // ------------------------------------------------------------ props (P5)
 // Soft-body props (catalog keys in src/sim/props/types.ts). Pitches leave a
@@ -98,8 +158,7 @@ const ARENA_PROPS: PropPlacement[] = [
   { id: 'arenaLightNE', prop: 'lightPole', pos: [446, null, 244], facing: [-DIAG, DIAG] },
   { id: 'arenaLightSW', prop: 'lightPole', pos: [274, null, 416], facing: [DIAG, -DIAG] },
   { id: 'arenaLightSE', prop: 'lightPole', pos: [446, null, 416], facing: [-DIAG, -DIAG] },
-  { id: 'mainLightE', prop: 'lightPole', pos: [155.5, null, 280], facing: [-1, 0], row: { count: 2, step: [0, 90] } },
-  { id: 'mainLightW', prop: 'lightPole', pos: [144.5, null, 300], facing: [1, 0], row: { count: 2, step: [0, 90] } },
+  // v6: Main St's street lights come from the generated town content (every town street).
   // Warning signs facing the traffic they warn.
   { id: 'runwaySign', prop: 'signPost', pos: [485, null, 336.6], facing: [1, 0] },
   { id: 'crashWallSign', prop: 'signPost', pos: [347.5, null, 267], facing: [0, 1] },
@@ -123,14 +182,16 @@ export const DEFAULT_LAYOUT: WorldLayout = {
   id: 'crumple-valley',
   name: 'Crumple Valley',
   // v5 (P8): arena grown east + the stunt park / ski-jump colliders and props.
-  version: 5,
+  // v6 (R-WORLD): 2560 m map — interchange, raceway, rally stage, dragway, off-road park,
+  // proving ground + crash lab, quarry, causeway bridge, Northgate tunnel (docs/CONTRACTS.md).
+  version: 6,
   seed: 0x5eed_c0de,
-  size: 1408,
+  size: 2560,
   terrain: {
     spacing: 1,
     baseHeight: 10,
     detail: { amplitude: 2.5, wavelength: 220, octaves: 4 },
-    edgeRise: { width: 90, height: 40 },
+    edgeRise: { width: 130, height: 55 },
     minHeight: -10,
     maxHeight: 220,
   },
@@ -170,9 +231,9 @@ export const DEFAULT_LAYOUT: WorldLayout = {
       shape: {
         type: 'polygon',
         points: [
-          [-420, -704],
-          [704, -704],
-          [704, -120],
+          [-420, -1240],
+          [760, -1240],
+          [760, -120],
           [380, -120],
           [-60, -90],
           [-300, -260],
@@ -186,6 +247,12 @@ export const DEFAULT_LAYOUT: WorldLayout = {
           { name: 'Gable', center: [-170, -420], height: 70, radiusX: 200, radiusZ: 180 },
           { name: 'Anvil', center: [420, -380], height: 105, radiusX: 170, radiusZ: 160 },
           { name: 'North Downs', center: [60, -680], height: 44, radiusX: 900, radiusZ: 330 },
+          // v6: the Northgate ridge (tunnel + radio mast), the quarry hill, the Hollow Peaks (rally
+          // hairpins) and the Badlands knob (off-road hill climb). Peaks are unmasked bumps.
+          { name: 'Northgate', center: [380, -790], height: 90, radiusX: 360, radiusZ: 190 },
+          { name: 'Quarry Hill', center: [760, -930], height: 46, radiusX: 140, radiusZ: 85 },
+          { name: 'Hollow Peaks', center: [-1010, -560], height: 58, radiusX: 190, radiusZ: 270 },
+          { name: 'Badlands Knob', center: [-985, 1065], height: 30, radiusX: 62, radiusZ: 55 },
         ],
         ridged: { amplitude: 9, wavelength: 140, octaves: 5 },
         rockSlope: 0.65,
@@ -202,7 +269,8 @@ export const DEFAULT_LAYOUT: WorldLayout = {
       id: 'millbrook',
       name: 'Millbrook',
       kind: 'town',
-      shape: { type: 'rect', center: [150, 330], halfX: 80, halfZ: 100, blend: 40 },
+      // v6: grown west and south over the residential lanes (was center (150, 330), 80 × 100).
+      shape: { type: 'rect', center: [112, 338], halfX: 152, halfZ: 138, blend: 40 },
       params: { height: 10.5 },
     },
     {
@@ -214,6 +282,7 @@ export const DEFAULT_LAYOUT: WorldLayout = {
       shape: { type: 'rect', center: [390, 330], halfX: 120, halfZ: 90, blend: 30 },
       params: { height: 10.5, material: MaterialId.concrete },
     },
+    ...merged('zones'),
   ],
 
   pads: [
@@ -231,6 +300,7 @@ export const DEFAULT_LAYOUT: WorldLayout = {
       height: null,
       material: MaterialId.gravel,
     },
+    ...merged('pads'),
   ],
 
   roads: [
@@ -454,26 +524,29 @@ export const DEFAULT_LAYOUT: WorldLayout = {
       shoulder: 0.5,
       material: MaterialId.asphalt,
       markings: 'center',
+      sidewalk: TOWN_SIDEWALK,
+      wear: 'worn',
     },
     {
       id: 'mainStreet',
       name: 'Main Street',
       kind: 'street',
       closed: false,
+      // v6: ends at the town's south gate; Raceway Road continues over the highway (interchange).
       points: [
         [150, 10.5, 225],
         [150, 10.5, 250],
         [150, 10.5, 330],
         [150, 10.5, 410],
-        [150, 10.2, 480],
-        [150, 9.6, 550],
-        [150, 9, 600],
+        [150, 10.45, 470],
       ],
       width: 8,
       lanes: 1,
       shoulder: 0.5,
       material: MaterialId.asphalt,
       markings: 'center',
+      sidewalk: TOWN_SIDEWALK,
+      wear: 'worn',
     },
     {
       id: 'gateStreet',
@@ -490,6 +563,8 @@ export const DEFAULT_LAYOUT: WorldLayout = {
       shoulder: 0.5,
       material: MaterialId.asphalt,
       markings: 'edge',
+      sidewalk: TOWN_SIDEWALK,
+      wear: 'patched',
     },
     {
       id: 'arenaRunway',
@@ -509,21 +584,24 @@ export const DEFAULT_LAYOUT: WorldLayout = {
       material: MaterialId.concrete,
       markings: 'edge',
     },
+    // v6 regions. Sorted so every road's declaration keeps the core's carve / through-road ties.
+    ...(merged('roads') as RoadDef[]),
   ],
 
   junctions: [
     { id: 'hwyWest', pos: [-578, 250], roads: ['highway', 'lakeshore'] },
     { id: 'hwySouthLake', pos: [-80, 605], roads: ['highway', 'lakeshore'] },
-    { id: 'hwySouthTown', pos: [150, 600], roads: ['highway', 'mainStreet'] },
-    { id: 'hwyEastArena', pos: [596, 330], roads: ['highway', 'arenaRunway'] },
+    // v6: hwySouthTown removed (Main St → Raceway Road crosses the highway on the interchange overpass).
+    { id: 'hwyEastArena', pos: [596, 330], roads: ['highway', 'arenaRunway', 'airfieldRoad'], control: 'signal' },
     { id: 'trailhead', pos: [-330, 163], roads: ['lakeshore', 'dirtTrail'] },
-    { id: 'millJunction', pos: [-118, 370], roads: ['lakeshore', 'millRoad'] },
+    { id: 'millJunction', pos: [-118, 370], roads: ['lakeshore', 'millRoad', 'causeway'], control: 'stop' },
     { id: 'base', pos: [-235, -185], roads: ['ridgePass', 'valleyRoad', 'dirtTrail'] },
-    { id: 'townNorth', pos: [150, 225], roads: ['valleyRoad', 'mainStreet'] },
-    { id: 'ringWest', pos: [90, 330], roads: ['townRing', 'millRoad'] },
-    { id: 'ringNorth', pos: [150, 250], roads: ['townRing', 'mainStreet'] },
-    { id: 'ringSouth', pos: [150, 410], roads: ['townRing', 'mainStreet'] },
-    { id: 'ringEast', pos: [210, 330], roads: ['townRing', 'gateStreet'] },
+    { id: 'townNorth', pos: [150, 225], roads: ['valleyRoad', 'mainStreet'], control: 'stop' },
+    { id: 'ringWest', pos: [90, 330], roads: ['townRing', 'millRoad'], control: 'stop' },
+    { id: 'ringNorth', pos: [150, 250], roads: ['townRing', 'mainStreet'], control: 'signal' },
+    { id: 'ringSouth', pos: [150, 410], roads: ['townRing', 'mainStreet'], control: 'signal' },
+    { id: 'ringEast', pos: [210, 330], roads: ['townRing', 'gateStreet'], control: 'stop' },
+    ...merged('junctions'),
   ],
 
   spawnPoints: [
@@ -535,6 +613,7 @@ export const DEFAULT_LAYOUT: WorldLayout = {
     { id: 'dirtTrail', name: 'Hollow Creek Trailhead', road: { id: 'dirtTrail', s: 15, d: 0 } },
     { id: 'lakeshore', name: 'Lakeshore Drive', road: { id: 'lakeshore', s: 120, d: 1.9 } },
     { id: 'town', name: 'Millbrook', road: { id: 'mainStreet', s: 12, d: 2 } },
+    ...v6Spawns(),
   ],
 
   // Crash Test Arena furniture (P4, arena core x 270..450, z 240..420, y 10.5).
@@ -569,6 +648,9 @@ export const DEFAULT_LAYOUT: WorldLayout = {
     ...STUNT_PARK_COLLIDERS,
   ],
   props: [...ARENA_PROPS, ...STUNT_PARK_PROPS],
+  areas: [...CORE_AREAS, ...merged('areas')],
+  pois: [...CORE_POIS, ...merged('pois')],
+  surfaces: merged('surfaces'),
 };
 
 /** Registry by id (saves, replays and the protocol name layouts by id). */

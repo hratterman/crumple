@@ -54,7 +54,7 @@ function maxMove(a: Record<string, number[]>, b: Record<string, number[]>): { mo
 const vehicle = (page: Page) => page.evaluate(() => (window as unknown as { __crumple: CrumpleRepairGlobal }).__crumple.vehicle);
 
 test('repair: F after a crash restores the car (damage 0) and every prop to its spawn pose', async ({ page }) => {
-  test.setTimeout(180_000);
+  test.setTimeout(360_000);
   const errors: string[] = [];
   page.on('pageerror', (err) => errors.push(err.stack ?? String(err)));
   page.on('console', (msg) => {
@@ -68,7 +68,7 @@ test('repair: F after a crash restores the car (damage 0) and every prop to its 
       return !!c && c.ready && c.vehicle !== null && c.position !== null;
     },
     null,
-    { timeout: 110_000 },
+    { timeout: 240_000 }, // layout v6: the 2560 m world takes minutes to generate on a loaded box
   );
   const spawnPoses = await propPoses(page);
   expect(Object.keys(spawnPoses).length).toBeGreaterThan(150);

@@ -4,6 +4,7 @@
  * resting on slopes, the SEDAN parked on a 10 % grade, and a rolling
  * "hum" check against an analytic (exact, smooth) reference surface.
  */
+import { buildWorldContent } from '../world/content';
 import { describe, expect, it } from 'vitest';
 import { GAME_CAPACITY, type MainToWorker, type Transform, type WorkerToMain } from '../protocol/messages';
 import { resolveWater } from '../world/water';
@@ -383,7 +384,9 @@ describe('WorkerHost groundHeightfield', () => {
     expect(h.posted.filter((m) => m.type === 'error')).toEqual([]);
     const eng = h.host.engine!;
     // P5: every layout prop is spawned asleep at its resolved placement.
-    const instances = resolvePropInstances(DEFAULT_LAYOUT.props, (x, z) => eng.sampler!.heightAt(x, z));
+    // Layout v6: the generated world content's props follow the layout's.
+    const content = buildWorldContent(DEFAULT_LAYOUT, eng.terrain!, { render: false });
+    const instances = resolvePropInstances([...DEFAULT_LAYOUT.props, ...content.props], (x, z) => eng.sampler!.heightAt(x, z));
     expect(ready.props).toBe(instances.length);
     for (const inst of instances) {
       const o = eng.arena.get(inst.objectId)!;
