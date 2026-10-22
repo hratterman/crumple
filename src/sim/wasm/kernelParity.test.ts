@@ -16,6 +16,7 @@ import { runCrash } from '../vehicle/crash';
 import { createHandlingSim, stepN } from '../vehicle/handling';
 import { BOXTRUCK } from '../vehicle/defs/boxtruck';
 import type { SimEngine } from '../engine';
+import { vehicleVariantSync } from '../vehicle/defs/hd/index';
 
 const KERNELS: KernelFactory[] = simdSupported() ? [WASM_KERNEL, SIMD_KERNEL] : [WASM_KERNEL];
 
@@ -203,4 +204,16 @@ describe('wasm kernel parity (bit-identical to the JS kernel)', () => {
     const ref = run(JS_KERNEL);
     for (const kf of KERNELS) expect(run(kf), kf.kind).toBe(ref);
   }, 120_000);
+
+  it("R-RIG's HD sedan (high) 60 km/h frontal: identical crash results and final state on every kernel", () => {
+    const v = vehicleVariantSync('sedan', 'high');
+    const run = (kf: KernelFactory): { result: string; hash: string } =>
+      withKernel(kf, () => {
+        let last: SimEngine | null = null;
+        const r = runCrash({ kind: 'frontal', speedKmh: 60, def: v.def, probes: v.probes, afterContactS: 0.4, onStep: (eng) => (last = eng) });
+        return { result: JSON.stringify(r), hash: hashEngine(last!) };
+      });
+    const ref = run(JS_KERNEL);
+    for (const kf of KERNELS) expect(run(kf), kf.kind).toEqual(ref);
+  }, 300_000);
 });

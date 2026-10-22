@@ -9,6 +9,7 @@ import { SEDAN } from '../../src/sim/vehicle/defs/sedan';
 import { BOXTRUCK } from '../../src/sim/vehicle/defs/boxtruck';
 import { placePlayer, trafficWorld } from '../../src/sim/traffic/testkit';
 import type { VehicleDef } from '../../src/sim/vehicle/types';
+import { vehicleVariantSync } from '../../src/sim/vehicle/defs/hd/index';
 
 export interface Scene {
   name: string;
@@ -49,8 +50,15 @@ export function trafficScene(n = 3): Scene {
   return { name: `traffic (player + ${w.tr.awakeCount} awake, valley)`, eng: w.eng, beams };
 }
 
+/** R-RIG's HD sedan (sheet-metal skins) at `tier`, launching on a plane. */
+export function sedanHdScene(tier: 'high' | 'ultra'): Scene {
+  return planeCar(`HD sedan ${tier} (plane, launching)`, vehicleVariantSync('sedan', tier).def, 0.6);
+}
+
 export const SCENES: Record<string, () => Scene> = {
   sedan: sedanScene,
   truck: truckScene,
   traffic: () => trafficScene(3),
+  sedanHigh: () => sedanHdScene('high'),
+  sedanUltra: () => sedanHdScene('ultra'),
 };

@@ -433,10 +433,113 @@ static int polar3(const f64 *a, f64 *out) {
   return 1;
 }
 
+/* Accumulators of the shell's force pass (pass 3). */
+typedef struct {
+  f64 maxDev2, maxRel2, sumRel2;
+  int nRel, newRelease, releasedInc;
+} ShellAcc;
+
+/* Pass 3 for one cluster node q: exactly applyShell's loop body. */
+static inline void shell_node(int q, const int32_t *nodes, f64 *w, const f64 *mass, f64 *rest, const f64 *vs,
+                              const uint8_t *tier, const uint8_t *gone, const f64 *rel, const uint8_t *whole,
+                              const uint8_t *yields, uint8_t *tripped, const f64 *R, f64 cx, f64 cy, f64 cz,
+                              f64 rx, f64 ry, f64 rz, f64 vx, f64 vy, f64 vz, f64 ox, f64 oy, f64 oz, f64 beta,
+                              f64 kdt, f64 cr, f64 idt, f64 inv1b, ShellAcc *acc) {
+  const f64 r0 = R[0], r1 = R[1], r2 = R[2], r3 = R[3], r4 = R[4], r5 = R[5], r6 = R[6], r7 = R[7], r8 = R[8];
+  const f64 wq = w[q];
+  const int32_t i = nodes[q];
+  if (invMass[i] == 0) return;
+  const f64 px = posX[i], py = posY[i], pz = posZ[i];
+  const f64 qx = rest[3 * q] - rx, qy = rest[3 * q + 1] - ry, qz = rest[3 * q + 2] - rz;
+  const f64 ex = px - (cx + r0 * qx + r1 * qy + r2 * qz);
+  const f64 ey = py - (cy + r3 * qx + r4 * qy + r5 * qz);
+  const f64 ez = pz - (cz + r6 * qx + r7 * qy + r8 * qz);
+  const f64 dx = px - cx, dy = py - cy, dz = pz - cz;
+  const f64 ux = vx + (oy * dz - oz * dy) - vs[3 * q];
+  const f64 uy = vy + (oz * dx - ox * dz) - vs[3 * q + 1];
+  const f64 uz = vz + (ox * dy - oy * dx) - vs[3 * q + 2];
+  if (wq == 0) {
+    if (gone[q] != 0) return;
+    const f64 r2v = ux * ux + uy * uy + uz * uz;
+    if (r2v > acc->maxRel2) acc->maxRel2 = r2v;
+    acc->sumRel2 += r2v;
+    acc->nRel++;
+    return;
+  }
+  const f64 e2 = ex * ex + ey * ey + ez * ez;
+  if (e2 > acc->maxDev2) acc->maxDev2 = e2;
+  const f64 u2 = ux * ux + uy * uy + uz * uz;
+  f64 wn = wq;
+  const int tq = tier[q];
+  const int ro = 4 * tq;
+  const f64 lo = rel[ro];
+  const f64 vlo = rel[ro + 2];
+  if (tripped[tq] != 0) {
+    wn = 0;
+    w[q] = 0;
+    if (wq == 1) acc->releasedInc++;
+    acc->newRelease = 1;
+  } else if (yields[tq] != 0 && u2 <= vlo * vlo && ((nodeFlags[i] & (NODE_FLAG_IN_CONTACT | NODE_FLAG_OBJ_TOUCH)) == 0 || e2 <= cr * cr) &&
+             /* R-CRASH: a crumple-zone node struck by another object releases its zone */
+             !((nodeFlags[i] & NODE_FLAG_OBJ_IMPACT) != 0 && whole[tq] != 0)) {
+    if (e2 > lo * lo) {
+      const f64 f = 1 - lo / __builtin_sqrt(e2);
+      const f64 fx = ex * f, fy = ey * f, fz = ez * f;
+      rest[3 * q] += r0 * fx + r3 * fy + r6 * fz;
+      rest[3 * q + 1] += r1 * fx + r4 * fy + r7 * fz;
+      rest[3 * q + 2] += r2 * fx + r5 * fy + r8 * fz;
+    }
+  } else if (e2 > lo * lo || u2 > vlo * vlo || ((nodeFlags[i] & NODE_FLAG_OBJ_IMPACT) != 0 && whole[tq] != 0)) {
+    f64 t = e2 > lo * lo && yields[tq] == 0 ? (rel[ro + 1] - __builtin_sqrt(e2)) / (rel[ro + 1] - lo) : 1;
+    /* R-CRASH: pressed into a contact past CONTACT_RELEASE, or struck by another object (whole tiers): let go now */
+    const uint8_t fl = nodeFlags[i];
+    if (yields[tq] != 0 && ((((fl & (NODE_FLAG_IN_CONTACT | NODE_FLAG_OBJ_TOUCH)) != 0) && e2 > cr * cr) || ((fl & NODE_FLAG_OBJ_IMPACT) != 0 && whole[tq] != 0))) t = 0;
+    if (u2 > vlo * vlo) {
+      const f64 tv = (rel[ro + 3] - __builtin_sqrt(u2)) / (rel[ro + 3] - vlo);
+      if (tv < t) t = tv;
+    }
+    f64 wt = t < 0 ? 0 : t;
+    if (wt < wq && whole[tq] != 0) {
+      tripped[tq] = 1;
+      wt = 0;
+    }
+    if (wt < wq) {
+      wn = wt;
+      if (wq == 1) acc->releasedInc++;
+      w[q] = wt;
+      acc->newRelease = 1;
+    }
+  }
+  if (wn < 1) {
+    if (u2 > acc->maxRel2) acc->maxRel2 = u2;
+    acc->sumRel2 += u2;
+    acc->nRel++;
+  }
+  if (wn == 0) return;
+  const f64 f = wn * mass[q] * idt * inv1b;
+  frcX[i] += f * (beta * ux - kdt * ex);
+  frcY[i] += f * (beta * uy - kdt * ey);
+  frcZ[i] += f * (beta * uz - kdt * ez);
+}
+
+#ifdef CRUMPLE_SIMD
+#define V2(a, b) wasm_f64x2_make((a), (b))
+#define SPL(a) wasm_f64x2_splat(a)
+#define ADD wasm_f64x2_add
+#define SUB wasm_f64x2_sub
+#define MUL wasm_f64x2_mul
+#define L0(v) wasm_f64x2_extract_lane((v), 0)
+#define L1(v) wasm_f64x2_extract_lane((v), 1)
+#endif
+
 /*
  * applyShell up to (excluding) the recapture check, which the glue runs in JS
  * (shellRecaptureCheck) from the outputs. Returns 1 when the force pass ran,
  * 0 on the early-outs (no weight, degenerate rotation) like the JS returns.
+ * SIMD build: per-node products in f64x2 lanes (two cluster nodes), every
+ * reduction accumulated in node order exactly as the scalar loop does; in the
+ * force pass a pair where either node could change state (weight < 1, tripped
+ * tier, past its yield / release limits, pinned) runs shell_node in order.
  */
 EXPORT(shell) int shell(f64 *H, f64 dt, f64 gx, f64 gy, f64 gz) {
   const int n = (int)H[SH_N];
@@ -455,7 +558,38 @@ EXPORT(shell) int shell(f64 *H, f64 dt, f64 gx, f64 gy, f64 gz) {
 
   f64 W = 0;
   f64 cx = 0, cy = 0, cz = 0, vx = 0, vy = 0, vz = 0, rx = 0, ry = 0, rz = 0;
-  for (int k = 0; k < n; k++) {
+  int k = 0;
+#ifdef CRUMPLE_SIMD
+  {
+    const v128_t vdt = SPL(dt), vgx = SPL(gx), vgy = SPL(gy), vgz = SPL(gz);
+    for (; k + 1 < n; k += 2) {
+      const int32_t i0 = nodes[k], i1 = nodes[k + 1];
+      const v128_t im = V2(invMass[i0], invMass[i1]);
+      const v128_t v0 = ADD(V2(velX[i0], velX[i1]), MUL(ADD(MUL(V2(frcX[i0], frcX[i1]), im), vgx), vdt));
+      const v128_t v1 = ADD(V2(velY[i0], velY[i1]), MUL(ADD(MUL(V2(frcY[i0], frcY[i1]), im), vgy), vdt));
+      const v128_t v2 = ADD(V2(velZ[i0], velZ[i1]), MUL(ADD(MUL(V2(frcZ[i0], frcZ[i1]), im), vgz), vdt));
+      vs[3 * k] = L0(v0); vs[3 * k + 1] = L0(v1); vs[3 * k + 2] = L0(v2);
+      vs[3 * k + 3] = L1(v0); vs[3 * k + 4] = L1(v1); vs[3 * k + 5] = L1(v2);
+      const v128_t m = MUL(wasm_v128_load(w + k), wasm_v128_load(mass + k));
+      const v128_t mpx = MUL(m, V2(posX[i0], posX[i1])), mpy = MUL(m, V2(posY[i0], posY[i1])), mpz = MUL(m, V2(posZ[i0], posZ[i1]));
+      const v128_t mvx = MUL(m, v0), mvy = MUL(m, v1), mvz = MUL(m, v2);
+      const v128_t mrx = MUL(m, V2(rest[3 * k], rest[3 * k + 3])), mry = MUL(m, V2(rest[3 * k + 1], rest[3 * k + 4])), mrz = MUL(m, V2(rest[3 * k + 2], rest[3 * k + 5]));
+      if (!(L0(m) == 0 || L0(im) == 0)) {
+        W += L0(m);
+        cx += L0(mpx); cy += L0(mpy); cz += L0(mpz);
+        vx += L0(mvx); vy += L0(mvy); vz += L0(mvz);
+        rx += L0(mrx); ry += L0(mry); rz += L0(mrz);
+      }
+      if (!(L1(m) == 0 || L1(im) == 0)) {
+        W += L1(m);
+        cx += L1(mpx); cy += L1(mpy); cz += L1(mpz);
+        vx += L1(mvx); vy += L1(mvy); vz += L1(mvz);
+        rx += L1(mrx); ry += L1(mry); rz += L1(mrz);
+      }
+    }
+  }
+#endif
+  for (; k < n; k++) {
     const int32_t i = nodes[k];
     const f64 im = invMass[i];
     const f64 v0 = velX[i] + (frcX[i] * im + gx) * dt;
@@ -477,7 +611,43 @@ EXPORT(shell) int shell(f64 *H, f64 dt, f64 gx, f64 gy, f64 gz) {
   f64 A[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
   f64 lx = 0, ly = 0, lz = 0;
   f64 ixx = 0, iyy = 0, izz = 0, ixy = 0, ixz = 0, iyz = 0;
-  for (int k = 0; k < n; k++) {
+  k = 0;
+#ifdef CRUMPLE_SIMD
+  {
+    const v128_t vcx = SPL(cx), vcy = SPL(cy), vcz = SPL(cz), vrx = SPL(rx), vry = SPL(ry), vrz = SPL(rz), vvx = SPL(vx), vvy = SPL(vy), vvz = SPL(vz);
+    for (; k + 1 < n; k += 2) {
+      const int32_t i0 = nodes[k], i1 = nodes[k + 1];
+      const v128_t m = MUL(wasm_v128_load(w + k), wasm_v128_load(mass + k));
+      const int ok0 = !(L0(m) == 0) && !(invMass[i0] == 0);
+      const int ok1 = !(L1(m) == 0) && !(invMass[i1] == 0);
+      if (!ok0 && !ok1) continue;
+      const v128_t dx = SUB(V2(posX[i0], posX[i1]), vcx), dy = SUB(V2(posY[i0], posY[i1]), vcy), dz = SUB(V2(posZ[i0], posZ[i1]), vcz);
+      const v128_t qx = SUB(V2(rest[3 * k], rest[3 * k + 3]), vrx), qy = SUB(V2(rest[3 * k + 1], rest[3 * k + 4]), vry), qz = SUB(V2(rest[3 * k + 2], rest[3 * k + 5]), vrz);
+      const v128_t mdx = MUL(m, dx), mdy = MUL(m, dy), mdz = MUL(m, dz);
+      const v128_t a0 = MUL(mdx, qx), a1 = MUL(mdx, qy), a2 = MUL(mdx, qz);
+      const v128_t a3 = MUL(mdy, qx), a4 = MUL(mdy, qy), a5 = MUL(mdy, qz);
+      const v128_t a6 = MUL(mdz, qx), a7 = MUL(mdz, qy), a8 = MUL(mdz, qz);
+      const v128_t ux = SUB(V2(vs[3 * k], vs[3 * k + 3]), vvx), uy = SUB(V2(vs[3 * k + 1], vs[3 * k + 4]), vvy), uz = SUB(V2(vs[3 * k + 2], vs[3 * k + 5]), vvz);
+      const v128_t tlx = MUL(m, SUB(MUL(dy, uz), MUL(dz, uy)));
+      const v128_t tly = MUL(m, SUB(MUL(dz, ux), MUL(dx, uz)));
+      const v128_t tlz = MUL(m, SUB(MUL(dx, uy), MUL(dy, ux)));
+      const v128_t txx = MUL(m, ADD(MUL(dy, dy), MUL(dz, dz)));
+      const v128_t tyy = MUL(m, ADD(MUL(dx, dx), MUL(dz, dz)));
+      const v128_t tzz = MUL(m, ADD(MUL(dx, dx), MUL(dy, dy)));
+      const v128_t txy = MUL(mdx, dy), txz = MUL(mdx, dz), tyz = MUL(mdy, dz);
+#define SHELL_ACC2(L)                                                                                     \
+  A[0] += L(a0); A[1] += L(a1); A[2] += L(a2); A[3] += L(a3); A[4] += L(a4); A[5] += L(a5);           \
+  A[6] += L(a6); A[7] += L(a7); A[8] += L(a8);                                                          \
+  lx += L(tlx); ly += L(tly); lz += L(tlz);                                                             \
+  ixx += L(txx); iyy += L(tyy); izz += L(tzz);                                                          \
+  ixy -= L(txy); ixz -= L(txz); iyz -= L(tyz);
+      if (ok0) { SHELL_ACC2(L0) }
+      if (ok1) { SHELL_ACC2(L1) }
+#undef SHELL_ACC2
+    }
+  }
+#endif
+  for (; k < n; k++) {
     const f64 m = w[k] * mass[k];
     if (m == 0) continue;
     const int32_t i = nodes[k];
@@ -515,97 +685,67 @@ EXPORT(shell) int shell(f64 *H, f64 dt, f64 gx, f64 gy, f64 gz) {
     oy = (j1 * lx + j4 * ly + j5 * lz) * id;
     oz = (j2 * lx + j5 * ly + j8 * lz) * id;
   }
-  const f64 k = H[SH_K];
-  const f64 beta = H[SH_CD] * dt + k * dt * dt;
+  const f64 kk = H[SH_K];
+  const f64 beta = H[SH_CD] * dt + kk * dt * dt;
   const f64 inv1b = 1 / (1 + beta);
-  const f64 kdt = k * dt;
+  const f64 kdt = kk * dt;
   const f64 cr = H[SH_CONTACT_RELEASE];
   const f64 idt = 1 / dt;
-  f64 maxDev2 = 0, maxRel2 = 0, sumRel2 = 0;
-  int nRel = 0, newRelease = 0, releasedInc = 0;
-  const f64 r0 = R[0], r1 = R[1], r2 = R[2], r3 = R[3], r4 = R[4], r5 = R[5], r6 = R[6], r7 = R[7], r8 = R[8];
-  for (int q = 0; q < n; q++) {
-    const f64 wq = w[q];
-    const int32_t i = nodes[q];
-    if (invMass[i] == 0) continue;
-    const f64 px = posX[i], py = posY[i], pz = posZ[i];
-    const f64 qx = rest[3 * q] - rx, qy = rest[3 * q + 1] - ry, qz = rest[3 * q + 2] - rz;
-    const f64 ex = px - (cx + r0 * qx + r1 * qy + r2 * qz);
-    const f64 ey = py - (cy + r3 * qx + r4 * qy + r5 * qz);
-    const f64 ez = pz - (cz + r6 * qx + r7 * qy + r8 * qz);
-    const f64 dx = px - cx, dy = py - cy, dz = pz - cz;
-    const f64 ux = vx + (oy * dz - oz * dy) - vs[3 * q];
-    const f64 uy = vy + (oz * dx - ox * dz) - vs[3 * q + 1];
-    const f64 uz = vz + (ox * dy - oy * dx) - vs[3 * q + 2];
-    if (wq == 0) {
-      if (gone[q] != 0) continue;
-      const f64 r2v = ux * ux + uy * uy + uz * uz;
-      if (r2v > maxRel2) maxRel2 = r2v;
-      sumRel2 += r2v;
-      nRel++;
-      continue;
+  ShellAcc acc = {0, 0, 0, 0, 0, 0};
+  int q = 0;
+#ifdef CRUMPLE_SIMD
+  {
+    const v128_t r0 = SPL(R[0]), r1 = SPL(R[1]), r2 = SPL(R[2]), r3 = SPL(R[3]), r4 = SPL(R[4]), r5 = SPL(R[5]), r6 = SPL(R[6]), r7 = SPL(R[7]), r8 = SPL(R[8]);
+    const v128_t vcx = SPL(cx), vcy = SPL(cy), vcz = SPL(cz), vrx = SPL(rx), vry = SPL(ry), vrz = SPL(rz);
+    const v128_t vvx = SPL(vx), vvy = SPL(vy), vvz = SPL(vz), vox = SPL(ox), voy = SPL(oy), voz = SPL(oz);
+    const v128_t vbeta = SPL(beta), vkdt = SPL(kdt), vidt = SPL(idt), vinv1b = SPL(inv1b), one = SPL(1.0);
+    for (; q + 1 < n; q += 2) {
+      const int32_t i0 = nodes[q], i1 = nodes[q + 1];
+      const int t0 = tier[q], t1 = tier[q + 1];
+      /* (R-CRASH: a node struck by another object on a whole-zone tier releases even inside its limits) */
+      if (w[q] != 1 || w[q + 1] != 1 || invMass[i0] == 0 || invMass[i1] == 0 || tripped[t0] != 0 || tripped[t1] != 0 ||
+          ((nodeFlags[i0] & NODE_FLAG_OBJ_IMPACT) != 0 && whole[t0] != 0) || ((nodeFlags[i1] & NODE_FLAG_OBJ_IMPACT) != 0 && whole[t1] != 0)) {
+        shell_node(q, nodes, w, mass, rest, vs, tier, gone, rel, whole, yields, tripped, R, cx, cy, cz, rx, ry, rz, vx, vy, vz, ox, oy, oz, beta, kdt, cr, idt, inv1b, &acc);
+        shell_node(q + 1, nodes, w, mass, rest, vs, tier, gone, rel, whole, yields, tripped, R, cx, cy, cz, rx, ry, rz, vx, vy, vz, ox, oy, oz, beta, kdt, cr, idt, inv1b, &acc);
+        continue;
+      }
+      const v128_t px = V2(posX[i0], posX[i1]), py = V2(posY[i0], posY[i1]), pz = V2(posZ[i0], posZ[i1]);
+      const v128_t qx = SUB(V2(rest[3 * q], rest[3 * q + 3]), vrx), qy = SUB(V2(rest[3 * q + 1], rest[3 * q + 4]), vry), qz = SUB(V2(rest[3 * q + 2], rest[3 * q + 5]), vrz);
+      const v128_t ex = SUB(px, ADD(ADD(ADD(vcx, MUL(r0, qx)), MUL(r1, qy)), MUL(r2, qz)));
+      const v128_t ey = SUB(py, ADD(ADD(ADD(vcy, MUL(r3, qx)), MUL(r4, qy)), MUL(r5, qz)));
+      const v128_t ez = SUB(pz, ADD(ADD(ADD(vcz, MUL(r6, qx)), MUL(r7, qy)), MUL(r8, qz)));
+      const v128_t dx = SUB(px, vcx), dy = SUB(py, vcy), dz = SUB(pz, vcz);
+      const v128_t ux = SUB(ADD(vvx, SUB(MUL(voy, dz), MUL(voz, dy))), V2(vs[3 * q], vs[3 * q + 3]));
+      const v128_t uy = SUB(ADD(vvy, SUB(MUL(voz, dx), MUL(vox, dz))), V2(vs[3 * q + 1], vs[3 * q + 4]));
+      const v128_t uz = SUB(ADD(vvz, SUB(MUL(vox, dy), MUL(voy, dx))), V2(vs[3 * q + 2], vs[3 * q + 5]));
+      const v128_t e2 = ADD(ADD(MUL(ex, ex), MUL(ey, ey)), MUL(ez, ez));
+      const v128_t u2 = ADD(ADD(MUL(ux, ux), MUL(uy, uy)), MUL(uz, uz));
+      const f64 lo0 = rel[4 * t0], vlo0 = rel[4 * t0 + 2], lo1 = rel[4 * t1], vlo1 = rel[4 * t1 + 2];
+      /* Inside both limits: no branch of shell_node changes any state (weight stays 1, rest unchanged). */
+      if (!(L0(e2) <= lo0 * lo0 && L0(u2) <= vlo0 * vlo0 && L1(e2) <= lo1 * lo1 && L1(u2) <= vlo1 * vlo1)) {
+        shell_node(q, nodes, w, mass, rest, vs, tier, gone, rel, whole, yields, tripped, R, cx, cy, cz, rx, ry, rz, vx, vy, vz, ox, oy, oz, beta, kdt, cr, idt, inv1b, &acc);
+        shell_node(q + 1, nodes, w, mass, rest, vs, tier, gone, rel, whole, yields, tripped, R, cx, cy, cz, rx, ry, rz, vx, vy, vz, ox, oy, oz, beta, kdt, cr, idt, inv1b, &acc);
+        continue;
+      }
+      if (L0(e2) > acc.maxDev2) acc.maxDev2 = L0(e2);
+      if (L1(e2) > acc.maxDev2) acc.maxDev2 = L1(e2);
+      const v128_t f = MUL(MUL(MUL(one, wasm_v128_load(mass + q)), vidt), vinv1b);
+      const v128_t fx = MUL(f, SUB(MUL(vbeta, ux), MUL(vkdt, ex)));
+      const v128_t fy = MUL(f, SUB(MUL(vbeta, uy), MUL(vkdt, ey)));
+      const v128_t fz = MUL(f, SUB(MUL(vbeta, uz), MUL(vkdt, ez)));
+      frcX[i0] += L0(fx); frcY[i0] += L0(fy); frcZ[i0] += L0(fz);
+      frcX[i1] += L1(fx); frcY[i1] += L1(fy); frcZ[i1] += L1(fz);
     }
-    const f64 e2 = ex * ex + ey * ey + ez * ez;
-    if (e2 > maxDev2) maxDev2 = e2;
-    const f64 u2 = ux * ux + uy * uy + uz * uz;
-    f64 wn = wq;
-    const int tq = tier[q];
-    const int ro = 4 * tq;
-    const f64 lo = rel[ro];
-    const f64 vlo = rel[ro + 2];
-    if (tripped[tq] != 0) {
-      wn = 0;
-      w[q] = 0;
-      if (wq == 1) releasedInc++;
-      newRelease = 1;
-    } else if (yields[tq] != 0 && u2 <= vlo * vlo && ((nodeFlags[i] & (NODE_FLAG_IN_CONTACT | NODE_FLAG_OBJ_TOUCH)) == 0 || e2 <= cr * cr) &&
-               /* R-CRASH: a crumple-zone node struck by another object releases its zone */
-               !((nodeFlags[i] & NODE_FLAG_OBJ_IMPACT) != 0 && whole[tq] != 0)) {
-      if (e2 > lo * lo) {
-        const f64 f = 1 - lo / __builtin_sqrt(e2);
-        const f64 fx = ex * f, fy = ey * f, fz = ez * f;
-        rest[3 * q] += r0 * fx + r3 * fy + r6 * fz;
-        rest[3 * q + 1] += r1 * fx + r4 * fy + r7 * fz;
-        rest[3 * q + 2] += r2 * fx + r5 * fy + r8 * fz;
-      }
-    } else if (e2 > lo * lo || u2 > vlo * vlo || ((nodeFlags[i] & NODE_FLAG_OBJ_IMPACT) != 0 && whole[tq] != 0)) {
-      f64 t = e2 > lo * lo && yields[tq] == 0 ? (rel[ro + 1] - __builtin_sqrt(e2)) / (rel[ro + 1] - lo) : 1;
-      /* R-CRASH: pressed into a contact past CONTACT_RELEASE, or struck by another object (whole tiers): let go now */
-      const uint8_t fl = nodeFlags[i];
-      if (yields[tq] != 0 && ((((fl & (NODE_FLAG_IN_CONTACT | NODE_FLAG_OBJ_TOUCH)) != 0) && e2 > cr * cr) || ((fl & NODE_FLAG_OBJ_IMPACT) != 0 && whole[tq] != 0))) t = 0;
-      if (u2 > vlo * vlo) {
-        const f64 tv = (rel[ro + 3] - __builtin_sqrt(u2)) / (rel[ro + 3] - vlo);
-        if (tv < t) t = tv;
-      }
-      f64 wt = t < 0 ? 0 : t;
-      if (wt < wq && whole[tq] != 0) {
-        tripped[tq] = 1;
-        wt = 0;
-      }
-      if (wt < wq) {
-        wn = wt;
-        if (wq == 1) releasedInc++;
-        w[q] = wt;
-        newRelease = 1;
-      }
-    }
-    if (wn < 1) {
-      if (u2 > maxRel2) maxRel2 = u2;
-      sumRel2 += u2;
-      nRel++;
-    }
-    if (wn == 0) continue;
-    const f64 f = wn * mass[q] * idt * inv1b;
-    frcX[i] += f * (beta * ux - kdt * ex);
-    frcY[i] += f * (beta * uy - kdt * ey);
-    frcZ[i] += f * (beta * uz - kdt * ez);
   }
-  H[SH_RELEASED_INC] = releasedInc;
-  H[SH_NEW_RELEASE] = newRelease;
-  H[SH_MAX_DEV2] = maxDev2;
-  H[SH_MAX_REL2] = maxRel2;
-  H[SH_SUM_REL2] = sumRel2;
-  H[SH_NREL] = nRel;
+#endif
+  for (; q < n; q++)
+    shell_node(q, nodes, w, mass, rest, vs, tier, gone, rel, whole, yields, tripped, R, cx, cy, cz, rx, ry, rz, vx, vy, vz, ox, oy, oz, beta, kdt, cr, idt, inv1b, &acc);
+  H[SH_RELEASED_INC] = acc.releasedInc;
+  H[SH_NEW_RELEASE] = acc.newRelease;
+  H[SH_MAX_DEV2] = acc.maxDev2;
+  H[SH_MAX_REL2] = acc.maxRel2;
+  H[SH_SUM_REL2] = acc.sumRel2;
+  H[SH_NREL] = acc.nRel;
   H[SH_CX] = cx;
   H[SH_CY] = cy;
   H[SH_CZ] = cz;
