@@ -27,6 +27,7 @@
  * nodes, so their auto beams shrink to fit, as for the P4 hood).
  */
 import type { RigBeamDef, RigNodeDef } from '../rig/types';
+import type { ShellDef } from './shellDefs';
 
 export type V3 = readonly [number, number, number];
 
@@ -121,6 +122,7 @@ function findOpenStop(
   const a = bodyPos(spec.hingeAxis[0]);
   const b = bodyPos(spec.hingeAxis[1]);
   let best: { cell: string; to: string; deg: number; score: number } | null = null;
+  const seen: string[] = [];
   for (const r of spec.stopRows) {
     for (const c of ids[r] ?? []) {
       if (!c) continue;
@@ -141,13 +143,14 @@ function findOpenStop(
             break;
           }
         }
+        if (deg > 0) seen.push(`${c}→${q} ${deg}° w${widest.toFixed(3)}`);
         if (deg < 0 || widest < 0.02) continue;
         const score = Math.abs(deg - spec.maxOpenDeg) - widest;
         if (Math.abs(deg - spec.maxOpenDeg) <= 12 && (!best || score < best.score)) best = { cell: c, to: q, deg, score };
       }
     }
   }
-  if (!best) throw new Error(`closure ${spec.id}: no open stop near ${spec.maxOpenDeg}° among the candidates`);
+  if (!best) throw new Error(`closure ${spec.id}: no open stop near ${spec.maxOpenDeg}° among the candidates (${seen.slice(0, 30).join(', ')})`);
   return best;
 }
 
@@ -413,4 +416,21 @@ export function addClosureNodes(
     spec.grid.forEach((row, r) => row.forEach((pt, k) => pt && addNode(`${spec.id}_${r}${k}`, pt, spec.nodeMass, spec.group, true, false)));
     spec.inner.forEach((pt, k) => addNode(`${spec.id}_i${k}`, pt, spec.nodeMass, spec.group, true, false));
   }
+}
+
+/**
+ * Each closure's DORMANT shell cluster (ShellDef.dormantLatch): asleep while latched (the body cluster's
+ * latched zone holds the panel), woken in its current shape when its latch pops, so the free panel moves
+ * as one stiff piece on its hinge beams and dents only where it is hit (`release`: the cell's).
+ */
+export function dormantClosureShells(
+  specs: readonly { spec: ClosureSpec }[],
+  release: { lo: number; hi: number; vLo: number; vHi: number },
+): ShellDef[] {
+  return specs.map(({ spec }) => ({
+    ids: [`${spec.id}_*`],
+    groups: [spec.group],
+    dormantLatch: `${spec.id}_*`,
+    zones: [{ ids: [`${spec.id}_*`], release, yield: true }],
+  }));
 }

@@ -582,9 +582,11 @@ export function runDrive(def: VehicleDef, kind: DriveKind, opts: DriveOptions = 
   }
   const total = Math.round(duration * SIM_HZ);
   let maxReleased = 0;
+  // released = shell weight < 1; `gone` nodes are out of the cluster (a broken beam, counted as broken, or an
+  // R-CRASH closure's dormant cluster still asleep: ShellDef.dormantLatch)
   const countReleased = (): number => {
     let n = 0;
-    for (const c of sim.veh.shell ?? []) for (let k = 0; k < c.w.length; k++) if (c.w[k]! < 1) n++;
+    for (const c of sim.veh.shell ?? []) for (let k = 0; k < c.w.length; k++) if (c.w[k]! < 1 && c.gone[k] === 0) n++;
     return n;
   };
   let prevV: [number, number, number] | null = null;
@@ -692,7 +694,7 @@ export function runDrop(def: VehicleDef, heightM = 0.5): DropResult {
     eng.step();
     if (t % 20 === 0) {
       let n = 0;
-      for (const c of veh.shell ?? []) for (let k = 0; k < c.w.length; k++) if (c.w[k]! < 1) n++;
+      for (const c of veh.shell ?? []) for (let k = 0; k < c.w.length; k++) if (c.w[k]! < 1 && c.gone[k] === 0) n++;
       maxReleased = Math.max(maxReleased, n);
     }
   }

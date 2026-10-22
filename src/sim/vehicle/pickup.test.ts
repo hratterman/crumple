@@ -30,6 +30,7 @@ import {
   type TopSpeedResult,
   setMotion,
 } from './handling';
+import type { ShellDef } from './shellDefs';
 import type { CompiledVehicle, VehicleDef } from './types';
 
 const cv: CompiledVehicle = compileVehicle(PICKUP);
@@ -103,8 +104,13 @@ describe('PICKUP definition', () => {
     const ids = PICKUP.body.nodes.map((n) => n.id);
     expect(ids.filter((id) => id.startsWith('hood_')).length).toBe(12);
     expect(ids.filter((id) => id.startsWith('tg_')).length).toBe(12);
+    // sub-rig beams after the structure's; only the R-CRASH hinged doors' beams follow them (a door node at
+    // one end, or one of the aperture racking sensors: the latch pairs)
+    const sub = /^(hood|tg|d[FR][LR])_/;
+    const shellDef = (Array.isArray(PICKUP.shell) ? PICKUP.shell[0] : PICKUP.shell) as ShellDef;
+    const latchPairs = new Set((shellDef.zones ?? []).flatMap((z) => (z.latch ?? []).map(([p, q]) => `${p}|${q}`)));
     const firstSub = PICKUP.body.beams.findIndex((b) => /^(hood|tg)_/.test(b.a) || /^(hood|tg)_/.test(b.b));
-    expect(PICKUP.body.beams.slice(firstSub).every((b) => /^(hood|tg)_/.test(b.a) || /^(hood|tg)_/.test(b.b))).toBe(true);
+    expect(PICKUP.body.beams.slice(firstSub).every((b) => sub.test(b.a) || sub.test(b.b) || latchPairs.has(`${b.a}|${b.b}`))).toBe(true);
     const beam = (a: string, b: string) => PICKUP.body.beams.find((x) => (x.a === a && x.b === b) || (x.a === b && x.b === a));
     expect(beam('hood_0C', 's0_rt')!.breakF).toBeLessThan(1e4); // latch
     for (const [a, b] of PICKUP_DESIGN.tailgateHinges) expect(beam(a, b)!.breakF).toBeGreaterThanOrEqual(2e4);

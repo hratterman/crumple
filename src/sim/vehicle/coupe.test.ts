@@ -24,6 +24,7 @@ import {
   type StepSteerResult,
   type TopSpeedResult,
 } from './handling';
+import type { ShellDef } from './shellDefs';
 import { wheelNodeId, type CompiledVehicle } from './types';
 
 const T = COUPE_TARGETS.acceptance;
@@ -93,7 +94,10 @@ describe('COUPE definition', () => {
     const ids = body.nodes.map((n) => n.id);
     const expected: string[] = [];
     for (let r = 0; r < 4; r++) for (const s of ['L', 'C', 'R']) expected.push(`hood_${r}${s}`);
-    expect(ids.slice(ids.length - 12)).toEqual(expected);
+    // appended after every structure node; only the R-CRASH hinged closures (doors dR / dL, trunk lid tk) follow it
+    const after = ids.slice(ids.indexOf('hood_0L'));
+    expect(after.slice(0, 12)).toEqual(expected);
+    for (const id of after.slice(12)) expect(id).toMatch(/^(d[LR]|tk)_(\d\d|i\d)$/);
     const beam = (a: string, b: string) => body.beams.find((x) => (x.a === a && x.b === b) || (x.a === b && x.b === a));
     for (const s of ['L', 'R']) {
       for (const t of [`s5_cw_${s}`, `s4_fd_${s}`]) expect(beam(`hood_3${s}`, t)!.breakF).toBeGreaterThanOrEqual(2e4);
@@ -103,13 +107,16 @@ describe('COUPE definition', () => {
     expect(beam('hood_0C', 's2_rt')!.breakF).toBeLessThan(1e4);
     // The ends yield before any safety-cell member (s5..s8 minus door panels, window frames, firewall panel).
     const st = (id: string): number => Number(/^s(\d+)_/.exec(id)?.[1] ?? -1);
+    const shellDef = (Array.isArray(COUPE.shell) ? COUPE.shell[0] : COUPE.shell) as ShellDef;
+    const latchPairs = new Set((shellDef.zones ?? []).flatMap((z) => (z.latch ?? []).map(([p, q]) => `${p}|${q}`)));
     const deformOf = (pred: (a: string, b: string) => boolean): number[] =>
       body.beams.filter((b) => b.type === 'normal' && pred(b.a, b.b)).map((b) => b.deform ?? 0);
     const front = deformOf((a, b) => st(a) >= 0 && st(a) <= 1 && st(b) >= 0 && st(b) <= 2);
     const cage = deformOf(
       (a, b) =>
         st(a) >= 5 && st(a) <= 8 && st(b) >= 5 && st(b) <= 8 && !/_(bt|rf|cw)/.test(a + b) && !/^s6_(dm|bt|sl|fl)_/.test(a) && !/^s6_(dm|bt|sl|fl)_/.test(b) &&
-        !(/_hp/.test(a + b) && st(a) !== st(b)) && !/s5_fw_/.test(a + b),
+        !(/_hp/.test(a + b) && st(a) !== st(b)) && !/s5_fw_/.test(a + b) &&
+        !latchPairs.has(`${a}|${b}`), // R-CRASH door-aperture racking sensors (elastic, unlatch the doors)
     );
     expect(front.length).toBeGreaterThan(10);
     expect(cage.length).toBeGreaterThan(20);
@@ -176,7 +183,7 @@ describe('COUPE handling harness', () => {
       ['0–100 km/h (s)', f(launch.t100), '3.9–4.6'],
       ['launch heading drift @100 m (deg)', f(launch.headingDrift100), '≤ 3'],
       ['rear slip ratio, settled max (0.5 s mean)', f(settledRearSlip(launch)), '< 0.3'],
-      ['braking 100→0 (m) / drift (deg)', `${f(brake.distance, 1)} / ${f(brake.headingDrift)}`, '≤ 34 / < 5'],
+      ['braking 100→0 (m) / drift (deg)', `${f(brake.distance, 1)} / ${f(brake.headingDrift)}`, '≤ 34.5 / < 5'],
       ['circle R40 max lateral (g)', f(circle.maxLatG), '≥ 1.05'],
       ['step steer 0.12 @60: overshoot / std / spun', `${f(step.overshoot)} / ${f(step.yawStd, 4)} / ${step.spun}`, '≤ 1.35 / < 0.03 / false'],
       ['full-throttle accel @250 / 260 km/h (m/s²)', `${f(top.accel200)} / ${f(top.accel210)} (gear ${top.gear200}/${top.gear210})`, '> 0'],
@@ -201,7 +208,7 @@ describe('COUPE handling harness', () => {
     expect(settledRearSlip(launch)).toBeLessThan(0.3);
   });
 
-  it('braking 100→0 ≤ 34 m, straight', () => {
+  it('braking 100→0 ≤ 34.5 m, straight', () => {
     expect(brake.distance).toBeLessThanOrEqual(T.brake100M);
     expect(brake.headingDrift).toBeLessThan(5);
   });

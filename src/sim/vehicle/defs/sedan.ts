@@ -562,9 +562,16 @@ const TRUNK_REST_K = 1e5;
  * firewall. Rear door: hinge s7_sl → s7_dm (B-pillar), latch s9_qm + s9_fl (C-pillar). Trunk: hinge axis
  * s9_dk_L → s9_dk_R (rear-glass base), latch s12_tf + s12_ld, gas strut to the trunk floor.
  */
-/** 1 kg nodes: an 11 kg door skin (the cage carries the rest of a door's mass; 2 kg took 100 kg out of the tuned structure mass solve and the 50 km/h crush went 54 → 70 cm). */
-const DOOR_NODE_MASS = 1;
-const TRUNK_NODE_MASS = 1.4;
+/**
+ * 0.5 kg nodes: a 6.5 kg door skin, a 7 kg lid (the cage nodes keep the rest of a door's mass, as before
+ * the closures). Closure nodes are fixed masses in the structure solve, so their mass comes out of the
+ * structure, whose stiffness and yield forces are budgeted per kg: 1 kg nodes (66 kg) made the body 8 %
+ * softer — 50 km/h peak crush 62.9 → 65.4 cm, spring-back 16 → 22 %, a sedan into a truck's box side left
+ * 7.7 cm instead of 16; at 0.5 kg: 62.9 cm, 18 %, 15.0 cm, SWR 3.6. (Taking a door's mass from the cell
+ * nodes on its side instead weakened the roof / door ring: SWR 3.4, pickup pole intrusion +9 cm.)
+ */
+const DOOR_NODE_MASS = 0.5;
+const TRUNK_NODE_MASS = 0.7;
 const CLOSURE = {
   skin: { zeta: 0.5, yieldStrain: 0.03, minDeform: 2.5e3, breakRatio: 8 },
   /** Hinges bend from 12 kN and tear off at 30 kN; each latch beam pops at 11 kN (FMVSS 206 primary latch, longitudinal 11 kN / transverse 9 kN) or when the door ring racks (sensors). */
@@ -837,7 +844,7 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
         ],
         strap: { cell: [1, 1], to: rear ? sid(7, 'tn') : sid(5, 'fw', side) },
         // a light detent: an unlatched door pops ajar and then swings with the car's motion
-        strapForce: 150,
+        strapForce: 75,
         stopCandidates: [],
         stopRows: [1, 2],
         // inner panel: lower door and belt reinforcement, 14 cm inboard of the skin
@@ -885,7 +892,7 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
         ],
         strap: { cell: [1, 1], to: sid(10, 'tf') },
         // gas struts: an unlatched lid rises to (nearly) fully open
-        strapForce: 1400,
+        strapForce: 700,
         stopCandidates: [],
         stopRows: [1],
         inner: [[0, 0.86, 1.75]],

@@ -470,8 +470,14 @@ export const compileVehicle: CompileVehicle = (def) => {
 export const CRUSH_UNLOAD_DEFAULT = 40;
 /** A crumple-zone member is crash loaded from this fraction of its yield force (only while the car is in a crash). */
 export const CRUSH_TRIGGER_YIELD = 0.3;
-/** SET members (VehicleDef.crushSet) take their permanent set above this fraction of their yield force. */
+/** SET members (VehicleDef.crushSet) take their permanent set above this fraction of their yield force… */
 const CRUSH_TRIGGER_SET = 0.5;
+/**
+ * …and never below this force, N: set members are armed without a crash (a platen / a slow roll-over lands
+ * no impact), so their trigger must sit above every driving load. A light member that merely touches the
+ * ring (the beater's 2 kN fender → cowl links) triggered at 1 kN in hard cornering and took a set.
+ */
+const CRUSH_TRIGGER_SET_MIN = 4e3;
 /** A held (cell / firewall / box / cab) or never-yielding member (engine block, subframe) is crash loaded from this force, N. */
 export const CRUSH_TRIGGER_HELD = 10e3;
 
@@ -520,7 +526,7 @@ function setCrushUnload(def: VehicleDef, rig: CompiledRig, shells: readonly Comp
     if (setPat.length > 0 && Number.isFinite(df) && (isSet(rig.beamA[b]!) || isSet(rig.beamB[b]!))) {
       // set members unload at the default α whatever the def's crumple α (the beater / box truck run theirs at 1)
       gain[b] = CRUSH_UNLOAD_DEFAULT - 1;
-      trig[b] = -CRUSH_TRIGGER_SET * df;
+      trig[b] = -Math.max(CRUSH_TRIGGER_SET * df, CRUSH_TRIGGER_SET_MIN);
       continue;
     }
     const isHeld = (held[rig.beamA[b]!] !== 0 && held[rig.beamB[b]!] !== 0) || CRUSH_RUNNING_GEAR.test(ga) || CRUSH_RUNNING_GEAR.test(gb);

@@ -1,5 +1,5 @@
 /**
- * R-CRASH hinged closures (closures.ts, sedan doors + trunk lid): an unlatched door swings on its hinge
+ * R-CRASH hinged closures (closures.ts; sedan / coupe doors + trunk lid, pickup crew-cab doors; data: CASES): an unlatched door swings on its hinge
  * axis as a stiff panel (its dormant shell cluster wakes), out to its open stop under braking and back
  * toward closed under acceleration; a 64 km/h frontal leaves the latched doors latched and undented (the
  * open stop on the crushing fender breaks instead of pushing the door in); a 30 km/h side pole leaves
@@ -9,9 +9,12 @@ import { describe, expect, it } from 'vitest';
 import type { SimObject, SimState } from '../types';
 import { compileVehicle } from './builder';
 import { runCrash } from './crash';
+import { COUPE, COUPE_CRASH_PROBES } from './defs/coupe';
+import { PICKUP, PICKUP_CRASH_PROBES } from './defs/pickup';
 import { SEDAN } from './defs/sedan';
 import { createHandlingSim, stepN } from './handling';
-import type { CompiledVehicle } from './types';
+import type { CompiledVehicle, VehicleDef } from './types';
+import type { CrashProbes } from './crash';
 
 type V3 = [number, number, number];
 
@@ -51,86 +54,113 @@ function closureSkin(cv: CompiledVehicle, s: SimState, obj: SimObject, prefix: s
   return { strain, set };
 }
 
-describe('sedan hinged closures', () => {
-  it('an unlatched front door swings as a stiff panel: out to its stop braking, back toward closed accelerating', () => {
-    const sim = createHandlingSim({ def: SEDAN });
-    const s = sim.eng.state;
-    const ids = sim.cv.rig.nodeIds;
-    const n0 = sim.obj.nodeStart;
-    const at = new Map(ids.map((id, i) => [id, i] as const));
-    const P = (id: string): V3 => {
-      const i = n0 + at.get(id)!;
-      return [s.posX[i]!, s.posY[i]!, s.posZ[i]!];
-    };
-    const ang = () => hingeAngle(P, 'dFR_12', 's7_dm_R', 's5_sl_R', 's5_hp_R');
-    stepN(sim, 1000);
-    const a0 = ang();
-    // pop the front-right latch: break one of its latch beams; the zone's latch pass lets the rest go
-    const body = sim.veh.shell![0]!;
-    const sh = sim.cv.shell[0]!;
-    const latch = Array.from(sh.latchBeams).find((b) => [sim.cv.rig.beamA[b]!, sim.cv.rig.beamB[b]!].some((i) => ids[i]!.startsWith('dFR_')));
-    expect(latch).toBeDefined();
-    s.active[sim.obj.beamStart + latch!] = 0;
-    stepN(sim, 4000);
-    expect(Array.from(body.latchOff).filter((x) => x === 1)).toHaveLength(1);
-    // its own cluster woke (weights 1) and the panel is held (not a sagging node lattice)
-    const door = sim.veh.shell!.find((rt) => rt !== body && Array.from(rt.nodes).some((i) => ids[i - n0] === 'dFR_12'))!;
-    expect(door).toBeDefined();
-    expect(Math.min(...Array.from(door.w))).toBe(1);
-    const popped = Math.abs(ang() - a0);
-    expect(popped).toBeGreaterThan(5); // it hangs open under its check strap
+/** Per vehicle: the front-right door (its shut-edge node, the latch-pillar reference, the hinge axis) and every door prefix. */
+interface ClosureCase {
+  def: VehicleDef;
+  probes?: CrashProbes;
+  door: string;
+  edge: string;
+  ref: string;
+  axis: readonly [string, string];
+  doors: readonly string[];
+  /** Worst door-skin strain allowed after the 64 km/h frontal (default 3 %). */
+  maxSkinStrain?: number;
+}
+const CASES: readonly ClosureCase[] = [
+  { def: SEDAN, door: 'dFR', edge: 'dFR_12', ref: 's7_dm_R', axis: ['s5_sl_R', 's5_hp_R'], doors: ['dFR_', 'dFL_', 'dRR_', 'dRL_'] },
+  { def: COUPE, probes: COUPE_CRASH_PROBES, door: 'dR', edge: 'dR_12', ref: 's7_dm_R', axis: ['s5_sl_R', 's5_hp_R'], doors: ['dR_', 'dL_'] },
+  { def: PICKUP, probes: PICKUP_CRASH_PROBES, door: 'dFR', edge: 'dFR_12', ref: 'c2_dm_R', axis: ['c0_sl_R', 'c0_hp_R'], doors: ['dFR_', 'dFL_', 'dRR_', 'dRL_'], maxSkinStrain: 0.1 },
+];
 
-    sim.eng.setInput(sim.objectId, { throttle: 1, gearSelect: 1, handbrake: 0, brake: 0 });
-    let minAccel = Infinity;
-    for (let k = 0; k < 40; k++) {
-      stepN(sim, 200);
-      minAccel = Math.min(minAccel, Math.abs(ang() - a0));
-    }
-    sim.eng.setInput(sim.objectId, { throttle: 0, brake: 1 });
-    let maxBrake = 0;
-    for (let k = 0; k < 20; k++) {
-      stepN(sim, 200);
-      maxBrake = Math.max(maxBrake, Math.abs(ang() - a0));
-    }
-    // accelerating swings it toward the closed door (inertia); braking throws it out to its 68° stop (+ compliance)
-    expect(minAccel).toBeLessThan(popped);
-    expect(maxBrake).toBeGreaterThan(55);
-    expect(maxBrake).toBeLessThan(85);
-    const skin = closureSkin(sim.cv, s, sim.obj, 'dFR_');
-    expect(skin.strain).toBeLessThan(0.02);
-    expect(skin.set).toBe(0);
-  }, 900_000);
+for (const c of CASES) {
+  describe(`${c.def.name} hinged closures`, () => {
+    it('an unlatched front door swings as a stiff panel: out to its stop braking, back toward closed accelerating', () => {
+      const sim = createHandlingSim({ def: c.def });
+      const s = sim.eng.state;
+      const ids = sim.cv.rig.nodeIds;
+      const n0 = sim.obj.nodeStart;
+      const at = new Map(ids.map((id, i) => [id, i] as const));
+      const P = (id: string): V3 => {
+        const i = n0 + at.get(id)!;
+        return [s.posX[i]!, s.posY[i]!, s.posZ[i]!];
+      };
+      const ang = () => hingeAngle(P, c.edge, c.ref, c.axis[0], c.axis[1]);
+      stepN(sim, 1000);
+      const a0 = ang();
+      // pop the latch: break one of its latch beams; the zone's latch pass lets the rest go
+      const body = sim.veh.shell![0]!;
+      const sh = sim.cv.shell[0]!;
+      const latch = Array.from(sh.latchBeams).find((b) => [sim.cv.rig.beamA[b]!, sim.cv.rig.beamB[b]!].some((i) => ids[i]!.startsWith(`${c.door}_`)));
+      expect(latch).toBeDefined();
+      s.active[sim.obj.beamStart + latch!] = 0;
+      stepN(sim, 4000);
+      expect(Array.from(body.latchOff).filter((x) => x === 1)).toHaveLength(1);
+      // its own cluster woke (weights 1) and the panel is held (not a sagging node lattice)
+      const door = sim.veh.shell!.find((rt) => rt !== body && Array.from(rt.nodes).some((i) => ids[i - n0] === c.edge))!;
+      expect(door).toBeDefined();
+      expect(Math.min(...Array.from(door.w))).toBe(1);
+      const popped = Math.abs(ang() - a0);
+      expect(popped).toBeGreaterThan(5); // it hangs open under its check strap
 
-  it('a 64 km/h frontal leaves the doors latched and undented (the open stop breaks, not the door)', () => {
-    const cv = compileVehicle(SEDAN);
-    let checked = false;
-    runCrash({
-      kind: 'frontal',
-      speedKmh: 64,
-      onStep: (eng, obj, since) => {
-        if (since !== 3000) return;
-        checked = true;
-        const rt = eng.getVehicle(obj.objectId)!.shell![0]!;
-        expect(Array.from(rt.latchOff).every((x) => x === 0)).toBe(true);
-        for (const d of ['dFR_', 'dFL_', 'dRR_', 'dRL_']) {
-          const skin = closureSkin(cv, eng.state, obj, d);
-          expect(skin.strain, d).toBeLessThan(0.03);
-          expect(skin.set, d).toBe(0);
-        }
-      },
-    });
-    expect(checked).toBe(true);
-  }, 900_000);
+      sim.eng.setInput(sim.objectId, { throttle: 1, gearSelect: 1, handbrake: 0, brake: 0 });
+      let minAccel = Infinity;
+      for (let k = 0; k < 40; k++) {
+        stepN(sim, 200);
+        minAccel = Math.min(minAccel, Math.abs(ang() - a0));
+      }
+      sim.eng.setInput(sim.objectId, { throttle: 0, brake: 1 });
+      let maxBrake = 0;
+      for (let k = 0; k < 20; k++) {
+        stepN(sim, 200);
+        maxBrake = Math.max(maxBrake, Math.abs(ang() - a0));
+      }
+      // accelerating swings it toward the closed door (inertia); braking throws it out to its 68° stop (+ compliance)
+      expect(minAccel).toBeLessThan(popped);
+      expect(maxBrake).toBeGreaterThan(55);
+      expect(maxBrake).toBeLessThan(85);
+      const skin = closureSkin(sim.cv, s, sim.obj, `${c.door}_`);
+      expect(skin.strain).toBeLessThan(0.02);
+      expect(skin.set).toBe(0);
+    }, 900_000);
 
-  it('a 30 km/h side pole (FMVSS 214) leaves every door latched', () => {
-    let off = -1;
-    runCrash({
-      kind: 'pole',
-      speedKmh: 30,
-      onStep: (eng, obj, since) => {
-        if (since === 3000) off = Array.from(eng.getVehicle(obj.objectId)!.shell![0]!.latchOff).filter((x) => x !== 0).length;
-      },
-    });
-    expect(off).toBe(0);
-  }, 900_000);
-});
+    it('a 64 km/h frontal leaves the doors latched and undented (the open stop breaks, not the door)', () => {
+      const cv = compileVehicle(c.def);
+      let checked = false;
+      runCrash({
+        kind: 'frontal',
+        speedKmh: 64,
+        def: c.def,
+        ...(c.probes ? { probes: c.probes } : {}),
+        onStep: (eng, obj, since) => {
+          if (since !== 3000) return;
+          checked = true;
+          const rt = eng.getVehicle(obj.objectId)!.shell![0]!;
+          expect(Array.from(rt.latchOff).every((x) => x === 0)).toBe(true);
+          for (const d of c.doors) {
+            const skin = closureSkin(cv, eng.state, obj, d);
+            // no dent (no member set); the strain bound catches a door pushed in (29 % with the open stop on
+            // the crushing fender unbreakable): the pickup's cab racks on its frame mounts, so its inner panel
+            // node sits up to 9 % off (elastic) in a door frame that is no longer square
+            expect(skin.strain, d).toBeLessThan(c.maxSkinStrain ?? 0.03);
+            expect(skin.set, d).toBe(0);
+          }
+        },
+      });
+      expect(checked).toBe(true);
+    }, 900_000);
+
+    it('a 30 km/h side pole (FMVSS 214) leaves every door latched', () => {
+      let off = -1;
+      runCrash({
+        kind: 'pole',
+        speedKmh: 30,
+        def: c.def,
+        ...(c.probes ? { probes: c.probes } : {}),
+        onStep: (eng, obj, since) => {
+          if (since === 3000) off = Array.from(eng.getVehicle(obj.objectId)!.shell![0]!.latchOff).filter((x) => x !== 0).length;
+        },
+      });
+      expect(off).toBe(0);
+    }, 900_000);
+  });
+}
