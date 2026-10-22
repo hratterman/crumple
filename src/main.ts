@@ -87,8 +87,6 @@ import {
   type RenderContext,
   type WorldFrame,
 } from './render/types';
-import { compilePropRig } from './sim/props/catalog';
-import { resolvePropInstances } from './sim/props/placement';
 import { compileRig } from './sim/rig/builder';
 import { softCube } from './sim/rig/testrigs';
 import type { TransmissionMode } from './sim/vehicle/types';
@@ -1449,6 +1447,9 @@ function loadWorldLayer() {
     import('./render/world/stuntpark'),
     // Layout v6: the generated world content (structures, town, areas, detail).
     import('./render/world/content'),
+    // The prop catalog (every prop's rig builder) + placement: only the world layer needs them (~25 kB off the app chunk).
+    import('./sim/props/placement'),
+    import('./sim/props/catalog'),
   ]);
 }
 
@@ -1563,7 +1564,7 @@ async function boot(): Promise<void> {
   const [
     loaded,
     materials,
-    [{ createPropRenderer }, { createVegetationRenderer }, { createWaterRenderer }, { createFxSystem }, { createColliderRenderer }, { createStuntParkRenderer }, { createWorldContentRenderer, withTerrainCovers }],
+    [{ createPropRenderer }, { createVegetationRenderer }, { createWaterRenderer }, { createFxSystem }, { createColliderRenderer }, { createStuntParkRenderer }, { createWorldContentRenderer, withTerrainCovers }, { resolvePropInstances }, { compilePropRig }],
   ] = await Promise.all([
     terrainP,
     materialsP,

@@ -364,6 +364,8 @@ export interface SolverFlags {
 
 export class TriangleContacts {
   readonly maxObjects: number;
+  /** R-PHYS2: object-id pairs (key lo·65536 + hi, collision/objects.ts `pairKey`) that never use triangle contact. */
+  excludedPairs: Set<number> | null = null;
   // ---- per arena slot, filled by the engine (`setObject`) before each rebuild
   private readonly slots: (TriangleSlot | null)[];
   private readonly oStart: Int32Array;
@@ -560,6 +562,12 @@ export class TriangleContacts {
           continue;
         }
         if (!solver.triangleContact || !hasTris) continue;
+        const ex = this.excludedPairs;
+        if (ex !== null && ex.size > 0) {
+          const a = this.oId[p]!;
+          const b = this.oId[q]!;
+          if (ex.has(a < b ? a * 65536 + b : b * 65536 + a)) continue;
+        }
         const pad = vp + (stat[q] !== 0 ? 0 : vmax[q]!) * span + TRI_MARGIN + 0.5;
         if (!boxesNear(box, p, q, pad)) continue;
         this.queryNodes(P, p, q, slq, vp, false);

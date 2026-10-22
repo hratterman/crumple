@@ -12,7 +12,8 @@
 import { MaterialId } from '../../protocol/messages';
 import { compileRig } from '../rig/builder';
 import type { CompiledRig, RigDef } from '../rig/types';
-import { BARREL_RIG } from './defs/barrel';
+import { BARREL_FULL_RIG, BARREL_FULL_WATER_KG, BARREL_RIG } from './defs/barrel';
+import { FENCE_ANCHOR_BREAK_F, FENCE_PANEL_RIG, HAY_BALE_RIG, JERSEY_BARRIER_RIG, PALLET_RIG, WATER_BARRIER_RIG, WATER_BARRIER_WATER_KG } from './defs/barriers';
 import { BOX_CARDBOARD_RIG, BOX_WOOD_RIG, CONCRETE_BLOCK_RIG } from './defs/box';
 import { CONE_RIG } from './defs/cone';
 import { LIGHT_POLE_ANCHOR_BREAK_F, LIGHT_POLE_RIG, MAILBOX_ANCHOR_BREAK_F, MAILBOX_RIG, SIGN_POST_ANCHOR_BREAK_F, SIGN_POST_RIG, STOP_SIGN_RIG } from './defs/posts';
@@ -146,6 +147,58 @@ export const PROP_CATALOG: Readonly<Record<PropKey, PropDef>> = {
     stackHeight: 0.6,
     anchor: null,
     frame: BOX_FRAME,
+  }),
+  // ---- R-PHYS2
+  barrelFull: def('barrelFull', '200 L drum (full)', BARREL_FULL_RIG, {
+    surface: 'metal',
+    material: MaterialId.metal,
+    // 218 kg in 0.236 m³ (it barely floats, low)
+    density: 924,
+    stackHeight: 0,
+    anchor: null,
+    frame: { origin: 'lidB_c', front: 'rim0_0', top: 'lidT_c' },
+    fluid: { mass: BARREL_FULL_WATER_KG, areaPerBreak: 0.004, maxArea: 0.03, height: 0.85 },
+  }),
+  waterBarrier: def('waterBarrier', 'Water-filled barrier', WATER_BARRIER_RIG, {
+    surface: 'plastic',
+    material: MaterialId.plastic,
+    density: 730,
+    stackHeight: 0,
+    anchor: null,
+    frame: { origin: 's1_bR', front: 's1_bL', top: 's1_tR' },
+    fluid: { mass: WATER_BARRIER_WATER_KG, areaPerBreak: 0.006, maxArea: 0.05, height: 0.75, crackStrain: 0.01 },
+  }),
+  jerseyBarrier: def('jerseyBarrier', 'Concrete barrier', JERSEY_BARRIER_RIG, {
+    surface: 'concrete',
+    material: MaterialId.concrete,
+    density: 2400,
+    stackHeight: 0,
+    anchor: null,
+    frame: { origin: 's1_bR', front: 's1_bL', top: 's1_tR' },
+  }),
+  hayBale: def('hayBale', 'Round hay bale', HAY_BALE_RIG, {
+    surface: 'cardboard',
+    material: MaterialId.cardboard,
+    density: 150,
+    stackHeight: 0,
+    anchor: null,
+    frame: { origin: 'ax_0', front: 'r0_6', top: 'r0_4' },
+  }),
+  pallet: def('pallet', 'Wooden pallet', PALLET_RIG, {
+    surface: 'wood',
+    material: MaterialId.wood,
+    density: 550,
+    stackHeight: 0.144,
+    anchor: null,
+    frame: { origin: 'b11', front: 'b10', top: 't11' },
+  }),
+  fencePanel: def('fencePanel', 'Picket fence', FENCE_PANEL_RIG, {
+    surface: 'wood',
+    material: MaterialId.wood,
+    density: 600,
+    stackHeight: 0,
+    anchor: { nodes: 'anchor_*', breakF: FENCE_ANCHOR_BREAK_F },
+    frame: { origin: 'p0_c', front: 'p0_0_0', top: 'p0_1_0' },
   }),
 };
 

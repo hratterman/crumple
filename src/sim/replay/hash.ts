@@ -7,6 +7,7 @@
  * Not a hot path (allocation of two tiny views per call is fine).
  */
 import type { SimEngine } from '../engine';
+import { SOFT_TILE } from '../softground/softground';
 
 export function hashSimState(eng: SimEngine): number {
   let h = 0x811c9dc5 | 0;
@@ -56,6 +57,36 @@ export function hashSimState(eng: SimEngine): number {
       word(a.v);
       mix(a.awake ? 1 : 0);
       mix(a.variant | (a.paint << 8));
+    }
+  }
+  // R-PHYS2: vehicle water (compartment water, hydrolock), joints (broken / force-free state), soft ground ruts.
+  for (const o of objs) {
+    const w = eng.getVehicle(o.objectId)?.water;
+    if (!w) continue;
+    mix(w.hydrolocked);
+    for (const c of w.comps) word(c.water);
+  }
+  const js = eng.towing.joints.joints;
+  mix(js.length);
+  for (const j of js) {
+    mix(j.objA.objectId);
+    mix(j.objB.objectId);
+    mix(j.broken ? 1 : 0);
+  }
+  mix(eng.towing.cargo.size);
+  const sg = eng.softGround;
+  mix(sg.tileCount);
+  const dv = new Uint32Array(sg.depth.buffer, sg.depth.byteOffset, sg.depth.length);
+  for (let t = 0; t < sg.tileCount; t++) {
+    mix(sg.tileX[t]!);
+    mix(sg.tileZ[t]!);
+    const base = t * SOFT_TILE * SOFT_TILE;
+    for (let k = 0; k < SOFT_TILE * SOFT_TILE; k++) {
+      const d = dv[base + k]!;
+      if (d !== 0) {
+        mix(k);
+        mix(d);
+      }
     }
   }
   return h >>> 0;

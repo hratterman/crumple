@@ -437,6 +437,9 @@ function createWasmKernel(kind: 'wasm' | 'simd', nodeCapacity: number, beamCapac
   /** Points the ground header at `sampler`; false when the kernel cannot mirror it. */
   const groundFor = (sampler: HeightSampler): boolean => {
     if (sampler !== gSampler) {
+      // A sampler the kernel cannot mirror (R-PHYS2's rutted SoftGroundSampler, used only near ruts) runs on
+      // the JS path WITHOUT uninstalling the mirrored one: its tile cache stays warm for the other objects.
+      if (!(sampler instanceof PlaneSampler) && !isMirroredSampler(sampler)) return false;
       gSampler = sampler;
       gMirrored = terrain.install(sampler);
     }
@@ -554,18 +557,9 @@ function createWasmKernel(kind: 'wasm' | 'simd', nodeCapacity: number, beamCapac
       shellRecaptureCheck(state, rt, dt, H[SH.NEW_RELEASE] !== 0, H[SH.MAX_REL2]!, H[SH.SUM_REL2]!, H[SH.NREL]!, H[SH.CX]!, H[SH.CY]!, H[SH.CZ]!);
     },
     ground(first: number, count: number, sampler: HeightSampler, materials: MaterialTable, dt: number, objectId: number, events: EventSink, gx: number, gy: number, gz: number, wantBox?: boolean): void {
-      if (sampler !== gSampler) {
-        gSampler = sampler;
-        gMirrored = terrain.install(sampler);
-      }
-      if (!gMirrored) {
+      if (!groundFor(sampler)) {
         groundJs(first, count, sampler, materials, dt, objectId, events, gx, gy, gz);
         return;
-      }
-      if (gH[G.KIND] === 1) {
-        const p = sampler as PlaneSampler;
-        gH[G.PLANE_Y] = p.y;
-        gH[G.PLANE_MAT] = p.materialId;
       }
       gMatF.set(materials.friction);
       const end = first + count;
@@ -589,11 +583,7 @@ function createWasmKernel(kind: 'wasm' | 'simd', nodeCapacity: number, beamCapac
       return gH[G.BOX_FIRST] === first && gH[G.BOX_COUNT] === count && gH[G.BOX_STAMP] === gH[G.STAMP] ? boxView : null;
     },
     groundSample(sampler: HeightSampler, x: number, z: number): Float64Array | null {
-      if (sampler !== gSampler) {
-        gSampler = sampler;
-        gMirrored = terrain.install(sampler);
-      }
-      if (!gMirrored || gH[G.KIND] !== 2) return null;
+      if (!groundFor(sampler) || gH[G.KIND] !== 2) return null;
       while (ex.ground_sample(x, z, sampleOut.byteOffset) === 0) terrain.load(gH[G.MISS_GRID]!, gH[G.MISS_TILE]!);
       return sampleOut.slice();
     },

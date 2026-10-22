@@ -184,6 +184,14 @@ float propBare;
 		vec3 g = propGrime( 2.2 );
 		float seed = propInstance().x;
 		float st = propStrain();
+		// R-PHYS2 hay bale (variant 1): sun-bleached straw, darker weathered outer layer, net-wrap lines
+		if ( propVariant( 1.0 ) ) {
+			vec3 p = propRest();
+			float strand = 0.5 + 0.5 * sin( p.z * 140.0 + p.y * 37.0 + g.b * 9.0 );
+			diffuseColor.rgb = mix( ${lin(0xb89a52)}, ${lin(0xd9bf73)}, 0.45 * g.g + 0.35 * strand );
+			diffuseColor.rgb *= 1.0 - 0.22 * g.r;
+			diffuseColor.rgb = mix( diffuseColor.rgb, ${lin(0xe6e2d6)}, 0.18 * smoothstep( 0.92, 0.98, sin( p.x * 24.0 ) ) );
+		}
 		// kraft shade per box, scuffed corners, crushed board darkens along the creases
 		diffuseColor.rgb *= vec3( 0.92 + 0.16 * seed, 0.92 + 0.12 * seed, 0.9 + 0.08 * fract( seed * 7.3 ) );
 		diffuseColor.rgb *= 1.0 - 0.18 * g.r * ( 0.3 + propInstance().y );

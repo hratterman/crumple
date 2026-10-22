@@ -21,7 +21,8 @@
  * NUMERICS: hot loop, + − × ÷ only, no allocation, ascending node order.
  */
 import type { Transform } from '../../protocol/messages';
-import type { EventSink, SimState } from '../types';
+import type { CompiledRig } from '../rig/types';
+import type { EventSink, SimObject, SimState } from '../types';
 import type { PropDef, PropKey } from './types';
 
 /** Internal (rigid-relative) damping rate, 1/s. */
@@ -43,6 +44,82 @@ export interface PropRuntime {
   /** While asleep: node-centre box of the contact nodes (min xyz, max xyz) and max contact radius. */
   sleepBox: Float64Array;
   sleepRmax: number;
+  /** R-PHYS2: liquid contents (PropDef.fluid), null for dry props. */
+  fluid: PropFluidState | null;
+}
+
+/** R-PHYS2: draining state of a prop's liquid contents (PropDef.fluid). */
+export interface PropFluidState {
+  /** Contents left, kg. */
+  remaining: number;
+  /** Current mass scale of the prop (1 = full) applied to node masses and beam forces. */
+  scale: number;
+  /** Shell mass (everything but the contents) and the full total, kg. */
+  shell: number;
+  total0: number;
+}
+
+/** Leak update interval, ticks (the mass changes slowly; every tick would rescale ~100 beams for nothing). */
+export const FLUID_TICKS = 20;
+/** Orifice discharge coefficient of a torn seam. */
+const LEAK_CD = 0.6;
+
+export function createFluidState(def: PropDef, rig: CompiledRig): PropFluidState | null {
+  if (!def.fluid) return null;
+  let total = 0;
+  for (let i = 0; i < rig.nodeCount; i++) if (rig.nodeInvMass[i]! > 0) total += 1 / rig.nodeInvMass[i]!;
+  return { remaining: def.fluid.mass, scale: 1, shell: total - def.fluid.mass, total0: total };
+}
+
+export function resetFluidState(f: PropFluidState, def: PropDef): void {
+  f.remaining = def.fluid ? def.fluid.mass : 0;
+  f.scale = 1;
+}
+
+/**
+ * Drains a torn container (every FLUID_TICKS ticks while awake): Torricelli
+ * outflow through the broken beams' share of open area, then node masses
+ * and beam stiffness / damping / yield / break forces rescaled by the mass
+ * ratio (keeps every node's ω·dt; a drained drum is the thin empty shell
+ * again). Deterministic; + − × ÷ sqrt.
+ */
+export function stepPropFluid(state: SimState, obj: SimObject, rt: PropRuntime, g: number, dt: number): void {
+  const f = rt.fluid;
+  const spec = rt.def.fluid;
+  if (f === null || spec === undefined || f.remaining <= 0) return;
+  const { active, restLen, restLen0 } = state;
+  let broken = 0;
+  const be = obj.beamStart + obj.beamCount;
+  const crack = spec.crackStrain ?? Infinity;
+  for (let b = obj.beamStart; b < be; b++) {
+    if (active[b] === 0) broken++;
+    else if (crack < Infinity) {
+      const e = restLen[b]! / restLen0[b]! - 1;
+      if (e > crack || e < -crack) broken++;
+    }
+  }
+  if (broken === 0) return;
+  let area = broken * spec.areaPerBreak;
+  if (area > spec.maxArea) area = spec.maxArea;
+  const h = (spec.height * f.remaining) / spec.mass;
+  const q = LEAK_CD * area * Math.sqrt(2 * g * (h > 0 ? h : 0));
+  let rem = f.remaining - 1000 * q * FLUID_TICKS * dt;
+  if (rem < 0) rem = 0;
+  f.remaining = rem;
+  const scale = (f.shell + rem) / f.total0;
+  const r = scale / f.scale;
+  if (r > 0.999999) return;
+  f.scale = scale;
+  const { invMass, k, d, deform, breakF } = state;
+  const ne = obj.nodeStart + obj.nodeCount;
+  const ir = 1 / r;
+  for (let i = obj.nodeStart; i < ne; i++) if (invMass[i]! > 0) invMass[i] = invMass[i]! * ir;
+  for (let b = obj.beamStart; b < be; b++) {
+    k[b] = k[b]! * r;
+    d[b] = d[b]! * r;
+    deform[b] = deform[b]! * r;
+    breakF[b] = breakF[b]! * r;
+  }
 }
 
 /**

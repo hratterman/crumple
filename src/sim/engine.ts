@@ -30,12 +30,13 @@ import {
   type Transform,
 } from '../protocol/messages';
 import { applyColliderContacts, compileColliders, resetColliderContactState } from './collision/colliders';
-import { OBJ_REBUILD_TICKS, OBJ_REBUILD_TICKS_SLOW, OBJ_SLOW_SPEED, ObjectContacts } from './collision/objects';
+import { OBJ_REBUILD_TICKS, OBJ_REBUILD_TICKS_SLOW, OBJ_SLOW_SPEED, ObjectContacts, pairKey } from './collision/objects';
 import { applyWater, boxNearWater, VEHICLE_FLOOD_LOSS, VEHICLE_FLOOD_TIME_S } from './collision/water';
 import { TriangleContacts, type StaticMeshInput, type TriangleSlot } from './collision/triangles';
 import { deriveCollisionTriangles, mergeTriangles, triangleSetOf } from './rig/triangles';
 import { quatToMatrix } from '../world/colliders';
-import { markMirroredSampler, PlaneSampler, resetGroundContactState } from './collision/ground';
+import { groundNormalForce, markMirroredSampler, PlaneSampler, resetGroundContactState } from './collision/ground';
+import { applyBodyDig, applySoftGround, SoftGround, SoftGroundSampler } from './softground/softground';
 import type { ColliderWorld } from './collision/types';
 import { resolveColliders } from '../world/colliders';
 import { WATER_PHYSICS, type ColliderDef, type ResolvedCollider, type WaterBody } from '../world/types';
@@ -46,7 +47,7 @@ import type { CompiledRig, RigDef } from './rig/types';
 import { SimArena } from './state';
 import { NODE_FLAG_OBJ_CONTACT, SIM_OBJECT_FLAG_SLEEPING, type EventSink, type HeightSampler, type MaterialTable, type SimObject, type SimState } from './types';
 import { compilePropRig, getPropDef, isPropKey } from './props/catalog';
-import { applyPropDamping, PROP_BUDGET_SLEEP_SPEED, PROP_INTERNAL_DAMPING, PROP_UNMOVED_HOLD_FRACTION, PROP_WAKE_SPEED, propAnchored, type PropRuntime } from './props/runtime';
+import { applyPropDamping, createFluidState, FLUID_TICKS, PROP_BUDGET_SLEEP_SPEED, PROP_INTERNAL_DAMPING, PROP_UNMOVED_HOLD_FRACTION, PROP_WAKE_SPEED, propAnchored, resetFluidState, stepPropFluid, type PropRuntime } from './props/runtime';
 import { PROP_AWAKE_BEAM_BUDGET, type PropInstance, type PropKey } from './props/types';
 import { compileVehicle, TRAFFIC_BEAM_BUDGET, validateVehicle } from './vehicle/builder';
 import { isTrafficObjectId, TRAFFIC_AI_TICKS, type TrafficBubble, type TrafficDensity, type TrafficVariantSpec } from '../protocol/traffic';
@@ -70,11 +71,17 @@ import {
 } from './vehicle/runtime';
 import type { CompiledVehicle, TransmissionMode, VehicleDef, VehicleRuntime } from './vehicle/types';
 import { setWheelGround } from './vehicle/wheels';
-import { fillWheelFrame, punctureTyre, repairTyre, setTreadDepth, setTyreEnvironment, setTyrePressure, tyreEnv } from './vehicle/tyre';
+import { fillWheelFrame, punctureTyre, repairTyre, setSoilRutHook, setTreadDepth, setTyreEnvironment, setTyrePressure, tyreEnv, type SoilRutHook } from './vehicle/tyre';
 import { createWheelFrame } from '../protocol/wheels';
 
 /** Snapshot scratch for the wheel records (never retained). */
 const wheelScratch = createWheelFrame();
+import { createVehicleWater, drainVehicleWater, stepVehicleWater } from './water/vehicleWater';
+import { COUPLING_ARM_S, TowingSystem } from './trailer/runtime';
+import { buildTrailer, TOW_HITCH_NODES, type TrailerKind } from './trailer/defs';
+import { facingQuat } from './props/placement';
+import { joinProps, PROP_JOINS } from './props/joins';
+import { createVehicleDebris, updateDebris, wakeAllIslands, type VehicleDebris } from './debris/islands';
 import type { DrivetrainStateEx } from './vehicle/drivetrain';
 
 /**
@@ -309,6 +316,10 @@ export class SimEngine {
   /** |gravity| (water buoyancy). */
   gravityMag: number;
   sampler: HeightSampler | null = null;
+  /** R-PHYS2: the rutted view of `sampler` (soft ground on), used only for objects near ruts. */
+  private rutSampler: SoftGroundSampler | null = null;
+  /** Per arena slot, this tick: 1 = the object's box touches a rut tile (ground + wheels on the rutted sampler). */
+  private nearRuts = new Uint8Array(64);
   /** The installed heightfield (setGroundTerrain), null for plane / no ground. */
   terrain: TerrainData | null = null;
   materials: MaterialTable = DEFAULT_MATERIALS;
@@ -376,6 +387,30 @@ export class SimEngine {
   readonly solver: SolverOptions = { ...defaultSolver };
   /** VehicleCatalog id per vehicle objectId (spawnVehicle.catalogId; P7 replay header). */
   readonly catalogIds = new Map<number, string>();
+  /** R-PHYS2: trailers, cargo, cross-object joints and carrier surfaces. */
+  readonly towing = new TowingSystem();
+  /** R-PHYS2: debris island sleep per vehicle (objectId → state); list + frame origins rebuilt by syncVehicles. */
+  private readonly debris = new Map<number, VehicleDebris>();
+  private debrisList: VehicleDebris[] = [];
+  private debrisOrigins: number[] = [];
+  private debrisSlots: number[] = [];
+  /** R-PHYS2: persistent ruts (heightfield ground; planes only after enableSoftGround()). */
+  readonly softGround = new SoftGround();
+  softGroundOn = false;
+  /**
+   * The compaction resistance of fresh ruts (softground.ts). Off: R-TYRE's Bekker tyre contact
+   * (vehicle/tyre.ts) owns the soil forces, its compaction resistance included (CONTRACTS "R-TYRE ↔ R-PHYS2").
+   */
+  softGroundResistance = false;
+  /** R-TYRE seam: a tyre in a rut sinks only the rest of its Bekker sinkage (the rutted ground is already that deep). */
+  private readonly rutHook: SoilRutHook = { rutDepth: (x, z) => this.softGround.priorDepthAt(x, z, this.tick), onSink: () => {} };
+  private readonly groundN = (i: number): number => groundNormalForce(this.state, i, this.rutSampler ?? this.sampler!, SIM_DT);
+  /** Compiled trailer defs per (kind, options) key. */
+  private readonly trailerDefs = new Map<string, CompiledVehicle>();
+  /** Wake callback for joint wake requests (bound once: no per-tick closure). */
+  private readonly wakeObject = (obj: SimObject): void => {
+    if ((obj.flags & SIM_OBJECT_FLAG_SLEEPING) !== 0) this.setAsleep(obj, false);
+  };
 
   constructor(config: EngineConfig) {
     const cap = config.capacity ?? DEFAULT_CAPACITY;
@@ -393,6 +428,7 @@ export class SimEngine {
     this.events = new PendingEvents(this.arena);
     this.contacts = new ObjectContacts(cap.nodeCapacity, cap.maxObjects);
     this.tris = new TriangleContacts(cap.nodeCapacity, cap.maxObjects);
+    this.tris.excludedPairs = this.contacts.triExcludedPairs;
     this.gravityX = g[0];
     this.gravityY = g[1];
     this.gravityZ = g[2];
@@ -414,7 +450,16 @@ export class SimEngine {
       throw new SimCommandError(`invalid materialId ${materialId}`);
     }
     this.sampler = new PlaneSampler(y, materialId);
+    this.rutSampler = null;
     this.terrain = null;
+    this.softGroundOn = false;
+  }
+
+  /** R-PHYS2: ruts on the current ground (the heightfield turns them on by itself; tests call this on a plane). */
+  enableSoftGround(): void {
+    if (!this.sampler || this.softGroundOn) return;
+    this.rutSampler = new SoftGroundSampler(this.sampler, this.softGround);
+    this.softGroundOn = true;
   }
 
   /**
@@ -437,13 +482,18 @@ export class SimEngine {
     }
     markMirroredSampler(sampler);
     this.sampler = sampler;
+    this.softGround.clear();
+    this.rutSampler = new SoftGroundSampler(sampler, this.softGround);
+    this.softGroundOn = true;
     this.terrain = terrain;
     return sampler;
   }
 
   clearGround(): void {
     this.sampler = null;
+    this.rutSampler = null;
     this.terrain = null;
+    this.softGroundOn = false;
   }
 
   /** Ground height for collider resolution (0 without ground). */
@@ -588,6 +638,11 @@ export class SimEngine {
     // HD rig's surface takes ~0.2–0.6 s once per def).
     if (this.solver.triangleContact) resolveTriangles(lazy);
     const rt = createVehicleRuntime(objectId, compiled, obj.nodeStart, obj.beamStart, transmission);
+    const water = createVehicleWater(compiled);
+    if (water) rt.water = water;
+    this.towing.addCarrier(obj, compiled.name, compiled.rig);
+    this.debris.set(objectId, createVehicleDebris(obj, rt));
+    this.syncVehicles();
     this.vehicles.set(objectId, rt);
     this.syncVehicles();
     return obj;
@@ -668,12 +723,16 @@ export class SimEngine {
     if (pos !== undefined && (!Array.isArray(pos) || pos.length !== 3 || !pos.every(Number.isFinite))) {
       throw new SimCommandError('recover pos must be 3 finite numbers', objectId);
     }
+    const dbr = this.debris.get(objectId);
+    if (dbr) wakeAllIslands(this.state, dbr);
     recoverVehicle(this.state, v, this.sampler, pos);
     resetGroundContactState(this.state, obj.nodeStart, obj.nodeCount);
     resetColliderContactState(this.state, obj.nodeStart, obj.nodeCount);
     const fl = this.floods.get(objectId);
     if (fl) fl.level = 0; // recovered onto land: the cabin drains
+    if (v.water) drainVehicleWater(v.water, false);
     this.contactsDirty = true;
+    if (this.towing.trailers.size > 0) this.replaceTrailersOf(objectId);
   }
 
   /** Rebuilds the per-object vehicle/prop slots and rebases every vehicle onto its current arena range. */
@@ -703,11 +762,272 @@ export class SimEngine {
     this.propSlots = pslots;
     this.floodSlots = fslots;
     this.triSlots = tslots;
+    this.debrisList = [];
+    this.debrisOrigins = [];
+    this.debrisSlots = [];
+    for (let o = 0; o < objs.length; o++) {
+      const d = this.debris.get(objs[o]!.objectId);
+      const v = slots[o];
+      if (!d || !v) continue;
+      this.debrisList.push(d);
+      this.debrisOrigins.push(v.vehicle.frameNodes[0]!);
+      this.debrisSlots.push(o);
+    }
+  }
+
+  // ------------------------------------------------------------------ trailers + cargo (R-PHYS2)
+  /** Compiled trailer def per kind + ballast (pure, cached). */
+  private compiledTrailer(kind: TrailerKind, ballastKg: number, ballastZ: number): CompiledVehicle {
+    const key = `${kind}|${ballastKg}|${ballastZ}`;
+    let c = this.trailerDefs.get(key);
+    if (!c) {
+      c = compileVehicle(buildTrailer(kind, ballastKg > 0 ? { ballast: { mass: ballastKg, z: ballastZ } } : {}));
+      this.trailerDefs.set(key, c);
+    }
+    return c;
+  }
+
+  /** World basis of a vehicle's frame now: origin + right (X), up (Y), back (Z) unit columns. */
+  private vehicleBasis(v: VehicleRuntime, out: Float64Array): void {
+    const s = this.state;
+    const f = v.vehicle.frameNodes;
+    const o = v.nodeStart + f[0]!;
+    const a = v.nodeStart + f[1]!;
+    const t = v.nodeStart + f[2]!;
+    let fx = s.posX[a]! - s.posX[o]!;
+    let fy = s.posY[a]! - s.posY[o]!;
+    let fz = s.posZ[a]! - s.posZ[o]!;
+    const fl = Math.sqrt(fx * fx + fy * fy + fz * fz);
+    fx /= fl;
+    fy /= fl;
+    fz /= fl;
+    let ux = s.posX[t]! - s.posX[o]!;
+    let uy = s.posY[t]! - s.posY[o]!;
+    let uz = s.posZ[t]! - s.posZ[o]!;
+    const ud = ux * fx + uy * fy + uz * fz;
+    ux -= ud * fx;
+    uy -= ud * fy;
+    uz -= ud * fz;
+    const ul = Math.sqrt(ux * ux + uy * uy + uz * uz);
+    ux /= ul;
+    uy /= ul;
+    uz /= ul;
+    out[0] = s.posX[o]!;
+    out[1] = s.posY[o]!;
+    out[2] = s.posZ[o]!;
+    // right = forward × up; back = −forward
+    out[3] = fy * uz - fz * uy;
+    out[4] = fz * ux - fx * uz;
+    out[5] = fx * uy - fy * ux;
+    out[6] = ux;
+    out[7] = uy;
+    out[8] = uz;
+    out[9] = -fx;
+    out[10] = -fy;
+    out[11] = -fz;
+  }
+
+  /** Trailer transform with its coupler on `towId`'s hitch ball, aligned with the tow's heading (sqrt-only). */
+  private trailerPoseOnHitch(towId: number, cv: CompiledVehicle, trailerId: number): Transform {
+    const tow = this.vehicles.get(towId);
+    if (!tow) throw new SimCommandError(`trailer: tow ${towId} is not a vehicle`, trailerId);
+    const hitchName = TOW_HITCH_NODES[tow.vehicle.name];
+    const hi = hitchName === undefined ? -1 : tow.vehicle.rig.nodeIds.indexOf(hitchName);
+    if (hi < 0) throw new SimCommandError(`trailer: vehicle '${tow.vehicle.name}' has no tow hitch`, trailerId);
+    const B = new Float64Array(12);
+    this.vehicleBasis(tow, B);
+    let bx = -B[9]!;
+    let bz = -B[11]!;
+    const bl = Math.sqrt(bx * bx + bz * bz);
+    bx /= bl;
+    bz /= bl;
+    const qy = facingQuat(bx, bz);
+    const ci = cv.rig.nodeIds.indexOf('coupler');
+    const cy = cv.rig.nodePos[3 * ci + 1]!;
+    const cz = cv.rig.nodePos[3 * ci + 2]!;
+    // Axle line (wheel hubs' mean z, rig-local; the tyres stand on rig y = 0).
+    let za = 0;
+    for (const w of cv.wheels) za += cv.rig.nodePos[3 * w.hubI + 2]!;
+    za /= cv.wheels.length;
+    const g = tow.nodeStart + hi;
+    const s = this.state;
+    const hx = s.posX[g]!;
+    const hy = s.posY[g]!;
+    const hz = s.posZ[g]!;
+    // Ground under the axle (approximately: the hitch xz moved back along the heading by the drawbar length).
+    const L = za - cz;
+    const ground = this.sampler ? this.sampler.heightAt(hx - bx * L, hz - bz * L) : hy - cy;
+    // Pitch θ about the trailer's x so the coupler meets the ball with the tyres on the ground:
+    // cy·cosθ + L·sinθ = hy − ground (two fixed-point passes, sqrt only).
+    const dy = hy - ground;
+    let sn = (dy - cy) / L;
+    for (let k = 0; k < 2; k++) {
+      if (sn > 0.5) sn = 0.5;
+      if (sn < -0.5) sn = -0.5;
+      sn = (dy - cy * Math.sqrt(1 - sn * sn)) / L;
+    }
+    if (sn > 0.5) sn = 0.5;
+    if (sn < -0.5) sn = -0.5;
+    const cs = Math.sqrt(1 - sn * sn);
+    const qp: [number, number, number, number] = [(sn >= 0 ? 1 : -1) * Math.sqrt((1 - cs) / 2), 0, 0, Math.sqrt((1 + cs) / 2)];
+    const q = quatMul(qy, qp);
+    // Coupler offset under (yaw ∘ pitch): pitch about x first, then yaw.
+    const cy2 = cy * cs - cz * sn;
+    const cz2 = cy * sn + cz * cs;
+    const ys = qy[1];
+    const yc = qy[3];
+    const cosY = 1 - 2 * ys * ys;
+    const sinY = 2 * ys * yc;
+    const px = hx - sinY * cz2;
+    const pz = hz - cosY * cz2;
+    return { pos: [px, hy - cy2 + 0.003, pz], quat: q };
+  }
+
+  /** After a tow vehicle was reset / recovered: its hitched trailers follow onto the hitch (repaired couplings, re-armed). */
+  private replaceTrailersOf(towId: number): void {
+    for (const t of this.towing.trailers.values()) {
+      if (t.tow?.objectId !== towId) continue;
+      const tid = t.trailer.objectId;
+      const tv = this.vehicles.get(tid);
+      if (!tv) continue;
+      this.reset(tid, this.trailerPoseOnHitch(towId, tv.vehicle, tid), 0.4);
+      this.hitchTrailer(tid, towId);
+    }
+  }
+
+  /**
+   * R-PHYS2 protocol `spawnTrailer`: spawns a trailer (kind 'utility' | 'box',
+   * optional ballast kg at deck z) and, with `towObjectId`, places it on the
+   * tow vehicle's hitch ball (aligned with its heading) and hitches it. A
+   * 0.4 s spawn settle applies; the coupling cannot break for COUPLING_ARM_S.
+   */
+  spawnTrailer(objectId: number, kind: TrailerKind, o: { towObjectId?: number; transform?: Transform; ballastKg?: number; ballastZ?: number } = {}): SimObject {
+    if (kind !== 'utility' && kind !== 'box') throw new SimCommandError(`unknown trailer kind '${String(kind)}'`, objectId);
+    const ballastKg = o.ballastKg ?? 0;
+    const ballastZ = o.ballastZ ?? 0;
+    if (!(Number.isFinite(ballastKg) && ballastKg >= 0 && ballastKg <= 2000 && Number.isFinite(ballastZ))) throw new SimCommandError('spawnTrailer: invalid ballast', objectId);
+    const cv = this.compiledTrailer(kind, ballastKg, ballastZ);
+    let transform = o.transform;
+    if (o.towObjectId !== undefined) transform = this.trailerPoseOnHitch(o.towObjectId, cv, objectId);
+    if (!transform) throw new SimCommandError('spawnTrailer: needs towObjectId or transform', objectId);
+    const obj = this.spawnCompiledVehicle(objectId, cv, transform, 'manual');
+    this.setInput(objectId, { gearSelect: 0, throttle: 0 });
+    this.startSettle(objectId, Math.round(0.4 / SIM_DT));
+    if (o.towObjectId !== undefined) this.hitchTrailer(objectId, o.towObjectId);
+    return obj;
+  }
+
+  /** R-PHYS2 protocol `hitchTrailer`: couples a trailer to a tow vehicle's hitch (null = unhitch). */
+  hitchTrailer(trailerId: number, towObjectId: number | null): void {
+    const t = this.vehicles.get(trailerId);
+    const tObj = this.arena.get(trailerId);
+    if (!t || !tObj || !t.vehicle.rig.nodeIds.includes('coupler')) throw new SimCommandError(`hitchTrailer: ${trailerId} is not a trailer`, trailerId);
+    if (towObjectId === null) {
+      this.towing.unhitch(tObj);
+      this.syncTowPairs();
+      return;
+    }
+    const tow = this.vehicles.get(towObjectId);
+    const towObj = this.arena.get(towObjectId);
+    const hitchName = tow ? TOW_HITCH_NODES[tow.vehicle.name] : undefined;
+    if (!tow || !towObj || hitchName === undefined) throw new SimCommandError(`hitchTrailer: ${towObjectId} cannot tow`, trailerId);
+    this.towing.hitch(tObj, t.vehicle.rig, towObj, tow.vehicle.rig, hitchName, t.vehicle.name === 'trailerBox', this.tick + Math.round(COUPLING_ARM_S / SIM_DT), this.state);
+    this.syncTowPairs();
+  }
+
+  /** Trailer ↔ tow pairs stay on node-vs-node spheres (ObjectContacts.triExcludedPairs). */
+  private syncTowPairs(): void {
+    const ex = this.contacts.triExcludedPairs;
+    ex.clear();
+    for (const t of this.towing.trailers.values()) if (t.tow) ex.add(pairKey(t.trailer.objectId, t.tow.objectId));
+    this.contactsDirty = true;
+  }
+
+  /**
+   * R-PHYS2 protocol `spawnCargo`: props placed on a carrier (pickup bed, box
+   * truck, trailer deck) at a rig-local point of the carrier (the prop's base
+   * centre), optionally turned (rig-local facing) and strapped down. Atomic:
+   * everything is validated first. Cargo contacts the carrier through its
+   * deck / wall surfaces (src/sim/trailer/carrier.ts).
+   */
+  spawnCargo(items: readonly { objectId: number; prop: PropKey; carrierObjectId: number; pos: readonly [number, number, number]; facing?: readonly [number, number]; strap?: boolean }[]): void {
+    if (!Array.isArray(items)) throw new SimCommandError('spawnCargo: items must be an array');
+    items.forEach((it, i) => {
+      const where = `spawnCargo.items[${i}]`;
+      if (!it || typeof it !== 'object') throw new SimCommandError(`${where}: not an object`);
+      if (!this.towing.carrierOf(it.carrierObjectId)) throw new SimCommandError(`${where}: ${it.carrierObjectId} is not a carrier`);
+      if (!Array.isArray(it.pos) || it.pos.length !== 3 || !it.pos.every(Number.isFinite)) throw new SimCommandError(`${where}: invalid pos`);
+      if (it.facing !== undefined && !(Array.isArray(it.facing) && it.facing.length === 2 && Math.abs(it.facing[0] * it.facing[0] + it.facing[1] * it.facing[1] - 1) < 1e-3)) throw new SimCommandError(`${where}: facing must be a unit (x, z)`);
+    });
+    const B = new Float64Array(12);
+    const spawns: PropSpawn[] = items.map((it) => {
+      const v = this.vehicles.get(it.carrierObjectId)!;
+      this.vehicleBasis(v, B);
+      const rig = v.vehicle.rig;
+      const o = v.vehicle.frameNodes[0]!;
+      const lx = it.pos[0] - rig.nodePos[3 * o]!;
+      const ly = it.pos[1] - rig.nodePos[3 * o + 1]!;
+      const lz = it.pos[2] - rig.nodePos[3 * o + 2]!;
+      const pos: [number, number, number] = [B[0]! + B[3]! * lx + B[6]! * ly + B[9]! * lz, B[1]! + B[4]! * lx + B[7]! * ly + B[10]! * lz, B[2]! + B[5]! * lx + B[8]! * ly + B[11]! * lz];
+      // Rotation: carrier basis × local yaw (facing), as a quaternion (sqrt-only).
+      const f = it.facing ?? [0, -1];
+      const qy = facingQuat(f[0], f[1]);
+      return { objectId: it.objectId, prop: it.prop, transform: { pos, quat: quatMul(matToQuat(B), qy) }, asleep: false };
+    });
+    this.spawnProps(spawns);
+    items.forEach((it) => {
+      const cargo = this.arena.get(it.objectId)!;
+      const carrier = this.towing.carrierOf(it.carrierObjectId)!;
+      const v = this.vehicles.get(it.carrierObjectId)!;
+      // Carried along: the carrier's velocity at the frame origin.
+      const s = this.state;
+      const og = v.nodeStart + v.vehicle.frameNodes[0]!;
+      for (let i = cargo.nodeStart; i < cargo.nodeStart + cargo.nodeCount; i++) {
+        s.velX[i] = s.velX[og]!;
+        s.velY[i] = s.velY[og]!;
+        s.velZ[i] = s.velZ[og]!;
+      }
+      this.towing.load(cargo, carrier, v.vehicle.rig, compilePropRig(it.prop), v.vehicle.name, !!it.strap, this.tick + Math.round(COUPLING_ARM_S / SIM_DT), s, this.contacts.excludedPairs, pairKey);
+    });
+    this.contactsDirty = true;
+  }
+
+  /** R-PHYS2 protocol `setCargoDoor`: opens / closes a carrier's doors (box rear doors) or a trailer's tailgate latch. */
+  setCargoDoor(objectId: number, open: boolean): void {
+    const v = this.vehicles.get(objectId);
+    const obj = this.arena.get(objectId);
+    if (!v || !obj || !this.towing.carrierOf(objectId)) throw new SimCommandError(`setCargoDoor: ${objectId} is not a carrier`, objectId);
+    this.towing.setDoors(objectId, open);
+    // Latched gates (utility trailer): the gt_* → sd4_* latch beams.
+    const rig = v.vehicle.rig;
+    const s = this.state;
+    for (const side of ['L', 'R']) {
+      const a = rig.nodeIds.indexOf(`gt_${side}`);
+      const b = rig.nodeIds.indexOf(`sd4_${side}`);
+      if (a < 0 || b < 0) continue;
+      for (let k = 0; k < rig.beamCount; k++) {
+        const ba = rig.beamA[k]!;
+        const bb = rig.beamB[k]!;
+        if (!((ba === a && bb === b) || (ba === b && bb === a))) continue;
+        const g = obj.beamStart + k;
+        if (open) s.active[g] = 0;
+        else {
+          const dx = s.posX[obj.nodeStart + a]! - s.posX[obj.nodeStart + b]!;
+          const dy = s.posY[obj.nodeStart + a]! - s.posY[obj.nodeStart + b]!;
+          const dz = s.posZ[obj.nodeStart + a]! - s.posZ[obj.nodeStart + b]!;
+          // Re-latch only a gate that is (nearly) shut.
+          if (Math.sqrt(dx * dx + dy * dy + dz * dz) < s.restLen[g]! + 0.05) s.active[g] = 1;
+        }
+      }
+    }
+    this.contactsDirty = true;
   }
 
   // ------------------------------------------------------------------ props (P5)
   /** Vehicle flood level 0..1 (water), or undefined for a non-vehicle. */
   floodLevel(objectId: number): number | undefined {
+    const w = this.vehicles.get(objectId)?.water;
+    if (w) return w.flood;
     return this.floods.get(objectId)?.level;
   }
 
@@ -738,6 +1058,7 @@ export class SimEngine {
       moved: false,
       sleepBox: new Float64Array(6),
       sleepRmax: 0,
+      fluid: createFluidState(def, rig),
     });
     this.syncVehicles();
     this.setAsleep(obj, asleep);
@@ -831,6 +1152,17 @@ export class SimEngine {
     if (s.nodeCount + nodes > s.nodeCapacity) throw new SimCommandError(`spawnProps: node capacity ${s.nodeCapacity} exceeded`);
     if (s.beamCount + beams > s.beamCapacity) throw new SimCommandError(`spawnProps: beam capacity ${s.beamCapacity} exceeded`);
     for (const it of items) this.spawnProp(it.objectId, it.prop, it.transform, it.asleep ?? true);
+    this.joinProps();
+  }
+
+  /** R-PHYS2: joins end-to-end segments of joinable props (pinned barrier runs; props/joins.ts). */
+  private joinProps(): void {
+    const list: { obj: SimObject; key: PropKey; rig: CompiledRig }[] = [];
+    for (const o of this.arena.objects) {
+      const rt = this.props.get(o.objectId);
+      if (rt && PROP_JOINS[rt.key] !== undefined) list.push({ obj: o, key: rt.key, rig: compilePropRig(rt.key) });
+    }
+    if (list.length > 1) joinProps(this.towing.joints, this.state, list);
   }
 
   /**
@@ -861,6 +1193,7 @@ export class SimEngine {
     if (beams > s.beamCapacity) throw new SimCommandError(`layout props exceed the beam capacity ${s.beamCapacity}`);
     for (const o of old) this.despawn(o.objectId);
     for (const inst of instances) this.spawnProp(inst.objectId, inst.prop, inst.transform, true);
+    this.joinProps();
   }
 
   /**
@@ -891,6 +1224,8 @@ export class SimEngine {
     if (!obj) throw new SimCommandError(`unknown objectId ${objectId}`, objectId);
     const start = obj.nodeStart;
     const n = obj.nodeCount;
+    this.towing.removeObject(obj, this.contacts.excludedPairs, pairKey);
+    this.syncTowPairs();
     this.arena.remove(objectId);
     this.autopilots.remove(objectId);
     this.rigs.delete(objectId);
@@ -899,6 +1234,7 @@ export class SimEngine {
     if (gone) this.kernel.releaseWheels?.(gone.wheels);
     this.vehicles.delete(objectId);
     this.triById.delete(objectId);
+    this.debris.delete(objectId);
     this.props.delete(objectId);
     this.floods.delete(objectId);
     const epoch = this.repairEpochs.get(objectId);
@@ -931,6 +1267,17 @@ export class SimEngine {
     this.autopilots.resetTimers(objectId);
     const v = this.vehicles.get(objectId);
     if (v) resetVehicleRuntime(v);
+    if (v?.water) drainVehicleWater(v.water, true);
+    const dbr = this.debris.get(objectId);
+    if (dbr) {
+      // The arena reloaded the rig's masses: frozen islands are gone with the damage.
+      dbr.islands = [];
+      dbr.broken = 0;
+    }
+    const pr = this.props.get(objectId);
+    if (pr?.fluid) resetFluidState(pr.fluid, pr.def);
+    // Couplings of a repaired object are repaired too (pinned barrier segments, cargo straps).
+    if (this.towing.joints.size > 0) this.towing.joints.repair((j) => j.objA === obj || j.objB === obj);
     const fl = this.floods.get(objectId);
     if (fl) fl.level = 0;
     // A sleeping object stays asleep at the new pose: refresh its broadphase box.
@@ -940,6 +1287,7 @@ export class SimEngine {
     this.settles.delete(objectId);
     this.events.muted.delete(objectId);
     if (settleTicks > 0) this.startSettle(objectId, settleTicks);
+    if (v && this.towing.trailers.size > 0) this.replaceTrailersOf(objectId);
   }
 
   /**
@@ -1083,6 +1431,8 @@ export class SimEngine {
    */
   step(): void {
     if (this.tick >= this.nextSettleEnd) this.expireSettles();
+    const tow = this.towing.busy ? this.towing : null;
+    if (tow !== null) tow.preStep(this.wakeObject);
     // P6: traffic driver model + scheduler at the START of every TRAFFIC_AI_TICKS-th tick (may spawn/despawn).
     if (this.traffic !== null && this.tick % TRAFFIC_AI_TICKS === 0) this.traffic.update(this);
     if (this.autopilots.size > 0 && this.tick % TRAFFIC_AI_TICKS === 0) this.autopilots.update(this);
@@ -1101,19 +1451,38 @@ export class SimEngine {
     const kern = this.kernel;
     // The wheel kernels' ground is module state: point it at THIS engine's
     // ground every step (several engines may coexist, e.g. in tests).
+    const rutS = this.rutSampler;
     if (this.vehicles.size > 0) {
       setWheelGround(sampler, this.materials, SIM_DT);
       setTyreEnvironment(this.wetness, this.rain);
+      setSoilRutHook(this.softGroundOn ? this.rutHook : null);
     }
     setActiveKernel(kern);
     kern.beginTick?.();
     if (this.contactsDirty || this.tick >= this.nextRebuild) this.broadphase();
+    // R-PHYS2: which objects are near ruts this tick (their wheels + ground use the rutted sampler).
+    const ruts = this.softGroundOn && this.softGround.tileCount > 0;
+    if (this.nearRuts.length < objs.length) this.nearRuts = new Uint8Array(2 * objs.length);
+    const near = this.nearRuts;
     // Phase 1, per awake object ascending: vehicle pre-step → hydros → beams (+ prop damping).
     for (let o = 0; o < objs.length; o++) {
       const obj = objs[o]!;
       if ((obj.flags & SIM_OBJECT_FLAG_SLEEPING) !== 0) continue;
+      let nr = 0;
+      if (ruts) {
+        // The broadphase box (≤ 16 ticks old) padded by the motion since.
+        const b = 6 * o;
+        const ob = this.contacts.oBox;
+        const pad = this.contacts.oVmax[o]! * OBJ_REBUILD_TICKS_SLOW * SIM_DT + 0.5;
+        nr = this.softGround.anyTileIn(ob[b]! - pad, ob[b + 2]! - pad, ob[b + 3]! + pad, ob[b + 5]! + pad) ? 1 : 0;
+      }
+      near[o] = nr;
       const veh = vslots[o];
-      if (veh) vehiclePreStep(s, veh, obj.actions, SIM_DT);
+      if (veh) {
+        if (nr === 1) setWheelGround(rutS, this.materials, SIM_DT);
+        vehiclePreStep(s, veh, obj.actions, SIM_DT);
+        if (nr === 1) setWheelGround(sampler, this.materials, SIM_DT);
+      }
       const hb = obj.hydroBeams;
       if (hb.length > 0) {
         const steer = obj.actions[Action.steer]!;
@@ -1126,12 +1495,15 @@ export class SimEngine {
       if (prop) {
         const anchored = prop.anchorBeams.length > 0 && propAnchored(s, prop, obj.beamStart, sink);
         applyPropDamping(s, obj.nodeStart, obj.nodeCount, PROP_INTERNAL_DAMPING, anchored);
+        if (prop.fluid !== null && this.tick % FLUID_TICKS === 0) stepPropFluid(s, obj, prop, this.gravityMag, SIM_DT);
       }
     }
     // Phase 2: node-vs-node contacts over the cached pair list (canonical order), then node-vs-triangle
     // (R-CORE: object triangles, self-collision, static meshes; canonical order).
     if (this.contacts.pairCount > 0) this.contacts.apply(s, SIM_DT, sink);
     if (this.tris.pairCount > 0) this.tris.apply(s, SIM_DT, sink, gx, gy, gz, this.solver.ccd);
+    // R-PHYS2: cross-object joints (hitches, chains, straps), then carrier surfaces (cargo on decks / beds).
+    if (tow !== null) tow.apply(s, SIM_DT, this.tick, sink, gx, gy, gz);
     // Phase 3, per awake object ascending: water → ground → static colliders → integrate.
     const water = this.water;
     const c = this.contacts;
@@ -1147,7 +1519,10 @@ export class SimEngine {
           const veh = vslots[o];
           const prop = pslots[o];
           const fl = this.floodSlots[o];
-          if (veh && fl) {
+          if (veh && veh.water) {
+            stepVehicleWater(s, veh.water, obj.nodeStart, obj.nodeCount, obj.beamStart, water, g, SIM_DT, veh.drivetrain.rpm);
+            if (veh.water.hydrolocked !== 0) seizeHydrolocked(veh);
+          } else if (veh && fl) {
             const bodyN = veh.vehicle.bodyNodeCount;
             const sum = applyWater(s, obj.nodeStart, obj.nodeCount, water, WATER_PHYSICS.vehicleDensity, g, SIM_DT, obj.nodeStart + bodyN, 1 - VEHICLE_FLOOD_LOSS * fl.level);
             if (sum > 0 && fl.level < 1) {
@@ -1160,7 +1535,13 @@ export class SimEngine {
         }
       }
       if (sampler !== null) {
-        kern.ground(obj.nodeStart, obj.nodeCount, sampler, this.materials, SIM_DT, obj.objectId, sink, gx, gy, gz, cw !== null);
+        const sv = vslots[o];
+        if (this.softGroundOn && sv) {
+          applySoftGround(s, sv.wheels, this.softGround, rutS!, this.groundN, this.tick, SIM_DT, this.softGroundResistance);
+          applyBodyDig(s, obj.nodeStart, sv.vehicle.bodyNodeCount, this.softGround, rutS!, this.groundN, this.tick, SIM_DT);
+        }
+        // Near ruts the rutted sampler (JS ground); elsewhere the plain ground (the kernel's mirror).
+        kern.ground(obj.nodeStart, obj.nodeCount, near[o] === 1 ? rutS! : sampler, this.materials, SIM_DT, obj.objectId, sink, gx, gy, gz, cw !== null);
       }
       if (cw !== null) {
         applyColliderContacts(s, obj.nodeStart, obj.nodeCount, cw, this.materials, SIM_DT, obj.objectId, sink, gx, gy, gz, kern.objectBox?.(obj.nodeStart, obj.nodeCount));
@@ -1253,6 +1634,8 @@ export class SimEngine {
     }
     if (this.props.size > 0) this.enforceAwakeBudget(interval);
     const triNeeded = this.markTriangleSlots(n, interval);
+    if (this.debrisList.length > 0 && !this.contactsDirty) updateDebris(s, this.debrisList, this.debrisOrigins, elapsed, c.oBox, c.oVmax, n, this.debrisSlots);
+    if (this.towing.cargo.size > 0) this.towing.rebuild(s, this.tick, c.excludedPairs, pairKey);
     c.rebuild(s, interval, SIM_DT, s.friction);
     if (triNeeded) this.rebuildTriangles(n, interval);
     else if (this.tris.pairCount > 0) this.tris.clear();
@@ -1500,4 +1883,71 @@ export class SimEngine {
     if (!density || typeof density !== 'object') throw new SimCommandError('setTrafficDensity: density must be an object');
     this.traffic.setDensity(density);
   }
+}
+
+/** Quaternion [x, y, z, w] of the rotation whose columns are B[3..5], B[6..8], B[9..11] (sqrt-only, Shepperd). */
+function matToQuat(B: Float64Array): [number, number, number, number] {
+  const m00 = B[3]!;
+  const m10 = B[4]!;
+  const m20 = B[5]!;
+  const m01 = B[6]!;
+  const m11 = B[7]!;
+  const m21 = B[8]!;
+  const m02 = B[9]!;
+  const m12 = B[10]!;
+  const m22 = B[11]!;
+  const tr = m00 + m11 + m22;
+  let x: number;
+  let y: number;
+  let z: number;
+  let w: number;
+  if (tr > 0) {
+    const sq = Math.sqrt(tr + 1) * 2;
+    w = 0.25 * sq;
+    x = (m21 - m12) / sq;
+    y = (m02 - m20) / sq;
+    z = (m10 - m01) / sq;
+  } else if (m00 > m11 && m00 > m22) {
+    const sq = Math.sqrt(1 + m00 - m11 - m22) * 2;
+    w = (m21 - m12) / sq;
+    x = 0.25 * sq;
+    y = (m01 + m10) / sq;
+    z = (m02 + m20) / sq;
+  } else if (m11 > m22) {
+    const sq = Math.sqrt(1 + m11 - m00 - m22) * 2;
+    w = (m02 - m20) / sq;
+    x = (m01 + m10) / sq;
+    y = 0.25 * sq;
+    z = (m12 + m21) / sq;
+  } else {
+    const sq = Math.sqrt(1 + m22 - m00 - m11) * 2;
+    w = (m10 - m01) / sq;
+    x = (m02 + m20) / sq;
+    y = (m12 + m21) / sq;
+    z = 0.25 * sq;
+  }
+  const l = Math.sqrt(x * x + y * y + z * z + w * w);
+  return [x / l, y / l, z / l, w / l];
+}
+
+/** Hamilton product a·b of [x, y, z, w] quaternions. */
+function quatMul(a: readonly number[], b: readonly number[]): [number, number, number, number] {
+  const [ax, ay, az, aw] = a as [number, number, number, number];
+  const [bx, by, bz, bw] = b as [number, number, number, number];
+  return [aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx, aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz];
+}
+
+/**
+ * R-PHYS2 → R-PHYS: water in the cylinders (VehicleRuntime.water.hydrolocked) bends the rods — the engine
+ * stops and locks (engine systems: health 0, seized; the starter cannot turn it). Sticky like the flag:
+ * `recover` keeps it, `reset` clears both.
+ */
+function seizeHydrolocked(veh: VehicleRuntime): void {
+  const es = (veh as VehicleRuntimeEx).engineSys;
+  if (!es || es.seized !== 0) return;
+  es.health = 0;
+  es.seized = 1;
+  const d = veh.drivetrain as DrivetrainStateEx;
+  d.engineOn = 0;
+  d.seized = 1;
 }
