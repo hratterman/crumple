@@ -616,6 +616,8 @@ const HOOD = {
  * truck at ≈ 110 km/h.
  */
 const DRIVETRAIN: DrivetrainDef = {
+  // R-PHYS engine systems (engineSystems.ts): fuel, cooling, oil, stall / starter
+  engine: { displacementL: 6.7, fuel: 'diesel', tankL: 150 },
   torqueCurve: [
     [0, 380],
     [600, 520],
@@ -722,11 +724,11 @@ export interface BoxtruckDesign {
 
 /**
  * R-PHYS rolling-loss correction (tyre.ts): the 12/10-ray tread polygon's excess loss over a real tyre's
- * f_r = 0.0065·(1 + V/160 km/h) (Wong, "Theory of Ground Vehicles" eq. 1.12), per unit load, every 20 km/h
+ * f_r = 0.0065·(1 + V/160 km/h) (Wong, "Theory of Ground Vehicles" eq. 1.12), per unit load, every 10 km/h
  * of tread speed from 0 — measured by coasting this car in neutral (realism/coastdown calibration), kept
  * conservative (0.85 × the lower of the bin and its neighbours' mean) so it never propels a coasting car.
  */
-export const BOXTRUCK_ROLLING_LOSS: readonly number[] = [0.0,  0.0043,  0.0062,  0.0081,  0.0072,  0.0135,  0.0155];
+export const BOXTRUCK_ROLLING_LOSS: readonly number[] = [0, 0.0069, 0.009, 0.0066, 0.0078, 0.0088, 0.0097, 0.0103, 0.0099, 0.0131, 0.0163, 0.0173, 0.0183];
 
 function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
   const nodes: RigNodeDef[] = [];

@@ -579,9 +579,11 @@ const TRUNK_REST_K = 5e4;
  * to the brief's ~90 kW because the soft-body tyres' high-speed rolling
  * loss, ≈ 1 m/s² at 150 km/h, leaves 75 kW decelerating at 155 km/h:
  * docs/CONTRACTS.md "Fleet targets" note.) 4-speed automatic with lazy
- * shifts, open diff, no TC; the 4th tops out on the limiter ≈ 170 km/h.
+ * shifts, open diff, no TC; R-PHYS: a 0.72 overdrive 4th (≈ 3400 rpm at 100 km/h), drag-limited ≈ 175 km/h.
  */
 const DRIVETRAIN: DrivetrainDef = {
+  // R-PHYS engine systems (engineSystems.ts): fuel, cooling, oil, stall / starter
+  engine: { displacementL: 1.6, fuel: 'petrol', tankL: 45 },
   torqueCurve: [
     [0, 60],
     [800, 78],
@@ -603,7 +605,8 @@ const DRIVETRAIN: DrivetrainDef = {
   revLimitRpm: 6500,
   engineInertia: 0.15,
   engineBrakeTorque: 35,
-  gearRatios: [3.2, 1.85, 1.25, 0.89],
+  // R-PHYS: 4th 0.89 → 0.72 (a 1990s 4-speed automatic's overdrive ≈ 0.69–0.73): 3400 rpm at 100 km/h, was 4250
+  gearRatios: [3.2, 1.85, 1.25, 0.72],
   reverseRatio: 3.0,
   finalDrive: 4.42,
   shiftTimeS: 0.8,
@@ -692,11 +695,11 @@ export interface BeaterDesign {
 
 /**
  * R-PHYS rolling-loss correction (tyre.ts): the 12/10-ray tread polygon's excess loss over a real tyre's
- * f_r = 0.012·(1 + V/160 km/h) (Wong, "Theory of Ground Vehicles" eq. 1.12), per unit load, every 20 km/h
+ * f_r = 0.012·(1 + V/160 km/h) (Wong, "Theory of Ground Vehicles" eq. 1.12), per unit load, every 10 km/h
  * of tread speed from 0 — measured by coasting this car in neutral (realism/coastdown calibration), kept
  * conservative (0.85 × the lower of the bin and its neighbours' mean) so it never propels a coasting car.
  */
-export const BEATER_ROLLING_LOSS: readonly number[] = [0.0,  0.0031,  0.0061,  0.0093,  0.0126,  0.0225,  0.0325,  0.055,  0.0549,  0.0423];
+export const BEATER_ROLLING_LOSS: readonly number[] = [0, 0.0098, 0.0045, 0.006, 0.0074, 0.009, 0.0106, 0.0136, 0.0148, 0.0217, 0.0474, 0.042, 0.0631, 0.0852, 0.0965, 0.0964, 0.0964, 0.0901, 0.0838];
 
 function buildBeater(): { def: VehicleDef; design: BeaterDesign } {
   const nodes: RigNodeDef[] = [];

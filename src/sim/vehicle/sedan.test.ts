@@ -194,7 +194,7 @@ describe('SEDAN definition', () => {
     expect(lut(1500)).toBeLessThan(0.8 * peak); // a real curve, not flat
     expect(lut(6800)).toBeLessThan(peak);
     expect(d.redlineRpm).toBe(6800);
-    expect(Array.from(d.gearRatioTable.slice(2))).toEqual([3.9, 2.4, 1.7, 1.3, 1.0, 0.8]);
+    expect(Array.from(d.gearRatioTable.slice(2))).toEqual([3.9, 2.4, 1.7, 1.3, 1.0, 0.68]);
     expect(d.finalDrive).toBe(3.4);
     expect(d.diff).toBe(2); // limited
     expect(Array.from(d.drivenWheels)).toEqual([2, 3]); // RWD

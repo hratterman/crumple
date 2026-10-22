@@ -12,7 +12,7 @@ import {
   IMPACT_CAPACITY,
   SKID_CAPACITY,
 } from '../protocol/events';
-import { OBJECT_FLAG_HORN, TELEMETRY_SLOTS } from '../protocol/layout';
+import { OBJECT_FLAG_HORN, TELEMETRY_SLOTS, VEHICLE_EXT_SLOTS } from '../protocol/layout';
 import {
   ACTION_NAMES,
   ACTION_RANGES,
@@ -64,6 +64,7 @@ import {
   resetVehicleRuntime,
   vehiclePreStep,
   writeVehicleTelemetry,
+  writeVehicleTelemetryExt,
 } from './vehicle/runtime';
 import type { CompiledVehicle, TransmissionMode, VehicleDef, VehicleRuntime } from './vehicle/types';
 import { setWheelGround } from './vehicle/wheels';
@@ -584,7 +585,7 @@ export class SimEngine {
   }
 
   /** Driver assists (protocol `setAssists`); omitted fields keep their state. */
-  setAssists(objectId: number, assists: { tractionControl?: boolean; abs?: boolean; esc?: boolean }): void {
+  setAssists(objectId: number, assists: { tractionControl?: boolean; abs?: boolean; esc?: boolean; clutchAssist?: boolean }): void {
     const v = this.vehicles.get(objectId);
     if (!v) throw new SimCommandError(`objectId ${objectId} is not a vehicle`, objectId);
     const tc = assists?.tractionControl;
@@ -593,10 +594,13 @@ export class SimEngine {
     if (tc !== undefined && typeof tc !== 'boolean') throw new SimCommandError('setAssists: tractionControl must be a boolean', objectId);
     if (abs !== undefined && typeof abs !== 'boolean') throw new SimCommandError('setAssists: abs must be a boolean', objectId);
     if (esc !== undefined && typeof esc !== 'boolean') throw new SimCommandError('setAssists: esc must be a boolean', objectId);
+    const ca = assists?.clutchAssist;
+    if (ca !== undefined && typeof ca !== 'boolean') throw new SimCommandError('setAssists: clutchAssist must be a boolean', objectId);
     if (tc !== undefined) v.drivetrain.tractionControl = tc;
     const dts = v.drivetrain as DrivetrainStateEx;
     if (abs !== undefined) dts.abs = abs;
     if (esc !== undefined) dts.esc = esc;
+    if (ca !== undefined) dts.clutchAssist = ca;
   }
 
   /** Upright the vehicle in place (damage and drivetrain kept); see recoverVehicle. */
@@ -1334,6 +1338,8 @@ export class SimEngine {
       if (veh) {
         const t = writeVehicleTelemetry(s, veh);
         for (let k = 0; k < TELEMETRY_SLOTS; k++) writer.setTelemetry(i, k, t[k]!);
+        const x = writeVehicleTelemetryExt(veh);
+        for (let k = 0; k < VEHICLE_EXT_SLOTS; k++) writer.setTelemetryExt(i, k, x[k]!);
       }
     }
     if (this.traffic !== null) this.traffic.writeRecords(writer, this);

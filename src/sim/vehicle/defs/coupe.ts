@@ -464,6 +464,8 @@ const TRUNK_REST_K = 1e5;
  * 6th tops out near 290 km/h, 7th is a cruise overdrive.
  */
 const DRIVETRAIN: DrivetrainDef = {
+  // R-PHYS engine systems (engineSystems.ts): fuel, cooling, oil, stall / starter
+  engine: { displacementL: 4.0, fuel: 'petrol', tankL: 70 },
   torqueCurve: [
     [0, 230],
     [750, 280],
@@ -570,11 +572,11 @@ export interface CoupeDesign {
 
 /**
  * R-PHYS rolling-loss correction (tyre.ts): the 12/10-ray tread polygon's excess loss over a real tyre's
- * f_r = 0.011·(1 + V/160 km/h) (Wong, "Theory of Ground Vehicles" eq. 1.12), per unit load, every 20 km/h
+ * f_r = 0.011·(1 + V/160 km/h) (Wong, "Theory of Ground Vehicles" eq. 1.12), per unit load, every 10 km/h
  * of tread speed from 0 — measured by coasting this car in neutral (realism/coastdown calibration), kept
  * conservative (0.85 × the lower of the bin and its neighbours' mean) so it never propels a coasting car.
  */
-export const COUPE_ROLLING_LOSS: readonly number[] = [0.0,  0.0086,  0.0172,  0.026,  0.0306,  0.0279,  0.0471,  0.0663,  0.1056,  0.0986,  0.0909,  0.0554,  0.054,  0.09,  0.1054,  0.11];
+export const COUPE_ROLLING_LOSS: readonly number[] = [0, 0.0012, 0.0024, 0.0026, 0.0038, 0.0082, 0.0126, 0.0206, 0.0229, 0.0245, 0.0417, 0.0711, 0.0861, 0.0957, 0.1037, 0.1342, 0.1599, 0.1644, 0.118, 0.11, 0.0891, 0.0561, 0.0384, 0.0626, 0.0619, 0.0658, 0.0838, 0.0977, 0.1054, 0.1077, 0.11];
 
 function buildCoupe(): { def: VehicleDef; design: CoupeDesign } {
   const nodes: RigNodeDef[] = [];

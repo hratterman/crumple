@@ -24,7 +24,8 @@
  *     −128 = broken / NaN; only while `recordStrains`)
  *   then per object data, 4-aligned: nodes = min xyz f32, scale xyz f32,
  *     u16 × 3n (q = round((x − min)/scale), x' = min + q·scale);
- *     telemetry = 32 f32; broken = ⌈beamCount/32⌉ u32, OBJECT-LOCAL bits
+ *     telemetry = 32 f32 + 16 f32 R-PHYS ext telemetry (zeros when the snapshot had none);
+ *     broken = ⌈beamCount/32⌉ u32, OBJECT-LOCAL bits
  *   then events in protocol word layout: impacts (9 words), beam breaks
  *   (5), skids (7), traffic records (16).
  * REPEAT: a sleeping object unchanged since the previous recorded frame
@@ -40,7 +41,7 @@ import {
   createSkidEvent,
 } from '../../protocol/events';
 import type { SnapshotReader, SnapshotWriter } from '../../protocol/codec';
-import { NODE_STRIDE, OBJECT_FLAG_SLEEPING, TELEMETRY_SLOTS } from '../../protocol/layout';
+import { NODE_STRIDE, OBJECT_FLAG_SLEEPING, TELEMETRY_SLOTS, VEHICLE_EXT_SLOTS } from '../../protocol/layout';
 import { PROP_LAYOUT_ID_BASE } from '../../protocol/messages';
 import { VehicleTelemetry } from '../../protocol/telemetry';
 import { isTrafficObjectId } from '../../protocol/traffic';
@@ -483,7 +484,7 @@ export class ReplayBuffer {
         }
       }
       this.sTel[i] = tel;
-      if (tel) size += TELEMETRY_SLOTS * 4;
+      if (tel) size += (TELEMETRY_SLOTS + VEHICLE_EXT_SLOTS) * 4;
       let broken = 0;
       if (!repeat) {
         size += 24 + ((nc * 6 + 3) & ~3);
@@ -572,7 +573,8 @@ export class ReplayBuffer {
         u32[t + O_TEL] = off - base;
         const w0 = off >>> 2;
         for (let s = 0; s < TELEMETRY_SLOTS; s++) f32[w0 + s] = r.telemetry(i, s);
-        off += TELEMETRY_SLOTS * 4;
+        for (let s = 0; s < VEHICLE_EXT_SLOTS; s++) f32[w0 + TELEMETRY_SLOTS + s] = r.telemetryExt(i, s);
+        off += (TELEMETRY_SLOTS + VEHICLE_EXT_SLOTS) * 4;
       }
       if (id < ID_SPACE) {
         this.seenSeq[id] = seq;
@@ -968,6 +970,7 @@ export class ReplayBuffer {
       if (to !== 0) {
         const w0 = (base + to) >>> 2;
         for (let s = 0; s < TELEMETRY_SLOTS; s++) w.setTelemetry(oi, s, f32[w0 + s]!);
+        for (let s = 0; s < VEHICLE_EXT_SLOTS; s++) w.setTelemetryExt(oi, s, f32[w0 + TELEMETRY_SLOTS + s]!);
       }
       g += nc;
       gb += bc;

@@ -35,7 +35,7 @@ import {
 import { createTrafficAgentFrame, TRAFFIC_FLAG_AWAKE, TRAFFIC_FLAG_TELEPORTED, type TrafficAgentFrame, type TrafficDensity } from '../protocol/traffic';
 import { NODE_STRIDE } from '../protocol/layout';
 import { SnapshotReader } from '../protocol/codec';
-import { readVehicleTelemetry, type VehicleTelemetryFrame } from '../protocol/telemetry';
+import { readVehicleTelemetry, readVehicleTelemetryExt, type VehicleTelemetryExtFrame, type VehicleTelemetryFrame } from '../protocol/telemetry';
 import { compileRig } from '../sim/rig/builder';
 import type { RigDef } from '../sim/rig/types';
 import { buildVehicleRig } from '../sim/vehicle/builder';
@@ -460,11 +460,12 @@ export class SimClient {
   }
 
   /** Driver assists (SetAssistsMsg): traction control on/off. */
-  setAssists(objectId: number, assists: { tractionControl?: boolean; abs?: boolean; esc?: boolean }): void {
+  setAssists(objectId: number, assists: { tractionControl?: boolean; abs?: boolean; esc?: boolean; clutchAssist?: boolean }): void {
     const msg: MainToWorker = { type: 'setAssists', objectId };
     if (assists.tractionControl !== undefined) msg.tractionControl = assists.tractionControl;
     if (assists.abs !== undefined) msg.abs = assists.abs;
     if (assists.esc !== undefined) msg.esc = assists.esc;
+    if (assists.clutchAssist !== undefined) msg.clutchAssist = assists.clutchAssist;
     this.post(msg);
   }
 
@@ -795,6 +796,25 @@ export class SimClient {
     if (!t) return false;
     readVehicleTelemetry(t, out);
     return true;
+  }
+
+  /**
+   * R-PHYS: latest ext telemetry block (VEHICLE_EXT_SLOTS f32, protocol/telemetry.ts VehicleTelemetryExt:
+   * brake disc temperatures, coolant, oil, fuel, engine health, assist / engine bits) for `objectId`, or
+   * null when absent. Valid until the next snapshot is processed.
+   */
+  telemetryExt(objectId: number): Float32Array | null {
+    const cur = this.cur;
+    if (!cur) return null;
+    const i = cur.findObject(objectId);
+    return i < 0 ? null : cur.objectTelemetryExt(i);
+  }
+
+  /** R-PHYS: decodes the latest ext telemetry of `objectId` into `out`; false (out.present = false) when absent. */
+  readTelemetryExt(objectId: number, out: VehicleTelemetryExtFrame): boolean {
+    const t = this.telemetryExt(objectId);
+    readVehicleTelemetryExt(t, out);
+    return t !== null;
   }
 
   /** Latest strains for `objectId` (object-local beam order), or null (absent / no debugStrains). */

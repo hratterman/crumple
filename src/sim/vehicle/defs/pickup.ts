@@ -458,6 +458,8 @@ const TAILGATE = {
  * truck at ≈ 190 km/h (contract: accel > 0 at 175, ≤ 0 at 200 km/h).
  */
 const DRIVETRAIN: DrivetrainDef = {
+  // R-PHYS engine systems (engineSystems.ts): fuel, cooling, oil, stall / starter
+  engine: { displacementL: 5.0, fuel: 'petrol', tankL: 98 },
   torqueCurve: [
     [0, 280],
     [700, 360],
@@ -476,7 +478,10 @@ const DRIVETRAIN: DrivetrainDef = {
   revLimitRpm: 6200,
   engineInertia: 0.26,
   engineBrakeTorque: 85,
-  gearRatios: [3.4, 2.25, 1.62, 1.28, 1.1, 1.0],
+  // R-PHYS: 5th direct, 6th a 0.72 overdrive (a real full-size pickup cruises at ≈ 2000 rpm at 100 km/h; it
+  // held 3250 rpm and burned 16.5 L/100 km), the old limiter top speed now an electronic governor (speedLimitKmh)
+  gearRatios: [3.4, 2.25, 1.62, 1.28, 1.0, 0.72],
+  speedLimitKmh: 190,
   reverseRatio: 3.3,
   finalDrive: 4.1,
   shiftTimeS: 0.2,
@@ -566,11 +571,11 @@ export interface PickupDesign {
 
 /**
  * R-PHYS rolling-loss correction (tyre.ts): the 12/10-ray tread polygon's excess loss over a real tyre's
- * f_r = 0.011·(1 + V/160 km/h) (Wong, "Theory of Ground Vehicles" eq. 1.12), per unit load, every 20 km/h
+ * f_r = 0.011·(1 + V/160 km/h) (Wong, "Theory of Ground Vehicles" eq. 1.12), per unit load, every 10 km/h
  * of tread speed from 0 — measured by coasting this car in neutral (realism/coastdown calibration), kept
  * conservative (0.85 × the lower of the bin and its neighbours' mean) so it never propels a coasting car.
  */
-export const PICKUP_ROLLING_LOSS: readonly number[] = [0.0,  0.0027,  0.0053,  0.0055,  0.0074,  0.0093,  0.0173,  0.0253,  0.0317,  0.038,  0.034];
+export const PICKUP_ROLLING_LOSS: readonly number[] = [0, 0.0048, 0.0058, 0.0063, 0.0066, 0.0062, 0.0063, 0.0089, 0.0097, 0.0081, 0.0091, 0.0137, 0.0179, 0.0289, 0.0474, 0.0533, 0.0742, 0.0774, 0.0805, 0.0785, 0.0765];
 
 function buildPickup(): { def: VehicleDef; design: PickupDesign } {
   const nodes: RigNodeDef[] = [];

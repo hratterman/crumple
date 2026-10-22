@@ -17,6 +17,9 @@
  * SNAPSHOT_FLAG_TRAFFIC, offset/count at HDR_TRAFFIC_*; records in
  * traffic.ts) and the worker load word HDR_WORKER_LOAD_BYTE. Same rule:
  * older readers ignore them, SNAPSHOT_VERSION stays 1.
+ * R-PHYS additive: the `vehicle ext` telemetry section (always present,
+ * header flag SNAPSHOT_FLAG_VEHICLE_EXT, offset at HDR_VEHICLE_EXT_OFFSET_BYTE;
+ * slots in telemetry.ts VehicleTelemetryExt). Same rule.
  *
  * Fixed-size sections (header, objects, events) come first; their byte
  * offsets depend only on maxObjects. The header ALSO stores every section
@@ -84,6 +87,13 @@ export const HDR_TRAFFIC_COUNT_BYTE = 112;
  * `setTrafficDensity`, which is a logged command — the sim never reads it.
  */
 export const HDR_WORKER_LOAD_BYTE = 116;
+/**
+ * R-PHYS additive: u32 byte offset of the VEHICLE EXT telemetry section (0 =
+ * absent: pre-R-PHYS writer). maxObjects records of VEHICLE_EXT_SLOTS f32 in
+ * object-record order (record i ↔ object i of the objects section); slots in
+ * telemetry.ts `VehicleTelemetryExt`. Non-vehicles: all zeros.
+ */
+export const HDR_VEHICLE_EXT_OFFSET_BYTE = 120;
 // bytes 120..127 reserved (zero)
 
 export const HDR_U32_MAGIC = HDR_MAGIC_BYTE >> 2;
@@ -115,6 +125,7 @@ export const HDR_U32_BROKEN_OFFSET = HDR_BROKEN_OFFSET_BYTE >> 2;
 export const HDR_U32_TRAFFIC_OFFSET = HDR_TRAFFIC_OFFSET_BYTE >> 2;
 export const HDR_U32_TRAFFIC_COUNT = HDR_TRAFFIC_COUNT_BYTE >> 2;
 export const HDR_F32_WORKER_LOAD = HDR_WORKER_LOAD_BYTE >> 2;
+export const HDR_U32_VEHICLE_EXT_OFFSET = HDR_VEHICLE_EXT_OFFSET_BYTE >> 2;
 
 /** Header flag bits. */
 export const SNAPSHOT_FLAG_DEBUG_STRAINS = 1 << 0;
@@ -122,6 +133,8 @@ export const SNAPSHOT_FLAG_DEBUG_STRAINS = 1 << 0;
 export const SNAPSHOT_FLAG_BROKEN_BEAMS = 1 << 1;
 /** P6 additive: the traffic section is present (always set by P6 writers; count may be 0). */
 export const SNAPSHOT_FLAG_TRAFFIC = 1 << 2;
+/** R-PHYS additive: the vehicle ext telemetry section is present (always set by R-PHYS writers). */
+export const SNAPSHOT_FLAG_VEHICLE_EXT = 1 << 3;
 
 // ============================================================ objects
 /**
@@ -220,6 +233,8 @@ export function brokenSectionBytes(beamCapacity: number): number {
 }
 /** P6: traffic section size (fixed: TRAFFIC_MAX_AGENTS records of traffic.ts TRAFFIC_RECORD_BYTES). */
 export const TRAFFIC_SECTION_BYTES = TRAFFIC_MAX_AGENTS * TRAFFIC_RECORD_BYTES;
+/** R-PHYS: f32 slots per object in the vehicle ext telemetry section (telemetry.ts VehicleTelemetryExt). */
+export const VEHICLE_EXT_SLOTS = 16;
 
 // ============================================================ layout calc
 export interface SnapshotLayout {
@@ -238,6 +253,8 @@ export interface SnapshotLayout {
   brokenOffset: number;
   /** P6 additive: traffic records (always present). */
   trafficOffset: number;
+  /** R-PHYS additive: vehicle ext telemetry, maxObjects × VEHICLE_EXT_SLOTS f32 (always present). */
+  vehicleExtOffset: number;
   totalBytes: number;
 }
 
@@ -261,7 +278,8 @@ export function computeSnapshotLayout(
   const strainsEnd = debugStrains ? alignUp(nodesEnd + beamCapacity * STRAIN_BYTES) : nodesEnd;
   const brokenOffset = strainsEnd;
   const trafficOffset = alignUp(brokenOffset + brokenSectionBytes(beamCapacity));
-  const totalBytes = alignUp(trafficOffset + TRAFFIC_SECTION_BYTES);
+  const vehicleExtOffset = alignUp(trafficOffset + TRAFFIC_SECTION_BYTES);
+  const totalBytes = alignUp(vehicleExtOffset + maxObjects * VEHICLE_EXT_SLOTS * 4);
   return {
     maxObjects,
     nodeCapacity,
@@ -275,6 +293,7 @@ export function computeSnapshotLayout(
     strainsOffset,
     brokenOffset,
     trafficOffset,
+    vehicleExtOffset,
     totalBytes,
   };
 }

@@ -11,11 +11,29 @@
  */
 import { createShellRuntime, rebaseShell, resetShell, type ShellRuntime } from './shell';
 import type { Vec3 } from '../../core/math';
-import { TELEMETRY_SLOTS } from '../../protocol/layout';
+import { TELEMETRY_SLOTS, VEHICLE_EXT_SLOTS } from '../../protocol/layout';
+import { Action } from '../../protocol/messages';
 import {
+  BRAKE_TEMP_SLOTS,
   CORNER_BIT,
+  EXT_ASSIST_ABS_ACTIVE,
+  EXT_ASSIST_ABS_ON,
+  EXT_ASSIST_ESC_ACTIVE,
+  EXT_ASSIST_ESC_ON,
+  EXT_ASSIST_TC_ACTIVE,
+  EXT_ASSIST_TC_ON,
+  EXT_ENGINE_CRANKING,
+  EXT_ENGINE_LOW_FUEL,
+  EXT_ENGINE_LOW_OIL,
+  EXT_ENGINE_OIL_LEAK,
+  EXT_ENGINE_OVERHEAT,
+  EXT_ENGINE_RADIATOR_LEAK,
+  EXT_ENGINE_RUNNING,
+  EXT_ENGINE_SEIZED,
+  EXT_ENGINE_STALLED,
   TELEMETRY_CORNER_COUNT,
   VehicleTelemetry,
+  VehicleTelemetryExt,
   WHEEL_LOAD_SLOTS,
   WHEEL_OMEGA_SLOTS,
   WHEEL_SLIP_SLOTS,
@@ -39,6 +57,7 @@ import type {
 } from './types';
 import { applyHoopTension, applyParkingClamp, applyTreadBrush, applyWheelTorques, estimateWheelOmega, setDriveOnUpright } from './wheels';
 import { brakeFade, createBrakeHeat, resetBrakeHeat, stepDiscTemp, type BrakeHeatState } from './brakeHeat';
+import { DERATE_START_C, LOW_OIL, createEngineSystems, detectEngineDamage, engineSystemsPost, engineSystemsPre, resetEngineSystems, type EngineSystemsState } from './engineSystems';
 import { applyDampers, createVehicleDampers, rebaseDampers, type DamperState } from './dampers';
 import { createBrakeSystem, resetBrakeSystem, stepBrakes, type BrakeSystemState } from './brakes';
 import { createTyreState, resetTyreState, stepTyre, type TyreState } from './tyre';
@@ -80,6 +99,10 @@ export interface VehicleRuntimeEx extends VehicleRuntime {
   dampers: DamperState | null;
   /** R-PHYS: brake disc temperatures (brakeHeat.ts). */
   brakeHeat: BrakeHeatState;
+  /** R-PHYS: fuel, cooling, oil, engine health, stall / starter (engineSystems.ts). */
+  engineSys: EngineSystemsState;
+  /** R-PHYS: ext telemetry block (VEHICLE_EXT_SLOTS f32, telemetry.ts VehicleTelemetryExt), filled by writeVehicleTelemetryExt. */
+  telemetryExt: Float32Array;
 }
 
 // ------------------------------------------------------------ create / rebase
@@ -200,6 +223,8 @@ export function createVehicleRuntime(
     shell: vehicle.shell.map((c) => createShellRuntime(c, rig)),
     brakeSys: undefined as unknown as BrakeSystemState,
     dampers: null,
+    engineSys: undefined as unknown as EngineSystemsState,
+    telemetryExt: new Float32Array(VEHICLE_EXT_SLOTS),
     brakeHeat: createBrakeHeat(
       vehicle.wheels.map((cw) => cw.brakeDiscMass ?? 0),
       vehicle.wheels.map((cw) => cw.brakeDiscVented ?? cw.axle === 'front'),
@@ -221,6 +246,8 @@ export function createVehicleRuntime(
     }),
   };
   rt.brakeSys = createBrakeSystem(rt);
+  rt.engineSys = createEngineSystems(vehicle);
+  rt.drivetrain.starterTorque = 25 * rt.engineSys.spec.displacementL + 20;
   rt.dampers = createVehicleDampers(vehicle);
   rebaseVehicle(rt, nodeStart, beamStart);
   return rt;
@@ -269,6 +296,8 @@ export function resetVehicleRuntime(vehicle: VehicleRuntime): void {
   if (ty) for (const t of ty) resetTyreState(t);
   const bh = (vehicle as VehicleRuntimeEx).brakeHeat;
   if (bh) resetBrakeHeat(bh);
+  const es = (vehicle as VehicleRuntimeEx).engineSys;
+  if (es) resetEngineSystems(es);
   vehicle.telemetry.fill(0);
   const sh = (vehicle as VehicleRuntimeEx).shell;
   if (sh) for (const c of sh) resetShell(c);
@@ -358,7 +387,21 @@ export function applyAero(state: SimState, vehicle: VehicleRuntime): void {
 export function vehiclePreStep(state: SimState, vehicle: VehicleRuntime, actions: Float64Array, dt: number): void {
   const wheels = vehicle.wheels;
   for (let w = 0; w < wheels.length; w++) estimateWheelOmega(state, wheels[w]!);
+  const es = (vehicle as VehicleRuntimeEx).engineSys;
+  const dts = vehicle.drivetrain as DrivetrainStateEx;
+  if (es) {
+    detectEngineDamage(state, vehicle, es);
+    engineSystemsPre(es, dts, actions[Action.throttle]!, actions[Action.clutch]!, actions[Action.gearSelect]!, dt);
+  }
   stepDrivetrain(state, vehicle, actions, dt, vehicle.telemetry);
+  if (es) {
+    let v = 0;
+    for (let w = 0; w < wheels.length; w++) {
+      const u = wheels[w]!.omega * wheels[w]!.rollRadius;
+      v += u < 0 ? -u : u;
+    }
+    engineSystemsPost(es, dts, vehicle.vehicle.drivetrain.idleRpm, dts.clutch, wheels.length > 0 ? v / wheels.length : 0, dt);
+  }
   const bs = (vehicle as VehicleRuntimeEx).brakeSys;
   if (bs) stepBrakes(state, vehicle, actions, dt, bs);
   const onAxle = vehicle.vehicle.drivetrain.driveReaction === 'axle';
@@ -515,6 +558,61 @@ export const computeDamage: ComputeDamage = (state, vehicle) => {
  * slip/load/ω, damage, airborne and the detached/contact bitmasks. Returns
  * vehicle.telemetry. Snapshot-rate only.
  */
+/**
+ * R-PHYS: fills the vehicle's ext telemetry block (telemetry.ts
+ * VehicleTelemetryExt) from the brake / engine-system state. Snapshot time
+ * only (cheap: no node loops).
+ */
+export function writeVehicleTelemetryExt(vehicle: VehicleRuntime): Float32Array {
+  const v = vehicle as VehicleRuntimeEx;
+  const out = v.telemetryExt;
+  out.fill(0);
+  const X = VehicleTelemetryExt;
+  const bh = v.brakeHeat;
+  const wheels = v.vehicle.wheels;
+  if (bh) {
+    for (let w = 0; w < wheels.length; w++) {
+      const c = wheels[w]!.corner;
+      if (c >= 0 && c < 4 && bh.mass[w]! > 0) out[BRAKE_TEMP_SLOTS[c]!] = bh.temp[w]!;
+    }
+  }
+  const d = v.drivetrain as DrivetrainStateEx;
+  const bs = v.brakeSys;
+  const brakes = v.vehicle.brakes;
+  let assist = 0;
+  if (bs && bs.absActive !== 0) assist |= EXT_ASSIST_ABS_ACTIVE;
+  if (bs && bs.escActive !== 0) assist |= EXT_ASSIST_ESC_ACTIVE;
+  if (d.tcCut > 0.05) assist |= EXT_ASSIST_TC_ACTIVE;
+  if (brakes.abs === true && d.abs !== false) assist |= EXT_ASSIST_ABS_ON;
+  if (brakes.esc === true && d.esc !== false) assist |= EXT_ASSIST_ESC_ON;
+  if (v.vehicle.drivetrain.tcSlip > 0 && d.tractionControl) assist |= EXT_ASSIST_TC_ON;
+  out[X.assistBits] = assist;
+  const es = v.engineSys;
+  if (es) {
+    out[X.coolantTemp] = es.coolantC;
+    out[X.coolantLevel] = es.coolantLevel;
+    out[X.oilLevel] = es.oilLevel;
+    out[X.fuel] = es.fuelL;
+    out[X.fuelRate] = es.fuelRateLph;
+    out[X.fuelTank] = es.spec.tankL;
+    out[X.engineHealth] = es.health;
+    out[X.radiatorDamage] = es.radiatorDamage;
+    out[X.powerFactor] = d.powerFactor;
+    let e = 0;
+    if (d.engineOn !== 0) e |= EXT_ENGINE_RUNNING;
+    if (es.stalled !== 0) e |= EXT_ENGINE_STALLED;
+    if (d.cranking !== 0) e |= EXT_ENGINE_CRANKING;
+    if (es.coolantC > DERATE_START_C) e |= EXT_ENGINE_OVERHEAT;
+    if (es.seized !== 0) e |= EXT_ENGINE_SEIZED;
+    if (es.radiatorDamage > 0) e |= EXT_ENGINE_RADIATOR_LEAK;
+    if (es.oilLeak > 0) e |= EXT_ENGINE_OIL_LEAK;
+    if (es.fuelL < 0.1 * es.spec.tankL) e |= EXT_ENGINE_LOW_FUEL;
+    if (es.oilLevel < LOW_OIL) e |= EXT_ENGINE_LOW_OIL;
+    out[X.engineBits] = e;
+  }
+  return out;
+}
+
 export function writeVehicleTelemetry(state: SimState, vehicle: VehicleRuntime): Float32Array {
   const T = VehicleTelemetry;
   const out = vehicle.telemetry;

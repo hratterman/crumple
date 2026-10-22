@@ -59,6 +59,9 @@ import {
   HDR_F32_TIMESCALE,
   HDR_F32_WORKER_LOAD,
   HDR_U32_TRAFFIC_COUNT,
+  HDR_U32_VEHICLE_EXT_OFFSET,
+  SNAPSHOT_FLAG_VEHICLE_EXT,
+  VEHICLE_EXT_SLOTS,
   HDR_U32_TRAFFIC_OFFSET,
   SNAPSHOT_FLAG_TRAFFIC,
   HDR_F64_SIMTIME,
@@ -171,6 +174,7 @@ export class SnapshotWriter {
   private readonly strainW: number;
   private readonly brokenW: number;
   private readonly trafficW: number;
+  private readonly extW: number;
   private lastObjectId = -1;
   private lastAgent = -1;
 
@@ -184,6 +188,7 @@ export class SnapshotWriter {
     this.strainW = layout.strainsOffset >> 2;
     this.brokenW = layout.brokenOffset >> 2;
     this.trafficW = layout.trafficOffset >> 2;
+    this.extW = layout.vehicleExtOffset >> 2;
   }
 
   /** Binds the writer to `buffer` (creates views) and writes the static header. */
@@ -199,7 +204,7 @@ export class SnapshotWriter {
     for (let i = 0; i < HEADER_BYTES >> 2; i++) u[i] = 0;
     u[HDR_U32_MAGIC] = SNAPSHOT_MAGIC;
     u[HDR_U32_VERSION] = SNAPSHOT_VERSION;
-    u[HDR_U32_FLAGS] = (L.debugStrains ? SNAPSHOT_FLAG_DEBUG_STRAINS : 0) | SNAPSHOT_FLAG_BROKEN_BEAMS | SNAPSHOT_FLAG_TRAFFIC;
+    u[HDR_U32_FLAGS] = (L.debugStrains ? SNAPSHOT_FLAG_DEBUG_STRAINS : 0) | SNAPSHOT_FLAG_BROKEN_BEAMS | SNAPSHOT_FLAG_TRAFFIC | SNAPSHOT_FLAG_VEHICLE_EXT;
     u[HDR_U32_OBJECTS_OFFSET] = L.objectsOffset;
     u[HDR_U32_IMPACTS_OFFSET] = L.impactsOffset;
     u[HDR_U32_BEAM_BREAKS_OFFSET] = L.beamBreaksOffset;
@@ -212,6 +217,7 @@ export class SnapshotWriter {
     u[HDR_U32_TOTAL_BYTES] = L.totalBytes;
     u[HDR_U32_BROKEN_OFFSET] = L.brokenOffset;
     u[HDR_U32_TRAFFIC_OFFSET] = L.trafficOffset;
+    u[HDR_U32_VEHICLE_EXT_OFFSET] = L.vehicleExtOffset;
     this.lastObjectId = -1;
     this.lastAgent = -1;
     return this;
@@ -317,10 +323,17 @@ export class SnapshotWriter {
     const f = this.f32;
     const t = r + OBJ_TELEMETRY;
     for (let s = 0; s < TELEMETRY_SLOTS; s++) f[t + s] = 0;
+    const x = this.extW + index * VEHICLE_EXT_SLOTS;
+    for (let s = 0; s < VEHICLE_EXT_SLOTS; s++) f[x + s] = 0;
     u[HDR_U32_OBJECT_COUNT] = index + 1;
     u[HDR_U32_NODE_TOTAL] = nodeOffset + nodeCount;
     u[HDR_U32_BEAM_TOTAL] = beamOffset + beamCount;
     return index;
+  }
+
+  /** R-PHYS: one slot of object i's vehicle ext telemetry (telemetry.ts VehicleTelemetryExt). */
+  setTelemetryExt(objectIndex: number, slot: number, value: number): void {
+    this.f32[this.extW + objectIndex * VEHICLE_EXT_SLOTS + slot] = value;
   }
 
   setObjectFlags(objectIndex: number, flags: number): void {
@@ -549,6 +562,8 @@ export class SnapshotReader {
   private objNodes: (Float32Array | null)[] = [];
   private objStrains: (Float32Array | null)[] = [];
   private objTelemetry: (Float32Array | null)[] = [];
+  private extW = 0;
+  private objExt: (Float32Array | null)[] = [];
 
   attach(buffer: ArrayBuffer): this {
     const check = checkSnapshot(buffer);
@@ -574,10 +589,11 @@ export class SnapshotReader {
     this._hasBroken = (u[HDR_U32_FLAGS]! & SNAPSHOT_FLAG_BROKEN_BEAMS) !== 0 && this.brokenW !== 0;
     this.trafficW = u[HDR_U32_TRAFFIC_OFFSET]! >> 2;
     this._trafficCount = (u[HDR_U32_FLAGS]! & SNAPSHOT_FLAG_TRAFFIC) !== 0 && this.trafficW !== 0 ? u[HDR_U32_TRAFFIC_COUNT]! : 0;
+    this.extW = (u[HDR_U32_FLAGS]! & SNAPSHOT_FLAG_VEHICLE_EXT) !== 0 ? u[HDR_U32_VEHICLE_EXT_OFFSET]! >> 2 : 0;
     this.nodesView = null;
     this.strainsView = null;
     const n = this._objectCount;
-    for (const cache of [this.objNodes, this.objStrains, this.objTelemetry]) {
+    for (const cache of [this.objNodes, this.objStrains, this.objTelemetry, this.objExt]) {
       for (let i = 0; i < n; i++) cache[i] = null;
     }
     return this;
@@ -662,6 +678,11 @@ export class SnapshotReader {
   objectBeamCount(i: number): number {
     return this.u32[this.rec(i) + OBJ_BEAM_COUNT]!;
   }
+  /** R-PHYS: one ext telemetry slot of object i (0 when the section is absent). */
+  telemetryExt(i: number, slot: number): number {
+    return this.extW === 0 ? 0 : this.f32[this.extW + i * VEHICLE_EXT_SLOTS + slot]!;
+  }
+
   telemetry(i: number, slot: number): number {
     return this.f32[this.rec(i) + OBJ_TELEMETRY + slot]!;
   }
@@ -750,6 +771,22 @@ export class SnapshotReader {
     if (!v) {
       const s = this.rec(i) + OBJ_TELEMETRY;
       v = this.objTelemetry[i] = this.f32.subarray(s, s + TELEMETRY_SLOTS);
+    }
+    return v;
+  }
+
+  /** R-PHYS: whether the snapshot carries the vehicle ext telemetry section. */
+  get hasTelemetryExt(): boolean {
+    return this.extW !== 0;
+  }
+
+  /** R-PHYS: lazy cached view of object i's VEHICLE_EXT_SLOTS ext telemetry f32, or null when the section is absent. */
+  objectTelemetryExt(i: number): Float32Array | null {
+    if (this.extW === 0) return null;
+    let v = this.objExt[i];
+    if (!v) {
+      const s = this.extW + i * VEHICLE_EXT_SLOTS;
+      v = this.objExt[i] = this.f32.subarray(s, s + VEHICLE_EXT_SLOTS);
     }
     return v;
   }

@@ -139,3 +139,119 @@ export function readVehicleTelemetry(t: ArrayLike<number>, out: VehicleTelemetry
   }
   return out;
 }
+
+/**
+ * R-PHYS VEHICLE EXT TELEMETRY (additive section, layout.ts
+ * HDR_VEHICLE_EXT_OFFSET_BYTE; VEHICLE_EXT_SLOTS = 16 f32 per object, zeros
+ * for non-vehicles and pre-R-PHYS writers). Written by the worker's vehicle
+ * step with the snapshot; recorded and replayed by the replay buffer.
+ *
+ * | slot  | name            | unit / meaning                                                           |
+ * |-------|-----------------|--------------------------------------------------------------------------|
+ * | 0–3   | brakeTemp FL..RR| °C, brake disc temperature (brakeHeat.ts); 0 = unbraked corner         |
+ * | 4     | coolantTemp     | °C (engineSystems.ts)                                                    |
+ * | 5     | coolantLevel    | 0..1                                                                     |
+ * | 6     | oilLevel        | 0..1                                                                     |
+ * | 7     | fuel            | litres in the tank                                                       |
+ * | 8     | fuelRate        | L/h, instantaneous                                                       |
+ * | 9     | engineHealth    | 0..1 (0 = seized)                                                        |
+ * | 10    | assistBits      | EXT_ASSIST_* bitmask (as f32): ABS / ESC / TC active this tick + enabled |
+ * | 11    | engineBits      | EXT_ENGINE_* bitmask (as f32)                                            |
+ * | 12    | radiatorDamage  | 0..1 (coolant leak rate ∝)                                               |
+ * | 13    | powerFactor     | 0..1, over-temperature derate of full-load torque                       |
+ * | 14    | fuelTank        | litres, tank capacity                                                    |
+ * | 15    | (spare)         | 0                                                                        |
+ */
+export const VehicleTelemetryExt = {
+  brakeTempFL: 0,
+  brakeTempFR: 1,
+  brakeTempRL: 2,
+  brakeTempRR: 3,
+  coolantTemp: 4,
+  coolantLevel: 5,
+  oilLevel: 6,
+  fuel: 7,
+  fuelRate: 8,
+  engineHealth: 9,
+  assistBits: 10,
+  engineBits: 11,
+  radiatorDamage: 12,
+  powerFactor: 13,
+  fuelTank: 14,
+} as const;
+export const BRAKE_TEMP_SLOTS: readonly number[] = [0, 1, 2, 3];
+/** assistBits: ABS / ESC / TC intervening this tick, and switched on (and fitted). */
+export const EXT_ASSIST_ABS_ACTIVE = 1;
+export const EXT_ASSIST_ESC_ACTIVE = 2;
+export const EXT_ASSIST_TC_ACTIVE = 4;
+export const EXT_ASSIST_ABS_ON = 8;
+export const EXT_ASSIST_ESC_ON = 16;
+export const EXT_ASSIST_TC_ON = 32;
+/** engineBits. */
+export const EXT_ENGINE_RUNNING = 1;
+export const EXT_ENGINE_STALLED = 2;
+export const EXT_ENGINE_CRANKING = 4;
+export const EXT_ENGINE_OVERHEAT = 8;
+export const EXT_ENGINE_SEIZED = 16;
+export const EXT_ENGINE_RADIATOR_LEAK = 32;
+export const EXT_ENGINE_OIL_LEAK = 64;
+export const EXT_ENGINE_LOW_FUEL = 128;
+export const EXT_ENGINE_LOW_OIL = 256;
+
+/** Decoded ext telemetry (main-thread convenience; reuse one instance). */
+export interface VehicleTelemetryExtFrame {
+  present: boolean;
+  brakeTemp: [number, number, number, number];
+  coolantTemp: number;
+  coolantLevel: number;
+  oilLevel: number;
+  fuel: number;
+  fuelRate: number;
+  fuelTank: number;
+  engineHealth: number;
+  radiatorDamage: number;
+  powerFactor: number;
+  assistBits: number;
+  engineBits: number;
+}
+
+export function createVehicleTelemetryExtFrame(): VehicleTelemetryExtFrame {
+  return {
+    present: false,
+    brakeTemp: [0, 0, 0, 0],
+    coolantTemp: 0,
+    coolantLevel: 0,
+    oilLevel: 0,
+    fuel: 0,
+    fuelRate: 0,
+    fuelTank: 0,
+    engineHealth: 0,
+    radiatorDamage: 0,
+    powerFactor: 0,
+    assistBits: 0,
+    engineBits: 0,
+  };
+}
+
+function extAt(t: ArrayLike<number> | null, i: number): number {
+  return t ? (t[i] ?? 0) : 0;
+}
+
+/** Decodes one object's ext block (SnapshotReader.objectTelemetryExt(i), null = absent) into `out`. Allocation-free. */
+export function readVehicleTelemetryExt(t: ArrayLike<number> | null, out: VehicleTelemetryExtFrame): VehicleTelemetryExtFrame {
+  const X = VehicleTelemetryExt;
+  out.present = t !== null;
+  for (let c = 0; c < TELEMETRY_CORNER_COUNT; c++) out.brakeTemp[c] = extAt(t, BRAKE_TEMP_SLOTS[c]!);
+  out.coolantTemp = extAt(t, X.coolantTemp);
+  out.coolantLevel = extAt(t, X.coolantLevel);
+  out.oilLevel = extAt(t, X.oilLevel);
+  out.fuel = extAt(t, X.fuel);
+  out.fuelRate = extAt(t, X.fuelRate);
+  out.fuelTank = extAt(t, X.fuelTank);
+  out.engineHealth = extAt(t, X.engineHealth);
+  out.radiatorDamage = extAt(t, X.radiatorDamage);
+  out.powerFactor = extAt(t, X.powerFactor);
+  out.assistBits = Math.round(extAt(t, X.assistBits));
+  out.engineBits = Math.round(extAt(t, X.engineBits));
+  return out;
+}

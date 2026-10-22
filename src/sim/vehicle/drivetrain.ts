@@ -67,6 +67,8 @@ export const REV_MATCH_GAIN = 0.05;
 export const REV_LIMIT_HYSTERESIS_RPM = 200;
 /** Idle governor: full throttle this many rpm below idle (proportional). */
 export const IDLE_GOVERNOR_BAND_RPM = 150;
+/** R-PHYS: idle controller authority (throttle-equivalent), see the governor in stepDrivetrain. */
+export const IDLE_GOVERNOR_MAX = 0.4;
 /**
  * Auto-clutch (launch control). Engagement e = max(eEng, eRoad):
  *   eEng  = smoothstep over ENGINE rpm  [lo, idle·(AUTO_CLUTCH_LOCK + AUTO_CLUTCH_LAUNCH·thr)]
@@ -153,6 +155,15 @@ export const AUTO_SHIFT_COOLDOWN = 0.6;
  * at zero throttle the box upshifts at AUTO_UP_LIGHT·autoShiftDownRpm, lerped.
  */
 export const AUTO_UP_LIGHT = 1.5;
+/**
+ * R-PHYS economy schedule: at light throttle the DOWNSHIFT point falls from
+ * autoShiftDownRpm (at ECO_THROTTLE and above) to ECO_DOWN_IDLE × idle (at
+ * zero throttle), and the light upshift point follows it (× AUTO_UP_LIGHT),
+ * so a cruising automatic sits in top gear at 1500–2500 rpm like a real one
+ * (it held 3300 rpm in 5th at 100 km/h: 10 L/100 km instead of ≈ 6.5).
+ */
+export const ECO_DOWN_IDLE = 1.5;
+export const ECO_THROTTLE = 0.6;
 /** Throttle at/above which a kickdown downshift is allowed. */
 export const KICKDOWN_THROTTLE = 0.95;
 /** Kickdown: shift down if the lower gear lands at ≤ this × autoShiftUpRpm. */
@@ -249,7 +260,21 @@ export interface DrivetrainStateEx extends DrivetrainState {
   esc: boolean;
   /** ESC engine torque reduction request 0..1 (brakes.ts, applied next tick). */
   escCut: number;
+  /** R-PHYS engine systems (engineSystems.ts): 1 running / 0 off (stalled, out of fuel, seized). */
+  engineOn: number;
+  /** Over-temperature derate of the full-load torque, 0..1. */
+  powerFactor: number;
+  /** Starter engaged this tick (1), seized engine (1: locked at 0 rpm). */
+  cranking: number;
+  seized: number;
+  /** Starter torque limit, N·m. */
+  starterTorque: number;
+  /** Clutch assist (setAssists): true = automatic clutch in every mode; false = a manual box uses the clutch pedal only (it can stall). */
+  clutchAssist: boolean;
 }
+
+/** Starter target speed, rpm (engineSystems.ts CRANK_RPM). */
+export const STARTER_RPM = 250;
 
 /**
  * Fresh drivetrain at idle in neutral. `wheelInertia` (per wheel, kg·m²) comes
@@ -292,6 +317,12 @@ export function createDrivetrainState(
     abs: true,
     esc: true,
     escCut: 0,
+    engineOn: 1,
+    powerFactor: 1,
+    cranking: 0,
+    seized: 0,
+    starterTorque: 60,
+    clutchAssist: true,
   };
 }
 
@@ -322,6 +353,10 @@ export function resetDrivetrainState(s: DrivetrainStateEx, dt: CompiledDrivetrai
   s.tcExcess = 0;
   s.launchTrac = 0;
   s.escCut = 0;
+  s.engineOn = 1;
+  s.powerFactor = 1;
+  s.cranking = 0;
+  s.seized = 0;
   s.diffPhi.fill(0);
 }
 
@@ -424,19 +459,23 @@ function chooseGear(
   if (select === 0) return 0;
   const g = s.gear;
   if (g < 1) return 1;
-  if (s.shiftCooldown > 0) return g;
   const table = d.gearRatioTable;
   const r = table[g + 1]!;
-  const upLight = d.autoShiftDownRpm * AUTO_UP_LIGHT;
+  const ecoLo = d.idleRpm * ECO_DOWN_IDLE;
+  const down = ecoLo < d.autoShiftDownRpm ? ecoLo + (d.autoShiftDownRpm - ecoLo) * clamp01(throttle / ECO_THROTTLE) : d.autoShiftDownRpm;
+  // closed-throttle coast-down shifts are not rate-limited (the box steps down through the gears as the car
+  // stops, ending in 1st), everything else waits for the cooldown
+  if (s.shiftCooldown > 0 && !(throttle < 0.05 && g > 1 && rpmG <= down)) return g;
+  const upLight = down * AUTO_UP_LIGHT;
   const up = upLight < d.autoShiftUpRpm ? upLight + (d.autoShiftUpRpm - upLight) * throttle : d.autoShiftUpRpm;
   if (g < n && rpmG >= up) {
     const rpmNext = (rpmG * table[g + 2]!) / r;
-    if (rpmNext >= d.autoShiftDownRpm * UPSHIFT_MIN_DOWN_FRACTION) return g + 1;
+    if (rpmNext >= down * UPSHIFT_MIN_DOWN_FRACTION) return g + 1;
   }
   if (g > 1) {
     const rpmPrev = (rpmG * table[g]!) / r;
     if (rpmPrev <= d.autoShiftUpRpm * DOWNSHIFT_MAX_UP_FRACTION) {
-      if (rpmG <= d.autoShiftDownRpm) return g - 1;
+      if (rpmG <= down) return g - 1;
       if (throttle >= KICKDOWN_THROTTLE && rpmPrev <= d.autoShiftUpRpm * KICKDOWN_UP_FRACTION) return g - 1;
     }
   }
@@ -625,6 +664,13 @@ export const stepDrivetrain: StepDrivetrain = (
     s.tcExcess = 0;
   }
   if (s.escCut > 0) throttle *= 1 - s.escCut;
+  // R-PHYS electronic top-speed governor (DrivetrainDef.speedLimitKmh): fades the throttle over the last 2 m/s
+  const vLim = d.speedLimit;
+  if (vLim !== undefined && vLim > 0 && nAttached > 0) {
+    const vd = omegaMean * wheels[driven[0]!]!.rollRadius;
+    const g = (vLim - (vd < 0 ? -vd : vd)) * 0.5;
+    if (g < 1) throttle *= g > 0 ? g : 0;
+  }
   if (s.revLimiterActive) throttle = 0;
   // Launch control holds the engine near LAUNCH_RPM_FACTOR × idle while the clutch slips (from the limiter
   // the flywheel dumped its energy into the tyres when the clutch locked: wheelspin, TC cut, surging).
@@ -635,14 +681,33 @@ export const stepDrivetrain: StepDrivetrain = (
     lim = lim + (1 - lim) * launchFade;
     if (throttle > lim) throttle = lim;
   }
-  const gov = clamp01((idle - rpm) / IDLE_GOVERNOR_BAND_RPM);
-  if (gov > throttle) throttle = gov;
+  const running = s.engineOn !== 0;
+  if (running) {
+    let gov = clamp01((idle - rpm) / IDLE_GOVERNOR_BAND_RPM);
+    // R-PHYS: the idle controller's authority is an idle-air reserve, not full load: a dumped clutch at idle
+    // stalls a manual (engineSystems.ts) instead of pulling away on full torque at 650 rpm
+    if (gov > IDLE_GOVERNOR_MAX) gov = IDLE_GOVERNOR_MAX;
+    if (gov > throttle) throttle = gov;
+  } else {
+    throttle = 0;
+  }
 
   // ---- engine torque
-  const full = sampleTorqueLut(d.torqueLut, d.lutStepRpm, rpm);
+  const full = sampleTorqueLut(d.torqueLut, d.lutStepRpm, rpm) * s.powerFactor;
   let rr = rpm / d.redlineRpm;
   rr = rr < 0 ? 0 : rr > 1 ? 1 : rr;
-  const tEng = throttle * full - (1 - throttle) * d.engineBrakeTorque * rr;
+  let tEng = throttle * full - (1 - throttle) * d.engineBrakeTorque * rr;
+  if (!running) {
+    // engine off: friction + pumping drag down to standstill (≥ 30 % of the overrun torque at any speed),
+    // plus the starter while cranking (a speed controller toward STARTER_RPM, capped)
+    tEng = -d.engineBrakeTorque * (0.3 + 0.7 * rr);
+    if (s.engineOmega <= 0) tEng = 0;
+    if (s.cranking !== 0) {
+      let st = (d.engineInertia * (STARTER_RPM * RAD_S_PER_RPM - s.engineOmega)) / 0.05 + d.engineBrakeTorque * (0.3 + 0.7 * rr);
+      if (st > s.starterTorque) st = s.starterTorque;
+      if (st > 0) tEng += st;
+    }
+  }
 
   // ---- auto-clutch (engagement target, low-passed)
   const rpmGSigned = omegaG * RPM_PER_RAD_S;
@@ -653,7 +718,9 @@ export const stepDrivetrain: StepDrivetrain = (
   const eTarget = eRoad > eEng ? eRoad : eEng;
   const alpha = dt / (AUTO_CLUTCH_TAU + dt);
   s.autoEngage += (eTarget - s.autoEngage) * alpha;
-  let applied = 1 - s.autoEngage;
+  const pedalOnly = s.transmission === 'manual' && !s.clutchAssist;
+  if (!running && !pedalOnly) s.autoEngage = 0;
+  let applied = pedalOnly ? 0 : 1 - s.autoEngage;
   if (pedalClutch > applied) applied = pedalClutch;
   if (shiftOpen > applied) applied = shiftOpen;
   // Upshift inertia phase: the clutch slips at the held torque (capacity = upshiftCap).
@@ -714,8 +781,8 @@ export const stepDrivetrain: StepDrivetrain = (
   }
   s.clutchTorque = tClutch;
 
-  // ---- engine integration
-  let we = s.engineOmega + (dt * (tEng - tClutch)) / Ie;
+  // ---- engine integration (a seized engine is locked: the clutch then holds the driveline against it)
+  let we = s.seized !== 0 ? 0 : s.engineOmega + (dt * (tEng - tClutch)) / Ie;
   const weMax = (d.revLimitRpm * 1.5) * RAD_S_PER_RPM;
   if (we < 0) we = 0;
   else if (we > weMax) we = weMax;

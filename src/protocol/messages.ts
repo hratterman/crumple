@@ -309,6 +309,11 @@ export interface SetAssistsMsg {
   /** R-PHYS (additive): ABS / ESC on or off (effective only on cars that have them; default on). */
   abs?: boolean;
   esc?: boolean;
+  /**
+   * R-PHYS (additive): automatic clutch (default true). false = a manual box takes the clutch pedal only:
+   * dumping it at low rpm stalls the engine; throttle with the clutch down (or neutral) cranks the starter.
+   */
+  clutchAssist?: boolean;
 }
 /**
  * Recover (R): rigidly re-place the CURRENT (deformed) node set upright —

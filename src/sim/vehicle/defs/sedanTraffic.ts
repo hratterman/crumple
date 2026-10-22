@@ -600,6 +600,8 @@ const TRUNK_REST_K = 1e5;
  * 6000 rpm, ~200 kW, and could not hold 200 km/h against drag + rolling).
  */
 const DRIVETRAIN: DrivetrainDef = {
+  // R-PHYS engine systems (engineSystems.ts): fuel, cooling, oil, stall / starter
+  engine: { displacementL: 3.0, fuel: 'petrol', tankL: 60 },
   torqueCurve: [
     [0, 180],
     [800, 210],
@@ -617,7 +619,8 @@ const DRIVETRAIN: DrivetrainDef = {
   revLimitRpm: 7000,
   engineInertia: 0.18,
   engineBrakeTorque: 60,
-  gearRatios: [3.9, 2.4, 1.7, 1.3, 1.0, 0.8],
+  // R-PHYS: 6th 0.8 → 0.68 overdrive (6-speed automatics run ≈ 0.67–0.69): 2270 rpm at 100 km/h instead of 2670
+  gearRatios: [3.9, 2.4, 1.7, 1.3, 1.0, 0.68],
   reverseRatio: 3.6,
   finalDrive: 3.4,
   shiftTimeS: 0.25,
@@ -713,11 +716,11 @@ export interface SedanTrafficDesign {
 
 /**
  * R-PHYS rolling-loss correction (tyre.ts): the 12/10-ray tread polygon's excess loss over a real tyre's
- * f_r = 0.01·(1 + V/160 km/h) (Wong, "Theory of Ground Vehicles" eq. 1.12), per unit load, every 20 km/h
+ * f_r = 0.01·(1 + V/160 km/h) (Wong, "Theory of Ground Vehicles" eq. 1.12), per unit load, every 10 km/h
  * of tread speed from 0 — measured by coasting this car in neutral (realism/coastdown calibration), kept
  * conservative (0.85 × the lower of the bin and its neighbours' mean) so it never propels a coasting car.
  */
-export const SEDAN_TRAFFIC_ROLLING_LOSS: readonly number[] = [0.0,  0.0047,  0.0093,  0.0119,  0.0145,  0.0265,  0.0445,  0.0626,  0.099,  0.0793,  0.0489,  0.0489];
+export const SEDAN_TRAFFIC_ROLLING_LOSS: readonly number[] = [0, 0.003, 0.0026, 0.0044, 0.0067, 0.0095, 0.024, 0.0096, 0.0107, 0.0164, 0.0244, 0.0501, 0.0591, 0.0929, 0.1153, 0.1361, 0.1543, 0.0974, 0.0875, 0.0641, 0.1091, 0.1022, 0.1022];
 
 function buildSedanTraffic(): { def: VehicleDef; design: SedanTrafficDesign } {
   const nodes: RigNodeDef[] = [];

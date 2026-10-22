@@ -137,7 +137,7 @@ export interface WheelDef {
    * tyre): load sensitivity of μ per unit of relative load (0 = none),
    * sliding/peak μ ratio (1 = no fall-off), the combined slip σ where the
    * fall-off starts / completes, and the rolling-loss correction table
-   * (excess loss per unit load every 20 km/h of tread speed, from 0).
+   * (excess loss per unit load every 10 km/h of tread speed, from 0).
    */
   tyreLoadSensitivity?: number;
   tyreSlideRatio?: number;
@@ -290,6 +290,19 @@ export interface DrivetrainDef {
    * axle — the couple acts on each driven wheel's upright / axle housing.
    */
   driveReaction?: 'body' | 'axle';
+  /** R-PHYS (additive, optional): engine systems spec (engineSystems.ts: fuel, cooling, oil, stall). */
+  engine?: EngineDef;
+  /** R-PHYS (additive, optional): electronic top-speed governor, km/h (throttle faded out over the last 7 km/h). */
+  speedLimitKmh?: number;
+}
+
+/** R-PHYS: engine systems spec. Defaults: displacement from the peak torque (≈ 110 N·m/L), petrol, 60 L tank, 75 % full. */
+export interface EngineDef {
+  displacementL: number;
+  fuel?: 'petrol' | 'diesel';
+  tankL?: number;
+  /** Fuel at spawn / repair, L (default 0.75 × tankL). */
+  startFuelL?: number;
 }
 
 export type TransmissionMode = 'auto' | 'manual';
@@ -497,6 +510,10 @@ export interface CompiledDrivetrain {
   transmission: TransmissionMode;
   /** DrivetrainDef.driveReaction ?? 'body' (R-PHYS, additive optional for hand-built tables). */
   driveReaction?: 'body' | 'axle';
+  /** DrivetrainDef.engine (R-PHYS, optional). */
+  engine?: EngineDef;
+  /** DrivetrainDef.speedLimitKmh / 3.6, m/s (R-PHYS; 0 / absent = no governor). */
+  speedLimit?: number;
 }
 
 /** compileVehicle output: what the worker spawns and main renders. Structured-cloneable. */

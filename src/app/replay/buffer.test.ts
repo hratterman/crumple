@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import { createRng } from '../../core/rng';
 import { SnapshotReader, SnapshotWriter } from '../../protocol/codec';
-import { computeSnapshotLayout, OBJECT_FLAG_SLEEPING, TELEMETRY_SLOTS } from '../../protocol/layout';
+import { computeSnapshotLayout, OBJECT_FLAG_SLEEPING, TELEMETRY_SLOTS, VEHICLE_EXT_SLOTS } from '../../protocol/layout';
 import { PROP_LAYOUT_ID_BASE } from '../../protocol/messages';
 import { TRAFFIC_FLAG_AWAKE, TRAFFIC_FLAG_TELEPORTED, TRAFFIC_ID_BASE, createTrafficAgentFrame } from '../../protocol/traffic';
 import { compilePropRig } from '../../sim/props/catalog';
@@ -64,6 +64,7 @@ class SceneWriter {
         w.setNode(g0 + k, o.x0 + v * t + o.rest[3 * k]! + wob, 1 + o.rest[3 * k + 1]!, o.z0 + o.rest[3 * k + 2]!);
       }
       if (o.vehicle) for (let s = 0; s < TELEMETRY_SLOTS; s++) w.setTelemetry(i, s, s === 23 ? Math.min(1, (opts.brokenFrom ?? Infinity) <= tick ? 0.3 : 0) : Math.sin(t + s));
+      if (o.vehicle) for (let s = 0; s < VEHICLE_EXT_SLOTS; s++) w.setTelemetryExt(i, s, 90 + Math.cos(t + s));
       if (opts.brokenFrom !== undefined && tick >= opts.brokenFrom && o.vehicle) {
         for (let b = 0; b < o.beams; b += 7) w.setBeamBroken(gb + b, true);
       }
@@ -141,6 +142,8 @@ function expectFrameEqual(a: SnapshotReader, b: SnapshotReader, epochOffset = 0)
     expect(a.objectBeamCount(i)).toBe(b.objectBeamCount(i));
     expect(a.objectRepairEpoch(i)).toBe(b.objectRepairEpoch(i) + epochOffset);
     for (let s = 0; s < TELEMETRY_SLOTS; s++) expect(a.telemetry(i, s)).toBe(b.telemetry(i, s));
+    // R-PHYS ext telemetry rides with the telemetry block (vehicles only)
+    if (b.objectId(i) < PROP_LAYOUT_ID_BASE) for (let s = 0; s < VEHICLE_EXT_SLOTS; s++) expect(a.telemetryExt(i, s)).toBe(b.telemetryExt(i, s));
     const o = b.objectNodeOffset(i) * 3;
     let lo = [Infinity, Infinity, Infinity];
     let hi = [-Infinity, -Infinity, -Infinity];

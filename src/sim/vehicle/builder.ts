@@ -330,6 +330,8 @@ function compileDrivetrain(def: VehicleDef): CompiledDrivetrain {
     drivenWheels: Int32Array.from(driven),
     transmission: d.transmission ?? 'auto',
     driveReaction: d.driveReaction ?? 'body',
+    ...(d.engine ? { engine: { ...d.engine } } : {}),
+    ...(d.speedLimitKmh ? { speedLimit: d.speedLimitKmh / 3.6 } : {}),
   };
 }
 

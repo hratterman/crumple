@@ -31,7 +31,7 @@
  *   speed (measured coasting in neutral, sedan: C_rr 0.016 at 40 km/h,
  *   0.068 at 120, 0.156 at 160 km/h — a real car tyre is 0.01·(1 + V/160 km/h),
  *   Wong "Theory of Ground Vehicles" eq. 1.12). WheelDef.rollingLossComp is a
- *   per-tyre table (every 20 km/h of tread speed from 0) of the measured
+ *   per-tyre table (every 10 km/h of tread speed from 0) of the measured
  *   EXCESS loss per unit load; it is fed back as a torque in the rolling
  *   direction, −(excess)·load·r_roll, with the reaction on the upright (it
  *   stands in for a ground force), so a coasting car follows the reference
@@ -58,8 +58,8 @@ export const TYRE_DEFAULTS = {
   peakSlip: 0.1,
   slideSlip: 0.6,
 } as const;
-/** Speed step of WheelDef.rollingLossComp, m/s (20 km/h). */
-export const ROLL_COMP_STEP = 20 / 3.6;
+/** Speed step of WheelDef.rollingLossComp, m/s (10 km/h). */
+export const ROLL_COMP_STEP = 10 / 3.6;
 
 /** Per-wheel tyre state (preallocated at spawn; worker-only). */
 export interface TyreState {
