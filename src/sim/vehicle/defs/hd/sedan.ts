@@ -10,14 +10,14 @@
  * on first use (`sedanHD(tier)`), so importing it lazily keeps it out of the
  * app chunk.
  */
-import { refineVehicle, type RefinedVehicle } from '../../../rig/gen/refine';
+import type { BoxMemberSpec } from '../../../rig/gen/member';
 import type { SkinPanelData, SkinSet, SkinSpec } from '../../../rig/gen/types';
 import type { CrashProbes } from '../../crash';
 import { SEDAN } from '../sedan';
+import { hdVariants, stationDonorWeight, stationMembers, type HdCarConfig } from './build';
 import { SKINS as HIGH } from './skins/sedan.high';
 import { SKINS as ULTRA } from './skins/sedan.ultra';
 import type { HdTier } from './skinSources';
-import type { VehicleVariant } from './variants';
 
 /**
  * Sheet construction per panel (real gauges: outer panels 0.7–0.75 mm
@@ -47,20 +47,9 @@ export function sedanSkinSpec(p: SkinPanelData): SkinSpec | null {
 }
 
 const SKINS: Readonly<Record<HdTier, SkinSet>> = { high: HIGH, ultra: ULTRA };
-const cache = new Map<HdTier, RefinedVehicle>();
 
-/** The generated sedan variant (memoized). */
-export function sedanHD(tier: HdTier): RefinedVehicle {
-  let r = cache.get(tier);
-  if (!r) {
-    r = refineVehicle(SEDAN, { name: `sedan.${tier}`, skins: SKINS[tier], skinSpec: sedanSkinSpec });
-    cache.set(tier, r);
-  }
-  return r;
-}
-
-/** Crash probes: the standard sedan's (every probed node is kept) + the detachable sheets exempt from the span check. */
-export const SEDAN_HD_CRASH_PROBES: CrashProbes = {
+/** The standard sedan's crash probes (crash.ts SEDAN_CRASH_PROBES; restated: crash.ts imports the engine). */
+export const SEDAN_PROBES: CrashProbes = {
   front: ['s1_rl_*', 's1_rh_*'],
   cabin: ['s7_fl_*', 's7_sl_*'],
   firewall: ['s5_fl_*', 's5_sl_*', 's5_hp_*', 's5_cw_*'],
@@ -71,14 +60,38 @@ export const SEDAN_HD_CRASH_PROBES: CrashProbes = {
   doorL: 's6_dm_L',
   sillR: 's6_sl_R',
   sillL: 's6_sl_L',
-  exemptPrefixes: ['s0_', 's13_', 'hood_', 'k_hood_', 'k_bumperF_', 'k_bumperR_', 'k_trunk_'],
+  exemptPrefixes: ['s0_', 's13_', 'hood_'],
   latch: [['hood_0C', 's2_rt']],
   bumperPrefix: 's0_',
   windscreen: ['s5_cw', 's6_rf'],
 };
 
-/** The sedan at an HD tier as a VehicleVariant (variants.ts loader). */
-export function sedanVariant(tier: HdTier): VehicleVariant {
-  const r = sedanHD(tier);
-  return { car: 'sedan', quality: tier, def: r.def, probes: SEDAN_HD_CRASH_PROBES, report: r.report, collision: r.collision, skinNodes: r.skinNodes };
+/**
+ * Closed-section members (member.ts, walls carried by the backbone stations): beaded crash cans (5 cm pitch: they
+ * fold first, accordion), front rails s1→s4 (beads over their front 40 %); ultra adds the rear rails + cans.
+ */
+export function sedanMembers(tier: HdTier): BoxMemberSpec[] {
+  return stationMembers(tier, { frontRail: [1, 2, 3, 4], rearRail: [10, 11, 12], rearBumper: 13 });
 }
+
+/** Mass donors (build.ts stationDonorWeight): the cell spans stations 5–9. */
+export const sedanMassDonorWeight = stationDonorWeight(9);
+/** The sedan's HD build recipe (build.ts). */
+export const SEDAN_HD_CONFIG: HdCarConfig = {
+  car: 'sedan',
+  base: SEDAN,
+  probes: SEDAN_PROBES,
+  skins: SKINS,
+  skinSpec: sedanSkinSpec,
+  donorWeight: sedanMassDonorWeight,
+  members: sedanMembers,
+  detachable: ['hood', 'bumperF', 'bumperR', 'trunk'],
+};
+
+const HD = hdVariants(SEDAN_HD_CONFIG);
+/** The generated sedan variant (memoized RefinedVehicle). */
+export const sedanHD = HD.raw;
+/** The sedan at an HD tier as a VehicleVariant (variants.ts loader). */
+export const sedanVariant = HD.variant;
+/** Crash probes of the HD sedans: the standard sedan's + generated-node handling (build.ts hdProbes). */
+export const SEDAN_HD_CRASH_PROBES: CrashProbes = HD.probes;

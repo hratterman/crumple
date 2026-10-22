@@ -9,26 +9,13 @@ import { BOXTRUCK, BOXTRUCK_CRASH_PROBES } from '../boxtruck';
 import { COUPE, COUPE_CRASH_PROBES } from '../coupe';
 import { PICKUP, PICKUP_CRASH_PROBES } from '../pickup';
 import { SEDAN } from '../sedan';
-import { sedanVariant } from './sedan';
+import { beaterVariant } from './beater';
+import { boxtruckVariant } from './boxtruck';
+import { coupeVariant } from './coupe';
+import { pickupVariant } from './pickup';
+import { SEDAN_PROBES, sedanVariant } from './sedan';
 import type { HdCar, HdTier } from './skinSources';
 import type { PhysicsQuality, VehicleVariant } from './variants';
-
-const SEDAN_PROBES: CrashProbes = {
-  front: ['s1_rl_*', 's1_rh_*'],
-  cabin: ['s7_fl_*', 's7_sl_*'],
-  firewall: ['s5_fl_*', 's5_sl_*', 's5_hp_*', 's5_cw_*'],
-  cellRear: ['s9_*'],
-  cellFront: ['s5_*'],
-  doorMid: ['s6_dm_*'],
-  doorR: 's6_dm_R',
-  doorL: 's6_dm_L',
-  sillR: 's6_sl_R',
-  sillL: 's6_sl_L',
-  exemptPrefixes: ['s0_', 's13_', 'hood_'],
-  latch: [['hood_0C', 's2_rt']],
-  bumperPrefix: 's0_',
-  windscreen: ['s5_cw', 's6_rf'],
-};
 
 export const STANDARD_VARIANTS: Readonly<Record<HdCar, VehicleVariant>> = {
   sedan: { car: 'sedan', quality: 'standard', def: SEDAN, probes: SEDAN_PROBES },
@@ -40,6 +27,10 @@ export const STANDARD_VARIANTS: Readonly<Record<HdCar, VehicleVariant>> = {
 
 const HD: Partial<Record<HdCar, (t: HdTier) => VehicleVariant>> = {
   sedan: sedanVariant,
+  coupe: coupeVariant,
+  pickup: pickupVariant,
+  boxtruck: boxtruckVariant,
+  beater: beaterVariant,
 };
 
 /** Cars × tiers that exist (standard always). */

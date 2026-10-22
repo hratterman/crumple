@@ -59,6 +59,12 @@ export interface CrashProbes {
   bumperPrefix: string;
   /** Windscreen glass beams: from a node with prefix [0] to one with prefix [1]. Empty = none. */
   windscreen: readonly [string, string] | null;
+  /**
+   * R-RIG (additive, optional): node-id prefixes of generated detail on a high-density rig (sheet skins `k_`,
+   * member walls `m_`). Beams touching them are left out of the latch / bumper / windscreen sets: a fascia's
+   * clips to the bumper beam are not the bumper's mounts.
+   */
+  generatedPrefixes?: readonly string[];
 }
 
 export const SEDAN_CRASH_PROBES: CrashProbes = {
@@ -268,9 +274,11 @@ export function runCrash(spec: CrashSpec): CrashResult {
   const zR = restMean(cellRear)[2]!;
   const bodyGroup = cv.rig.groups.indexOf('body');
   const cell: number[] = [];
+  // R-RIG: generated sheets / member walls are not the safety cell's structure
+  const generatedNode = (i: number): boolean => (pr.generatedPrefixes ?? []).some((p) => cv.rig.nodeIds[i]!.startsWith(p));
   for (let i = 0; i < cv.bodyNodeCount; i++) {
     const z = cv.rig.nodePos[3 * i + 2]!;
-    if (cv.rig.nodeGroup[i] === bodyGroup && z >= Math.min(zF, zR) - 0.02 && z <= Math.max(zF, zR) + 0.02) cell.push(i);
+    if (cv.rig.nodeGroup[i] === bodyGroup && z >= Math.min(zF, zR) - 0.02 && z <= Math.max(zF, zR) + 0.02 && !generatedNode(i)) cell.push(i);
   }
   const cellRef = cell.map((i) => P(i));
 
@@ -455,11 +463,13 @@ export function runCrash(spec: CrashSpec): CrashResult {
   let detached = 0;
   for (const w of veh.wheels) if (w.detached !== 0) detached |= 1 << w.wheel.corner;
 
+  const generated = (id: string): boolean => (pr.generatedPrefixes ?? []).some((p) => id.startsWith(p));
   const beamsWhere = (pred: (a: string, b: string) => boolean): number[] => {
     const out: number[] = [];
     for (let b = 0; b < cv.bodyBeamCount; b++) {
       const a = ids[cv.rig.beamA[b]!]!;
       const c = ids[cv.rig.beamB[b]!]!;
+      if (generated(a) || generated(c)) continue;
       if (pred(a, c) || pred(c, a)) out.push(b);
     }
     return out;

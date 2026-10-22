@@ -27,6 +27,10 @@ const OUT = resolve(process.env.OUT ?? resolve(ROOT, 'test-results/rig'));
 const TIMES_MS = (process.env.TIMES ?? '0,30,60,90,140,2000').split(',').map(Number);
 const TW = Number(process.env.TW ?? 420);
 const TH = Number(process.env.TH ?? 250);
+/** body = the render body (flexbody CPU mirror); structure = the rig's beams (members orange→red by plastic set, backbone grey, sheets faint). */
+const VIEW = process.env.VIEW ?? 'body';
+/** Optional fixed close-up camera relative to the car's body centroid: "ex,ey,ez|tx,ty,tz|fov" (metres, degrees). */
+const CLOSE = process.env.CLOSE ? process.env.CLOSE.split('|').map((p) => p.split(',').map(Number)) : null;
 mkdirSync(OUT, { recursive: true });
 
 const crash = await imp('sim/vehicle/crash.ts');
@@ -81,13 +85,48 @@ function run(v, c) {
         p[3 * i + 1] = s.posY[obj.nodeStart + i];
         p[3 * i + 2] = s.posZ[obj.nodeStart + i];
       }
+      const b0 = obj.beamStart;
+      const rest = new Float64Array(obj.beamCount);
+      const active = new Uint8Array(obj.beamCount);
+      for (let b = 0; b < obj.beamCount; b++) {
+        rest[b] = s.restLen[b0 + b] / s.restLen0[b0 + b];
+        active[b] = s.active[b0 + b];
+      }
+      p.rest = rest;
+      p.active = active;
       frames.set(since, p);
     },
   });
   return { res, frames: want.map((t) => frames.get(t) ?? null), collider };
 }
 
+function drawStructure(cv, cam, v, nodes) {
+  const rig = v.cv.rig;
+  const ids = rig.nodeIds;
+  const P = (i) => [nodes[3 * i], nodes[3 * i + 1], nodes[3 * i + 2]];
+  const order = [];
+  for (let b = 0; b < v.cv.bodyBeamCount; b++) order.push(b);
+  // sheets first (faint), backbone, members last (on top)
+  const rank = (b) => {
+    const a = ids[rig.beamA[b]];
+    const c = ids[rig.beamB[b]];
+    if (a.startsWith('m_') || c.startsWith('m_')) return 2;
+    if (a.startsWith('k_') || c.startsWith('k_')) return 0;
+    return 1;
+  };
+  order.sort((x, y) => rank(x) - rank(y));
+  for (const b of order) {
+    if (nodes.active && !nodes.active[b]) continue;
+    const r = rank(b);
+    const set = nodes.rest ? Math.abs(nodes.rest[b] - 1) : 0;
+    const t = Math.min(1, set / 0.3);
+    const col = r === 2 ? [Math.round(240 - 40 * t), Math.round(150 - 130 * t), 20] : r === 1 ? [Math.round(110 + 120 * t), Math.round(118 - 60 * t), Math.round(130 - 80 * t)] : [200, 202, 210];
+    drawLine(cv, cam, P(rig.beamA[b]), P(rig.beamB[b]), col, r === 2 ? 0.01 : 0.002);
+  }
+}
+
 function drawCar(cv, cam, v, nodes) {
+  if (VIEW === 'structure') return drawStructure(cv, cam, v, nodes);
   const out = new Float64Array(6);
   for (const panel of v.binding.panels) {
     if (panel.kind === 'interior' && panel.material === 'interior') continue;
@@ -163,26 +202,26 @@ const variants = TIERS.map(variant);
 for (const name of CASES) {
   const c = parseCase(name);
   const runs = variants.map((v) => ({ v, ...run(v, c) }));
-  // side view: frontal / offset from the struck side (offset: vehicle left = −X), pole from the far side looking at the dent through the car? no: from +X above
-  const sheet = createCanvas(TW * TIMES_MS.length + 120, TH * runs.length + 40, [250, 250, 252]);
-  drawText(sheet, 10, 10, `${CAR} ${c.kind} ${c.kmh} KM/H`, [20, 20, 20], 3);
-  TIMES_MS.forEach((ms, j) => drawText(sheet, 120 + j * TW + 8, 10 + 4, `${ms} MS`, [60, 60, 60], 2));
+  // side view: frontal / offset from the struck side (offset: vehicle left = −X), pole: 3/4 from above on the struck side (+X)
+  const sheet = createCanvas(TW * TIMES_MS.length + 120, TH * runs.length + 64, [250, 250, 252]);
+  drawText(sheet, 10, 8, `${CAR} ${c.kind} ${c.kmh} KM/H`, [20, 20, 20], 3);
+  TIMES_MS.forEach((ms, j) => drawText(sheet, 120 + j * TW + 8, 44, `${ms} MS`, [60, 60, 60], 2));
   runs.forEach((r, i) => {
-    drawText(sheet, 8, 40 + i * TH + TH / 2 - 10, r.v.tier.slice(0, 8), [20, 20, 20], 2);
+    drawText(sheet, 8, 64 + i * TH + TH / 2 - 10, r.v.tier.slice(0, 8), [20, 20, 20], 2);
     r.frames.forEach((nodes, j) => {
       const tile = createCanvas(TW, TH);
       if (nodes) {
         const cen = centroid(nodes, r.v.cv.bodyNodeCount);
         const side = c.kind === 'offset' ? -1 : 1;
-        const eye = c.kind === 'pole' ? [cen[0] - 5.5, cen[1] + 4.5, cen[2] + 3.2] : [cen[0] + side * 9, cen[1] + 0.9, cen[2] - 0.4];
+        const eye = c.kind === 'pole' ? [cen[0] + 5, cen[1] + 3.5, cen[2] + 4.2] : [cen[0] + side * 9, cen[1] + 0.9, cen[2] - 0.4];
         const cam = camera({ eye, target: [cen[0], cen[1] - 0.05, cen[2] - (c.kind === 'pole' ? 0 : 0.4)], fov: c.kind === 'pole' ? 34 : 30 }, TW, TH);
         drawScene(tile, cam, r.collider);
         drawCar(tile, cam, r.v, nodes);
       }
-      blit(sheet, tile, 120 + j * TW, 40 + i * TH);
+      blit(sheet, tile, 120 + j * TW, 64 + i * TH);
     });
   });
-  const file = resolve(OUT, `${CAR}-${name}-sequence.png`);
+  const file = resolve(OUT, `${CAR}-${name}-${VIEW === 'body' ? '' : VIEW + '-'}sequence.png`);
   writeFileSync(file, encodePng(sheet));
   // final-state close-ups, 3/4 views
   const close = createCanvas(560 * runs.length, 420, [250, 250, 252]);
@@ -191,15 +230,16 @@ for (const name of CASES) {
     const tile = createCanvas(560, 420);
     if (nodes) {
       const cen = centroid(nodes, r.v.cv.bodyNodeCount);
-      const eye = c.kind === 'pole' ? [cen[0] + 4.2, cen[1] + 2.4, cen[2] - 3.4] : c.kind === 'offset' ? [cen[0] - 3.6, cen[1] + 1.8, cen[2] - 4.4] : [cen[0] - 3.2, cen[1] + 2.0, cen[2] - 4.8];
-      const cam = camera({ eye, target: [cen[0], cen[1] - 0.1, cen[2] - (c.kind === 'pole' ? 0 : 1.1)], fov: 38 }, 560, 420);
+      const eye = CLOSE ? CLOSE[0].map((v, k) => cen[k] + v) : c.kind === 'pole' ? [cen[0] + 4.2, cen[1] + 2.4, cen[2] - 3.4] : c.kind === 'offset' ? [cen[0] - 3.6, cen[1] + 1.8, cen[2] - 4.4] : [cen[0] - 3.2, cen[1] + 2.0, cen[2] - 4.8];
+      const target = CLOSE ? CLOSE[1].map((v, k) => cen[k] + v) : [cen[0], cen[1] - 0.1, cen[2] - (c.kind === 'pole' ? 0 : 1.1)];
+      const cam = camera({ eye, target, fov: CLOSE ? CLOSE[2][0] : 38 }, 560, 420);
       drawScene(tile, cam, r.collider);
       drawCar(tile, cam, r.v, nodes);
     }
     drawText(tile, 10, 10, `${r.v.tier}`, [20, 20, 20], 3);
     blit(close, tile, i * 560, 0);
   });
-  const file2 = resolve(OUT, `${CAR}-${name}-final34.png`);
+  const file2 = resolve(OUT, `${CAR}-${name}-${VIEW === 'body' ? '' : VIEW + '-'}final34.png`);
   writeFileSync(file2, encodePng(close));
   for (const r of runs) console.log(`${r.v.tier.padEnd(8)} ${crash.formatCrash(r.res)}`);
   console.log(`wrote ${file}\n      ${file2}`);

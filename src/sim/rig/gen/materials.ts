@@ -14,6 +14,16 @@
  */
 import type { MaterialGrade } from './types';
 
+/**
+ * Effective yield strain of a generated SHEET beam by material: σ_y / E is 0.1–0.2 % for steel and aluminium
+ * (a dent sets), ≈ 1.3 % for PP/EPDM, whose fascias spring back from a parking bump (TPO recovers several % of
+ * strain); the sheets' stability-budget stiffness is far below the real membrane stiffness, so these are the
+ * strains at which the model's sheets set, chosen ≥ real so driving / settling loads never dent a panel.
+ */
+export function sheetYieldStrain(gradeId: string): number {
+  return grade(gradeId).density < 2000 ? 0.04 : 0.005;
+}
+
 const STEEL = { density: 7850, E: 210e9 };
 
 export const GRADES: Readonly<Record<string, MaterialGrade>> = {

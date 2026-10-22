@@ -15,8 +15,10 @@ import type { CrashProbes } from '../../crash';
 import type { VehicleDef } from '../../types';
 import type { CollisionTriangle, RigGenReport } from '../../../rig/gen/types';
 
-export type PhysicsQuality = 'standard' | 'high' | 'ultra';
-export const PHYSICS_QUALITIES: readonly PhysicsQuality[] = ['standard', 'high', 'ultra'];
+import type { PhysicsQuality } from '../../../../protocol/messages';
+
+// the union lives in the protocol (R-CORE's setting); re-exported for the rig side
+export { PHYSICS_QUALITIES, type PhysicsQuality } from '../../../../protocol/messages';
 
 /**
  * Per-tier budgets. Beams: the validator's player budget for that tier
@@ -27,8 +29,8 @@ export const PHYSICS_QUALITIES: readonly PhysicsQuality[] = ['standard', 'high',
  */
 export const PHYSICS_QUALITY_BUDGETS: Readonly<Record<PhysicsQuality, { playerBeams: number; playerNodes: number }>> = {
   standard: { playerBeams: 3500, playerNodes: 1024 },
-  high: { playerBeams: 8000, playerNodes: 2048 },
-  ultra: { playerBeams: 14000, playerNodes: 3072 },
+  high: { playerBeams: 10000, playerNodes: 2048 },
+  ultra: { playerBeams: 16000, playerNodes: 3072 },
 };
 
 export interface VehicleVariant {
@@ -45,11 +47,33 @@ export interface VehicleVariant {
   skinNodes?: Readonly<Record<string, readonly string[]>>;
 }
 
-type Loader = (q: Exclude<PhysicsQuality, 'standard'>) => Promise<VehicleVariant | null>;
+type HdQuality = Exclude<PhysicsQuality, 'standard'>;
+type Loader = (q: HdQuality) => Promise<VehicleVariant | null>;
+
+/**
+ * Which HD tiers have passed the car's full acceptance suite (src/sim/vehicle/defs/hd/validation.test.ts:
+ * the standard car's own crash / settling / handling / body-flex / launch-feel / rollover targets). An
+ * 'experimental' tier is generated and structurally tested (hd.test.ts) but still misses a target: the quality
+ * setting skips it (falls back to the next lower validated tier, then standard) unless the caller opts in.
+ */
+export type VariantStatus = 'validated' | 'experimental';
+export const HD_STATUS: Readonly<Record<string, Readonly<Record<HdQuality, VariantStatus>>>> = {
+  sedan: { high: 'validated', ultra: 'validated' },
+  coupe: { high: 'validated', ultra: 'experimental' },
+  pickup: { high: 'experimental', ultra: 'experimental' },
+  boxtruck: { high: 'experimental', ultra: 'experimental' },
+  beater: { high: 'experimental', ultra: 'experimental' },
+};
+
+const offered = (car: string, q: HdQuality, experimental: boolean): boolean => !!HD_LOADERS[car] && (experimental || HD_STATUS[car]?.[q] === 'validated');
 
 /** Cars with HD tiers: dynamic imports, so each car's rig data is its own chunk. */
 const HD_LOADERS: Readonly<Record<string, Loader>> = {
   sedan: async (q) => (await import('./sedan')).sedanVariant(q),
+  coupe: async (q) => (await import('./coupe')).coupeVariant(q),
+  pickup: async (q) => (await import('./pickup')).pickupVariant(q),
+  boxtruck: async (q) => (await import('./boxtruck')).boxtruckVariant(q),
+  beater: async (q) => (await import('./beater')).beaterVariant(q),
 };
 
 /**
@@ -57,10 +81,16 @@ const HD_LOADERS: Readonly<Record<string, Loader>> = {
  * has. `standard` resolves the caller-supplied standard def (main already
  * has it; this module never imports rig data eagerly).
  */
-export async function loadVehicleVariant(car: string, quality: PhysicsQuality, standard: () => Promise<VehicleVariant>): Promise<VehicleVariant> {
+export async function loadVehicleVariant(
+  car: string,
+  quality: PhysicsQuality,
+  standard: () => Promise<VehicleVariant>,
+  opts: { experimental?: boolean } = {},
+): Promise<VehicleVariant> {
   const loader = HD_LOADERS[car];
   if (loader && quality !== 'standard') {
     for (const q of quality === 'ultra' ? (['ultra', 'high'] as const) : (['high'] as const)) {
+      if (!offered(car, q, !!opts.experimental)) continue;
       const v = await loader(q);
       if (v) return v;
     }
@@ -68,7 +98,7 @@ export async function loadVehicleVariant(car: string, quality: PhysicsQuality, s
   return standard();
 }
 
-/** Tiers a car offers (UI). */
-export function variantTiers(car: string): readonly PhysicsQuality[] {
-  return HD_LOADERS[car] ? PHYSICS_QUALITIES : ['standard'];
+/** Tiers a car offers (UI): standard plus its validated HD tiers (or every HD tier with `experimental`). */
+export function variantTiers(car: string, experimental = false): readonly PhysicsQuality[] {
+  return ['standard', ...(['high', 'ultra'] as const).filter((q) => offered(car, q, experimental))];
 }

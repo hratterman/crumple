@@ -25,9 +25,21 @@
 import { sheetMass } from './materials';
 import type { SeamKind, SkinPanelData, SkinSpec } from './types';
 
-export const SKIN_YIELD_STRAIN = 0.015;
+/** Default sheet yield strain (steel); per material: materials.ts sheetYieldStrain. */
+export const SKIN_YIELD_STRAIN = 0.005;
+/** Floor on a sheet node's mass, kg (corner nodes of a fine plastic trim; contact stiffness is ∝ mass). */
+export const SKIN_MIN_NODE_MASS = 0.04;
+/**
+ * Seams / standoffs yield at this strain: spot welds and hems bend, clips slip, so a sheet pushed in by an
+ * obstacle stays where it was pushed (no elastic spring-back of the skin) and the structure behind can never
+ * press a light sheet node into a pole or wall with more than the seam's yield force.
+ */
+export const SEAM_YIELD_STRAIN = 0.02;
+/** Seam tear force = this × its yield force (the plastic ratchet's rate overshoot reaches it in fast, gross pulls). */
+export const SEAM_TEAR_RATIO: Readonly<Record<SeamKind, number>> = { weld: 12, hem: 16, bolt: 20, glue: 6 };
 export const SKIN_TEAR_RATIO = 30;
-export const SKIN_ZETA = 0.3;
+/** Sheet damping ratio per beam (0.3 left the ultra sheets ringing 0.22 s after a kerb strike; 0.5: 0.10 s). */
+export const SKIN_ZETA = 0.5;
 /** Beam weights in a sheet node's budget. */
 export const SKIN_W = { edge: 1, diagonal: 0.5, bending: 0.4, seam: 1.2, standoff: 0.3 } as const;
 /** Seam tear strain (elastic, stretch / rest length) by kind. */
@@ -54,6 +66,7 @@ export interface BuiltSkin {
   mass: number[];
   beams: SkinBeam[];
   seam: SeamKind;
+  grade: string;
   /** Collision / render triangles as node ids, CCW from outside. */
   tris: [string, string, string][];
 }
@@ -92,7 +105,7 @@ export function buildSkin(data: SkinPanelData, spec: SkinSpec, attachPos: Readon
   // floor at 40 % of the mean so corner nodes keep a usable stiffness budget
   const mass = Array.from(share, (s) => Math.max(0.4 * mean, s * scale * areal));
   const fix = (data.area * areal) / mass.reduce((x, y) => x + y, 0);
-  for (let i = 0; i < n; i++) mass[i] = mass[i]! * fix;
+  for (let i = 0; i < n; i++) mass[i] = Math.max(SKIN_MIN_NODE_MASS, mass[i]! * fix);
 
   const beams: SkinBeam[] = [];
   const seen = new Set<string>();
@@ -164,5 +177,5 @@ export function buildSkin(data: SkinPanelData, spec: SkinSpec, attachPos: Readon
   }
   const tris: [string, string, string][] = [];
   for (let t = 0; t < data.tris.length; t += 3) tris.push([ids[data.tris[t]!]!, ids[data.tris[t + 1]!]!, ids[data.tris[t + 2]!]!]);
-  return { panel: data.id, prefix, ids, pos, mass, beams, seam: spec.seam, tris };
+  return { panel: data.id, prefix, ids, pos, mass, beams, seam: spec.seam, grade: spec.grade, tris };
 }

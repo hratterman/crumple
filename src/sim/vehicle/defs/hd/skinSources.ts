@@ -24,6 +24,22 @@ export const SKIN_SOURCES: Readonly<Record<HdCar, { visualModule: string; visual
   beater: { visualModule: 'render/vehicle/defs/beater.ts', visualExport: 'BEATER_VISUAL', simModule: 'sim/vehicle/defs/beater.ts', simExport: 'BEATER' },
 };
 
+/**
+ * Per-panel pitch multipliers: big flat panels (the box truck's box: 9–10 m² aluminium sides / roof on posts and
+ * bows) sample coarser so the truck stays within ~3× its standard node count.
+ */
+export const SKIN_PITCH_SCALE: Readonly<Partial<Record<HdCar, Readonly<Record<string, number>>>>> = {
+  boxtruck: { boxSideR: 2, boxSideL: 2, boxRoof: 2.4, boxRails: 1.6, rollerDoor: 1.8, boxFront: 1.5, cabShell: 1.15 },
+};
+
+/**
+ * Panels left on their frame nodes: the box truck's rub rails and battens are strips one sample row wide (no
+ * well-shaped triads for the binder on a single row).
+ */
+export const SKIN_EXCLUDE: Readonly<Partial<Record<HdCar, readonly string[]>>> = {
+  boxtruck: ['boxRails', 'battensR', 'battensL'],
+};
+
 /** Render panel kinds whose outer sheet becomes a skin (paint / exterior sheet metal and fascias). */
 const SKIN_KINDS = new Set(['hood', 'trunk', 'door', 'fender', 'bumper', 'roof', 'body']);
 const SKIN_MATERIALS = new Set(['paint', 'trim']);
@@ -84,8 +100,9 @@ export function extractSkins(
     if (!isSkinPanel(p)) return;
     const attach = resolveBind(def, p.bind);
     if (attach.length === 0) return;
-    const s = sampleSkin(geoms[i]!, { id: p.id, kind: p.kind, material: p.material, attach }, { pitch, envelope });
-    if (s && s.area >= MIN_AREA && s.pos.length >= 4 * 3) panels.push(s);
+    const scale = SKIN_PITCH_SCALE[car as HdCar]?.[p.id] ?? 1;
+    const s = sampleSkin(geoms[i]!, { id: p.id, kind: p.kind, material: p.material, attach }, { pitch: pitch * scale, envelope });
+    if (s && s.area >= MIN_AREA && s.pos.length >= 4 * 3 && !SKIN_EXCLUDE[car as HdCar]?.includes(p.id)) panels.push(s);
   });
   return { vehicle: car, pitch, panels, hash: hashSkins(panels) };
 }

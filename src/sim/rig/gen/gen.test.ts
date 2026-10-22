@@ -13,7 +13,7 @@ import { SKINS } from '../../vehicle/defs/hd/skins/sedan.high';
 import { grade, sheetMass, tubeCrushForce } from './materials';
 import { refineVehicle } from './refine';
 import { envelopeOf, sampleSkin, type SampleMesh } from './sample';
-import { buildSkin } from './skin';
+import { buildSkin, SKIN_MIN_NODE_MASS } from './skin';
 
 /** A crowned 1.2 × 0.8 m panel at y ≈ 1 (outer face up) plus its inner shell 2 mm below (inward normals). */
 function crownedPanel(): SampleMesh {
@@ -90,7 +90,11 @@ describe('rig gen: skin sampler', () => {
     expect(count('diagonal')).toBe(2 * 12 * 8);
     expect(count('bending')).toBe(11 * 9 + 13 * 7);
     expect(count('seam')).toBeGreaterThan(s.edge.length);
-    expect(b.mass.reduce((x, y) => x + y, 0)).toBeCloseTo(s.area * sheetMass('BH220', 0.0007), 6);
+    // real areal mass (corner nodes floored at SKIN_MIN_NODE_MASS)
+    const total = b.mass.reduce((x, y) => x + y, 0);
+    expect(total).toBeGreaterThanOrEqual(s.area * sheetMass('BH220', 0.0007) - 1e-9);
+    expect(total).toBeLessThan(1.15 * s.area * sheetMass('BH220', 0.0007));
+    for (const m of b.mass) expect(m).toBeGreaterThanOrEqual(SKIN_MIN_NODE_MASS);
     // every seam joins a sheet node to a frame node
     for (const x of b.beams.filter((q) => q.kind === 'seam')) expect(frame.has(x.b) || frame.has(x.a)).toBe(true);
   });

@@ -98,6 +98,8 @@ export interface SkinSpec {
   zone?: ShellZoneName;
   /** Attach-node override (ids or globs on the backbone); default SkinPanelData.attach. */
   attach?: readonly string[];
+  /** Membrane yield strain at the reference pitch, default materials.ts sheetYieldStrain(grade) (a tired, rusty sheet sets earlier). */
+  yieldStrain?: number;
 }
 
 export type ShellZoneName = 'front' | 'rear' | 'cell' | 'firewall' | 'none';

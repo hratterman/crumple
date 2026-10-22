@@ -7,7 +7,7 @@
 //
 // The sim may not import src/render, so the outer sheets cross the boundary as
 // generated data: src/sim/vehicle/defs/hd/skins/<car>.<tier>.ts (SkinSet). Run it
-// after a body-shape change; src/render/vehicle/defs/hd/skins.test.ts fails
+// after a body-shape change; src/render/vehicle/defs/hd/hd.test.ts fails
 // when the committed data drifts from the render surfaces.
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
