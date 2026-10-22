@@ -33,7 +33,7 @@ import { applyColliderContacts, compileColliders, resetColliderContactState } fr
 import { OBJ_REBUILD_TICKS, OBJ_REBUILD_TICKS_SLOW, OBJ_SLOW_SPEED, ObjectContacts } from './collision/objects';
 import { applyWater, boxNearWater, VEHICLE_FLOOD_LOSS, VEHICLE_FLOOD_TIME_S } from './collision/water';
 import { TriangleContacts, type StaticMeshInput, type TriangleSlot } from './collision/triangles';
-import { deriveCollisionTriangles, triangleSetOf } from './rig/triangles';
+import { deriveCollisionTriangles, mergeTriangles, triangleSetOf } from './rig/triangles';
 import { quatToMatrix } from '../world/colliders';
 import { markMirroredSampler, PlaneSampler, resetGroundContactState } from './collision/ground';
 import type { ColliderWorld } from './collision/types';
@@ -110,7 +110,12 @@ function resolveTriangles(t: LazyTriangles): TriangleSlot | null {
   if (slot === undefined) slot = TRI_BY_RIG.get(t.rig);
   if (slot === undefined) {
     const rig = t.rig;
-    const tris = rig.triangles ?? (t.bodyNodeCount > 0 ? deriveCollisionTriangles(rig, { nodeCount: t.bodyNodeCount }) : undefined);
+    // Vehicles: the derived body surface (+ caps), plus declared triangles it lacks; plain rigs: declared only.
+    let tris = rig.triangles;
+    if (t.bodyNodeCount > 0) {
+      const derived = deriveCollisionTriangles(rig, { nodeCount: t.bodyNodeCount });
+      tris = tris && tris.count > 0 ? mergeTriangles(derived, tris, rig.nodePos) : derived;
+    }
     slot = tris && tris.count > 0 ? { set: triangleSetOf(rig, tris), nodeSelf: rig.nodeSelfCollide ?? null } : null;
     TRI_BY_RIG.set(rig, slot);
     if (t.defKey) TRI_BY_DEF.set(t.defKey, slot);
@@ -567,8 +572,8 @@ export class SimEngine {
       throw new SimCommandError(`invalid transmission ${String(transmission)}`, objectId);
     }
     const obj = this.spawnCompiled(objectId, compiled.rig, transform);
-    // Vehicles always have collision triangles: declared ones, else the derived body surface.
-    const lazy: LazyTriangles = { rig: compiled.rig, bodyNodeCount: compiled.bodyNodeCount, defKey: compiled.rig.triangles ? null : (defKey ?? null), slot: undefined };
+    // Vehicles always have collision triangles: the derived body surface plus any declared ones it lacks.
+    const lazy: LazyTriangles = { rig: compiled.rig, bodyNodeCount: compiled.bodyNodeCount, defKey: defKey ?? null, slot: undefined };
     this.triById.set(objectId, lazy);
     // With triangle contact on, derive now (a spawn already compiles) rather than at the first approach (an
     // HD rig's surface takes ~0.2–0.6 s once per def).

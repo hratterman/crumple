@@ -146,7 +146,7 @@ const assetCache = new Map<string, Promise<PlayerAssets>>();
  * R-RIG's variant (`loadVehicleVariant`: its own lazy chunk, falling back to
  * the next lower tier) with the visual re-pointed at its sheets
  * (`vehicleVisualSync`, lazy too). Collision triangles: the engine's derived
- * surface (R-CORE), not the variant's skin-only `collision` list.
+ * surface plus the variant's sheet triangles (R-CORE `mergeTriangles`).
  */
 export function loadPlayerAssets(entry: VehicleCatalogEntry, quality: PhysicsQuality = 'standard'): Promise<PlayerAssets> {
   const key = `${entry.id}|${quality}`;
@@ -172,8 +172,7 @@ async function loadAt(entry: VehicleCatalogEntry, quality: PhysicsQuality): Prom
   if (v.quality === 'standard') return assets(base.sim, base.visual, 'standard');
   const { vehicleVisualSync } = await import('../render/vehicle/defs/hd/index');
   // Collision surface: the engine derives it from the HD rig (beam surfaces of the skins and structure plus
-  // end / underbody caps). R-RIG's `collision` list covers the outer sheets only (from inside the cabin, rays
-  // escape through 47–100 % of directions: no underbody, bumpers or glass), so it is not declared.
+  // end / underbody caps) and adds the generator's sheet triangles it lacks (`def.body.triangles`).
   return assets(v.def, vehicleVisualSync(entry.id as Parameters<typeof vehicleVisualSync>[0], v.quality), v.quality);
 }
 

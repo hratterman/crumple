@@ -59,6 +59,84 @@ export function emptyTriangles(): CompiledTriangles {
   return { count: 0, a: new Int32Array(0), b: new Int32Array(0), c: new Int32Array(0), flags: new Uint8Array(0), material: new Uint8Array(0), thickness: new Float64Array(0) };
 }
 
+/**
+ * A vehicle's collision surface when its def also declares triangles (R-RIG's HD sheets): the derived
+ * surface plus every declared triangle whose vertex set it does not already have (declared winding,
+ * flags and material kept). Declared lists alone are not closed (R-RIG's sheets: no underbody, bumpers or
+ * glass), so they add to the derivation instead of replacing it.
+ */
+export function mergeTriangles(derived: CompiledTriangles, declared: CompiledTriangles, P?: Float64Array): CompiledTriangles {
+  const key = (a: number, b: number, c: number): string => {
+    const v = [a, b, c].sort((x, y) => x - y);
+    return `${v[0]},${v[1]},${v[2]}`;
+  };
+  const have = new Set<string>();
+  for (let t = 0; t < derived.count; t++) have.add(key(derived.a[t]!, derived.b[t]!, derived.c[t]!));
+  // Coplanar overlap through a shared edge (the same quad split along the other diagonal), as in step 3.
+  const byEdge = new Map<number, number[]>();
+  const ek = (u: number, v: number): number => Math.min(u, v) * 1048576 + Math.max(u, v);
+  if (P) {
+    for (let t = 0; t < derived.count; t++) {
+      const v = [derived.a[t]!, derived.b[t]!, derived.c[t]!];
+      for (let e = 0; e < 3; e++) {
+        const k = ek(v[e]!, v[(e + 1) % 3]!);
+        let list = byEdge.get(k);
+        if (!list) byEdge.set(k, (list = []));
+        list.push(t);
+      }
+    }
+  }
+  const overlaps = (a: number, b: number, c: number): boolean => {
+    if (!P) return false;
+    const cand = candOf(P, a, b, c);
+    if (!Number.isFinite(cand.nx)) return false;
+    const v = [a, b, c];
+    for (let e = 0; e < 3; e++) {
+      const u = v[e]!, w = v[(e + 1) % 3]!, o3 = v[(e + 2) % 3]!;
+      for (const t of byEdge.get(ek(u, w)) ?? []) {
+        const d = candOf(P, derived.a[t]!, derived.b[t]!, derived.c[t]!);
+        if (!(Math.abs(d.nx * cand.nx + d.ny * cand.ny + d.nz * cand.nz) >= COPLANAR_COS)) continue;
+        const da = derived.a[t]!, db = derived.b[t]!, dc = derived.c[t]!;
+        const other = da !== u && da !== w ? da : db !== u && db !== w ? db : dc;
+        if (sameSide(P, u, w, o3, other, cand)) return true;
+      }
+    }
+    return false;
+  };
+  const extra: number[] = [];
+  for (let t = 0; t < declared.count; t++) {
+    const a = declared.a[t]!, b = declared.b[t]!, c = declared.c[t]!;
+    if (!have.has(key(a, b, c)) && !overlaps(a, b, c)) extra.push(t);
+  }
+  const n = derived.count + extra.length;
+  const out: CompiledTriangles = {
+    count: n,
+    a: new Int32Array(n),
+    b: new Int32Array(n),
+    c: new Int32Array(n),
+    flags: new Uint8Array(n),
+    material: new Uint8Array(n),
+    thickness: new Float64Array(n),
+  };
+  out.a.set(derived.a.subarray(0, derived.count));
+  out.b.set(derived.b.subarray(0, derived.count));
+  out.c.set(derived.c.subarray(0, derived.count));
+  out.flags.set(derived.flags.subarray(0, derived.count));
+  out.material.set(derived.material.subarray(0, derived.count));
+  out.thickness.set(derived.thickness.subarray(0, derived.count));
+  for (let k = 0; k < extra.length; k++) {
+    const t = extra[k]!;
+    const o = derived.count + k;
+    out.a[o] = declared.a[t]!;
+    out.b[o] = declared.b[t]!;
+    out.c[o] = declared.c[t]!;
+    out.flags[o] = declared.flags[t]!;
+    out.material[o] = declared.material[t]!;
+    out.thickness[o] = declared.thickness[t]!;
+  }
+  return out;
+}
+
 /** Compiles declared triangles (node ids → indices); throws on unknown / repeated vertices or bad values. */
 export function compileTriangleDefs(defs: readonly RigTriangleDef[], index: ReadonlyMap<string, number>): CompiledTriangles {
   const n = defs.length;
