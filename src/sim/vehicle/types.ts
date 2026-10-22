@@ -232,7 +232,7 @@ export const WHEEL_RAYS_MIN = 10;
 export const WHEEL_RAYS_MAX = 14;
 
 // ====================================================================== drivetrain
-export type DiffType = 'open' | 'locked' | 'limited';
+export type DiffType = 'open' | 'locked' | 'limited' | 'viscous';
 
 /**
  * Engine + clutch + gearbox + one differential across ALL driven wheels.
@@ -292,6 +292,20 @@ export interface DrivetrainDef {
   driveReaction?: 'body' | 'axle';
   /** R-PHYS (additive, optional): engine systems spec (engineSystems.ts: fuel, cooling, oil, stall). */
   engine?: EngineDef;
+  /**
+   * R-PHYS (additive, optional): clutch-pack (Salisbury) limited-slip model for diff 'limited'. Locking
+   * torque = preload + ramp·|T_in| (power ramp when the diff is driven, coast ramp on the overrun), so the
+   * torque bias ratio is (1 + r)/(1 − r) once the preload is overcome (Milliken RCVD ch. 20). Without it,
+   * 'limited' keeps the constant diffLockTorque.
+   */
+  lsd?: { preload: number; powerRamp: number; coastRamp: number };
+  /**
+   * R-PHYS (additive, optional): torsional strength of each driven halfshaft / CV joint, N·m at the wheel;
+   * an overload snaps it (DrivetrainStateEx.shaftBroken). Absent = unbreakable.
+   */
+  halfshaftBreakTorque?: number;
+  /** R-PHYS (additive, optional): viscous coupling coefficient for diff 'viscous', N·m per rad/s of wheel-speed difference. */
+  viscousCoeff?: number;
   /** R-PHYS (additive, optional): electronic top-speed governor, km/h (throttle faded out over the last 7 km/h). */
   speedLimitKmh?: number;
 }
@@ -303,6 +317,10 @@ export interface EngineDef {
   tankL?: number;
   /** Fuel at spawn / repair, L (default 0.75 × tankL). */
   startFuelL?: number;
+  /** Crank orientation (engine rock axis): default transverse for front-wheel drive, else longitudinal. */
+  layout?: 'longitudinal' | 'transverse';
+  /** Engine rock (the powertrain reactions on the engine mounts, runtime.ts applyEngineReaction); default true. */
+  rock?: boolean;
 }
 
 export type TransmissionMode = 'auto' | 'manual';
@@ -336,6 +354,13 @@ export interface AeroDef {
   dragCoeffArea: number;
   /** Cl·A, m² (positive = lift). */
   liftCoeffArea: number;
+  /**
+   * R-PHYS (additive, optional): lift split per axle, Cl·A at the front / rear axle, m² (+ = lift). When
+   * either is set the lift acts at the axles (liftCoeffArea is then ignored): a uniform part plus a pitch
+   * couple, so the front axle unloads by ½ρv²·liftFront and the rear by ½ρv²·liftRear.
+   */
+  liftFront?: number;
+  liftRear?: number;
 }
 
 /** Body node ids defining the vehicle frame (camera, telemetry speed, recover). */
@@ -408,7 +433,7 @@ export interface DamperCurveDef {
 
 // ====================================================================== compiled
 /** Diff type ids used in CompiledDrivetrain. */
-export const DIFF_TYPE_ID: Readonly<Record<DiffType, number>> = { open: 0, locked: 1, limited: 2 };
+export const DIFF_TYPE_ID: Readonly<Record<DiffType, number>> = { open: 0, locked: 1, limited: 2, viscous: 3 };
 
 /** Telemetry corner ids (FL, FR, RL, RR = slots 0..3 of the per-wheel telemetry groups). */
 export const WHEEL_CORNER = { FL: 0, FR: 1, RL: 2, RR: 3 } as const;
@@ -519,6 +544,12 @@ export interface CompiledDrivetrain {
   driveReaction?: 'body' | 'axle';
   /** DrivetrainDef.engine (R-PHYS, optional). */
   engine?: EngineDef;
+  /** DrivetrainDef.lsd (R-PHYS; absent = constant diffLockTorque). */
+  lsd?: { preload: number; powerRamp: number; coastRamp: number };
+  /** DrivetrainDef.halfshaftBreakTorque (R-PHYS). */
+  halfshaftBreakTorque?: number;
+  /** DrivetrainDef.viscousCoeff (R-PHYS; diff 'viscous'). */
+  viscousCoeff?: number;
   /** DrivetrainDef.speedLimitKmh / 3.6, m/s (R-PHYS; 0 / absent = no governor). */
   speedLimit?: number;
 }

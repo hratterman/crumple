@@ -617,7 +617,8 @@ const HOOD = {
  */
 const DRIVETRAIN: DrivetrainDef = {
   // R-PHYS engine systems (engineSystems.ts): fuel, cooling, oil, stall / starter
-  engine: { displacementL: 6.7, fuel: 'diesel', tankL: 150 },
+  engine: { displacementL: 6.7, fuel: 'diesel', tankL: 150 , rock: false },
+  // R-PHYS: no engine rock yet: the ladder frame twists under the propshaft torque (heading drift on launch) (frame stiffness: open)
   torqueCurve: [
     [0, 380],
     [600, 520],
@@ -1879,7 +1880,8 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
     wheels,
     drivetrain: DRIVETRAIN,
     brakes: { frontBias: 0.55, handbrakeTorqueMax: 4000, abs: true },
-    aero: { dragCoeffArea: 5.6, liftCoeffArea: 0 },
+    // R-PHYS: lift per axle (box truck: no net lift; Hucho, "Aerodynamics of Road Vehicles" 1998)
+    aero: { dragCoeffArea: 5.6, liftCoeffArea: 0, liftFront: 0, liftRear: 0 },
     // R-PHYS: linear dampers. Non-linear valving (dampers.ts) on the truck's d (ζ 0.6, near the ω·dt budget
     // of its light axle nodes) jittered the parked truck (0.19–0.21 m/s node speed vs 0.15) even with
     // { bump: 0.5, rebound: 1 }, and a softer bump changed the 50 km/h box-side dent (12.9 vs ≥ 15 cm).

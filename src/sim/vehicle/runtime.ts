@@ -102,6 +102,9 @@ export interface VehicleRuntimeEx extends VehicleRuntime {
   brakeHeat: BrakeHeatState;
   /** R-PHYS: fuel, cooling, oil, engine health, stall / starter (engineSystems.ts). */
   engineSys: EngineSystemsState;
+  /** R-PHYS: rig-local engine / gearbox nodes (group 'engine'; engine rock) and whether the engine is transverse. */
+  engineNodes: Int32Array;
+  engineTransverse: boolean;
   /** R-PHYS: ext telemetry block (VEHICLE_EXT_SLOTS f32, telemetry.ts VehicleTelemetryExt), filled by writeVehicleTelemetryExt. */
   telemetryExt: Float32Array;
 }
@@ -191,6 +194,15 @@ function makeWheel(vehicle: CompiledVehicle, index: number): WheelRuntime {
   };
 }
 
+/** Rig-local body nodes of group 'engine' (block + gearbox), declaration order. */
+function engineNodesOf(vehicle: CompiledVehicle): Int32Array {
+  const rig = vehicle.rig;
+  const gi = rig.groups.indexOf('engine');
+  const out: number[] = [];
+  if (gi >= 0) for (let i = 0; i < vehicle.bodyNodeCount; i++) if (rig.nodeGroup[i] === gi) out.push(i);
+  return Int32Array.from(out);
+}
+
 /** Runtime for a vehicle whose merged rig sits at arena [nodeStart…], [beamStart…]. */
 export function createVehicleRuntime(
   objectId: number,
@@ -226,6 +238,8 @@ export function createVehicleRuntime(
     dampers: null,
     engineSys: undefined as unknown as EngineSystemsState,
     telemetryExt: new Float32Array(VEHICLE_EXT_SLOTS),
+    engineNodes: vehicle.drivetrain.engine?.rock === false ? new Int32Array(0) : engineNodesOf(vehicle),
+    engineTransverse: (vehicle.drivetrain.engine?.layout ?? (vehicle.drivetrain.drivenWheels.length > 0 && vehicle.wheels[vehicle.drivetrain.drivenWheels[0]!]!.axle === 'front' ? 'transverse' : 'longitudinal')) === 'transverse',
     brakeHeat: createBrakeHeat(
       vehicle.wheels.map((cw) => cw.brakeDiscMass ?? 0),
       vehicle.wheels.map((cw) => cw.brakeDiscVented ?? cw.axle === 'front'),
@@ -314,7 +328,8 @@ export function applyAero(state: SimState, vehicle: VehicleRuntime): void {
   const v = vehicle as VehicleRuntimeEx;
   const aero = v.vehicle.aero;
   const M = v.bodyMass;
-  if (!(M > 0) || (aero.dragCoeffArea === 0 && aero.liftCoeffArea === 0)) return;
+  const perAxle = aero.liftFront !== undefined || aero.liftRear !== undefined;
+  if (!(M > 0) || (aero.dragCoeffArea === 0 && aero.liftCoeffArea === 0 && !perAxle)) return;
   const { velX, velY, velZ, frcX, frcY, frcZ, invMass } = state;
   const start = v.nodeStart;
   const end = start + v.vehicle.bodyNodeCount;
@@ -350,6 +365,10 @@ export function applyAero(state: SimState, vehicle: VehicleRuntime): void {
   let ax = (dragK * vx) / M;
   let ay = (dragK * vy) / M;
   let az = (dragK * vz) / M;
+  if (perAxle) {
+    applyAxleLift(state, v, q * v2, aero.liftFront ?? 0, aero.liftRear ?? 0, ax, ay, az);
+    return;
+  }
   if (aero.liftCoeffArea !== 0) {
     const fr = v.vehicle.frameNodes;
     const o = start + fr[0]!;
@@ -397,6 +416,94 @@ export function applyAero(state: SimState, vehicle: VehicleRuntime): void {
 const momentumOut = new Float64Array(3);
 
 /**
+ * R-PHYS per-axle lift (AeroDef.liftFront / liftRear): with the drag accelerations (ax, ay, az) per kg,
+ * applies to every body node a_i = drag + (a0 + a1·(ξ_i − ξ̄))·up, ξ = position along the body's forward
+ * axis: a0 = L/M gives the total lift L = qv²(ClF + ClR), a1 = M_p/J (J = Σm(ξ − ξ̄)²) the pitch moment
+ * M_p = qv²(ClF·(ξ_F − ξ̄) + ClR·(ξ_R − ξ̄)) of lifts acting at the axle stations ξ_F, ξ_R (wheel hubs).
+ */
+function applyAxleLift(state: SimState, v: VehicleRuntimeEx, qv2: number, clF: number, clR: number, ax: number, ay: number, az: number): void {
+  const { posX, posY, posZ, frcX, frcY, frcZ, invMass } = state;
+  const start = v.nodeStart;
+  const end = start + v.vehicle.bodyNodeCount;
+  const fr = v.vehicle.frameNodes;
+  const o = start + fr[0]!;
+  const f = start + fr[1]!;
+  const t = start + fr[2]!;
+  let fx = posX[f]! - posX[o]!;
+  let fy = posY[f]! - posY[o]!;
+  let fz = posZ[f]! - posZ[o]!;
+  const fl = Math.sqrt(fx * fx + fy * fy + fz * fz);
+  if (!(fl > 1e-9)) return;
+  fx /= fl;
+  fy /= fl;
+  fz /= fl;
+  let ux = posX[t]! - posX[o]!;
+  let uy = posY[t]! - posY[o]!;
+  let uz = posZ[t]! - posZ[o]!;
+  const du = ux * fx + uy * fy + uz * fz;
+  ux -= du * fx;
+  uy -= du * fy;
+  uz -= du * fz;
+  const ul = Math.sqrt(ux * ux + uy * uy + uz * uz);
+  if (!(ul > 1e-9)) return;
+  ux /= ul;
+  uy /= ul;
+  uz /= ul;
+  const ox = posX[o]!;
+  const oy = posY[o]!;
+  const oz = posZ[o]!;
+  let M = 0;
+  let sx = 0;
+  for (let i = start; i < end; i++) {
+    const im = invMass[i]!;
+    if (im === 0) continue;
+    const m = 1 / im;
+    M += m;
+    sx += m * ((posX[i]! - ox) * fx + (posY[i]! - oy) * fy + (posZ[i]! - oz) * fz);
+  }
+  if (!(M > 0)) return;
+  const xb = sx / M;
+  let J = 0;
+  for (let i = start; i < end; i++) {
+    const im = invMass[i]!;
+    if (im === 0) continue;
+    const xi = (posX[i]! - ox) * fx + (posY[i]! - oy) * fy + (posZ[i]! - oz) * fz - xb;
+    J += xi * xi / im;
+  }
+  // axle stations: mean hub positions per axle along the forward axis
+  let xF = 0;
+  let nF = 0;
+  let xR = 0;
+  let nR = 0;
+  for (const w of v.wheels) {
+    const x = ((posX[w.hubI]! + posX[w.hubO]!) * 0.5 - ox) * fx + ((posY[w.hubI]! + posY[w.hubO]!) * 0.5 - oy) * fy + ((posZ[w.hubI]! + posZ[w.hubO]!) * 0.5 - oz) * fz - xb;
+    if (w.wheel.axle === 'front') {
+      xF += x;
+      nF++;
+    } else {
+      xR += x;
+      nR++;
+    }
+  }
+  if (nF > 0) xF /= nF;
+  if (nR > 0) xR /= nR;
+  const L = qv2 * (clF + clR);
+  const Mp = qv2 * (clF * xF + clR * xR);
+  const a0 = L / M;
+  const a1 = J > 1e-9 ? Mp / J : 0;
+  for (let i = start; i < end; i++) {
+    const im = invMass[i]!;
+    if (im === 0) continue;
+    const m = 1 / im;
+    const xi = (posX[i]! - ox) * fx + (posY[i]! - oy) * fy + (posZ[i]! - oz) * fz - xb;
+    const al = a0 + a1 * xi;
+    frcX[i] = frcX[i]! + (ax + al * ux) * m;
+    frcY[i] = frcY[i]! + (ay + al * uy) * m;
+    frcZ[i] = frcZ[i]! + (az + al * uz) * m;
+  }
+}
+
+/**
  * The vehicle pre-step: ω estimate → drivetrain → wheel torques → parking
  * clamp → aero. `actions` = the object's protocol action array.
  */
@@ -441,6 +548,7 @@ export function vehiclePreStep(state: SimState, vehicle: VehicleRuntime, actions
     }
   }
   if (!onAxle) applyDriveReaction(state, vehicle);
+  applyEngineReaction(state, vehicle);
   const dm = (vehicle as VehicleRuntimeEx).dampers;
   if (dm) applyDampers(state, dm);
   applyParkingClamp(state, vehicle, actions, dt);
@@ -458,7 +566,7 @@ export function vehiclePreStep(state: SimState, vehicle: VehicleRuntime, actions
  * Hot path: + − × ÷ sqrt, no allocation (two passes over the body nodes, as aero).
  */
 export function applyDriveReaction(state: SimState, vehicle: VehicleRuntime): void {
-  const { posX, posY, posZ, frcX, frcY, frcZ, invMass } = state;
+  const { posX, posY, posZ } = state;
   const wheels = vehicle.wheels;
   let Tx = 0;
   let Ty = 0;
@@ -479,24 +587,36 @@ export function applyDriveReaction(state: SimState, vehicle: VehicleRuntime): vo
     Ty += sy * k;
     Tz += sz * k;
   }
-  const tl = Math.sqrt(Tx * Tx + Ty * Ty + Tz * Tz);
-  if (!(tl > 1e-9)) return;
-  const ux = Tx / tl;
-  const uy = Ty / tl;
-  const uz = Tz / tl;
-  const start = vehicle.nodeStart;
-  const end = start + vehicle.vehicle.bodyNodeCount;
-  // R-CORE: a WASM kernel runs the three body passes below (kernel.c drive_reaction, a mirror of them).
-  const bk = activeKernelFor(state)?.body;
-  if (bk) {
-    bk.driveReaction(start, end, ux, uy, uz, tl);
+  const v = vehicle as VehicleRuntimeEx;
+  const eng = v.engineNodes;
+  if (eng && eng.length > 0 && v.engineTransverse) {
+    // transverse engine + transaxle: the differential sits in the engine unit, which takes the whole
+    // drive reaction on its mounts (powertrain pitch / rock); applyEngineReaction adds the crank part
+    applyCoupleToNodes(state, vehicle.nodeStart, eng, eng.length, Tx, Ty, Tz);
     return;
   }
+  const start = vehicle.nodeStart;
+  // R-PHYS: the exact-tensor couple below replaced the three axis-only passes that kernel.c drive_reaction
+  // mirrors, so this runs as TS on every kernel (CONTRACTS R-CORE mirror rule: dispatch line removed)
+  applyCoupleToNodes(state, start, null, vehicle.vehicle.bodyNodeCount, Tx, Ty, Tz);
+}
+
+/**
+ * Applies the couple T as the rigid-body angular acceleration of a node set: α = I⁻¹·T with the set's
+ * full inertia tensor about its centre of mass, F_j = m_j·(α × ρ_j). Zero net force and EXACTLY the
+ * moment T (an axis-only distribution leaks cross moments through the products of inertia: an engine
+ * couple about the crank put ≈ 0.06 rad/s of yaw weave into a 195 km/h straight).
+ * `list` = rig-local indices (offset by `base`), or null for [base, base + count).
+ */
+export function applyCoupleToNodes(state: SimState, base: number, list: Int32Array | null, count: number, Tx: number, Ty: number, Tz: number): void {
+  const { posX, posY, posZ, frcX, frcY, frcZ, invMass } = state;
+  if (!(Tx * Tx + Ty * Ty + Tz * Tz > 1e-18)) return;
   let m = 0;
   let cx = 0;
   let cy = 0;
   let cz = 0;
-  for (let i = start; i < end; i++) {
+  for (let j = 0; j < count; j++) {
+    const i = list ? base + list[j]! : base + j;
     const im = invMass[i]!;
     if (im === 0) continue;
     m += 1 / im;
@@ -508,36 +628,110 @@ export function applyDriveReaction(state: SimState, vehicle: VehicleRuntime): vo
   cx /= m;
   cy /= m;
   cz /= m;
-  let I = 0;
-  for (let i = start; i < end; i++) {
+  let ixx = 0;
+  let iyy = 0;
+  let izz = 0;
+  let ixy = 0;
+  let ixz = 0;
+  let iyz = 0;
+  for (let j = 0; j < count; j++) {
+    const i = list ? base + list[j]! : base + j;
     const im = invMass[i]!;
     if (im === 0) continue;
+    const mi = 1 / im;
     const rx = posX[i]! - cx;
     const ry = posY[i]! - cy;
     const rz = posZ[i]! - cz;
-    const a = rx * ux + ry * uy + rz * uz;
-    const px = rx - a * ux;
-    const py = ry - a * uy;
-    const pz = rz - a * uz;
-    I += (px * px + py * py + pz * pz) / im;
+    ixx += mi * (ry * ry + rz * rz);
+    iyy += mi * (rx * rx + rz * rz);
+    izz += mi * (rx * rx + ry * ry);
+    ixy -= mi * rx * ry;
+    ixz -= mi * rx * rz;
+    iyz -= mi * ry * rz;
   }
-  if (!(I > 1e-9)) return;
-  const g = tl / I;
-  for (let i = start; i < end; i++) {
+  // α = I⁻¹ T (symmetric 3×3 by cofactors)
+  const c00 = iyy * izz - iyz * iyz;
+  const c01 = ixz * iyz - ixy * izz;
+  const c02 = ixy * iyz - ixz * iyy;
+  const det = ixx * c00 + ixy * c01 + ixz * c02;
+  if (!(det > 1e-12)) return;
+  const c11 = ixx * izz - ixz * ixz;
+  const c12 = ixy * ixz - ixx * iyz;
+  const c22 = ixx * iyy - ixy * ixy;
+  const inv = 1 / det;
+  const axx = (c00 * Tx + c01 * Ty + c02 * Tz) * inv;
+  const ayy = (c01 * Tx + c11 * Ty + c12 * Tz) * inv;
+  const azz = (c02 * Tx + c12 * Ty + c22 * Tz) * inv;
+  for (let j = 0; j < count; j++) {
+    const i = list ? base + list[j]! : base + j;
     const im = invMass[i]!;
     if (im === 0) continue;
+    const mi = 1 / im;
     const rx = posX[i]! - cx;
     const ry = posY[i]! - cy;
     const rz = posZ[i]! - cz;
-    const a = rx * ux + ry * uy + rz * uz;
-    const px = rx - a * ux;
-    const py = ry - a * uy;
-    const pz = rz - a * uz;
-    const k = g / im;
-    frcX[i] = frcX[i]! + k * (uy * pz - uz * py);
-    frcY[i] = frcY[i]! + k * (uz * px - ux * pz);
-    frcZ[i] = frcZ[i]! + k * (ux * py - uy * px);
+    frcX[i] = frcX[i]! + mi * (ayy * rz - azz * ry);
+    frcY[i] = frcY[i]! + mi * (azz * rx - axx * rz);
+    frcZ[i] = frcZ[i]! + mi * (axx * ry - ayy * rx);
   }
+}
+
+/**
+ * R-PHYS engine rock: the reactions inside the powertrain about the crank axis a (unit, the crank's
+ * rotation for a forward-running engine). Crank: I_e·α = T_e − T_cl. Block (+ gearbox, one unit on its
+ * mounts): −(T_e + T_cl·(g − 1))·a for a longitudinal engine (the gearbox housing reacts its ratio
+ * step); the differential housing (body / subframe) takes +T_cl·g·a from the propshaft. These sum with
+ * the crank's angular momentum change to zero, so only the mounts see them — the block rolls on its
+ * mounts under load and on a free-revving blip (−T_e alone). Transverse (transaxle): the block takes
+ * −(T_e − T_cl)·a here and the whole wheel reaction in applyDriveReaction.
+ */
+export function applyEngineReaction(state: SimState, vehicle: VehicleRuntime): void {
+  const v = vehicle as VehicleRuntimeEx;
+  const eng = v.engineNodes;
+  if (!eng || eng.length === 0) return;
+  const d = v.drivetrain as DrivetrainStateEx;
+  const te = d.engineTorque;
+  const tcl = d.clutchTorque;
+  if (te === 0 && tcl === 0) return;
+  const { posX, posY, posZ } = state;
+  const base = v.nodeStart;
+  let ax: number;
+  let ay: number;
+  let az: number;
+  if (v.engineTransverse) {
+    // crank parallel to the driven axle, turning the way the wheels roll forward (two gear meshes)
+    const w = v.wheels[v.vehicle.drivetrain.drivenWheels[0]!]!;
+    ax = posX[w.hubO]! - posX[w.hubI]!;
+    ay = posY[w.hubO]! - posY[w.hubI]!;
+    az = posZ[w.hubO]! - posZ[w.hubI]!;
+    const l = Math.sqrt(ax * ax + ay * ay + az * az);
+    if (!(l > 1e-9)) return;
+    const k = w.wheel.spinSign / l;
+    ax *= k;
+    ay *= k;
+    az *= k;
+    const tb = -(te - tcl);
+    applyCoupleToNodes(state, base, eng, eng.length, ax * tb, ay * tb, az * tb);
+    return;
+  }
+  // longitudinal: the crank turns clockwise seen from the front, i.e. its vector points rearward
+  const fr = v.vehicle.frameNodes;
+  const o = base + fr[0]!;
+  const f = base + fr[1]!;
+  ax = posX[o]! - posX[f]!;
+  ay = posY[o]! - posY[f]!;
+  az = posZ[o]! - posZ[f]!;
+  const l = Math.sqrt(ax * ax + ay * ay + az * az);
+  if (!(l > 1e-9)) return;
+  ax /= l;
+  ay /= l;
+  az /= l;
+  const dt = v.vehicle.drivetrain;
+  const g = dt.gearRatioTable[d.gear + 1]!;
+  const tb = -(te + tcl * (g - 1));
+  applyCoupleToNodes(state, base, eng, eng.length, ax * tb, ay * tb, az * tb);
+  const td = tcl * g;
+  if (td !== 0) applyCoupleToNodes(state, base, null, v.vehicle.bodyNodeCount, ax * td, ay * td, az * td);
 }
 
 // ------------------------------------------------------------ damage / telemetry
@@ -632,6 +826,12 @@ export function writeVehicleTelemetryExt(vehicle: VehicleRuntime): Float32Array 
     if (es.oilLevel < LOW_OIL) e |= EXT_ENGINE_LOW_OIL;
     out[X.engineBits] = e;
   }
+  let dl = 0;
+  for (let w = 0; w < wheels.length; w++) {
+    const c = wheels[w]!.corner;
+    if (c >= 0 && c < 4 && d.shaftBroken[w] !== 0) dl |= CORNER_BIT[c]!;
+  }
+  out[X.drivelineBits] = dl;
   return out;
 }
 

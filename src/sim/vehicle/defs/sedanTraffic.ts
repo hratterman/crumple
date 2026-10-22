@@ -604,6 +604,8 @@ const TRUNK_REST_K = 1e5;
  * 6000 rpm, ~200 kW, and could not hold 200 km/h against drag + rolling).
  */
 const DRIVETRAIN: DrivetrainDef = {
+  // R-PHYS: halfshaft / CV strength ≈ 2.2 × the peak 1st-gear wheel torque per side (as the sedan)
+  halfshaftBreakTorque: 5100,
   // R-PHYS engine systems (engineSystems.ts): fuel, cooling, oil, stall / starter
   engine: { displacementL: 3.0, fuel: 'petrol', tankL: 60 },
   torqueCurve: [
@@ -636,6 +638,8 @@ const DRIVETRAIN: DrivetrainDef = {
   autoShiftDownRpm: 2600,
   diff: 'limited',
   diffLockTorque: 400,
+  // R-PHYS: clutch-pack LSD (Salisbury): 80 N·m preload, 40 % power / 25 % coast locking (TBR 2.3 / 1.7)
+  lsd: { preload: 80, powerRamp: 0.4, coastRamp: 0.25 },
   clutchMaxTorque: 550,
   transmission: 'auto',
   // Driven-wheel excess slip over the undriven reference before TC cuts in.
@@ -1407,7 +1411,8 @@ function buildSedanTraffic(): { def: VehicleDef; design: SedanTrafficDesign } {
     wheels,
     drivetrain: DRIVETRAIN,
     brakes: { frontBias: 0.6, handbrakeTorqueMax: 1500, abs: true, esc: true },
-    aero: { dragCoeffArea: 0.65, liftCoeffArea: 0.08 },
+    // R-PHYS: lift per axle (as the sedan; Hucho, "Aerodynamics of Road Vehicles" 1998)
+    aero: { dragCoeffArea: 0.65, liftCoeffArea: 0.08, liftFront: 0.06, liftRear: 0.02 },
     // R-PHYS: asymmetric digressive dampers (dampers.ts: rebound 2.6 : 1 bump, knee 0.1 m/s)
     dampers: { front: true, rear: true },
     steering: { maxWheelAngleDeg: round((SEDAN_TRAFFIC_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },

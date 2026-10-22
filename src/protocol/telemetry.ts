@@ -160,7 +160,7 @@ export function readVehicleTelemetry(t: ArrayLike<number>, out: VehicleTelemetry
  * | 12    | radiatorDamage  | 0..1 (coolant leak rate ∝)                                               |
  * | 13    | powerFactor     | 0..1, over-temperature derate of full-load torque                       |
  * | 14    | fuelTank        | litres, tank capacity                                                    |
- * | 15    | (spare)         | 0                                                                        |
+ * | 15    | drivelineBits   | broken halfshaft bitmask per corner FL=1 FR=2 RL=4 RR=8 (as f32)         |
  */
 export const VehicleTelemetryExt = {
   brakeTempFL: 0,
@@ -178,6 +178,7 @@ export const VehicleTelemetryExt = {
   radiatorDamage: 12,
   powerFactor: 13,
   fuelTank: 14,
+  drivelineBits: 15,
 } as const;
 export const BRAKE_TEMP_SLOTS: readonly number[] = [0, 1, 2, 3];
 /** assistBits: ABS / ESC / TC intervening this tick, and switched on (and fitted). */
@@ -213,6 +214,7 @@ export interface VehicleTelemetryExtFrame {
   powerFactor: number;
   assistBits: number;
   engineBits: number;
+  drivelineBits: number;
 }
 
 export function createVehicleTelemetryExtFrame(): VehicleTelemetryExtFrame {
@@ -230,6 +232,7 @@ export function createVehicleTelemetryExtFrame(): VehicleTelemetryExtFrame {
     powerFactor: 0,
     assistBits: 0,
     engineBits: 0,
+    drivelineBits: 0,
   };
 }
 
@@ -253,5 +256,6 @@ export function readVehicleTelemetryExt(t: ArrayLike<number> | null, out: Vehicl
   out.powerFactor = extAt(t, X.powerFactor);
   out.assistBits = Math.round(extAt(t, X.assistBits));
   out.engineBits = Math.round(extAt(t, X.engineBits));
+  out.drivelineBits = Math.round(extAt(t, X.drivelineBits));
   return out;
 }

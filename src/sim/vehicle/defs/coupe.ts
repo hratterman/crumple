@@ -466,6 +466,8 @@ const TRUNK_REST_K = 1e5;
  * 6th tops out near 290 km/h, 7th is a cruise overdrive.
  */
 const DRIVETRAIN: DrivetrainDef = {
+  // R-PHYS: halfshaft / CV strength ≈ 2.2 × the peak 1st-gear wheel torque per side (520 × 2.75 × 3.45 / 2 = 2470)
+  halfshaftBreakTorque: 5400,
   // R-PHYS engine systems (engineSystems.ts): fuel, cooling, oil, stall / starter
   engine: { displacementL: 4.0, fuel: 'petrol', tankL: 70 },
   torqueCurve: [
@@ -493,6 +495,8 @@ const DRIVETRAIN: DrivetrainDef = {
   autoShiftDownRpm: 2800,
   diff: 'limited',
   diffLockTorque: 600,
+  // R-PHYS: clutch-pack LSD: 150 N·m preload, 50 % power / 30 % coast locking (TBR 3.0 / 1.9)
+  lsd: { preload: 150, powerRamp: 0.5, coastRamp: 0.3 },
   clutchMaxTorque: 800,
   transmission: 'auto',
   // The soft tyre needs ~20 % slip for 0.65 g of drive (TC off: ~0.7 g with the rears spinning).
@@ -1336,7 +1340,8 @@ function buildCoupe(): { def: VehicleDef; design: CoupeDesign } {
     // × 1.95 m²) also caps v_max at ≈ 285 km/h (a 40 s run settles there, |r| < 0.02 rad/s):
     // at 0.58 it reached 288 km/h and slowly yawed off line (wheel speed far beyond the tread
     // hoop-tension cap, wheels.ts HOOP_OMEGA_MAX).
-    aero: { dragCoeffArea: 0.68, liftCoeffArea: -0.12 },
+    // R-PHYS: lift per axle (sports coupe with a rear spoiler: slight front lift, rear downforce; Hucho, "Aerodynamics of Road Vehicles" 1998)
+    aero: { dragCoeffArea: 0.68, liftCoeffArea: -0.12, liftFront: 0.03, liftRear: -0.15 },
     // R-PHYS: linear dampers for now. With any non-linear valving (dampers.ts) the 30 km/h side pole pulls
     // s5_hp_R 1–3 cm past the pole axis ≈ 0.4 s after contact (it already does at 31 km/h with these linear
     // dampers): a marginal pillar case for R-CRASH (CONTRACTS "R-PHYS ↔ R-CRASH"). Sports valving to fit then:

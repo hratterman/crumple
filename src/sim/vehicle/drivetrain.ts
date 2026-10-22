@@ -267,12 +267,17 @@ export interface DrivetrainStateEx extends DrivetrainState {
   /** Starter engaged this tick (1), seized engine (1: locked at 0 rpm). */
   cranking: number;
   seized: number;
+  /** R-PHYS: per wheel (declaration order) halfshaft broken (1) and the overload timer, s. */
+  shaftBroken: Uint8Array;
+  shaftOver: Float64Array;
   /** Starter torque limit, N·m. */
   starterTorque: number;
   /** Clutch assist (setAssists): true = automatic clutch in every mode; false = a manual box uses the clutch pedal only (it can stall). */
   clutchAssist: boolean;
 }
 
+/** Halfshaft overload time to failure, s (a torsional overload snaps the shaft or a CV joint at once). */
+export const SHAFT_BREAK_S = 0.01;
 /** Starter target speed, rpm (engineSystems.ts CRANK_RPM). */
 export const STARTER_RPM = 250;
 
@@ -322,6 +327,8 @@ export function createDrivetrainState(
     cranking: 0,
     seized: 0,
     starterTorque: 60,
+    shaftBroken: new Uint8Array(wheelInertia.length),
+    shaftOver: new Float64Array(wheelInertia.length),
     clutchAssist: true,
   };
 }
@@ -357,6 +364,8 @@ export function resetDrivetrainState(s: DrivetrainStateEx, dt: CompiledDrivetrai
   s.powerFactor = 1;
   s.cranking = 0;
   s.seized = 0;
+  s.shaftBroken.fill(0);
+  s.shaftOver.fill(0);
   s.diffPhi.fill(0);
 }
 
@@ -514,13 +523,26 @@ export const stepDrivetrain: StepDrivetrain = (
   let nAttached = 0;
   let omegaSum = 0;
   let inertiaSum = 0;
+  let nBroken = 0;
+  const broken = s.shaftBroken;
   for (let j = 0; j < driven.length; j++) {
     const w = driven[j]!;
     const wr = wheels[w]!;
     if (wr.detached !== 0) continue;
+    if (broken[w] !== 0) {
+      nBroken++;
+      continue;
+    }
     nAttached++;
     omegaSum += wr.omega;
     inertiaSum += inertia[w]!;
+  }
+  // R-PHYS broken halfshaft: its side of the differential spins free. An open (or viscous) diff then
+  // drives nothing; a clutch LSD passes only its preload to the good side; a locked axle drives it fully.
+  let brokenCap = Infinity;
+  if (nBroken > 0 && nAttached > 0) {
+    if (d.diff === DIFF_TYPE_ID.open || d.diff === DIFF_TYPE_ID.viscous) nAttached = 0;
+    else if (d.diff === DIFF_TYPE_ID.limited) brokenCap = d.lsd ? d.lsd.preload : d.diffLockTorque;
   }
   const omegaMean = nAttached > 0 ? omegaSum / nAttached : 0;
 
@@ -756,6 +778,10 @@ export const stepDrivetrain: StepDrivetrain = (
     const need = tEng + Ie * UPSHIFT_MIN_DECEL * sl;
     if (cap < need) cap = need < d.clutchMaxTorque ? need : d.clutchMaxTorque;
   }
+  if (brokenCap < Infinity && G !== 0) {
+    const c = brokenCap / (G < 0 ? -G : G);
+    if (cap > c) cap = c;
+  }
   let tClutch = 0;
   if (G !== 0 && nAttached > 0 && cap > 0) {
     const Iref = inertiaSum / (G * G);
@@ -807,7 +833,16 @@ export const stepDrivetrain: StepDrivetrain = (
     } else {
       const W = DIFF_W_DT / dt;
       const locked = d.diff === DIFF_TYPE_ID.locked;
-      const capD = locked ? LOCKED_DIFF_MAX_TORQUE : d.diffLockTorque;
+      const viscous = d.diff === DIFF_TYPE_ID.viscous;
+      // R-PHYS clutch-pack LSD: locking torque T_lock = preload + ramp·|input torque| (ramp by drive /
+      // overrun) is the most the pack can move between the two sides: T_hi − T_lo ≤ T_lock, ±T_lock/2 per wheel
+      const lsd = d.lsd;
+      let capD = locked ? LOCKED_DIFF_MAX_TORQUE : d.diffLockTorque;
+      if (lsd && !locked && !viscous) {
+        const tin = tWheels < 0 ? -tWheels : tWheels;
+        capD = 0.5 * (lsd.preload + (tWheels >= 0 ? lsd.powerRamp : lsd.coastRamp) * tin);
+      }
+      const cVisc = d.viscousCoeff ?? 0;
       let mean = 0;
       for (let j = 0; j < driven.length; j++) {
         const w = driven[j]!;
@@ -817,16 +852,22 @@ export const stepDrivetrain: StepDrivetrain = (
           continue;
         }
         const I = inertia[w]!;
-        const k = locked ? I * W * W : 0;
-        const c = 2 * DIFF_ZETA * I * W;
-        const kc = k * dt + c;
         const delta = wr.omega - omegaMean;
-        let t = -(k * phi[w]! + kc * delta) / (1 + (kc * dt) / I);
-        if (t > capD) t = capD;
-        else if (t < -capD) t = -capD;
+        let t: number;
+        if (viscous) {
+          // viscous coupling: shear torque ∝ the wheel's speed difference from the carrier (implicit in Δω)
+          t = -(cVisc * delta) / (1 + (cVisc * dt) / I);
+        } else {
+          const k = locked ? I * W * W : 0;
+          const c = 2 * DIFF_ZETA * I * W;
+          const kc = k * dt + c;
+          t = -(k * phi[w]! + kc * delta) / (1 + (kc * dt) / I);
+          if (t > capD) t = capD;
+          else if (t < -capD) t = -capD;
+        }
         if (locked) {
           let p = phi[w]! + dt * delta;
-          const pMax = capD / k;
+          const pMax = capD / (I * W * W);
           if (p > pMax) p = pMax;
           else if (p < -pMax) p = -pMax;
           phi[w] = p;
@@ -841,6 +882,22 @@ export const stepDrivetrain: StepDrivetrain = (
       for (let j = 0; j < driven.length; j++) {
         const wr = wheels[driven[j]!]!;
         if (wr.detached === 0) wr.driveTorque = share + wr.driveTorque - mean;
+      }
+    }
+  }
+
+  // ---- R-PHYS halfshaft overload: |drive torque| above the shaft's strength for SHAFT_BREAK_S breaks it
+  const tBreak = d.halfshaftBreakTorque;
+  if (tBreak !== undefined && tBreak > 0) {
+    for (let j = 0; j < driven.length; j++) {
+      const w = driven[j]!;
+      if (broken[w] !== 0) continue;
+      const t = wheels[w]!.driveTorque;
+      if ((t < 0 ? -t : t) > tBreak) {
+        s.shaftOver[w] = s.shaftOver[w]! + dt;
+        if (s.shaftOver[w]! >= SHAFT_BREAK_S) broken[w] = 1;
+      } else {
+        s.shaftOver[w] = 0;
       }
     }
   }

@@ -332,6 +332,9 @@ function compileDrivetrain(def: VehicleDef): CompiledDrivetrain {
     driveReaction: d.driveReaction ?? 'body',
     ...(d.engine ? { engine: { ...d.engine } } : {}),
     ...(d.speedLimitKmh ? { speedLimit: d.speedLimitKmh / 3.6 } : {}),
+    ...(d.lsd ? { lsd: { ...d.lsd } } : {}),
+    ...(d.viscousCoeff !== undefined ? { viscousCoeff: d.viscousCoeff } : {}),
+    ...(d.halfshaftBreakTorque !== undefined ? { halfshaftBreakTorque: d.halfshaftBreakTorque } : {}),
   };
 }
 

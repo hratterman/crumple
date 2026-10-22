@@ -461,8 +461,11 @@ const TAILGATE = {
  * truck at ≈ 190 km/h (contract: accel > 0 at 175, ≤ 0 at 200 km/h).
  */
 const DRIVETRAIN: DrivetrainDef = {
+  // R-PHYS: halfshaft / CV strength ≈ 2.2 × the peak 1st-gear wheel torque per side (550 × 3.4 × 4.1 / 2 = 3830)
+  halfshaftBreakTorque: 8400,
   // R-PHYS engine systems (engineSystems.ts): fuel, cooling, oil, stall / starter
-  engine: { displacementL: 5.0, fuel: 'petrol', tankL: 98 },
+  engine: { displacementL: 5.0, fuel: 'petrol', tankL: 98 , rock: false },
+  // R-PHYS: no engine rock yet: its body-on-frame ladder (7 kN·m/deg torsion) twisted under the propshaft torque and cost 1 s of 0–100 (frame stiffness: open)
   torqueCurve: [
     [0, 280],
     [700, 360],
@@ -492,6 +495,8 @@ const DRIVETRAIN: DrivetrainDef = {
   autoShiftDownRpm: 2300,
   diff: 'limited',
   diffLockTorque: 600,
+  // R-PHYS: Trac-Lok-style clutch LSD: 150 N·m preload, 43 % locking both ways (TBR 2.5)
+  lsd: { preload: 150, powerRamp: 0.43, coastRamp: 0.43 },
   clutchMaxTorque: 850,
   transmission: 'auto',
   tractionControl: 0.14,
@@ -1473,7 +1478,8 @@ function buildPickup(): { def: VehicleDef; design: PickupDesign } {
     wheels,
     drivetrain: DRIVETRAIN,
     brakes: { frontBias: 0.64, handbrakeTorqueMax: 2200, abs: true, esc: true },
-    aero: { dragCoeffArea: 1.45, liftCoeffArea: 0.1 },
+    // R-PHYS: lift per axle (full-size pickup; Hucho, "Aerodynamics of Road Vehicles" 1998)
+    aero: { dragCoeffArea: 1.45, liftCoeffArea: 0.1, liftFront: 0.07, liftRear: 0.03 },
     // R-PHYS: asymmetric digressive dampers (dampers.ts: rebound 2.6 : 1 bump, knee 0.1 m/s)
     dampers: { front: true, rear: true },
     steering: { maxWheelAngleDeg: round((PICKUP_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },

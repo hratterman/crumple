@@ -586,6 +586,8 @@ const TRUNK_REST_K = 5e4;
  * shifts, open diff, no TC; R-PHYS: a 0.72 overdrive 4th (≈ 3400 rpm at 100 km/h), drag-limited ≈ 175 km/h.
  */
 const DRIVETRAIN: DrivetrainDef = {
+  // R-PHYS: halfshaft / CV strength ≈ 2.2 × the peak 1st-gear wheel torque per side (150 × 3.2 × 4.42 / 2 = 1060)
+  halfshaftBreakTorque: 2300,
   // R-PHYS engine systems (engineSystems.ts): fuel, cooling, oil, stall / starter
   engine: { displacementL: 1.6, fuel: 'petrol', tankL: 45 },
   torqueCurve: [
@@ -1461,7 +1463,8 @@ function buildBeater(): { def: VehicleDef; design: BeaterDesign } {
     // (μ_slide ≈ 0.75) stopped from 100 km/h in ≈ 55 m
     brakes: { frontBias: 0.65, handbrakeTorqueMax: 1000, abs: true },
     // boxy, no glass, a cage in the wind: Cd·A ≈ 0.37 × 1.85 m²
-    aero: { dragCoeffArea: 0.68, liftCoeffArea: 0.1 },
+    // R-PHYS: lift per axle (1990s compact; Hucho, "Aerodynamics of Road Vehicles" 1998)
+    aero: { dragCoeffArea: 0.68, liftCoeffArea: 0.1, liftFront: 0.06, liftRear: 0.04 },
     // R-PHYS: asymmetric digressive dampers (dampers.ts: rebound 2.6 : 1 bump, knee 0.1 m/s)
     dampers: { front: true, rear: true },
     steering: { maxWheelAngleDeg: round((BEATER_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
