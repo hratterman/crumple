@@ -21,6 +21,9 @@ import { addCables, addDecals, addPuddles, addStrips, buildSigns, decalMaterial,
 import { Geo as GeoBuilder } from './geo';
 import { addAreaColliders, addAreaRecords, addAreaStrips, type AreaGeos, type GeoAt, type TextBoard } from './areas';
 
+/** Content batches farther than this (m, plan distance to the batch) stop casting shadows. */
+export const SHADOW_CASTER_M = 300;
+
 export interface WorldContentRendererOptions {
   lighting: LightingStack;
   patchMaterial: PatchMaterial;
@@ -75,8 +78,9 @@ export function createWorldContentRenderer(
     root.add(me);
   };
   // Mode-area solids, barriers and free-standing structures: the structure materials (+ painted), batched
-  // per AREA_CELL_M cell so off-screen cells frustum- and shadow-cull (tyre walls alone are ~150 k tris).
-  const AREA_CELL_M = 256;
+  // per AREA_CELL_M cell so off-screen cells frustum- and shadow-cull (tyre walls alone are ~150 k tris); 512 m
+  // keeps it to ≤ 5 draws per occupied cell.
+  const AREA_CELL_M = 512;
   const cells = new Map<string, AreaGeos>();
   const geoAt: GeoAt = (x, z) => {
     const key = `${Math.floor(x / AREA_CELL_M)},${Math.floor(z / AREA_CELL_M)}`;
@@ -95,6 +99,7 @@ export function createWorldContentRenderer(
   add(sg.tile, mats.tile, 'tile', false);
   add(sg.steel, mats.steel, 'steel');
   add(sg.lamp, mats.lamp, 'lamp', false);
+  const areaStart = root.children.length;
   for (const [key, g] of cells) {
     add(g.concrete, mats.concrete, `area:${key}:concrete`);
     add(g.concreteDark, mats.concreteDark, `area:${key}:concreteDark`);
@@ -102,6 +107,9 @@ export function createWorldContentRenderer(
     add(g.painted, mats.painted, `area:${key}:painted`);
     add(g.lamp, mats.lamp, `area:${key}:lamp`, false);
   }
+  // Shadow LOD: per-cell area batches cast shadows only near the camera (every caster costs a draw in
+  // each cascade it reaches; the far cascade sees the whole town).
+  const areaMeshes = root.children.slice(areaStart).filter((m) => (m as Mesh).castShadow) as Mesh[];
   if (sg.shade.vertexCount > 0) {
     // Shadow-only: writes nothing in the colour pass (one empty draw), casts in every cascade.
     const shadeMat = new MeshBasicMaterial({ colorWrite: false, depthWrite: false });
@@ -196,6 +204,11 @@ export function createWorldContentRenderer(
     stats,
     update(camera: Camera, simTimeS: number) {
       items?.update(camera, simTimeS);
+      const cp = camera.position;
+      for (const m of areaMeshes) {
+        const bs = m.geometry.boundingSphere ?? (m.geometry.computeBoundingSphere(), m.geometry.boundingSphere!);
+        m.castShadow = Math.hypot(bs.center.x - cp.x, bs.center.z - cp.z) - bs.radius < SHADOW_CASTER_M;
+      }
     },
     setQuality() {},
     dispose() {

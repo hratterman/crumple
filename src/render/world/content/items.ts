@@ -8,6 +8,11 @@
  * instanced lamp mesh whose colours follow signalAspect every frame.
  */
 import {
+  Float32BufferAttribute,
+  Matrix3,
+  Mesh,
+  Uint16BufferAttribute,
+  Uint32BufferAttribute,
   Color,
   DynamicDrawUsage,
   InstancedBufferAttribute,
@@ -16,7 +21,7 @@ import {
   MeshStandardMaterial,
   Quaternion,
   Vector3,
-  type BufferGeometry,
+  BufferGeometry,
   type Camera,
   type Group,
   type Material,
@@ -25,7 +30,7 @@ import type { ItemInstance } from '../../../world/content/types';
 import { signalAspect, SIGNAL_TICK_HZ, type SignalPlan } from '../../../world/signals';
 import { Geo, linear, type V3 } from './geo';
 
-const CELL_M = 192;
+const CELL_M = 384;
 /** Kinds whose variants are separate meshes (key `kind:variant`). */
 const VARIANT_KEYED = new Set(['parkedCar', 'boulder', 'litter', 'chevron']);
 
@@ -655,11 +660,15 @@ export function createItems(
     }
     return g;
   };
-  // group instances by (key, cell)
+  // Static furniture is MERGED (one mesh per material × shadow flag × draw-distance class × MERGE_CELL_M
+  // cell, instance transform + tint baked in): a town block of 30 kinds costs a handful of draws instead
+  // of one per kind and part. Dense natural detail stays instanced (vertex count).
+  const merged = mergeItems(root, items, defs, mats, groundAt);
+  // group instanced (detail) items by (key, cell)
   const groups = new Map<string, { key: string; list: ItemInstance[] }>();
   for (const it of items) {
     const key = VARIANT_KEYED.has(it.kind) ? `${it.kind}:${it.variant}` : it.kind;
-    if (!defs.has(key)) continue;
+    if (!defs.has(key) || !isDetail(key)) continue;
     const cx = Math.floor(it.pos[0] / CELL_M);
     const cz = Math.floor(it.pos[2] / CELL_M);
     const gk = `${key}|${cx}|${cz}`;
@@ -763,6 +772,12 @@ export function createItems(
         const d = Math.hypot(bs.center.x - cp.x, bs.center.z - cp.z) - bs.radius;
         m.visible = d < far[i]!;
       }
+      for (const b of merged) {
+        const bs = b.mesh.geometry.boundingSphere!;
+        const d = Math.hypot(bs.center.x - cp.x, bs.center.z - cp.z) - bs.radius;
+        b.mesh.visible = d < b.far;
+        b.mesh.castShadow = b.shadow && d < 300; // shadow LOD (see SHADOW_CASTER_M)
+      }
       if (lampMesh) {
         const tick = Math.floor(simTimeS * SIGNAL_TICK_HZ);
         if (tick === lastTick) return;
@@ -784,6 +799,10 @@ export function createItems(
     dispose() {
       for (const gs of geoCache.values()) for (const g of gs) g.dispose();
       for (const m of meshes) m.removeFromParent();
+      for (const b of merged) {
+        b.mesh.geometry.dispose();
+        b.mesh.removeFromParent();
+      }
       if (lampMesh) {
         lampMesh.geometry.dispose();
         (lampMesh.material as Material).dispose();
@@ -794,3 +813,98 @@ export function createItems(
 }
 
 void Y;
+
+const MERGE_CELL_M = 512;
+/** Natural detail kinds: many instances of a few hundred vertices each — instanced, short draw distance. */
+function isDetail(key: string): boolean {
+  return key === 'flowers' || key === 'tussock' || key === 'stones' || key.startsWith('litter:');
+}
+
+/** Instance transform of an item (shared by the merged and the instanced paths). */
+function itemMatrix(key: string, it: ItemInstance, groundAt: (x: number, z: number) => number, out: Matrix4): Matrix4 {
+  const yaw = Math.atan2(-it.dir[0], -it.dir[1]);
+  const q = new Quaternion(0, Math.sin(yaw / 2), 0, Math.cos(yaw / 2));
+  const y = it.pos[1] !== 0 ? it.pos[1] : groundAt(it.pos[0], it.pos[2]);
+  const sv = key === 'awning' ? new Vector3(it.scale, 1, 1) : key === 'signalMast' ? new Vector3(it.scale - 0.6, 1, 1) : new Vector3(it.scale, it.scale, it.scale);
+  return out.compose(new Vector3(it.pos[0], y, it.pos[2]), q, sv);
+}
+
+interface MergedBucket {
+  mesh: Mesh;
+  far: number;
+  shadow: boolean;
+}
+
+function mergeItems(
+  root: Group,
+  items: readonly ItemInstance[],
+  defs: Map<string, KindDef>,
+  mats: { paint: Material; metal: Material; glass: Material; emissive: Material },
+  groundAt: (x: number, z: number) => number,
+): MergedBucket[] {
+  interface Acc {
+    pos: number[];
+    nrm: number[];
+    uv: number[];
+    col: number[];
+    idx: number[];
+    material: Part['material'];
+    shadow: boolean;
+    far: number;
+  }
+  const acc = new Map<string, Acc>();
+  const m4 = new Matrix4();
+  const nm = new Matrix3();
+  const v = new Vector3();
+  const tint = new Color();
+  for (const it of items) {
+    const key = VARIANT_KEYED.has(it.kind) ? `${it.kind}:${it.variant}` : it.kind;
+    const def = defs.get(key);
+    if (!def || isDetail(key)) continue;
+    itemMatrix(key, it, groundAt, m4);
+    nm.getNormalMatrix(m4);
+    // two draw-distance classes: small street furniture (≤ 300 m, no shadow casting: its shadow is a
+    // few pixels, and every caster costs a draw per cascade) and everything farther-reaching
+    const cls = def.far <= 300 ? 0 : 1;
+    const cx = Math.floor(it.pos[0] / MERGE_CELL_M);
+    const cz = Math.floor(it.pos[2] / MERGE_CELL_M);
+    for (const p of def.parts) {
+      const shadow = cls === 1 && def.shadows && p.material !== 'emissive' && p.material !== 'glass';
+      const bk = `${p.material}|${shadow ? 1 : 0}|${cls}|${cx}|${cz}`;
+      let a = acc.get(bk);
+      if (!a) acc.set(bk, (a = { pos: [], nrm: [], uv: [], col: [], idx: [], material: p.material, shadow, far: 0 }));
+      a.far = Math.max(a.far, def.far);
+      const g = p.geo;
+      const base = a.pos.length / 3;
+      if (p.tint) tint.set(it.color ?? 0xffffff).convertSRGBToLinear();
+      else tint.setRGB(1, 1, 1);
+      for (let i = 0; i < g.pos.length; i += 3) {
+        v.set(g.pos[i]!, g.pos[i + 1]!, g.pos[i + 2]!).applyMatrix4(m4);
+        a.pos.push(v.x, v.y, v.z);
+        v.set(g.nrm[i]!, g.nrm[i + 1]!, g.nrm[i + 2]!).applyMatrix3(nm).normalize();
+        a.nrm.push(v.x, v.y, v.z);
+        a.col.push((g.col[i] ?? 1) * tint.r, (g.col[i + 1] ?? 1) * tint.g, (g.col[i + 2] ?? 1) * tint.b);
+      }
+      for (let i = 0; i < g.uv.length; i++) a.uv.push(g.uv[i]!);
+      for (const k of g.idx) a.idx.push(base + k);
+    }
+  }
+  const out: MergedBucket[] = [];
+  for (const [bk, a] of acc) {
+    const geo = new BufferGeometry();
+    geo.setAttribute('position', new Float32BufferAttribute(a.pos, 3));
+    geo.setAttribute('normal', new Float32BufferAttribute(a.nrm, 3));
+    geo.setAttribute('uv', new Float32BufferAttribute(a.uv, 2));
+    geo.setAttribute('color', new Float32BufferAttribute(a.col, 3));
+    geo.setIndex(a.pos.length / 3 > 65535 ? new Uint32BufferAttribute(a.idx, 1) : new Uint16BufferAttribute(a.idx, 1));
+    geo.computeBoundingSphere();
+    const mesh = new Mesh(geo, mats[a.material]);
+    mesh.name = `worldContent:items:${bk}`;
+    mesh.castShadow = a.shadow;
+    mesh.receiveShadow = true;
+    mesh.matrixAutoUpdate = false;
+    root.add(mesh);
+    out.push({ mesh, far: a.far, shadow: a.shadow });
+  }
+  return out;
+}

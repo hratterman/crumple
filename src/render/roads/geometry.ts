@@ -52,8 +52,8 @@ export const RIBBON_LODS: readonly RibbonLod[] = [
   { stationStep: 2, carriageStep: 2.5, vergeStep: 1.5, fringeSlots: 2 },
   { stationStep: 4, carriageStep: 8, vergeStep: 4, fringeSlots: 1 },
 ];
-/** Stations per piece (piece ≈ 96 m of arc): the culling / LOD unit. */
-export const PIECE_STATIONS = 48;
+/** Stations per piece (piece ≈ 192 m of arc): the culling / LOD unit (layout v6: 96 → 192 m halves the road draws on the 2560 m map). */
+export const PIECE_STATIONS = 96;
 /** Closed roads scale v so the loop length is a multiple of this (texture/dash continuity). */
 export const V_PERIOD_M = 48;
 /** The fringe's outer row sits this far BELOW the terrain (tucked, alpha 0). */

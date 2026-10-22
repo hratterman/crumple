@@ -914,6 +914,9 @@ export function colliderGroups(resolved: readonly ResolvedCollider[]): Group[] {
  * Builds the meshes for `resolved` colliders (call again with a new set; P5
  * breakables will swap meshes per id). Materials are patched with CSM.
  */
+/** Batches farther than this (m, plan distance to their bounds) stop casting shadows. */
+export const COLLIDER_SHADOW_M = 300;
+
 export function createColliderRenderer(ctx: RenderContext, resolved: readonly ResolvedCollider[], opts: ColliderRendererOptions): ColliderRenderer {
   let maxAniso = 8;
   try {
@@ -962,9 +965,20 @@ export function createColliderRenderer(ctx: RenderContext, resolved: readonly Re
     root.add(me);
   }
 
+  // Shadow LOD (layout v6 draw budget): a merged batch casts only while the camera is within
+  // SHADOW_CASTER_M of its plan bounds (each caster costs a draw in every cascade it reaches).
+  const casters = root.children.filter((o) => (o as Mesh).castShadow) as Mesh[];
   return {
     object: root,
-    update() {},
+    update(camera: Camera) {
+      const p = camera.position;
+      for (const m of casters) {
+        const b = m.geometry.boundingBox!;
+        const dx = Math.max(b.min.x - p.x, 0, p.x - b.max.x);
+        const dz = Math.max(b.min.z - p.z, 0, p.z - b.max.z);
+        m.castShadow = dx * dx + dz * dz < COLLIDER_SHADOW_M * COLLIDER_SHADOW_M;
+      }
+    },
     setQuality() {},
     dispose() {
       root.traverse((o) => {

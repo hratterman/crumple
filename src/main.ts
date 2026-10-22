@@ -1993,6 +1993,7 @@ async function boot(): Promise<void> {
     prof.lap('vegetation');
     // Layout v6 world content: item draw distances + signal heads (presented sim time).
     contentR.update(camera, worldFrame.simTime);
+    collidersR.update(camera);
     prof.lap('worldContent');
     fxR.update(worldFrame);
     prof.lap('fx');

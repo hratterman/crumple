@@ -40,6 +40,11 @@ export { buildRoadRibbons } from './geometry';
 
 /** LOD switch distances (camera → piece sphere surface, m) before lodBias. */
 export const ROAD_LOD_DISTANCES: readonly number[] = [140, 360];
+/**
+ * Layout v6: pieces farther than this (m, every preset) are not drawn — the terrain under a ribbon
+ * is painted in the road's material, so a far road still reads; saves ~100 draws in town.
+ */
+export const ROAD_DRAW_DISTANCE_M = 550;
 const LOD_HYSTERESIS = 0.1;
 
 export interface RoadRendererStats {
@@ -151,6 +156,7 @@ export function createRoadRenderer(
     camera.getWorldPosition(camPos);
     stats.lodCounts.fill(0);
     stats.triangles = 0;
+    stats.visiblePieces = 0;
     for (const p of pieces) {
       const d = Math.max(0, camPos.distanceTo(p.center) - p.radius);
       const maxLod = Math.min(ROAD_LOD_DISTANCES.length, p.lods.length - 1);
@@ -161,6 +167,10 @@ export function createRoadRenderer(
         p.lod = lod;
         p.mesh.geometry = p.lods[lod]!;
       }
+      const show = d < ROAD_DRAW_DISTANCE_M;
+      p.mesh.visible = show;
+      if (!show) continue;
+      stats.visiblePieces++;
       stats.lodCounts[lod] = (stats.lodCounts[lod] ?? 0) + 1;
       stats.triangles += p.tris[lod]!;
     }

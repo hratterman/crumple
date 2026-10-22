@@ -96,7 +96,7 @@ const sampler = createTerrainSampler(terrain);
 describe('road ribbons: conforming geometry', () => {
   // Straight → R60 left-hand arc → straight, densely sampled (smooth tangents).
   const pts: [number, number][] = [];
-  for (let x = -90; x < -20; x += 1) pts.push([x, -60]);
+  for (let x = -260; x < -20; x += 1) pts.push([x, -60]); // ≥ 2 pieces of PIECE_STATIONS
   for (let a = 0; a <= 90; a += 1) {
     const t = (a * Math.PI) / 180;
     pts.push([-20 + 60 * Math.sin(t), -60 - 60 * (1 - Math.cos(t))]);
@@ -340,5 +340,5 @@ describe('road ribbons: default map', () => {
     expect(rb.junctions.partners[ring]!.every((p) => !p.beatsMe)).toBe(true);
     const main = ids.indexOf('mainStreet');
     expect(rb.junctions.partners[main]!.filter((p) => p.beatsMe).length).toBe(4);
-  });
+  }, 60_000); // layout v6: ribbons for every road of the 2560 m map (≈ 5 s on a loaded box)
 });
