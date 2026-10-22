@@ -645,6 +645,16 @@ export interface WheelRuntime {
    * reacting on the upright. Additive, optional.
    */
   extraTorque?: number;
+  /**
+   * R-TYRE combined slip (wheels.ts applyTreadBrush; additive, optional, 0 when
+   * absent): the patch's longitudinal friction utilisation Σ|F_lon|/Σ μ_x·N
+   * and its sliding fraction (load-weighted share of tread nodes whose stick
+   * slid), both from the last ground pass, low-passed over 10 ms.
+   */
+  patchLon?: number;
+  patchSlide?: number;
+  /** R-TYRE: the contact nodes' mean longitudinal sliding speed, m/s (load-weighted, low-passed 10 ms). */
+  patchUx?: number;
 }
 
 export interface DrivetrainState {

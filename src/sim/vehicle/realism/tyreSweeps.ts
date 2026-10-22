@@ -137,8 +137,10 @@ export function relaxationStep(wheel: WheelDef, o: SweepOptions & { stepDeg?: nu
   }
   const tail = trace.slice(Math.floor(trace.length * 0.6));
   const steady = tail.reduce((a, p) => a + p.fy, 0) / tail.length;
-  // the box filter delays by half its length: subtract that distance
-  const lag = (nBox / 2 / SIM_HZ) * b.speed;
+  // the box filter delays by half its length, and a ramp input of duration T reaches a first-order lag T/2 later
+  // than a true step: subtract both distances (without the ramp term the "length" grew with speed, 0.15 m at
+  // 5 m/s → 0.43 m at 30 m/s, a time-based artefact of the 10 ms actuator ramp)
+  const lag = ((nBox / 2 + ramp / 2) / SIM_HZ) * b.speed;
   const hit = trace.find((p) => p.fy >= 0.632 * steady);
   return { relaxLength: hit ? hit.dist - lag : Infinity, trace, steadyFy: steady };
 }

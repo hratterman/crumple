@@ -44,8 +44,9 @@ const CASES: Case[] = [
   { name: 'beater', def: BEATER, probes: BEATER_CRASH_PROBES, ring: [0.02, 0.045], rebound: [0.15, 0.1] },
   { name: 'traffic sedan', def: SEDAN_TRAFFIC, probes: SEDAN_TRAFFIC_CRASH_PROBES, ring: [0.01, 0.025], rebound: [0.23, 0.17] },
   // R-PHYS: the truck's 100 km/h ring is chaotic too (the cab lands on wheels spinning at road speed): 97 / 98.5 /
-  // 100 / 101.5 / 103 km/h read 2.4 / 2.8 / 3.8 / 3.0 / 7.6 cm with the recalibrated rolling-loss tables.
-  { name: 'box truck', def: BOXTRUCK, probes: BOXTRUCK_CRASH_PROBES as unknown as CrashProbes, ring: [0.02, 0.08], rebound: [0.17, 0.07] },
+  // 100 / 101.5 / 103 km/h read 2.4 / 2.8 / 3.8 / 3.0 / 7.6 cm with the recalibrated rolling-loss tables. R-TYRE: rebound 0.07 → 0.08: the truck rolls back off the
+  // wall on spinning, sliding tyres, and with the per-node friction ellipse the same build read 7.3 % (before 6.8 %).
+  { name: 'box truck', def: BOXTRUCK, probes: BOXTRUCK_CRASH_PROBES as unknown as CrashProbes, ring: [0.02, 0.08], rebound: [0.17, 0.08] },
 ];
 
 describe('post-crash settling (rigid wall frontal)', () => {

@@ -288,6 +288,9 @@ export function resetVehicleRuntime(vehicle: VehicleRuntime): void {
     w.brakeTorque = 0;
     w.treadLoad.fill(0);
     w.treadBrush.fill(0);
+    w.patchLon = 0;
+    w.patchSlide = 0;
+    w.patchUx = 0;
   }
   resetDrivetrainState(vehicle.drivetrain as DrivetrainStateEx, vehicle.vehicle.drivetrain);
   const bs = (vehicle as VehicleRuntimeEx).brakeSys;
@@ -827,5 +830,8 @@ export function recoverVehicle(
     w.slipSpeed = 0;
     w.treadLoad.fill(0);
     w.treadBrush.fill(0);
+    w.patchLon = 0;
+    w.patchSlide = 0;
+    w.patchUx = 0;
   }
 }
