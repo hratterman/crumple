@@ -117,7 +117,8 @@ export function sweepClass(c: TyreClass, opts: { relaxTrace?: boolean } = {}): T
 
 export function sweepWheel(wheel: WheelDef, fz0: number, opts: { relaxTrace?: boolean; materialId?: number } = {}): TyreCurves {
   const m = opts.materialId;
-  const lat = LOAD_FACTORS.map((f) => lateralSweep(wheel, { load: fz0 * f, maxDeg: 20, materialId: m }));
+  // 2°/s: quasi-static for a 0.5–1 m relaxation length at 15 m/s (lag ≈ 0.07–0.13°)
+  const lat = LOAD_FACTORS.map((f) => lateralSweep(wheel, { load: fz0 * f, maxDeg: 20, rateDegS: 2, materialId: m }));
   const brake = longitudinalSweep(wheel, { load: fz0, kappaEnd: -0.8, materialId: m });
   const drive = longitudinalSweep(wheel, { load: fz0, kappaEnd: 0.5, materialId: m });
   const comb = longitudinalSweep(wheel, { load: fz0, kappaEnd: -0.5, alphaDeg: 5, materialId: m });
@@ -236,7 +237,16 @@ export function reduceCurves(c: TyreCurves): TyreMetrics {
       }
     }
     alpha95.push(a95);
-    const fy1 = at(lat, (q) => q.fy, alphaOf, 1);
+    // C_α: least-squares slope through the origin over 0.25–1.5° (a single point at 1° carries the ray-passage
+    // ripple: ±10 % on the 12-ray truck wheel at 15 m/s)
+    let sfa = 0;
+    let saa = 0;
+    for (const q of lat) {
+      if (q.alphaDeg < 0.25 || q.alphaDeg > 1.5) continue;
+      sfa += q.fy * q.alphaDeg;
+      saa += q.alphaDeg * q.alphaDeg;
+    }
+    const fy1 = saa > 0 ? sfa / saa : at(lat, (q) => q.fy, alphaOf, 1);
     const fz = lat[0]!.fz;
     caNdeg.push(fy1);
     caPerFz.push(fy1 / fz / DEG);

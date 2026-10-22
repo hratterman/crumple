@@ -316,6 +316,34 @@ export interface SetAssistsMsg {
   clutchAssist?: boolean;
 }
 /**
+ * R-TYRE (additive): the road surface water the tyres see — `wetness` 0..1
+ * (the R-GFX weather's surface water film) and `rain` 0..1 (intensity: the
+ * standing film on sealed surfaces, tyreSurface.ts waterDepth). Main sends it
+ * when either changed by > 0.02 (CONTRACTS "R-TYRE"); logged (replays
+ * reproduce the grip). Values are clamped to [0, 1].
+ */
+export interface SetSurfaceWetnessMsg {
+  type: 'setSurfaceWetness';
+  wetness: number;
+  rain: number;
+}
+/**
+ * R-TYRE (additive): tyre service on a vehicle. `wheel` = index in
+ * VehicleDef.wheels (omitted = every wheel). `pressureKpa` re-inflates /
+ * airs down to that cold gauge pressure (seals a slow leak); `puncture`
+ * opens a leak ('slow' nail, 'fast' cut, 'debead': the bead unseats — flat
+ * at once, the tread slips on the rim); `repair` = new, cold, sealed tyre at
+ * its design pressure. Non-vehicle ids / bad wheels answer `error`. Logged.
+ */
+export interface SetTyreMsg {
+  type: 'setTyre';
+  objectId: number;
+  wheel?: number;
+  pressureKpa?: number;
+  puncture?: 'slow' | 'fast' | 'debead';
+  repair?: boolean;
+}
+/**
  * Recover (R): rigidly re-place the CURRENT (deformed) node set upright —
  * vehicle frame up → world +Y, heading kept — with its frame origin at
  * `pos` (default: current origin + 0.5 m up, ground-clearance adjusted),
@@ -569,6 +597,8 @@ export type MainToWorker =
   | SpawnVehicleMsg
   | SetTransmissionMsg
   | SetAssistsMsg
+  | SetSurfaceWetnessMsg
+  | SetTyreMsg
   | RecoverMsg
   | GroundHeightfieldCmd
   | SetCollidersMsg

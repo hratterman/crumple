@@ -85,6 +85,10 @@ export const WHEEL_TUNING_205_55R16 = {
   tyreSlideSlip: 0.5,
   // μ_y/μ_x: summer car tyres corner at ≈ 0.85–0.95 of their braking μ (skidpad ≈ 0.9 g vs ABS ≈ 1.0 g)
   tyreLateralMu: 0.85,
+  // R-TYRE: 2.3 bar cold (placard of a mid-size sedan), summer road compound, 8 mm new tread
+  tyrePressure: 230,
+  tyreCompound: 'road',
+  tyreTreadDepth: 8,
 } as const satisfies Partial<WheelDef>;
 
 function fail(wheel: string, msg: string): never {

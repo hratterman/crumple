@@ -90,6 +90,10 @@ export const COUPE_TYRE = {
   tireContactSpring: 8e4,
   // R-PHYS: 8.5e4 → 1.9e5: a 255/35R19-class performance tyre, C_α/Fz ≈ 18–22/rad, peak ≈ 5–7°
   treadBrushStiffness: 1.9e5,
+  // R-TYRE: 2.5 bar, max-performance summer compound (warmer window), 7 mm new
+  tyrePressure: 250,
+  tyreCompound: 'performance',
+  tyreTreadDepth: 7,
   treadBrushDamping: 30,
   rimHoopTension: 1,
   treadHoopTension: 0.5,

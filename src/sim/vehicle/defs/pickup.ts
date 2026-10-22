@@ -80,6 +80,9 @@ export const PICKUP_TIRE = {
   tireNodeRadius: 0.05,
   tireContactSpring: 7e4,
   treadBrushStiffness: 1.05e5,
+  // R-TYRE: LT load range E at 3.0 bar (an unladen crew-cab's placard), all-terrain road compound, 11 mm new
+  tyrePressure: 300,
+  tyreTreadDepth: 11,
   treadBrushDamping: 45,
   rimHoopTension: 1,
   treadHoopTension: 0.5,

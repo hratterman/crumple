@@ -6,7 +6,7 @@
  * (no DataView anywhere). Byte order is the platform's (little-endian on all
  * supported targets); worker and main always share it.
  *
- *   [header][objects][impacts][beamBreaks][skids][nodes][strains?][broken][traffic]
+ *   [header][objects][impacts][beamBreaks][skids][nodes][strains?][broken][traffic][wheels]
  *
  * P4 additive: the `broken` bitset section (always present, header flag
  * SNAPSHOT_FLAG_BROKEN_BEAMS, offset at HDR_BROKEN_OFFSET_BYTE) and the
@@ -21,6 +21,10 @@
  * header flag SNAPSHOT_FLAG_VEHICLE_EXT, offset at HDR_VEHICLE_EXT_OFFSET_BYTE;
  * slots in telemetry.ts VehicleTelemetryExt). Same rule.
  *
+ * R-TYRE additive: the `wheels` section (always present, header flag
+ * SNAPSHOT_FLAG_WHEELS, offset/count at HDR_WHEELS_*; records in wheels.ts):
+ * tyre pressure / temperatures / tread / grip per vehicle wheel (TPMS).
+ *
  * Fixed-size sections (header, objects, events) come first; their byte
  * offsets depend only on maxObjects. The header ALSO stores every section
  * offset, so a reader never needs the capacities to decode.
@@ -31,6 +35,7 @@
  * Section offsets are in bytes; divide by 4 for u32/f32 word indices.
  */
 import { TRAFFIC_MAX_AGENTS, TRAFFIC_RECORD_BYTES } from './traffic';
+import { WHEEL_SECTION_BYTES } from './wheels';
 import {
   BEAM_BREAK_BYTES,
   BEAM_BREAK_CAPACITY,
@@ -94,7 +99,14 @@ export const HDR_WORKER_LOAD_BYTE = 116;
  * telemetry.ts `VehicleTelemetryExt`. Non-vehicles: all zeros.
  */
 export const HDR_VEHICLE_EXT_OFFSET_BYTE = 120;
-// bytes 120..127 reserved (zero)
+/**
+ * R-TYRE additive: u32 byte offset of the WHEEL section (0 = absent: pre-R-TYRE
+ * writer). The section starts with WHEEL_SECTION_HEADER_BYTES (u32 0 = the
+ * records written this snapshot, ≤ WHEEL_SECTION_RECORDS; the rest zero), then
+ * the records (wheels.ts).
+ */
+export const HDR_WHEELS_OFFSET_BYTE = 124;
+// (the 128-byte header is now fully assigned)
 
 export const HDR_U32_MAGIC = HDR_MAGIC_BYTE >> 2;
 export const HDR_U32_VERSION = HDR_VERSION_BYTE >> 2;
@@ -126,6 +138,7 @@ export const HDR_U32_TRAFFIC_OFFSET = HDR_TRAFFIC_OFFSET_BYTE >> 2;
 export const HDR_U32_TRAFFIC_COUNT = HDR_TRAFFIC_COUNT_BYTE >> 2;
 export const HDR_F32_WORKER_LOAD = HDR_WORKER_LOAD_BYTE >> 2;
 export const HDR_U32_VEHICLE_EXT_OFFSET = HDR_VEHICLE_EXT_OFFSET_BYTE >> 2;
+export const HDR_U32_WHEELS_OFFSET = HDR_WHEELS_OFFSET_BYTE >> 2;
 
 /** Header flag bits. */
 export const SNAPSHOT_FLAG_DEBUG_STRAINS = 1 << 0;
@@ -135,6 +148,8 @@ export const SNAPSHOT_FLAG_BROKEN_BEAMS = 1 << 1;
 export const SNAPSHOT_FLAG_TRAFFIC = 1 << 2;
 /** R-PHYS additive: the vehicle ext telemetry section is present (always set by R-PHYS writers). */
 export const SNAPSHOT_FLAG_VEHICLE_EXT = 1 << 3;
+/** R-TYRE additive: the wheel section is present (always set by R-TYRE writers; count may be 0). */
+export const SNAPSHOT_FLAG_WHEELS = 1 << 4;
 
 // ============================================================ objects
 /**
@@ -255,6 +270,8 @@ export interface SnapshotLayout {
   trafficOffset: number;
   /** R-PHYS additive: vehicle ext telemetry, maxObjects × VEHICLE_EXT_SLOTS f32 (always present). */
   vehicleExtOffset: number;
+  /** R-TYRE additive: wheel records (always present). */
+  wheelsOffset: number;
   totalBytes: number;
 }
 
@@ -279,7 +296,8 @@ export function computeSnapshotLayout(
   const brokenOffset = strainsEnd;
   const trafficOffset = alignUp(brokenOffset + brokenSectionBytes(beamCapacity));
   const vehicleExtOffset = alignUp(trafficOffset + TRAFFIC_SECTION_BYTES);
-  const totalBytes = alignUp(vehicleExtOffset + maxObjects * VEHICLE_EXT_SLOTS * 4);
+  const wheelsOffset = alignUp(vehicleExtOffset + maxObjects * VEHICLE_EXT_SLOTS * 4);
+  const totalBytes = alignUp(wheelsOffset + WHEEL_SECTION_BYTES);
   return {
     maxObjects,
     nodeCapacity,
@@ -294,6 +312,7 @@ export function computeSnapshotLayout(
     brokenOffset,
     trafficOffset,
     vehicleExtOffset,
+    wheelsOffset,
     totalBytes,
   };
 }

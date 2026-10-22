@@ -48,6 +48,9 @@ export const WHEEL_TUNING_BEATER_10 = {
   rays: 10,
   // R-PHYS: a 175/70R13-class budget tyre: C_α/Fz ≈ 13–14/rad (bench)
   treadBrushStiffness: 1e5,
+  // R-TYRE: 2.2 bar, budget road compound, 7.5 mm new
+  tyrePressure: 220,
+  tyreTreadDepth: 7.5,
   treadBrushDamping: WHEEL_TUNING_205_55R16.treadBrushDamping * RAY_SCALE,
   tireRingSpring: WHEEL_TUNING_205_55R16.tireRingSpring * RAY_SCALE,
   tireRingDamp: WHEEL_TUNING_205_55R16.tireRingDamp * RAY_SCALE,

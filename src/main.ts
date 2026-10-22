@@ -274,6 +274,8 @@ let terrain: TerrainData | null = null;
 let sampler: TerrainSampler | null = null;
 let quality: QualityController | null = null;
 let post: PostStack | null = null;
+/** R-TYRE: the surface water last sent to the worker (setSurfaceWetness). */
+const tyreWater = { wetness: 0, rain: 0 };
 /** R-GFX: the world lighting stack (time of day + weather live on `lightingStack.env`). */
 let lightingStack: LightingStack | null = null;
 /** R-GFX night lights (light grid + the player's shadowed headlights), null before boot. */
@@ -1898,6 +1900,16 @@ async function boot(): Promise<void> {
     prof.lap('camera');
     // R-GFX: time of day advances with the world (frozen while paused or replaying)
     lighting.env?.advance(paused || replay.active ? 0 : dt);
+    // R-TYRE: the weather's surface water reaches the tyres as a LOGGED command (replays reproduce the grip), only
+    // when it moved by > 0.02 and never while replaying (main sends no commands then)
+    if (!replay.active && lighting.env) {
+      const wx = lighting.env.weather;
+      if (Math.abs(wx.wetness - tyreWater.wetness) > 0.02 || Math.abs(wx.rain - tyreWater.rain) > 0.02) {
+        tyreWater.wetness = wx.wetness;
+        tyreWater.rain = wx.rain;
+        client.setSurfaceWetness(wx.wetness, wx.rain);
+      }
+    }
     lighting.update(camera);
     updateNearCasters(lighting);
     prof.lap('csm');

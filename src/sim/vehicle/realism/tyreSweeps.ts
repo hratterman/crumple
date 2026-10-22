@@ -53,6 +53,8 @@ export interface SweepOptions {
   speed?: number;
   camberDeg?: number;
   materialId?: number;
+  wetness?: number;
+  rain?: number;
 }
 
 /**
@@ -61,7 +63,7 @@ export interface SweepOptions {
  * point per 20 ms.
  */
 export function lateralSweep(wheel: WheelDef, o: SweepOptions & { maxDeg?: number; rateDegS?: number }): TyrePoint[] {
-  const b = createTyreBench(wheel, { load: o.load, speed: o.speed ?? 15, camber: (o.camberDeg ?? 0) * DEG, materialId: o.materialId });
+  const b = createTyreBench(wheel, { load: o.load, speed: o.speed ?? 15, camber: (o.camberDeg ?? 0) * DEG, materialId: o.materialId, wetness: o.wetness, rain: o.rain });
   const max = (o.maxDeg ?? 20) * DEG;
   const rate = (o.rateDegS ?? 4) * DEG;
   const per = Math.round(SIM_HZ * 0.02);
@@ -85,7 +87,7 @@ export function longitudinalSweep(
   wheel: WheelDef,
   o: SweepOptions & { kappaEnd: number; rate?: number; alphaDeg?: number },
 ): TyrePoint[] {
-  const b = createTyreBench(wheel, { load: o.load, speed: o.speed ?? 15, materialId: o.materialId });
+  const b = createTyreBench(wheel, { load: o.load, speed: o.speed ?? 15, materialId: o.materialId, wetness: o.wetness, rain: o.rain });
   b.alpha = (o.alphaDeg ?? 0) * DEG;
   // let the lateral force build at the fixed slip angle first
   if (b.alpha !== 0) averaged(b, Math.round(0.3 * SIM_HZ));
@@ -116,7 +118,7 @@ export interface RelaxResult {
 
 /** Slip-angle step 0 → stepDeg at `speed`; relaxation length from the 63 % rise distance. */
 export function relaxationStep(wheel: WheelDef, o: SweepOptions & { stepDeg?: number }): RelaxResult {
-  const b = createTyreBench(wheel, { load: o.load, speed: o.speed ?? 15, materialId: o.materialId });
+  const b = createTyreBench(wheel, { load: o.load, speed: o.speed ?? 15, materialId: o.materialId, wetness: o.wetness, rain: o.rain });
   // Unaveraged per-tick trace (filtered lightly over a ray passage: 12 rays at 15 m/s ≈ 90 Hz).
   const d0 = b.dist;
   const target = (o.stepDeg ?? 2) * DEG;
@@ -147,7 +149,7 @@ export function relaxationStep(wheel: WheelDef, o: SweepOptions & { stepDeg?: nu
 
 /** Free-rolling longitudinal force at α = 0 (rolling resistance), N (negative = drag). */
 export function freeRolling(wheel: WheelDef, o: SweepOptions & { durationS?: number }): TyrePoint {
-  const b = createTyreBench(wheel, { load: o.load, speed: o.speed ?? 15, camber: (o.camberDeg ?? 0) * DEG, materialId: o.materialId });
+  const b = createTyreBench(wheel, { load: o.load, speed: o.speed ?? 15, camber: (o.camberDeg ?? 0) * DEG, materialId: o.materialId, wetness: o.wetness, rain: o.rain });
   return averaged(b, Math.round((o.durationS ?? 1) * SIM_HZ));
 }
 

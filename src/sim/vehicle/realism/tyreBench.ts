@@ -47,6 +47,9 @@ export interface TyreBenchOptions {
   camber?: number;
   /** Ground material. */
   materialId?: number;
+  /** R-TYRE: surface water (engine setSurfaceWetness), 0..1. */
+  wetness?: number;
+  rain?: number;
 }
 
 export interface TyreBench {
@@ -174,6 +177,7 @@ export function createTyreBench(src: WheelDef, opts: TyreBenchOptions): TyreBenc
     capacity: { maxObjects: 2, nodeCapacity: 512, beamCapacity: 2048 },
   });
   eng.setGroundPlane(0, opts.materialId ?? MaterialId.asphalt);
+  if (opts.wetness !== undefined || opts.rain !== undefined) eng.setSurfaceWetness(opts.wetness ?? 0, opts.rain ?? 0);
   // Start with the carriage lifted so the tyre just touches; the load servo sinks it.
   const obj = eng.spawnVehicle(1, def, { pos: [0, 0.01, 0], quat: [0, 0, 0, 1] }, 'manual');
   const veh = eng.getVehicle(1)!;
