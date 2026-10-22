@@ -95,6 +95,8 @@ export const buildVehicleRig: BuildVehicleRig = (def) => {
   }
   const merged: RigDef = { name: def.name, nodes, beams };
   if (body.groupDefaults !== undefined) merged.groupDefaults = { ...body.groupDefaults };
+  // R-CORE: declared collision triangles reference body node ids (unchanged by the merge).
+  if (body.triangles !== undefined) merged.triangles = body.triangles.map((t) => ({ ...t }));
   return merged;
 };
 

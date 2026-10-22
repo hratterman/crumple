@@ -20,6 +20,7 @@ import {
   type RigStats,
   type StabilityReport,
 } from './types';
+import { compileTriangleDefs } from './triangles';
 
 /** Fixed sim step (CLAUDE.md physics budget). */
 export const RIG_DT = 1 / 2000;
@@ -110,6 +111,11 @@ export function compileRig(def: RigDef): CompiledRig {
   /** Explicit RigNodeDef.objRadius (> 0) or 0 = derive from the incident beams below. */
   const objRadiusDecl = new Float64Array(nodeCount);
   const nodeFlags = new Uint8Array(nodeCount);
+  /** R-CORE: per-node contact material (255 = default) / self-collision, only kept when some node declares one. */
+  const nodeMaterial = new Uint8Array(nodeCount).fill(255);
+  const nodeSelfCollide = new Uint8Array(nodeCount);
+  let anyMaterial = false;
+  let anySelf = false;
   const nodeGroup = new Int32Array(nodeCount);
   const groups: string[] = [];
   const groupIndex = new Map<string, number>();
@@ -157,6 +163,16 @@ export function compileRig(def: RigDef): CompiledRig {
     if (n.tread !== undefined && typeof n.tread !== 'boolean') fail(rig, `${where} tread must be a boolean`);
     if (n.objContact !== undefined && typeof n.objContact !== 'boolean') fail(rig, `${where} objContact must be a boolean`);
     objRadiusDecl[i] = opt(rig, where, 'objRadius', n.objRadius, 0, false);
+    if (n.material !== undefined) {
+      if (!Number.isInteger(n.material) || n.material < 0 || n.material > 254) fail(rig, `${where} material must be a MaterialId`);
+      nodeMaterial[i] = n.material;
+      anyMaterial = true;
+    }
+    if (n.selfCollide !== undefined) {
+      if (typeof n.selfCollide !== 'boolean') fail(rig, `${where} selfCollide must be a boolean`);
+      anySelf = true;
+    }
+    nodeSelfCollide[i] = (n.selfCollide ?? n.collidable !== false) ? 1 : 0;
     const objContact = n.objContact ?? n.collidable !== false;
     nodeFlags[i] =
       (n.collidable === false ? 0 : RIG_NODE_FLAG_COLLIDABLE) |
@@ -229,7 +245,17 @@ export function compileRig(def: RigDef): CompiledRig {
     nodeObjRadius[i] = r < OBJ_RADIUS_MIN ? OBJ_RADIUS_MIN : r > OBJ_RADIUS_MAX ? OBJ_RADIUS_MAX : r;
   }
 
-  return {
+  let triangles: CompiledRig['triangles'];
+  if (def.triangles !== undefined) {
+    if (!Array.isArray(def.triangles)) fail(rig, 'triangles must be an array');
+    try {
+      triangles = compileTriangleDefs(def.triangles, indexOf);
+    } catch (e) {
+      fail(rig, e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  const out: CompiledRig = {
     name: def.name,
     nodeCount,
     beamCount,
@@ -257,6 +283,10 @@ export function compileRig(def: RigDef): CompiledRig {
     beamPreload,
     beamHydroTravel,
   };
+  if (anyMaterial) out.nodeMaterial = nodeMaterial;
+  if (anySelf) out.nodeSelfCollide = nodeSelfCollide;
+  if (triangles !== undefined) out.triangles = triangles;
+  return out;
 }
 
 function isCompiled(x: RigDef | CompiledRig): x is CompiledRig {

@@ -535,9 +535,15 @@ export interface SolverOptions {
   /** Speculative (swept) contacts against static colliders / meshes and triangles: no tunnelling at speed. */
   ccd: boolean;
 }
+/**
+ * standard keeps the tuned P5/P6 node-vs-node spheres between vehicles (every fleet / crash target was set
+ * with them: the 0.2 m spheres reach ~0.2 m beyond the lattice, e.g. a sedan's hood meets the truck box wall
+ * above its floor); high switches vehicle pairs to true-surface triangles; ultra adds self-collision.
+ * Static meshes and CCD are on everywhere.
+ */
 export const SOLVER_PRESETS: Readonly<Record<PhysicsQuality, SolverOptions>> = {
-  standard: { triangleContact: true, selfCollision: false, ccd: true },
-  high: { triangleContact: true, selfCollision: true, ccd: true },
+  standard: { triangleContact: false, selfCollision: false, ccd: true },
+  high: { triangleContact: true, selfCollision: false, ccd: true },
   ultra: { triangleContact: true, selfCollision: true, ccd: true },
 };
 /** Merge solver options (missing fields keep the current value). Replayable. */

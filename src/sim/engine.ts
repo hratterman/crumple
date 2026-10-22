@@ -31,6 +31,9 @@ import {
 import { applyColliderContacts, compileColliders, resetColliderContactState } from './collision/colliders';
 import { OBJ_REBUILD_TICKS, OBJ_REBUILD_TICKS_SLOW, OBJ_SLOW_SPEED, ObjectContacts } from './collision/objects';
 import { applyWater, boxNearWater, VEHICLE_FLOOD_LOSS, VEHICLE_FLOOD_TIME_S } from './collision/water';
+import { TriangleContacts, type StaticMeshInput, type TriangleSlot } from './collision/triangles';
+import { deriveCollisionTriangles, triangleSetOf } from './rig/triangles';
+import { quatToMatrix } from '../world/colliders';
 import { applyGroundContacts, PlaneSampler, resetGroundContactState } from './collision/ground';
 import type { ColliderWorld } from './collision/types';
 import { resolveColliders } from '../world/colliders';
@@ -71,7 +74,47 @@ import type { DrivetrainStateEx } from './vehicle/drivetrain';
  * sends the physics-quality preset (SOLVER_PRESETS) right after `init`.
  */
 export const SOLVER_DEFAULTS: Readonly<SolverOptions> = SOLVER_PRESETS.standard;
+let defaultSolver: Readonly<SolverOptions> = SOLVER_DEFAULTS;
+/** Solver options new engines start from (tests / tools run a harness at another quality; the worker uses setSolver). */
+export function setDefaultSolver(options: Readonly<SolverOptions>): void {
+  defaultSolver = { ...options };
+}
+export function getDefaultSolver(): Readonly<SolverOptions> {
+  return defaultSolver;
+}
 const SOLVER_OPTION_KEYS = ['triangleContact', 'selfCollision', 'ccd'] as const satisfies readonly (keyof SolverOptions)[];
+
+/**
+ * R-CORE collision triangles of an object, resolved lazily (derivation of a
+ * vehicle surface is ~10–150 ms once per def; single-object sims never need it).
+ */
+interface LazyTriangles {
+  rig: CompiledRig;
+  /** Vehicles: body node count (derivation range); plain rigs: 0 = declared triangles only. */
+  bodyNodeCount: number;
+  /** Cache key across compiles of the same def (VehicleDef object), or null. */
+  defKey: object | null;
+  slot: TriangleSlot | null | undefined;
+}
+/** Extra reach (m) when deciding whether two objects may meet through their triangles this interval. */
+const TRI_REACH_PAD = 0.5;
+const TRI_BY_DEF = new WeakMap<object, TriangleSlot | null>();
+const TRI_BY_RIG = new WeakMap<CompiledRig, TriangleSlot | null>();
+
+function resolveTriangles(t: LazyTriangles): TriangleSlot | null {
+  if (t.slot !== undefined) return t.slot;
+  let slot = t.defKey ? TRI_BY_DEF.get(t.defKey) : undefined;
+  if (slot === undefined) slot = TRI_BY_RIG.get(t.rig);
+  if (slot === undefined) {
+    const rig = t.rig;
+    const tris = rig.triangles ?? (t.bodyNodeCount > 0 ? deriveCollisionTriangles(rig, { nodeCount: t.bodyNodeCount }) : undefined);
+    slot = tris && tris.count > 0 ? { set: triangleSetOf(rig, tris), nodeSelf: rig.nodeSelfCollide ?? null } : null;
+    TRI_BY_RIG.set(rig, slot);
+    if (t.defKey) TRI_BY_DEF.set(t.defKey, slot);
+  }
+  t.slot = slot;
+  return slot;
+}
 
 /** Fixed physics step, s. */
 export const SIM_DT = 1 / 2000;
@@ -286,6 +329,12 @@ export class SimEngine {
   private readonly budgetOrder: number[] = [];
   /** Node-vs-node contact (P5): broadphase + pair list + kernel. */
   readonly contacts: ObjectContacts;
+  /** R-CORE node-vs-triangle contact (object triangles, self-collision, static meshes). */
+  readonly tris: TriangleContacts;
+  /** Collision triangles per objectId (lazy). */
+  private readonly triById = new Map<number, LazyTriangles>();
+  /** Parallel to arena.objects: lazy triangles or null. */
+  private triSlots: (LazyTriangles | null)[] = [];
   /** Tick of the last / next broadphase rebuild and its interval. */
   private lastRebuild = 0;
   private nextRebuild = 0;
@@ -307,7 +356,7 @@ export class SimEngine {
   /** Route network cache (layout id/version + terrain hash). */
   private routeCache: { key: string; net: RouteNetwork } | null = null;
   /** R-CORE solver options (setSolver). Engines start from SOLVER_DEFAULTS. */
-  readonly solver: SolverOptions = { ...SOLVER_DEFAULTS };
+  readonly solver: SolverOptions = { ...defaultSolver };
   /** VehicleCatalog id per vehicle objectId (spawnVehicle.catalogId; P7 replay header). */
   readonly catalogIds = new Map<number, string>();
 
@@ -326,6 +375,7 @@ export class SimEngine {
     this.state = this.arena.state;
     this.events = new PendingEvents(this.arena);
     this.contacts = new ObjectContacts(cap.nodeCapacity, cap.maxObjects);
+    this.tris = new TriangleContacts(cap.nodeCapacity, cap.maxObjects);
     this.gravityX = g[0];
     this.gravityY = g[1];
     this.gravityZ = g[2];
@@ -426,6 +476,24 @@ export class SimEngine {
       if (c.material >= this.materials.friction.length) throw new SimCommandError(`collider '${c.id}': material ${c.material} is not in the material table`);
     }
     this.colliderWorld = all.length > 0 ? compileColliders(all) : null;
+    // R-CORE: mesh colliders → world-space static triangle meshes.
+    const meshes: StaticMeshInput[] = [];
+    const R = new Float64Array(9);
+    for (const c of all) {
+      if (c.kind !== 'mesh' || !c.mesh) continue;
+      quatToMatrix(c.quat, R);
+      const P = c.mesh.positions;
+      const out = new Float64Array(P.length);
+      for (let v = 0; v < P.length; v += 3) {
+        const x = P[v]!, y = P[v + 1]!, z = P[v + 2]!;
+        out[v] = c.pos[0] + R[0]! * x + R[1]! * y + R[2]! * z;
+        out[v + 1] = c.pos[1] + R[3]! * x + R[4]! * y + R[5]! * z;
+        out[v + 2] = c.pos[2] + R[6]! * x + R[7]! * y + R[8]! * z;
+      }
+      meshes.push({ positions: out, indices: Int32Array.from(c.mesh.indices), material: c.material, twoSided: c.mesh.twoSided === true });
+    }
+    this.tris.setStaticMeshes(meshes);
+    this.contactsDirty = true;
   }
 
   spawn(objectId: number, def: RigDef, transform: Transform): SimObject {
@@ -447,14 +515,17 @@ export class SimEngine {
       throw new SimCommandError(e instanceof Error ? e.message : String(e), objectId);
     }
     this.rigs.set(objectId, rig);
+    if (rig.triangles && rig.triangles.count > 0) this.triById.set(objectId, { rig, bodyNodeCount: 0, defKey: null, slot: undefined });
+    else this.triById.delete(objectId);
     // Ranges from here on shifted; per-node contact bookkeeping restarts.
     resetGroundContactState(this.state, obj.nodeStart, this.state.nodeCount - obj.nodeStart);
     resetColliderContactState(this.state, obj.nodeStart, this.state.nodeCount - obj.nodeStart);
     const retired = this.retiredEpochs.get(objectId);
     this.repairEpochs.set(objectId, retired === undefined ? 0 : (retired + 1) >>> 0);
     this.syncVehicles();
-    // Global node indices shifted: drop the pair list.
+    // Global node indices shifted: drop the pair lists.
     this.contacts.clear();
+    this.tris.clear();
     this.contactsDirty = true;
     return obj;
   }
@@ -474,7 +545,7 @@ export class SimEngine {
     } catch (e) {
       throw new SimCommandError(`invalid vehicle: ${e instanceof Error ? e.message : String(e)}`, objectId);
     }
-    const obj = this.spawnCompiledVehicle(objectId, compiled, transform, transmission);
+    const obj = this.spawnCompiledVehicle(objectId, compiled, transform, transmission, def);
     if (catalogId !== undefined) this.catalogIds.set(objectId, catalogId);
     if (settleTicks > 0) this.startSettle(objectId, settleTicks);
     return obj;
@@ -485,11 +556,15 @@ export class SimEngine {
     compiled: CompiledVehicle,
     transform: Transform,
     transmission?: TransmissionMode,
+    /** R-CORE: the source def (caches the derived collision triangles across compiles). */
+    defKey?: object,
   ): SimObject {
     if (transmission !== undefined && transmission !== 'auto' && transmission !== 'manual') {
       throw new SimCommandError(`invalid transmission ${String(transmission)}`, objectId);
     }
     const obj = this.spawnCompiled(objectId, compiled.rig, transform);
+    // Vehicles always have collision triangles: declared ones, else the derived body surface.
+    this.triById.set(objectId, { rig: compiled.rig, bodyNodeCount: compiled.bodyNodeCount, defKey: compiled.rig.triangles ? null : (defKey ?? null), slot: undefined });
     const rt = createVehicleRuntime(objectId, compiled, obj.nodeStart, obj.beamStart, transmission);
     this.vehicles.set(objectId, rt);
     this.syncVehicles();
@@ -546,8 +621,10 @@ export class SimEngine {
     const slots: (VehicleRuntime | null)[] = new Array(objs.length);
     const pslots: (PropRuntime | null)[] = new Array(objs.length);
     const fslots: ({ level: number } | null)[] = new Array(objs.length);
+    const tslots: (LazyTriangles | null)[] = new Array(objs.length);
     for (let o = 0; o < objs.length; o++) {
       const obj = objs[o]!;
+      tslots[o] = this.triById.get(obj.objectId) ?? null;
       const v = this.vehicles.get(obj.objectId) ?? null;
       if (v !== null && (v.nodeStart !== obj.nodeStart || v.beamStart !== obj.beamStart)) {
         rebaseVehicle(v, obj.nodeStart, obj.beamStart);
@@ -564,6 +641,7 @@ export class SimEngine {
     this.vehicleSlots = slots;
     this.propSlots = pslots;
     this.floodSlots = fslots;
+    this.triSlots = tslots;
   }
 
   // ------------------------------------------------------------------ props (P5)
@@ -758,6 +836,7 @@ export class SimEngine {
     const gone = this.vehicles.get(objectId);
     if (gone?.shell) for (const c of gone.shell) this.kernel.releaseShell(c);
     this.vehicles.delete(objectId);
+    this.triById.delete(objectId);
     this.props.delete(objectId);
     this.floods.delete(objectId);
     const epoch = this.repairEpochs.get(objectId);
@@ -770,6 +849,7 @@ export class SimEngine {
     resetColliderContactState(this.state, start, this.state.nodeCount + n - start);
     this.syncVehicles();
     this.contacts.clear();
+    this.tris.clear();
     this.contactsDirty = true;
   }
 
@@ -981,8 +1061,10 @@ export class SimEngine {
         applyPropDamping(s, obj.nodeStart, obj.nodeCount, PROP_INTERNAL_DAMPING, anchored);
       }
     }
-    // Phase 2: node-vs-node contacts over the cached pair list (canonical order).
+    // Phase 2: node-vs-node contacts over the cached pair list (canonical order), then node-vs-triangle
+    // (R-CORE: object triangles, self-collision, static meshes; canonical order).
     if (this.contacts.pairCount > 0) this.contacts.apply(s, SIM_DT, sink);
+    if (this.tris.pairCount > 0) this.tris.apply(s, SIM_DT, sink, gx, gy, gz, this.solver.ccd);
     // Phase 3, per awake object ascending: water → ground → static colliders → integrate.
     const water = this.water;
     const c = this.contacts;
@@ -1103,11 +1185,72 @@ export class SimEngine {
       for (let o = 0; o < n; o++) if (c.oStatic[o]! >= 2) c.oStatic[o] = 0;
     }
     if (this.props.size > 0) this.enforceAwakeBudget(interval);
+    const triNeeded = this.markTriangleSlots(n, interval);
     c.rebuild(s, interval, SIM_DT, s.friction);
+    if (triNeeded) this.rebuildTriangles(n, interval);
+    else if (this.tris.pairCount > 0) this.tris.clear();
     this.rebuildInterval = interval;
     this.lastRebuild = this.tick;
     this.nextRebuild = this.tick + interval;
     this.contactsDirty = false;
+  }
+
+  /**
+   * R-CORE: decides which slots collide through triangles this interval
+   * (ObjectContacts.oTriangles: object pairs where both do skip spheres) and
+   * resolves (lazily derives) the triangles that will be needed: with
+   * triangleContact, objects with triangles whose boxes come within reach of
+   * another such object; with selfCollision, every awake object with
+   * triangles. Returns whether the triangle pass has work.
+   */
+  private markTriangleSlots(n: number, interval: number): boolean {
+    const c = this.contacts;
+    const ts = this.triSlots;
+    const sol = this.solver;
+    c.oTriangles.fill(0, 0, n);
+    let any = this.tris.hasStatic;
+    if (this.triById.size === 0) return any;
+    if (sol.triangleContact) {
+      for (let p = 0; p < n; p++) {
+        const tp = ts[p];
+        if (!tp || c.oValid[p] === 0) continue;
+        for (let q = p + 1; q < n; q++) {
+          const tq = ts[q];
+          if (!tq || c.oValid[q] === 0) continue;
+          if (c.oStatic[p] !== 0 && c.oStatic[q] !== 0) continue;
+          const pad = c.oRmax[p]! + c.oRmax[q]! + c.margin(p, q, interval, SIM_DT) + TRI_REACH_PAD;
+          if (!c.boxesNear(p, q, pad)) continue;
+          if (!resolveTriangles(tp) || !resolveTriangles(tq)) continue;
+          c.oTriangles[p] = 1;
+          c.oTriangles[q] = 1;
+          any = true;
+        }
+      }
+    }
+    if (sol.selfCollision) {
+      for (let o = 0; o < n; o++) {
+        const t = ts[o];
+        if (t && c.oValid[o] !== 0 && c.oStatic[o] === 0 && resolveTriangles(t)) any = true;
+      }
+    }
+    return any;
+  }
+
+  /** R-CORE: fills the triangle pass's slots (arena order) and rebuilds its pair list. */
+  private rebuildTriangles(n: number, interval: number): void {
+    const objs = this.arena.objects;
+    const c = this.contacts;
+    const t = this.tris;
+    const self = this.solver.selfCollision;
+    for (let o = 0; o < n; o++) {
+      const obj = objs[o]!;
+      const lazy = this.triSlots[o];
+      const slot = lazy && (c.oTriangles[o] !== 0 || (self && c.oStatic[o] === 0)) ? resolveTriangles(lazy) : null;
+      const prop = this.propSlots[o];
+      const rig = this.rigs.get(obj.objectId);
+      t.setObject(o, obj.nodeStart, obj.nodeCount, obj.beamStart, obj.objectId, prop ? prop.def.material : MaterialId.metal, rig?.nodeMaterial ?? null, slot);
+    }
+    t.rebuild(this.state, n, c.oBox, c.oVmax, c.oValid, c.oStatic, interval, SIM_DT, this.solver);
   }
 
   /**

@@ -108,6 +108,11 @@ export class ObjectContacts {
   readonly oBox: Float64Array;
   readonly oVmax: Float64Array;
   readonly oRmax: Float64Array;
+  /**
+   * R-CORE: 1 = the slot collides through its triangles (SolverOptions.triangleContact):
+   * a pair of two such slots gets node-vs-triangle contact instead of spheres.
+   */
+  readonly oTriangles: Uint8Array;
   objectCount = 0;
   // ---- pair list (canonical order)
   pairA: Int32Array;
@@ -164,6 +169,7 @@ export class ObjectContacts {
     this.oBox = new Float64Array(6 * maxObjects);
     this.oVmax = new Float64Array(maxObjects);
     this.oRmax = new Float64Array(maxObjects);
+    this.oTriangles = new Uint8Array(maxObjects);
     this.pairA = new Int32Array(pairCapacity);
     this.pairB = new Int32Array(pairCapacity);
     this.pairIdA = new Float64Array(pairCapacity);
@@ -322,6 +328,7 @@ export class ObjectContacts {
         if (q < p && this.oStatic[q] === 0) continue; // awake–awake pairs once, from the lower slot
         const lo = p < q ? p : q;
         const hi = p < q ? q : p;
+        if (this.oTriangles[lo] !== 0 && this.oTriangles[hi] !== 0) continue; // R-CORE: triangle contact instead
         const margin = this.margin(lo, hi, interval, dt);
         if (!this.boxesNear(lo, hi, this.oRmax[lo]! + this.oRmax[hi]! + margin)) continue;
         this.pairObjects(state, lo, hi, margin);
