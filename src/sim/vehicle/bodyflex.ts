@@ -248,7 +248,7 @@ export function captureShell(eng: SimEngine, nodeStart: number, shell: readonly 
 
 // ------------------------------------------------------------ static stiffness
 function zeroGEngine(def: VehicleDef): { eng: SimEngine; cv: CompiledVehicle; start: number } {
-  const eng = new SimEngine({ gravity: [0, 0, 0], debugStrains: false, capacity: { maxObjects: 2, nodeCapacity: 2048, beamCapacity: 8192 } });
+  const eng = new SimEngine({ gravity: [0, 0, 0], debugStrains: false, capacity: { maxObjects: 2, nodeCapacity: 4096, beamCapacity: 16384 } });
   eng.setGroundPlane(-50, MaterialId.asphalt);
   const obj = eng.spawnVehicle(1, def, { pos: [0, 0, 0], quat: [0, 0, 0, 1] }, 'auto');
   eng.setInput(1, { gearSelect: 0 });
@@ -682,7 +682,7 @@ export interface DropResult {
 
 /** Spawn drop: released `heightM` above the ground (a teleport / spawn), settled 2 s. */
 export function runDrop(def: VehicleDef, heightM = 0.5): DropResult {
-  const eng = new SimEngine({ gravity: [0, -9.81, 0], debugStrains: false, capacity: { maxObjects: 2, nodeCapacity: 2048, beamCapacity: 8192 } });
+  const eng = new SimEngine({ gravity: [0, -9.81, 0], debugStrains: false, capacity: { maxObjects: 2, nodeCapacity: 4096, beamCapacity: 16384 } });
   eng.setGroundPlane(0, MaterialId.asphalt);
   const obj = eng.spawnVehicle(1, def, { pos: [0, heightM, 0], quat: [0, 0, 0, 1] }, 'auto');
   eng.setInput(1, { gearSelect: 0 });

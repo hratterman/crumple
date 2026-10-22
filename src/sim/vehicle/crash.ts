@@ -169,7 +169,7 @@ function createSim(def: VehicleDef): Sim {
   const eng = new SimEngine({
     gravity: [0, -G, 0],
     debugStrains: false,
-    capacity: { maxObjects: 2, nodeCapacity: 2048, beamCapacity: 8192 },
+    capacity: { maxObjects: 2, nodeCapacity: 4096, beamCapacity: 16384 },
   });
   eng.setGroundPlane(0, MaterialId.concrete);
   const objectId = 1;
