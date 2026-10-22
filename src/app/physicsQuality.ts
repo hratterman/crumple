@@ -29,11 +29,16 @@ export function autoPhysicsQuality(kernel: PhysicsKernelKind, bench: number): Ph
   return 'standard';
 }
 
-/** The effective quality: an explicit setting wins; ?physics= overrides both (tests / tools). */
-export function resolvePhysicsQuality(setting: PhysicsQualitySetting, ready: { kernel: PhysicsKernelKind; kernelBench: number }, search = ''): PhysicsQuality {
+/**
+ * The effective quality: an explicit setting wins; ?physics= overrides both (tests / tools). Under
+ * automation (`webdriver`: e2e specs) 'auto' is 'standard', so every spec keeps the standard rigs unless
+ * it asks for a tier (as the crash cam is off there).
+ */
+export function resolvePhysicsQuality(setting: PhysicsQualitySetting, ready: { kernel: PhysicsKernelKind; kernelBench: number }, search = '', webdriver = false): PhysicsQuality {
   const forced = new URLSearchParams(search).get('physics');
   if (forced && (PHYSICS_QUALITIES as readonly string[]).includes(forced)) return forced as PhysicsQuality;
-  return setting === 'auto' ? autoPhysicsQuality(ready.kernel, ready.kernelBench) : setting;
+  if (setting !== 'auto') return setting;
+  return webdriver ? 'standard' : autoPhysicsQuality(ready.kernel, ready.kernelBench);
 }
 
 export function solverFor(q: PhysicsQuality): SolverOptions {

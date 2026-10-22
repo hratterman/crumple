@@ -19,6 +19,9 @@ describe('physics quality (R-CORE scaffold)', () => {
     expect(resolvePhysicsQuality('standard', fast)).toBe('standard');
     expect(resolvePhysicsQuality('auto', fast, '?physics=high')).toBe('high');
     expect(resolvePhysicsQuality('ultra', fast, '?physics=bogus')).toBe('ultra');
+    // Automation keeps the standard rigs unless a spec asks.
+    expect(resolvePhysicsQuality('auto', fast, '', true)).toBe('standard');
+    expect(resolvePhysicsQuality('auto', fast, '?physics=ultra', true)).toBe('ultra');
   });
   it('solver presets: spheres at standard, triangles at high, + self-collision at ultra; CCD everywhere', () => {
     expect(solverFor('standard')).toEqual({ triangleContact: false, selfCollision: false, ccd: true });

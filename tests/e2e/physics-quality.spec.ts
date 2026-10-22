@@ -42,11 +42,12 @@ test('physics quality: the WASM SIMD kernel runs, ?physics=ultra spawns the HD s
   expect(a.playerQuality).toBe('ultra');
   expect(a.beams).toBeGreaterThan(8000);
   // Drive it: hold W (releases the spawn hold, like drive.spec).
+  // (The 8.7 k-beam rig runs below real time on a loaded SwiftShader box: wait for the speed, not a clock.)
   await page.keyboard.down('KeyW');
-  await page.waitForTimeout(4000);
+  await page.waitForFunction(() => (window as unknown as { __crumple: CrumpleGlobal }).__crumple.vehicle!.speed > 2, null, { timeout: 90_000 });
   const v = await page.evaluate(() => (window as unknown as { __crumple: CrumpleGlobal }).__crumple.vehicle!.speed);
   await page.keyboard.up('KeyW');
-  console.log(`[e2e] HD ultra sedan speed after 4 s of W: ${v.toFixed(1)} m/s`);
+  console.log(`[e2e] HD ultra sedan speed on W: ${v.toFixed(1)} m/s`);
   expect(v).toBeGreaterThan(2);
   // Settings → standard: respawned in place with the standard rig.
   await page.evaluate(() => (window as unknown as { __crumple: CrumpleGlobal }).__crumple.physics.set('standard'));

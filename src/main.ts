@@ -275,7 +275,7 @@ const settings: GameSettings = loadSettings();
  */
 let physicsQuality: PhysicsQuality = 'standard';
 const physicsQualityP: Promise<PhysicsQuality> = client.whenReady().then((info) => {
-  physicsQuality = resolvePhysicsQuality(settings.physicsQuality, info, location.search);
+  physicsQuality = resolvePhysicsQuality(settings.physicsQuality, info, location.search, navigator.webdriver);
   client.setSolver(solverFor(physicsQuality));
   console.info(`[physics] kernel ${info.kernel}, bench ${info.kernelBench.toFixed(0)} M beam-updates/s → quality ${physicsQuality}`);
   return physicsQuality;
@@ -827,7 +827,7 @@ function setSetting(patch: Partial<GameSettings>): void {
   }
   // R-CORE physics quality: new solver preset now; the player car respawns in place at the new rig tier.
   if (patch.physicsQuality !== undefined && client.readyInfo) {
-    const q = resolvePhysicsQuality(patch.physicsQuality, client.readyInfo); // an explicit choice beats ?physics=
+    const q = resolvePhysicsQuality(patch.physicsQuality, client.readyInfo, '', navigator.webdriver); // an explicit choice beats ?physics=
     if (q !== physicsQuality) {
       physicsQuality = q;
       client.setSolver(solverFor(q));
