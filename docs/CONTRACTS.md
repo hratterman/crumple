@@ -871,6 +871,17 @@ Ownership: `src/sim/engine.ts` (the step / solver parts), `src/sim/{beams,integr
 - **Shell clusters in the kernel:** `vehicle/shell.ts applyShell` is mirrored by `shell()` in kernel.c (`kernel.shell(rt, …)` / `releaseShell`); each `ShellRuntime`'s arrays move into a block of the kernel's aux heap on first use (views re-pointed: JS reset / recapture / diagnostics share them; a full heap leaves the runtime on JS, bit-identical), the recapture bookkeeping stays in JS (`shellRecaptureCheck`). The SIMD build computes per-node products two nodes per f64x2 and accumulates every reduction in node order; in the force pass a pair where either node could change state runs the scalar node body. **Anyone editing `applyShell` edits `kernel.c` too** (kernelParity covers the sedan 100 km/h and HD sedan crashes).
 - **Build:** `tools/build-wasm.sh` (clang 18 + wasm-ld 18, freestanding, `-O3 -nostdlib`, scalar `-mno-simd128` and `-msimd128`) writes `src/sim/wasm/kernel-{scalar,simd}.wasm` and the generated `binary.ts` (both base64), all committed; byte-reproducible (CI installs clang-18 / lld-18, rebuilds and `git diff --exit-code`s).
 - **Loading:** the worker imports `./wasm/kernel` LAZILY (its own ≈ 11 kB chunk of the worker bundle; the app chunk is unaffected), installs `bestWasmKernel()` (SIMD → scalar WASM → JS when WebAssembly / SIMD is unavailable or blocked) and queues messages until then. `ReadyMsg.kernel` reports it. Tests: `src/sim/wasm/vitest.setup.ts` installs `CRUMPLE_KERNEL` = simd (default) | wasm | js for every engine a test creates.
+- **Bench** (`node tools/bench-physics.mjs`; process CPU ms per simulated second, min of 10 interleaved 0.5 s windows per kernel; 4-core box at load ≈ 25–30; every scene hash-identical across kernels):
+
+  | scene (awake beams) | JS | WASM | WASM + SIMD | step JS ÷ SIMD | beam pass alone, M beam-updates/s (JS / WASM / SIMD) |
+  |---|---|---|---|---|---|
+  | sedan, plane (2081) | 149 | 116 | 84 | 1.77× | 44 / 75 / 121 |
+  | box truck, plane (3466) | 246 | 185 | 110 | 2.24× | 40 / 62 / 127 |
+  | HD sedan high, plane (5922) | 490 | 376 | 240 | 2.04× | 37 / 55 / 118 |
+  | HD sedan ultra, plane (8687) | 738 | 554 | 358 | 2.06× | 37 / 52 / 116 |
+  | Crumple Valley, player + 3 awake traffic (6134) | 644 | 581 | 435 | 1.48× | 41 / 57 / 105 |
+
+  The kernels themselves run 2.6–3.2× (SIMD) faster; the whole step is held to 1.5–2.2× by what stays in JS: the vehicle pre-step (R-PHYS: wheels / tyre / drivetrain / brakes / dampers / drive reaction ≈ 25–30 % of a SIMD sedan step), the heightfield sampler + ground contact (≈ 20 % of the traffic scene; the tread branch is R-TYRE's), the traffic AI. Spent on density: the 8687-beam ultra sedan on SIMD costs 358 ms per sim-s, 2.4× the standard sedan on JS for 4.2× its beams. Boot bench (`kernelBench`) reads 89–132 M beam-updates/s in headless Chromium on this box.
 - **Replays:** kernels are bit-identical, so `ReplayFile` carries no kernel field and files replay across kernels. Should a future kernel ever not be (a relaxed-SIMD / FMA build), it gets its own `KernelKind`, `ReplayFile` gains `kernel` and `checkReplayFile` refuses files of another kernel.
 
 ### Collision triangles (`src/sim/rig/types.ts`; for R-RIG / R-CRASH)
