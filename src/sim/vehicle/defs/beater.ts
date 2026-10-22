@@ -1603,4 +1603,8 @@ export const BEATER_CRASH_PROBES: CrashProbes = {
   latch: [['hood_0C', 's2_rt']],
   bumperPrefix: 's0_',
   windscreen: null,
+  structure: {
+    ref: ['s7_*', 's8_*', 's9_*'],
+    points: { lowerHingePillar: 's5_hp_$', upperHingePillar: 's5_cw_$', toepan: 's5_fw_$', rocker: 's5_sl_$' },
+  },
 };

@@ -1662,4 +1662,8 @@ export const PICKUP_CRASH_PROBES = {
   latch: [['hood_0C', 's0_rt']],
   bumperPrefix: 'bf_',
   windscreen: ['c0_cw', 'c1_rf'],
+  structure: {
+    ref: ['c2_*', 'c3_*', 'c4_*'],
+    points: { lowerHingePillar: 'c0_hp_$', upperHingePillar: 'c0_ap_$', toepan: 'c0_fw_$', rocker: 'c0_sl_$' },
+  },
 } as const;
