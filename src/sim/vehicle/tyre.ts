@@ -120,6 +120,8 @@ export const CARCASS_STRUCT = 0.3;
 /** Flat-tyre rolling resistance: added C_rr at zero pressure (fades in below FLAT_FROM·p0). */
 export const FLAT_CRR = 0.25;
 export const FLAT_FROM = 0.3;
+/** The rig's free-rolling loss ÷ its compiled C_rr (sedan bench, 15 m/s: 0.0143 / 0.008): scales the inflation correction. */
+export const CRR_RIG_GAIN = 1.8;
 /** Grip vs inflation slope and clamps (f_p). */
 export const PRESSURE_GRIP = 0.1;
 /** Dry-grip gain of a fully worn tread. */
@@ -138,6 +140,8 @@ export const BULLDOZE_FROM_D = 0.06;
 /** Soil hold: below SOIL_HOLD_V (m/s) the slip fed to Janosi–Hanamoto rises toward SOIL_HOLD_I (full shear). */
 export const SOIL_HOLD_V = 2;
 export const SOIL_HOLD_I = 1;
+/** Speed floor of the soil's slip ratio, m/s. */
+export const SOIL_V_FLOOR = 0.5;
 /** Lateral bulldozing velocity regularisation, m/s. */
 export const BULLDOZE_V0 = 0.3;
 /** Rolling resistance ω ramp, rad/s (= types ROLL_RES_OMEGA_EPS). */
@@ -675,7 +679,8 @@ export function stepTyre(
     // a slow or parked wheel: a soil element dwells L/V in the patch, so any creep mobilises the soil's full
     // shear strength (j = creep × dwell ≫ K) — the rolling Janosi–Hanamoto slip only governs a moving patch
     // (without this a parked car slid down a 10° dirt trail: μ(σ = 0) = 0)
-    let iEff = t.sigma;
+    // σ is normalised by max(V, 3 m/s) (R-PHYS fall-off); the soil wants the true slip, slip speed / V
+    let iEff = speed < SIGMA_V_MIN ? (t.sigma * SIGMA_V_MIN) / (speed > SOIL_V_FLOOR ? speed : SOIL_V_FLOOR) : t.sigma;
     if (speed < SOIL_HOLD_V) iEff += (1 - speed / SOIL_HOLD_V) * SOIL_HOLD_I;
     mu = soilMu(soilT, iEff, L, A, W, strength);
     t.factor = mu / (t.base[0]! > 0 ? t.base[0]! : 1);
@@ -780,9 +785,13 @@ export function stepTyre(
     t.dirty = false;
   }
   // firm-surface roughness and the inflation's share of the rolling resistance (the compiled C_rr is the
-  // nominal tyre's: applyWheelTorques)
+  // nominal tyre's: applyWheelTorques). INFLATION: the rig's own rolling loss already grows as the carcass factor
+  // kc softens it (bench: loss ∝ 1/kc, +32 % at 0.7·p0 — hysteresis ∝ deflection), steeper than real tyres
+  // (SAE J2452: ∝ p^−0.3…−0.5); the correction CRR_RIG_GAIN·C_rr·((p/p0)^−0.375 − 1/kc) brings the total onto
+  // p^−0.375 (bench +19 % at 0.7·p0) and lowers it when over-inflated (kc is clamped at 1 there).
   if (w.load > 0 && w.detached === 0) {
-    const crrX = t.crr0 * (prr - 1) + surf.crr + crrFlat;
+    const kcNow = t.carcassApplied > CARCASS_STRUCT ? t.carcassApplied : CARCASS_STRUCT;
+    const crrX = surf.crr + crrFlat + CRR_RIG_GAIN * t.crr0 * (prr - 1 / kcNow);
     if (crrX !== 0) extra -= crrX * w.load * w.rollRadius * rr;
   }
 

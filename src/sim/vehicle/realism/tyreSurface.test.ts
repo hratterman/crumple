@@ -13,6 +13,7 @@
  *          (C_rr: concrete 0.01–0.015, gravel road ≈ 0.02–0.05, field 0.08–0.35,
  *          sand 0.15–0.3), §2 (Bekker sinkage, Janosi–Hanamoto: on soil the
  *          thrust rises with slip toward the soil's shear strength, no peak).
+ *  [J2452] SAE J2452 rolling-resistance model: C_rr ∝ p^α·F_z^β, α ≈ −0.3…−0.5.
  *  [ROAD]  Road-safety friction tables (e.g. NHTSA / accident reconstruction):
  *          dry gravel 0.55–0.7, dry dirt 0.65–0.75, grass 0.4–0.6, wet grass
  *          0.3–0.45, mud 0.2–0.4, loose sand 0.4–0.6.
@@ -38,11 +39,11 @@ interface SurfaceRun {
   lift: number;
 }
 
-function brakeOn(materialId: number, speed: number, wetness = 0, rain = 0, mod: Partial<typeof wheel> = {}, treadMm?: number): SurfaceRun {
+function brakeOn(materialId: number, speed: number, wetness = 0, rain = 0, mod: Partial<typeof wheel> = {}, treadMm?: number, pressureKpa?: number): SurfaceRun {
   const w = { ...wheel, ...mod };
-  const br = longitudinalSweep(w, { load: fz0, kappaEnd: -0.6, speed, materialId, wetness, rain, treadMm });
+  const br = longitudinalSweep(w, { load: fz0, kappaEnd: -0.6, speed, materialId, wetness, rain, treadMm, pressureKpa });
   const p = peakOf(br, fxB, negK);
-  const b = createTyreBench(w, { load: fz0, speed, materialId, wetness, rain, treadMm });
+  const b = createTyreBench(w, { load: fz0, speed, materialId, wetness, rain, treadMm, pressureKpa });
   let fx = 0;
   for (let i = 0; i < 2000; i++) {
     benchStep(b);
@@ -66,6 +67,7 @@ beforeAll(() => {
   R.sand = brakeOn(MaterialId.sand, 10);
   R.sandAired = brakeOn(MaterialId.sand, 10, 0, 0, { tyrePressure: 120 });
   R.dryWorn = brakeOn(MaterialId.asphalt, 15, 0, 0, {}, 1.6);
+  R.dryLowP = brakeOn(MaterialId.asphalt, 15, 0, 0, {}, undefined, 160);
   R.wet25Worn = brakeOn(MaterialId.asphalt, 25, 1, 0.3, {}, 1.6);
   R.flood22 = brakeOn(MaterialId.asphalt, 22, 1, 1);
   R.flood22Worn = brakeOn(MaterialId.asphalt, 22, 1, 1, {}, 1.6);
@@ -117,6 +119,14 @@ describe('tyre on surfaces (205/55R16 bench)', () => {
       expect(r.late, k).toBeGreaterThan(0.85);
       expect(r.kPeak, k).toBeGreaterThan(0.3);
     }
+  });
+
+  it('inflation: 30 % under-inflated → C_rr +5…+30 % (SAE J2452: C_rr ∝ p^−0.3…−0.5; the rig alone: +32 %), peak μ_x up ≤ 5 % (bigger patch) [J2452]', () => {
+    const r = R.dryLowP!.crr / R.dry!.crr;
+    expect(r).toBeGreaterThan(1.05);
+    expect(r).toBeLessThan(1.3);
+    expect(R.dryLowP!.muX / R.dry!.muX).toBeGreaterThan(1);
+    expect(R.dryLowP!.muX / R.dry!.muX).toBeLessThan(1.05);
   });
 
   it('rolling resistance by surface: asphalt ≈ 0.01–0.02, gravel / dirt 0.02–0.06, grass 0.04–0.1, mud and sand 0.12–0.3 [W]', () => {

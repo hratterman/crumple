@@ -114,7 +114,9 @@ describe('spawn hold on the trailhead slope', () => {
       expect(moved).toBeLessThan(0.05);
       expect(late).toBeLessThan(0.01); // settled, not creeping
       expect(drove).toBeGreaterThan(3);
-      expect(speed).toBeGreaterThan(2);
+      // R-TYRE: 2 → 1.5 m/s. The trail is soft soil now (dirt: C_rr ≈ 0.026, grip rising with slip): the beater
+      // (FWD, open diff) climbs the 10° trail at 7 km/h (1.96 m/s) after 4 s at 0.6 throttle, the others faster
+      expect(speed).toBeGreaterThan(1.5);
     });
   }
 });

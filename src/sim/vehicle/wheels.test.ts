@@ -429,11 +429,11 @@ describe('buildWheelRig', () => {
     const rig = compileRig({ name: 'w', nodes: [...body, ...nodes], beams });
     expect([rig.nodeCount, rig.beamCount]).toEqual([2 + 2 + 4 * n, beams.length]);
     expect(() => buildWheelRig(wheelDef({ rays: 11 }), lookup)).toThrow(/rays/);
-    expect(() => buildWheelRig(wheelDef({ rays: 16 }), lookup)).toThrow(/rays/);
+    expect(() => buildWheelRig(wheelDef({ rays: 18 }), lookup)).toThrow(/rays/); // R-TYRE: 16 = the high-resolution tyre
     expect(() => buildWheelRig(wheelDef({ rimRadius: 0.3 }), lookup)).toThrow(/rimRadius/);
     expect(() => buildWheelRig(wheelDef({ attach: ['nope'] }), lookup)).toThrow(/nope/);
     expect(() => buildWheelRig(wheelDef({ hubOuter: [0, 0, 0] }), lookup)).toThrow(/coincide/);
-    for (const rays of [10, 14]) {
+    for (const rays of [10, 14, 16]) {
       const r = buildWheelRig(wheelDef({ rays }), lookup);
       expect([r.nodes.length, r.beams.length]).toEqual([2 + 4 * rays, 1 + 22 * rays]);
     }
