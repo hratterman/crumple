@@ -31,6 +31,12 @@ import type { RigBeamDef, RigNodeDef } from '../../rig/types';
 import type { CrashProbes } from '../crash';
 import { wheelNodeId, type DrivetrainDef, type VehicleDef, type WheelDef } from '../types';
 import { WHEEL_TUNING_205_55R16 } from '../wheelrig';
+import { capRoofYield } from '../roof';
+
+// R-CRASH roof strength (see defs/sedan.ts "roof strength", roof.ts)
+/** Roof-ring members' yield force cap, N. Measured (roofStrength.ts platen): SWR 2.5 (26 kN at 127 mm: a 1990s compact, before the 2009 upgrade; old FMVSS 216 asked 1.5), ≈ 60 % kept as set. */
+const ROOF_YIELD = 8e3;
+const ROOF_RING = ['s5_cw*', 's6_rf*', 's7_rf*', 's8_rf*', 's9_dk*'];
 
 /**
  * Worn 175/70R14 on a 14" steel wheel, 10 rays: the 205/55R16 tuning
@@ -1443,6 +1449,8 @@ function buildBeater(): { def: VehicleDef; design: BeaterDesign } {
     }
   }
   const beams = [...autoBeams, ...fixed, ...hoodBeams];
+  // R-CRASH roof strength (roof.ts; roofStrength.ts platen): the roof ring's members yield at the roof's collapse load
+  capRoofYield(beams, ROOF_RING, ROOF_YIELD);
   const def: VehicleDef = {
     name: 'beater',
     body: {
@@ -1475,6 +1483,7 @@ function buildBeater(): { def: VehicleDef; design: BeaterDesign } {
     // R-CRASH: member crush unloading off — the paper-thin beater already rebounds 7–13 % (wall contact
     // hysteresis only) and its fold ratios vs the sedan are tuned on plain elastic unloading.
     crushUnload: 1,
+    crushSet: ROOF_RING,
     shell: { zones: [{ ids: ['*'], release: { lo: 0.01, hi: 0.02, vLo: 2, vHi: 3 }, whole: true, yield: true }] },
   };
   const design: BeaterDesign = {

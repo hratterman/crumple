@@ -86,6 +86,9 @@ export const PLASTIC_K_FLOOR = 0.25;
  *     CRUSH_HELD_HOLD after the load drops: the shift goes into hystOff, which relaxes back once the hold
  *     ends, i.e. after the car has left the wall. The stored energy comes back as internal motion
  *     (damped by the beams and the shell) instead of push-off, and the member ends in its own shape.
+ *   SET members (unloadTrig < 0, VehicleDef.crushSet: roof and pillars): loaded past |unloadTrig| they
+ *     unload permanently whether or not they yielded, and they arm WITHOUT a shell release (a slow roof
+ *     push lets the shell recapture mid-test; their triggers, ≥ 5 kN, are far above any driving load).
  * A beam that yields folds its offset into the rest length (the ratchet works on the effective rest).
  * Measured (crashRing.test.ts, rigid wall, 50 / 100 km/h): sedan 21 / 23 → 10 / 9 %, coupe 21 / 22 →
  * 11 / 8 %, traffic 21 / 15 → 9 / 7 % (with the wall-contact hysteresis, colliders.ts).
@@ -218,9 +221,11 @@ export const applyBeamForces: ApplyBeamForces = (state, first, count, events, de
 
     const fAbs = fs < 0 ? -fs : fs;
     const bf = breakF[b]!;
-    if (crashArmed && gain !== 0 && fAbs > unloadTrig[b]!) {
+    const trig = unloadTrig[b]!;
+    if ((crashArmed || trig < 0) && gain !== 0 && fAbs > (trig < 0 ? -trig : trig)) {
       // crash loaded: a crumple member that yielded or carries a real crash load unloads plastically
-      const perm = gain > 0 && restLen[b] !== restLen0[b];
+      // trig < 0: a SET member (VehicleDef.crushSet: roof / pillars) takes a permanent set once crash loaded
+      const perm = gain > 0 && (trig < 0 || restLen[b] !== restLen0[b]);
       const cur = crushHold[b]!;
       crushHold[b] = perm || (cur & 0x8000) !== 0 ? 0x8000 | CRUSH_UNLOAD_HOLD  : CRUSH_HELD_HOLD;
     }

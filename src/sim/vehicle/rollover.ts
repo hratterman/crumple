@@ -25,6 +25,7 @@
  * LIFT_LOAD_FRACTION of its static load. Inside = the side toward the turn.
  */
 import { SIM_DT, SIM_HZ } from '../engine';
+import { MaterialId } from '../../protocol/messages';
 import { createHandlingSim, G, kinematics, Recorder, setMotion, stepN, type HandlingSample, type HandlingSim } from './handling';
 import type { VehicleDef } from './types';
 
@@ -344,12 +345,24 @@ export interface RolloverOptions {
    * point `dropM` above the ground, moving forward at `speedKmh`.
    */
   invertedDropM?: number;
+  /**
+   * R-CRASH FMVSS 208 DOLLY rollover (S8.1.11 / NHTSA dolly test): the settled vehicle is tilted
+   * `tiltDeg` (23°) with its leading side down, lifted so its lowest point is `heightM` (0.23 m, the
+   * dolly bed) above the ground, and released moving sideways toward the leading side at `speedKmh`
+   * (48 km/h); the leading wheels dig in and trip it. Overrides speedKmh / rollRate.
+   */
+  dolly?: { speedKmh: number; tiltDeg?: number; heightM?: number; leading?: 'L' | 'R'; curbM?: number };
   durationS?: number;
   probes: Readonly<Record<string, readonly CrushProbe[]>>;
+  /** R-CRASH diagnostics: called with the live sim at every recorded sample. */
+  onSample?: (sim: HandlingSim) => void;
 }
 
 export interface RolloverResult {
   maxRollDeg: number;
+  /** Total roll turned (unwrapped), degrees (360 = one full roll), and the peak roll rate, deg/s (50 Hz samples). */
+  rollTotalDeg: number;
+  peakRollRate: number;
   /** |roll| at the end, degrees (≈ 90 on its side, 180 on its roof). */
   finalRollDeg: number;
   /** Per probe group: final crush = max over its probes of (rest − final height), m; and the max over time. */
@@ -362,7 +375,7 @@ export interface RolloverResult {
 }
 
 export function runRollover(def: VehicleDef, opts: RolloverOptions): RolloverResult {
-  const run = start(def, opts.invertedDropM === undefined ? opts.speedKmh / 3.6 : 0);
+  const run = start(def, opts.invertedDropM === undefined && opts.dolly === undefined ? opts.speedKmh / 3.6 : 0);
   const { sim } = run;
   const s = sim.eng.state;
   const n0 = sim.obj.nodeStart;
@@ -399,6 +412,49 @@ export function runRollover(def: VehicleDef, opts: RolloverOptions): RolloverRes
       s.velZ[i] = f[2]! * v;
     }
     for (const w of sim.veh.wheels) w.omega = 0;
+  }
+  if (opts.dolly) {
+    const k0 = kinematics(sim);
+    const lead = opts.dolly.leading ?? 'R';
+    // right = forward × up (horizontal); roll + = top toward the right: the right side goes down
+    const rx = -k0.fz;
+    const rz = k0.fx;
+    const a = (((lead === 'R' ? 1 : -1) * (opts.dolly.tiltDeg ?? 23)) * Math.PI) / 180;
+    const ca = Math.cos(a);
+    const sa = Math.sin(a);
+    // rotate about the forward axis through the COM: up → up·cos a + right·sin a
+    let minY = Infinity;
+    for (let i = n0; i < n0 + sim.obj.nodeCount; i++) {
+      const dx = s.posX[i]! - k0.cx;
+      const dy = s.posY[i]! - k0.cy;
+      const dz = s.posZ[i]! - k0.cz;
+      const side = dx * rx + dz * rz;
+      const fwd = dx * k0.fx + dz * k0.fz;
+      const nSide = side * ca + dy * sa;
+      const nUp = dy * ca - side * sa;
+      s.posX[i] = k0.cx + nSide * rx + fwd * k0.fx;
+      s.posY[i] = k0.cy + nUp;
+      s.posZ[i] = k0.cz + nSide * rz + fwd * k0.fz;
+      minY = Math.min(minY, s.posY[i]! - s.radius[i]!);
+    }
+    const v = ((lead === 'R' ? 1 : -1) * opts.dolly.speedKmh) / 3.6;
+    for (let i = n0; i < n0 + sim.obj.nodeCount; i++) {
+      s.posY[i] = s.posY[i]! - minY + (opts.dolly.heightM ?? 0.23);
+      s.velX[i] = rx * v;
+      s.velY[i] = 0;
+      s.velZ[i] = rz * v;
+    }
+    for (const w of sim.veh.wheels) w.omega = 0;
+    const curb = opts.dolly.curbM ?? 0;
+    if (curb > 0) {
+      // a tripping curb along the leading side, 0.3 m out from the vehicle's widest point
+      let reach = 0;
+      for (let i = n0; i < n0 + sim.obj.nodeCount; i++) reach = Math.max(reach, (s.posX[i]! - k0.cx) * rx * (v > 0 ? 1 : -1) + (s.posZ[i]! - k0.cz) * rz * (v > 0 ? 1 : -1) + s.radius[i]!);
+      const off = (v > 0 ? 1 : -1) * (reach + 0.3 + 0.5);
+      sim.eng.setExtraColliders([
+        { id: 'tripCurb', kind: 'box', pos: [k0.cx + rx * off, curb / 2, k0.cz + rz * off], quat: [0, Math.sin(Math.atan2(k0.fx, k0.fz) / 2), 0, Math.cos(Math.atan2(k0.fx, k0.fz) / 2)], size: [0.5, curb / 2, 4], material: MaterialId.concrete },
+      ]);
+    }
   }
   // Initial roll rate ω about the forward axis through the COM: v += ω × (p − c), ω = rollRate·forward
   // (ω × up = rollRate·right: the top starts toward the vehicle's right).
@@ -462,11 +518,23 @@ export function runRollover(def: VehicleDef, opts: RolloverOptions): RolloverRes
   for (const g of groups) for (const q of g.list) q.rest = height(q, RX, RY, RZ, n0);
   const crushMax: Record<string, number> = {};
   for (const g of groups) crushMax[g.g] = 0;
+  // unwrapped roll (rollAngleDeg every sample)
+  let lastRoll = rollAngleDeg(sim);
+  let total = 0;
+  let peakRate = 0;
   drive(
     run,
     opts.durationS ?? 4,
     () => ({ gearSelect: 0, throttle: 0, brake: 0, steer: 0 }),
     (smp) => {
+      opts.onSample?.(sim);
+      const r = rollAngleDeg(sim);
+      let d = r - lastRoll;
+      if (d > 180) d -= 360;
+      if (d < -180) d += 360;
+      lastRoll = r;
+      total += d;
+      peakRate = Math.max(peakRate, Math.abs(d) * SAMPLE_HZ);
       for (const g of groups) for (const q of g.list) crushMax[g.g] = Math.max(crushMax[g.g]!, q.rest - height(q, s.posX, s.posY, s.posZ, 0));
       return !Number.isFinite(smp.rollDeg);
     },
@@ -489,6 +557,8 @@ export function runRollover(def: VehicleDef, opts: RolloverOptions): RolloverRes
   for (const smp of run.samples) maxRoll = Math.max(maxRoll, Math.abs(smp.rollDeg));
   return {
     maxRollDeg: maxRoll,
+    rollTotalDeg: Math.abs(total),
+    peakRollRate: peakRate,
     finalRollDeg: Math.abs(run.samples[run.samples.length - 1]!.rollDeg),
     crush,
     crushMax,

@@ -42,7 +42,7 @@ import { WHEEL_KERNEL_PARAMS } from '../vehicle/wheels';
 import { createSimState, simStateBytes, type StateAllocator } from '../state';
 import type { EventSink, HeightSampler, MaterialTable, SimState } from '../types';
 import type { HeightfieldSampler } from '../../world/sampler';
-import { applyShell, shellRecaptureCheck, type ShellRuntime } from '../vehicle/shell';
+import { applyShell, shellLatchPass, shellRecaptureCheck, type ShellRuntime } from '../vehicle/shell';
 import { CONTACT_RELEASE } from '../vehicle/shellDefs';
 import { KERNEL_SCALAR_WASM, KERNEL_SIMD_WASM } from './binary';
 
@@ -544,6 +544,7 @@ function createWasmKernel(kind: 'wasm' | 'simd', nodeCapacity: number, beamCapac
         return;
       }
       const H = block.header;
+      shellLatchPass(state, rt);
       if (wShell(H.byteOffset, dt, gx, gy, gz) === 0) return;
       rt.released += H[SH.RELEASED_INC]!;
       rt.maxDev = Math.sqrt(H[SH.MAX_DEV2]!);
