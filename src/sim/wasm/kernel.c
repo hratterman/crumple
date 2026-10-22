@@ -200,9 +200,10 @@ static inline int beam_scalar(int b, int dbg, int armed) {
 
   const f64 fAbs = fs < 0 ? -fs : fs;
   const f64 bf = breakFArr[b];
-  if (armed && gain != 0 && fAbs > (f64)unloadTrig[b]) {
-    /* crash loaded: a crumple member that yielded unloads plastically */
-    const int perm = gain > 0 && restLen[b] != restLen0[b];
+  const f64 trig = (f64)unloadTrig[b];
+  if ((armed || trig < 0) && gain != 0 && fAbs > (trig < 0 ? -trig : trig)) {
+    /* crash loaded: a crumple member that yielded (or a SET member, trig < 0) unloads plastically */
+    const int perm = gain > 0 && (trig < 0 || restLen[b] != restLen0[b]);
     const int32_t cur = crushHold[b];
     crushHold[b] = perm || (cur & 0x8000) != 0 ? 0x8000 | UNLOAD_HOLD : HELD_HOLD;
   }
@@ -284,8 +285,9 @@ static inline int beam_pair(int b, int dbg, int armed) {
       wasm_v128_or(wasm_f64x2_lt(dist, wasm_f64x2_splat(MIN_DIST)), wasm_f64x2_gt(fAbs, bf)),
       wasm_f64x2_gt(fAbs, wasm_v128_load(deformArr + b)));
   /* a crash trigger (armed, gain ≠ 0, |F| past the trigger) starts a hold: scalar path */
-  const int trig = armed && ((unloadGain[b] != 0 && wasm_f64x2_extract_lane(fAbs, 0) > (f64)unloadTrig[b]) ||
-                             (unloadGain[b1] != 0 && wasm_f64x2_extract_lane(fAbs, 1) > (f64)unloadTrig[b1]));
+  const f64 t0 = (f64)unloadTrig[b], t1 = (f64)unloadTrig[b1];
+  const int trig = (unloadGain[b] != 0 && (armed || t0 < 0) && wasm_f64x2_extract_lane(fAbs, 0) > (t0 < 0 ? -t0 : t0)) ||
+                   (unloadGain[b1] != 0 && (armed || t1 < 0) && wasm_f64x2_extract_lane(fAbs, 1) > (t1 < 0 ? -t1 : t1));
   if (wasm_v128_any_true(rare) || trig) {
     const int r0 = beam_scalar(b, dbg, armed);
     return r0 | (beam_scalar(b1, dbg, armed) << 1);

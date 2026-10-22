@@ -467,6 +467,8 @@ export const compileVehicle: CompileVehicle = (def) => {
 export const CRUSH_UNLOAD_DEFAULT = 40;
 /** A crumple-zone member is crash loaded from this fraction of its yield force (only while the car is in a crash). */
 export const CRUSH_TRIGGER_YIELD = 0.3;
+/** SET members (VehicleDef.crushSet) take their permanent set above this fraction of their yield force. */
+const CRUSH_TRIGGER_SET = 0.5;
 /** A held (cell / firewall / box / cab) or never-yielding member (engine block, subframe) is crash loaded from this force, N. */
 export const CRUSH_TRIGGER_HELD = 10e3;
 
@@ -483,7 +485,7 @@ const CRUSH_RUNNING_GEAR = /^(knuckle|wheel)/;
 function setCrushUnload(def: VehicleDef, rig: CompiledRig, shells: readonly CompiledShell[]): void {
   const alpha = def.crushUnload ?? CRUSH_UNLOAD_DEFAULT;
   const alphaHeld = def.crushUnloadHeld ?? alpha;
-  if (!(alpha > 1) && !(alphaHeld > 1)) return;
+  if (!(alpha > 1) && !(alphaHeld > 1) && !(def.crushSet && def.crushSet.length > 0)) return;
   // HELD nodes: every zone tier except the crumple zones (yield + whole): the safety cell, the firewall
   // ring, a truck box / pickup cab.
   const held = new Uint8Array(rig.nodeCount);
@@ -497,6 +499,11 @@ function setCrushUnload(def: VehicleDef, rig: CompiledRig, shells: readonly Comp
   const trig = new Float32Array(rig.beamCount).fill(Infinity);
   const n = def.body.beams.length;
   const groupOf = (i: number): string => rig.groups[rig.nodeGroup[i]!] ?? '';
+  const setPat = def.crushSet ?? [];
+  const isSet = (i: number): boolean => {
+    const id = rig.nodeIds[i]!;
+    return setPat.some((p) => (p.endsWith('*') ? id.startsWith(p.slice(0, -1)) : id === p));
+  };
   for (let b = 0; b < n; b++) {
     if (rig.beamType[b] !== RIG_BEAM_TYPE_ID.normal) continue;
     const df = rig.beamDeform[b]!;
@@ -507,6 +514,12 @@ function setCrushUnload(def: VehicleDef, rig: CompiledRig, shells: readonly Comp
     // suspension, subframe, engine mounts: forged / cast parts that bend or break, never take a crush
     // set from a crash load (a permanent set there froze the crash's nose-dive into the suspension:
     // the 58 km/h wall-hit sedan sat on its floor and could not drive away); temporary unloading only
+    if (setPat.length > 0 && Number.isFinite(df) && (isSet(rig.beamA[b]!) || isSet(rig.beamB[b]!))) {
+      // set members unload at the default α whatever the def's crumple α (the beater / box truck run theirs at 1)
+      gain[b] = CRUSH_UNLOAD_DEFAULT - 1;
+      trig[b] = -CRUSH_TRIGGER_SET * df;
+      continue;
+    }
     const isHeld = (held[rig.beamA[b]!] !== 0 && held[rig.beamB[b]!] !== 0) || CRUSH_RUNNING_GEAR.test(ga) || CRUSH_RUNNING_GEAR.test(gb);
     if (isHeld || !Number.isFinite(df)) {
       if (!(alphaHeld > 1)) continue;

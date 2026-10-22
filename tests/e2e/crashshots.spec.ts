@@ -5,7 +5,7 @@ import { expect, test, type Page } from '@playwright/test';
  * into the crash wall at CRASH_SPEED km/h (default 50; throttle until the speed is reached, then neutral),
  * enters the replay and saves a fixed side-view sequence around the impact marker (CRASH_TIMES, seconds
  * relative to the marker) plus a three-quarter view of the wreck. CRASH_VEHICLE picks the car
- * (`?vehicle=`), CRASH_TAG prefixes the files. Not a regression test: it is how the crash work is
+ * (`?vehicle=`), CRASH_TAG prefixes the files, CRASH_RUNUP sets the run-up (m). Not a regression test: it is how the crash work is
  * inspected (before / after sequences). Uses only the public __crumple debug API.
  */
 interface Marker {
@@ -58,7 +58,8 @@ test(`crash shots: ${TAG}`, async ({ page }) => {
     { timeout: 200_000 },
   );
   // run-up: long enough to reach the speed, then coast in neutral into the wall
-  const runUp = Math.max(60, (SPEED / 3.6) ** 2 / 2 / 2.2 + 40);
+  // (inside the arena: its paved floor ends ≈ 150 m behind the wall face; CRASH_RUNUP overrides)
+  const runUp = Number(ENV.CRASH_RUNUP ?? Math.min(145, Math.max(60, (SPEED / 3.6) ** 2 / 2 / 2.2 + 40)));
   await page.evaluate(
     ([x, z]) => {
       const c = (window as unknown as { __crumple: G }).__crumple;
@@ -72,7 +73,8 @@ test(`crash shots: ${TAG}`, async ({ page }) => {
   await page.evaluate(() => (window as unknown as { __crumple: G }).__crumple.debug.client.input(1, { throttle: 1, brake: 0, handbrake: 0, gearSelect: 1 }));
   let vMax = 0;
   let coasting = false;
-  for (let i = 0; i < 1200; i++) {
+  // wall-clock bound: under load the sim runs slower than real time (a 100 km/h run-up is ~15 s of sim)
+  for (let i = 0; i < 6000; i++) {
     await page.waitForTimeout(25);
     const v = await W(page);
     if (!v) continue;

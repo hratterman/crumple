@@ -19,13 +19,16 @@
  *    sits on); the engine cover to the towers and the rail tops;
  *  - glass beam pairs keep the pairs that are beams of the traffic rig,
  *    else become `between` the surviving endpoint groups;
- *  - the hood is welded on (no hood sub-rig to tear off: detach null).
+ *  - the hood is welded on (no hood sub-rig to tear off: detach null);
+ *  - R-CRASH: the traffic rig has no hinged closures (doors / trunk lid): the
+ *    panels the sedan binds to its closures (SEDAN_CLOSURE_FALLBACK) bind to
+ *    the cage / glass beams they sit in, re-pointed as above.
  * Every panel binds at every LOD (sedanTraffic.test.ts).
  */
 import { SEDAN_TRAFFIC, SKIP_STATIONS } from '../../../sim/vehicle/defs/sedanTraffic';
 import { once, setVisualExtras } from '../lods';
 import type { BeamSelector, GlassSpec, PaintDef, PanelDef, VehicleVisualDef } from '../types';
-import { buildSedanVisual, SEDAN_FOLLOW, type SedanBuildOptions } from './sedan';
+import { buildSedanVisual, SEDAN_CLOSURE_FALLBACK, SEDAN_FOLLOW, type SedanBuildOptions } from './sedan';
 
 /** Body node ids of the traffic rig (VehicleDef body nodes; wheel nodes are never panel binds). */
 const TRAFFIC_NODE_IDS: readonly string[] = SEDAN_TRAFFIC.body.nodes.map((n) => n.id);
@@ -119,12 +122,13 @@ function repointBeams(sel: BeamSelector): BeamSelector {
 
 function repointPanel(p: PanelDef): PanelDef {
   const rebind = TRAFFIC_REBIND[p.id];
-  const bind = rebind ?? repointBind(p.bind);
+  const fb = SEDAN_CLOSURE_FALLBACK.get(p.id);
+  const bind = rebind ?? repointBind(fb?.bind ?? p.bind);
   const out: PanelDef = { ...p, bind };
   if (p.id === 'hood') out.detach = null;
   else if (p.detach && p.detach.attach !== 'boundary') out.detach = { ...p.detach, attach: repointBeams(p.detach.attach) };
   if (p.glass) {
-    const glass: GlassSpec = { ...p.glass, beams: TRAFFIC_GLASS_BEAMS[p.id] ?? repointBeams(p.glass.beams) };
+    const glass: GlassSpec = { ...p.glass, beams: TRAFFIC_GLASS_BEAMS[p.id] ?? repointBeams(fb?.glass ?? p.glass.beams) };
     out.glass = glass;
   }
   return out;

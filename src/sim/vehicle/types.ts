@@ -385,6 +385,13 @@ export interface VehicleDef {
   /** R-CRASH: the same for HELD / never-yielding members (temporary offset). Default crushUnload; 1 = off. */
   crushUnloadHeld?: number;
   /**
+   * R-CRASH: node-id patterns (`*` = any suffix) of the SET members — body beams with both ends matching
+   * unload permanently once crash loaded (≥ CRUSH_TRIGGER_SET × their yield force), yielded or not: the
+   * roof and pillars, whose real steel is at yield under the loads that bend the stability-capped lattice
+   * (roof strength / rollover; roofStrength.ts). Default none.
+   */
+  crushSet?: readonly string[];
+  /**
    * R-PHYS (additive, optional): asymmetric digressive dampers on the shock
    * beams (dampers.ts), per axle; a shock beam belongs to the axle of the
    * wheel whose hub is nearest. Omitted: linear symmetric d·v (pre-R-PHYS).

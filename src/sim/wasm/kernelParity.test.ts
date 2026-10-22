@@ -77,6 +77,8 @@ function fillBlob(s: SimState, seed: number): void {
     const g = rng.float();
     s.unloadGain[b] = g < 0.35 ? rng.range(1, 60) : g < 0.7 ? -rng.range(1, 60) : 0;
     s.unloadTrig[b] = rng.float() < 0.15 ? Infinity : rng.range(0.1, 0.6) * (Number.isFinite(s.deform[b]!) ? s.deform[b]! : k * rest * 0.1);
+    // SET members (VehicleDef.crushSet): a negative trigger arms without a crash
+    if (s.unloadGain[b]! > 0 && rng.float() < 0.3) s.unloadTrig[b] = -s.unloadTrig[b]!;
   }
 }
 

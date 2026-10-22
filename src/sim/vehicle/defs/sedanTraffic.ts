@@ -49,6 +49,12 @@ import type { RigBeamDef, RigNodeDef } from '../../rig/types';
 import { wheelNodeId, type DrivetrainDef, type VehicleDef, type WheelDef } from '../types';
 import type { CrashProbes } from '../crash';
 import { WHEEL_TUNING_205_55R16 } from '../wheelrig';
+import { capRoofYield } from '../roof';
+
+// R-CRASH roof strength (see defs/sedan.ts "roof strength", roof.ts)
+/** Roof-ring members' yield force cap, N. Measured (roofStrength.ts platen): SWR 4.2 (platen peak 60 kN at 45 mm), 95 % of the platen travel kept as set. */
+const ROOF_YIELD = 2e4;
+const ROOF_RING = ['s5_cw*', 's7_rf*', 's9_dk*'];
 
 /**
  * The sedan's 205/55R16 tuning on a 10-ray wheel: per-beam springs/dampers,
@@ -1388,6 +1394,8 @@ function buildSedanTraffic(): { def: VehicleDef; design: SedanTrafficDesign } {
     }
   }
   const beams = [...autoBeams, ...fixed];
+  // R-CRASH roof strength (roof.ts; roofStrength.ts platen): the roof ring's members yield at the roof's collapse load
+  capRoofYield(beams, ROOF_RING, ROOF_YIELD);
   const def: VehicleDef = {
     name: 'sedanTraffic',
     body: {
@@ -1409,6 +1417,7 @@ function buildSedanTraffic(): { def: VehicleDef; design: SedanTrafficDesign } {
     steering: { maxWheelAngleDeg: round((SEDAN_TRAFFIC_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
     frame: { origin: sid(7, 'tn'), front: sid(2, 'rs'), top: sid(7, 'rf') },
     // Feel pass: rigid shell cluster (shell.ts) — crumple zones released whole on impact, firewall, safety cell.
+    crushSet: ROOF_RING,
     shell: shellLayout({
       front: ['s0_*', 's1_*', 's2_*', 's3_*', 's4_*', 'FL_*', 'FR_*'],
       rear: ['s10_*', 's13_*', 'RL_*', 'RR_*'],
