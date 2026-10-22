@@ -6,7 +6,7 @@ import { Matrix4, Vector3 } from 'three';
 import { describe, expect, it } from 'vitest';
 
 import { createRng } from '../../core/rng';
-import { createDamageFx, createShardGeometry, GLASS_CRACK_GLSL, ShardPool } from './shatter';
+import { createDamageFx, createShardGeometry, DEBRIS_PERSIST_S, GLASS_CRACK_GLSL, ShardPool } from './shatter';
 import { MeshStandardMaterial } from 'three';
 import type { BindingSet, VehicleVisualDef } from './types';
 
@@ -79,6 +79,23 @@ describe('createDamageFx', () => {
     expect(fx.glass.live + fx.debris.live).toBe(0);
     fx.dispose();
     expect(damage!.onFx).toBeNull();
+  });
+
+  it('R-CRASH: glass crumbs and debris stay where they landed (persistent debris), resting pieces cost no matrix writes', () => {
+    const damage = { onFx: null } as unknown as Parameters<typeof createDamageFx>[0]['damage'];
+    const fx = createDamageFx({ binding, def, damage, glassCapacity: 300, debrisCapacity: 50 });
+    fx.sink({ type: 'glassShatter', panelIndex: 0, pos: [0, 1, 0], normal: [0, 0, 1], laminated: false });
+    fx.sink({ type: 'panelDetach', panelIndex: 1, mode: 'hide', pos: [0, 1, 0] });
+    const n = fx.glass.live;
+    for (let t = 0; t < 60; t += 1 / 30) fx.update(1 / 30);
+    // a minute later every crumb is still on the road (the old pool faded them out after ≈ 9 s)
+    expect(fx.glass.live).toBe(n);
+    expect(fx.debris.live).toBeGreaterThan(0);
+    expect(DEBRIS_PERSIST_S).toBeGreaterThanOrEqual(300);
+    const before = new Float32Array(fx.glass.mesh.instanceMatrix.array);
+    fx.update(1 / 30);
+    expect(Array.from(fx.glass.mesh.instanceMatrix.array)).toEqual(Array.from(before));
+    fx.dispose();
   });
 });
 

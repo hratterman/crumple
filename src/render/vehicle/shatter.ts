@@ -7,7 +7,8 @@
  *   - ShardPool: pooled InstancedMesh of small pieces with ballistic
  *     integration, ground bounce, settle, shrink-out. Fixed capacity: a new
  *     spawn past capacity recycles the oldest piece (bounded memory, no
- *     allocation after construction).
+ *     allocation after construction). R-CRASH: crash debris persists on the
+ *     road (DEBRIS_PERSIST_S) and a piece at rest skips its matrix write.
  *   - createDamageFx: the DamageFx sink (VehicleDamage.onFx) — tempered
  *     glass bursts into a cloud of shards, laminated glass sheds a few,
  *     'hide' panels (mirrors, trim) throw debris chunks, torn beams chip paint.
@@ -169,6 +170,12 @@ export function createChunkGeometry(): BufferGeometry {
 
 const SLEEP_SPEED = 0.35;
 const FADE_FRACTION = 0.25;
+/**
+ * R-CRASH persistent debris: glass crumbs, trim pieces and paint chips stay on the road where they landed
+ * (a real crash scene keeps them until it is swept), recycled oldest-first by the pool's capacity; 10 min
+ * then a fade. A glint from a fresh crack still fades in seconds.
+ */
+export const DEBRIS_PERSIST_S = 600;
 
 export class ShardPool {
   readonly mesh: InstancedMesh;
@@ -179,6 +186,8 @@ export class ShardPool {
   private readonly scale: Float32Array;
   private readonly alive: Uint8Array;
   private readonly asleep: Uint8Array;
+  /** 1 = at rest and its matrix already written (skipped until it fades). */
+  private readonly placed: Uint8Array;
   /** Cached ground height + where it was sampled (re-sampled after 1 m of travel: few boxed calls). */
   private readonly ground: Float64Array;
   private readonly colors: InstancedBufferAttribute;
@@ -204,6 +213,7 @@ export class ShardPool {
     this.scale = new Float32Array(n);
     this.alive = new Uint8Array(n);
     this.asleep = new Uint8Array(n);
+    this.placed = new Uint8Array(n);
     this.ground = new Float64Array(n * 3);
     this.mesh = new InstancedMesh(opts.geometry, opts.material, n);
     this.mesh.instanceMatrix.setUsage(DynamicDrawUsage);
@@ -241,6 +251,7 @@ export class ShardPool {
     if (!this.alive[i]) this._live++;
     this.alive[i] = 1;
     this.asleep[i] = 0;
+    this.placed[i] = 0;
     this.age[i] = 0;
     this.life[i] = lifeS;
     this.scale[i] = size;
@@ -378,6 +389,9 @@ export class ShardPool {
         }
       }
       const fadeStart = life * (1 - FADE_FRACTION);
+      // a piece at rest keeps its matrix until it starts to fade (persistent debris: most of the pool)
+      if (this.asleep[i] && age <= fadeStart && this.placed[i]) continue;
+      this.placed[i] = this.asleep[i]!;
       const k = age > fadeStart ? 1 - (age - fadeStart) / (life - fadeStart) : 1;
       const sc = size * k;
       this.v.set(s[o]!, s[o + 1]!, s[o + 2]!);
@@ -478,7 +492,7 @@ export function createDamageFx(opts: DamageFxOptions): DamageFxSystem {
         const panel = binding.panels[fx.panelIndex];
         const radius = panel ? Math.max(0.15, panel.restRadius * 0.75) : 0.4;
         const count = fx.laminated ? 40 : Math.min(420, Math.max(80, Math.round(420 * radius * radius)));
-        burstDisc(glass, rng, fx.pos, fx.normal, radius, count, vel, fx.laminated ? 0.6 : 1.8, 0.006, 0.022, 9);
+        burstDisc(glass, rng, fx.pos, fx.normal, radius, count, vel, fx.laminated ? 0.6 : 1.8, 0.006, 0.022, DEBRIS_PERSIST_S);
         break;
       }
       case 'panelDetach': {
@@ -619,5 +633,5 @@ function chip(
   const vy = vel[1]! + rng.float() * speed;
   const vz = vel[2]! * 0.8 + (rng.float() * 2 - 1) * speed;
   const size = sizeMin + (sizeMax - sizeMin) * rng.float();
-  pool.spawn(pos[0]!, pos[1]!, pos[2]!, vx, vy, vz, size, 5 + rng.float() * 3, rng, r, g, b);
+  pool.spawn(pos[0]!, pos[1]!, pos[2]!, vx, vy, vz, size, DEBRIS_PERSIST_S * (0.9 + 0.2 * rng.float()), rng, r, g, b);
 }
