@@ -135,6 +135,9 @@ export const KZ_COEF = 2.4;
 const NCONT_ALPHA = 1 / 41;
 /** Longitudinal bulldozing acts on sinkage beyond this share of the diameter (Bekker; see tyreSurface.ts). */
 export const BULLDOZE_FROM_D = 0.06;
+/** Soil hold: below SOIL_HOLD_V (m/s) the slip fed to Janosi–Hanamoto rises toward SOIL_HOLD_I (full shear). */
+export const SOIL_HOLD_V = 2;
+export const SOIL_HOLD_I = 1;
 /** Lateral bulldozing velocity regularisation, m/s. */
 export const BULLDOZE_V0 = 0.3;
 /** Rolling resistance ω ramp, rad/s (= types ROLL_RES_OMEGA_EPS). */
@@ -393,6 +396,12 @@ export function setTyrePressure(t: TyreState, kPa: number): void {
   th.pressure = (th.gasMass * 287.05 * (th.tGas + 273.15)) / t.thermalP.volume - 101_325;
   if (th.pressure < 0) th.pressure = 0;
   t.dirty = true;
+}
+
+/** Sets the remaining tread depth, mm (clamped to 0 … new): a worn tyre (less wet grip, earlier hydroplaning). */
+export function setTreadDepth(t: TyreState, mm: number): void {
+  const n = t.thermalP.treadNew;
+  t.thermal.tread = mm < 0 ? 0 : mm > n ? n : mm;
 }
 
 /** New tyre (cold, sealed, design pressure, full tread). */
@@ -663,7 +672,12 @@ export function stepTyre(
     A = t.sectionWidth * L;
     let strength = 1 - surf.soilWet * wet;
     if (strength < 0.2) strength = 0.2;
-    mu = soilMu(soilT, t.sigma, L, A, W, strength);
+    // a slow or parked wheel: a soil element dwells L/V in the patch, so any creep mobilises the soil's full
+    // shear strength (j = creep × dwell ≫ K) — the rolling Janosi–Hanamoto slip only governs a moving patch
+    // (without this a parked car slid down a 10° dirt trail: μ(σ = 0) = 0)
+    let iEff = t.sigma;
+    if (speed < SOIL_HOLD_V) iEff += (1 - speed / SOIL_HOLD_V) * SOIL_HOLD_I;
+    mu = soilMu(soilT, iEff, L, A, W, strength);
     t.factor = mu / (t.base[0]! > 0 ? t.base[0]! : 1);
     t.lift = 0;
     t.waterDepth = 0;

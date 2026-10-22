@@ -38,11 +38,11 @@ interface SurfaceRun {
   lift: number;
 }
 
-function brakeOn(materialId: number, speed: number, wetness = 0, rain = 0, mod: Partial<typeof wheel> = {}): SurfaceRun {
+function brakeOn(materialId: number, speed: number, wetness = 0, rain = 0, mod: Partial<typeof wheel> = {}, treadMm?: number): SurfaceRun {
   const w = { ...wheel, ...mod };
-  const br = longitudinalSweep(w, { load: fz0, kappaEnd: -0.6, speed, materialId, wetness, rain });
+  const br = longitudinalSweep(w, { load: fz0, kappaEnd: -0.6, speed, materialId, wetness, rain, treadMm });
   const p = peakOf(br, fxB, negK);
-  const b = createTyreBench(w, { load: fz0, speed, materialId, wetness, rain });
+  const b = createTyreBench(w, { load: fz0, speed, materialId, wetness, rain, treadMm });
   let fx = 0;
   for (let i = 0; i < 2000; i++) {
     benchStep(b);
@@ -65,6 +65,10 @@ beforeAll(() => {
   R.mud = brakeOn(MaterialId.mud, 10);
   R.sand = brakeOn(MaterialId.sand, 10);
   R.sandAired = brakeOn(MaterialId.sand, 10, 0, 0, { tyrePressure: 120 });
+  R.dryWorn = brakeOn(MaterialId.asphalt, 15, 0, 0, {}, 1.6);
+  R.wet25Worn = brakeOn(MaterialId.asphalt, 25, 1, 0.3, {}, 1.6);
+  R.flood22 = brakeOn(MaterialId.asphalt, 22, 1, 1);
+  R.flood22Worn = brakeOn(MaterialId.asphalt, 22, 1, 1, {}, 1.6);
 }, 600_000);
 
 describe('tyre on surfaces (205/55R16 bench)', () => {
@@ -82,6 +86,18 @@ describe('tyre on surfaces (205/55R16 bench)', () => {
     expect(R.flood33!.muX).toBeLessThan(0.45 * R.dry!.muX);
     // a damp road (no standing water) never lifts the tyre at 90 km/h
     expect(R.wet25!.lift).toBe(0);
+  });
+
+  it('wear: a 1.6 mm (legal limit) tread grips 2–8 % more on dry asphalt and ≥ 10 % less in the wet at 90 km/h [ADAC]', () => {
+    const dry = R.dryWorn!.muX / R.dry!.muX;
+    expect(dry).toBeGreaterThan(1.02);
+    expect(dry).toBeLessThan(1.08);
+    expect(R.wet25Worn!.muX / R.wet25!.muX).toBeLessThan(0.9);
+  });
+
+  it('hydroplaning starts earlier on a worn tread: at 80 km/h in 2.5 mm of water a new tyre still grips, a 1.6 mm one lifts [ADAC]', () => {
+    expect(R.flood22!.lift).toBeLessThan(0.3);
+    expect(R.flood22Worn!.lift).toBeGreaterThan(R.flood22!.lift + 0.2);
   });
 
   it('loose / soft ground: grip of the published range, rising with slip (no peak) [ROAD][W]', () => {

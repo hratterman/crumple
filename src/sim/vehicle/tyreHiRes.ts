@@ -17,7 +17,7 @@
  *  - the rolling-loss correction table (R-PHYS, calibrated on the 12-ray
  *    car) plus the 16-gon's EXTRA tread-vibration loss per speed bin
  *    (`rollDelta`, measured: bare 16-ray minus bare 12-ray free-rolling C_rr
- *    on the bench, 3-bin median, only where positive and below 110 km/h —
+ *    on the bench, 3-bin median, only where positive and up to 110 km/h —
  *    above it both polygons' losses are resonance-dominated and the
  *    difference is noise; HIRES_ROLL_DELTA_205_55R16 for the sedan tyre).
  * Hoop tension (wheels.ts): its geometric stiffness grows with the ray
@@ -37,7 +37,7 @@ export const HIRES_BRUSH_GAIN = 1.2;
 export const HIRES_SIDE_GAIN = 1;
 export const HIRES_RING_GAIN = 1.45;
 /** Extra rolling loss of the 16-ray 205/55R16 over the 12-ray one, per 10 km/h of tread speed (see the doc). */
-export const HIRES_ROLL_DELTA_205_55R16: readonly number[] = [0, 0, 0, 0, 0, 0, 0, 0.0023, 0.0044, 0.0129, 0.0129];
+export const HIRES_ROLL_DELTA_205_55R16: readonly number[] = [0, 0, 0, 0, 0, 0, 0, 0.0023, 0.0044, 0.0129, 0.0129, 0.007];
 
 /** Per-ray stiffness / damping fields of a WheelDef (scaled with the ray count). */
 const PER_RAY = [

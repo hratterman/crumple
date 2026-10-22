@@ -47,7 +47,7 @@
  * rubber's viscoelastic loss peak), Farroni 2015 (μ(T) window fits), tyre
  * makers' data for summer vs track compounds.
  * WEAR: tread depth falls with the frictional energy into the tread,
- * dd/dt = −k_w·η_slip·P_slip·(1 + ((T_s − 30)⁺/45)²) (Archard / Schallamach:
+ * dd/dt = −k_w·η_slip·P_slip·(1 + ((T_s − 30)⁺/38)³) (Archard / Schallamach:
  * abrasion ∝ frictional work, strongly accelerated by temperature). k_w is set
  * so a burnout destroys an 8 mm tread in ≈ 60 s of ≈ 50 kW per tyre and
  * normal driving lasts tens of thousands of km.
@@ -245,8 +245,9 @@ export function stepTyreThermal(p: TyreThermalParams, s: TyreThermalState, inp: 
   // ---- wear (frictional heat into the tread, temperature accelerated)
   if (qSlip > 0) {
     s.slipEnergy += qSlip * dt;
-    const hot = s.tSurf > 30 ? (s.tSurf - 30) / 45 : 0;
-    const d = s.tread - p.wearK * qSlip * dt * (1 + hot * hot);
+    const ts = s.tSurf < WEAR_HOT_MAX ? s.tSurf : WEAR_HOT_MAX;
+    const hot = ts > 30 ? (ts - 30) / WEAR_HOT_K : 0;
+    const d = s.tread - p.wearK * qSlip * dt * (1 + hot * hot * hot);
     s.tread = d > 0 ? d : 0;
   }
   // ---- inflation: leak, then ideal gas
@@ -297,12 +298,19 @@ export interface TyreBuild {
 /** Section width ÷ the rig's ring-plane spacing (the tread rings sit inside the shoulders). */
 export const SECTION_PER_WIDTH = 1.35;
 /**
- * Wear rate, mm of tread per J of frictional heat into the tread at ≤ 30 °C:
- * a 50 kW-per-tyre burnout (35 kW into the tread, surface ≈ 250 °C: ×25)
- * takes an 8 mm tread off in ≈ 60 s; normal driving (≈ 100–200 W of slip heat
- * per tyre at ≈ 40 °C) lasts ≈ 10⁴ km.
+ * Wear rate, mm of tread per J of frictional heat into the tread at ≤ 30 °C,
+ * × (1 + ((min(T_s, 250) − 30)/WEAR_HOT_K)³) above it (abrasion turns into thermal
+ * degradation / chunking on a hot tread). Calibrated on both ends:
+ * normal driving (≈ 100 W of slip heat per tyre, surface ≈ 35–45 °C) wears
+ * the 6.4 mm of usable tread (8 → 1.6 mm) in ≈ 50 000 km at a 50 km/h
+ * average — tyre makers' treadwear 40–80 000 km, ≈ 0.05–0.1 g/km per tyre;
+ * a 50 kW-per-tyre burnout (35 kW into the tread, surface ≈ 250 °C: × ≈ 200)
+ * takes an 8 mm tread off in ≈ 1 min (burnout practice: 30 s – 2 min).
  */
-export const WEAR_K = 4.5e-8;
+export const WEAR_K = 1.8e-8;
+export const WEAR_HOT_K = 38;
+/** The acceleration saturates at this surface temperature, °C (a smoking tread: the heat input, not the temperature, limits it). */
+export const WEAR_HOT_MAX = 250;
 
 /** Builds the thermal / inflation constants of a tyre (spawn time; Math.* allowed). */
 export function tyreThermalParams(b: TyreBuild): TyreThermalParams {

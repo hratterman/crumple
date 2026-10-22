@@ -69,7 +69,7 @@ import {
 } from './vehicle/runtime';
 import type { CompiledVehicle, TransmissionMode, VehicleDef, VehicleRuntime } from './vehicle/types';
 import { setWheelGround } from './vehicle/wheels';
-import { fillWheelFrame, punctureTyre, repairTyre, setTyreEnvironment, setTyrePressure, tyreEnv } from './vehicle/tyre';
+import { fillWheelFrame, punctureTyre, repairTyre, setTreadDepth, setTyreEnvironment, setTyrePressure, tyreEnv } from './vehicle/tyre';
 import { createWheelFrame } from '../protocol/wheels';
 
 /** Snapshot scratch for the wheel records (never retained). */
@@ -622,7 +622,7 @@ export class SimEngine {
   }
 
   /** R-TYRE: tyre service (protocol `setTyre`, logged): inflate / air down, puncture, repair. */
-  setTyre(msg: { objectId: number; wheel?: number; pressureKpa?: number; puncture?: 'slow' | 'fast' | 'debead'; repair?: boolean }): void {
+  setTyre(msg: { objectId: number; wheel?: number; pressureKpa?: number; puncture?: 'slow' | 'fast' | 'debead'; repair?: boolean; treadMm?: number }): void {
     const v = this.vehicles.get(msg.objectId) as VehicleRuntimeEx | undefined;
     if (!v) throw new SimCommandError(`objectId ${msg.objectId} is not a vehicle`, msg.objectId);
     const n = v.tyres.length;
@@ -635,12 +635,16 @@ export class SimEngine {
     if (msg.puncture !== undefined && msg.puncture !== 'slow' && msg.puncture !== 'fast' && msg.puncture !== 'debead') {
       throw new SimCommandError('setTyre: puncture must be slow | fast | debead', msg.objectId);
     }
+    if (msg.treadMm !== undefined && !(Number.isFinite(msg.treadMm) && msg.treadMm >= 0 && msg.treadMm <= 40)) {
+      throw new SimCommandError('setTyre: treadMm must be in [0, 40]', msg.objectId);
+    }
     for (let w = 0; w < n; w++) {
       if (msg.wheel !== undefined && w !== msg.wheel) continue;
       const t = v.tyres[w]!;
       if (msg.repair === true) repairTyre(t);
       if (msg.pressureKpa !== undefined) setTyrePressure(t, msg.pressureKpa);
       if (msg.puncture !== undefined) punctureTyre(t, msg.puncture);
+      if (msg.treadMm !== undefined) setTreadDepth(t, msg.treadMm);
     }
   }
 

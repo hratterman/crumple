@@ -342,6 +342,8 @@ export interface SetTyreMsg {
   pressureKpa?: number;
   puncture?: 'slow' | 'fast' | 'debead';
   repair?: boolean;
+  /** Tread depth, mm (0 … the tyre's new depth): a worn set; applied after `repair`. */
+  treadMm?: number;
 }
 /**
  * Recover (R): rigidly re-place the CURRENT (deformed) node set upright —

@@ -94,6 +94,15 @@ describe('tyre thermal model', () => {
     expect(s.tSurf).toBeLessThan(hot - 30);
   });
 
+  it('normal driving: ≈ 100 W of slip heat per tyre wears 6.4 mm of tread in 30–100 thousand km (treadwear 40–80 k km) [TIRE]', () => {
+    // 1 h at 50 km/h average with 100 W of frictional heat into the tread (cornering, braking, drive slip)
+    const s = run(3600, { slipPower: 100 / 0.7, speed: 50 / 3.6, rollPower: 0.011 * 3500 * (50 / 3.6) });
+    const mmPerKm = (SEDAN_TYRE.treadNew - s.tread) / 50;
+    const km = 6.4 / mmPerKm;
+    expect(km).toBeGreaterThan(30_000);
+    expect(km).toBeLessThan(100_000);
+  });
+
   it('punctures: a nail-sized leak takes minutes, a cut seconds, and both end at atmospheric [TIRE]', () => {
     const slow = createTyreThermalState(SEDAN_TYRE);
     slow.leakArea = 2e-7;

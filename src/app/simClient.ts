@@ -489,13 +489,14 @@ export class SimClient {
     this.post({ type: 'setSurfaceWetness', wetness, rain });
   }
 
-  /** R-TYRE: tyre service — inflate / air down, puncture, repair (SetTyreMsg; logged). */
-  setTyre(objectId: number, op: { wheel?: number; pressureKpa?: number; puncture?: 'slow' | 'fast' | 'debead'; repair?: boolean }): void {
+  /** R-TYRE: tyre service — inflate / air down, puncture, repair, worn tread (SetTyreMsg; logged). */
+  setTyre(objectId: number, op: { wheel?: number; pressureKpa?: number; puncture?: 'slow' | 'fast' | 'debead'; repair?: boolean; treadMm?: number }): void {
     const msg: MainToWorker = { type: 'setTyre', objectId };
     if (op.wheel !== undefined) msg.wheel = op.wheel;
     if (op.pressureKpa !== undefined) msg.pressureKpa = op.pressureKpa;
     if (op.puncture !== undefined) msg.puncture = op.puncture;
     if (op.repair !== undefined) msg.repair = op.repair;
+    if (op.treadMm !== undefined) msg.treadMm = op.treadMm;
     this.post(msg);
   }
 

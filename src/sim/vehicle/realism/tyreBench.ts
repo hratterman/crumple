@@ -50,6 +50,8 @@ export interface TyreBenchOptions {
   /** R-TYRE: surface water (engine setSurfaceWetness), 0..1. */
   wetness?: number;
   rain?: number;
+  /** R-TYRE: remaining tread depth, mm (engine setTyre treadMm; default new). */
+  treadMm?: number;
 }
 
 export interface TyreBench {
@@ -181,6 +183,7 @@ export function createTyreBench(src: WheelDef, opts: TyreBenchOptions): TyreBenc
   // Start with the carriage lifted so the tyre just touches; the load servo sinks it.
   const obj = eng.spawnVehicle(1, def, { pos: [0, 0.01, 0], quat: [0, 0, 0, 1] }, 'manual');
   const veh = eng.getVehicle(1)!;
+  if (opts.treadMm !== undefined) eng.setTyre({ objectId: 1, treadMm: opts.treadMm });
   const s = eng.state;
   const nCarriage = def.body.nodes.length;
   const nodes = new Int32Array(nCarriage);
