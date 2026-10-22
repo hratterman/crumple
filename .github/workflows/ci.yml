@@ -17,6 +17,14 @@ jobs:
 
       - run: npm ci
 
+      # R-CORE: the committed WASM physics kernel must be the build of kernel.c (same clang 18 → same bytes).
+      - name: Rebuild the WASM kernel and diff
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends clang-18 lld-18
+          CLANG=clang-18 tools/build-wasm.sh
+          git diff --exit-code -- src/sim/wasm
+
       - run: npm run typecheck
 
       - run: npm test

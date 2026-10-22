@@ -10,47 +10,74 @@ import type { Transform } from '../protocol/messages';
 import type { CompiledRig } from './rig/types';
 import { ACTION_COUNT, BeamType, NODE_FLAG_IN_CONTACT, type SimObject, type SimState } from './types';
 
-export function createSimState(nodeCapacity: number, beamCapacity: number): SimState {
+/**
+ * Typed-array allocator for SimState (R-CORE): the default allocates plain JS
+ * arrays; the WASM kernel carves them out of its linear memory so the kernel
+ * and JS share one copy (src/sim/wasm/kernel.ts). Arrays are zero-filled.
+ */
+export interface StateAllocator {
+  f64(n: number): Float64Array;
+  f32(n: number): Float32Array;
+  i32(n: number): Int32Array;
+  u8(n: number): Uint8Array;
+}
+
+export const JS_ALLOCATOR: StateAllocator = {
+  f64: (n) => new Float64Array(n),
+  f32: (n) => new Float32Array(n),
+  i32: (n) => new Int32Array(n),
+  u8: (n) => new Uint8Array(n),
+};
+
+/** Bytes a SimState of this capacity needs (allocators that pre-size, 16-byte aligned arrays). */
+export function simStateBytes(nodeCapacity: number, beamCapacity: number): number {
+  const al = (b: number): number => (b + 15) & ~15;
+  return 18 * al(8 * nodeCapacity) + al(nodeCapacity) + 12 * al(8 * beamCapacity) + 2 * al(4 * beamCapacity) + 2 * al(beamCapacity) + al(4 * beamCapacity);
+}
+
+export function createSimState(nodeCapacity: number, beamCapacity: number, alloc: StateAllocator = JS_ALLOCATOR): SimState {
   if (!(nodeCapacity >= 0) || !(beamCapacity >= 0)) throw new RangeError('negative SimState capacity');
+  const n = nodeCapacity;
+  const m = beamCapacity;
   return {
     nodeCapacity,
     beamCapacity,
     nodeCount: 0,
     beamCount: 0,
-    posX: new Float64Array(nodeCapacity),
-    posY: new Float64Array(nodeCapacity),
-    posZ: new Float64Array(nodeCapacity),
-    velX: new Float64Array(nodeCapacity),
-    velY: new Float64Array(nodeCapacity),
-    velZ: new Float64Array(nodeCapacity),
-    frcX: new Float64Array(nodeCapacity),
-    frcY: new Float64Array(nodeCapacity),
-    frcZ: new Float64Array(nodeCapacity),
-    invMass: new Float64Array(nodeCapacity),
-    radius: new Float64Array(nodeCapacity),
-    friction: new Float64Array(nodeCapacity),
-    contactK: new Float64Array(nodeCapacity),
-    treadAxX: new Float64Array(nodeCapacity),
-    treadAxY: new Float64Array(nodeCapacity),
-    treadAxZ: new Float64Array(nodeCapacity),
-    treadF: new Float64Array(nodeCapacity),
-    objRadius: new Float64Array(nodeCapacity),
-    flags: new Uint8Array(nodeCapacity),
-    aIdx: new Int32Array(beamCapacity),
-    bIdx: new Int32Array(beamCapacity),
-    k: new Float64Array(beamCapacity),
-    d: new Float64Array(beamCapacity),
-    restLen: new Float64Array(beamCapacity),
-    restLen0: new Float64Array(beamCapacity),
-    k0: new Float64Array(beamCapacity),
-    deform: new Float64Array(beamCapacity),
-    breakF: new Float64Array(beamCapacity),
-    boundsLow: new Float64Array(beamCapacity),
-    boundsHigh: new Float64Array(beamCapacity),
-    preload: new Float64Array(beamCapacity),
-    type: new Uint8Array(beamCapacity),
-    active: new Uint8Array(beamCapacity),
-    strainOut: new Float32Array(beamCapacity),
+    posX: alloc.f64(n),
+    posY: alloc.f64(n),
+    posZ: alloc.f64(n),
+    velX: alloc.f64(n),
+    velY: alloc.f64(n),
+    velZ: alloc.f64(n),
+    frcX: alloc.f64(n),
+    frcY: alloc.f64(n),
+    frcZ: alloc.f64(n),
+    invMass: alloc.f64(n),
+    radius: alloc.f64(n),
+    friction: alloc.f64(n),
+    contactK: alloc.f64(n),
+    treadAxX: alloc.f64(n),
+    treadAxY: alloc.f64(n),
+    treadAxZ: alloc.f64(n),
+    treadF: alloc.f64(n),
+    objRadius: alloc.f64(n),
+    flags: alloc.u8(n),
+    aIdx: alloc.i32(m),
+    bIdx: alloc.i32(m),
+    k: alloc.f64(m),
+    d: alloc.f64(m),
+    restLen: alloc.f64(m),
+    restLen0: alloc.f64(m),
+    k0: alloc.f64(m),
+    deform: alloc.f64(m),
+    breakF: alloc.f64(m),
+    boundsLow: alloc.f64(m),
+    boundsHigh: alloc.f64(m),
+    preload: alloc.f64(m),
+    type: alloc.u8(m),
+    active: alloc.u8(m),
+    strainOut: alloc.f32(m),
   };
 }
 
@@ -196,8 +223,9 @@ export class SimArena {
   /** Live objects, ascending objectId; ranges packed contiguously in this order. */
   readonly objects: SimObject[] = [];
 
-  constructor(nodeCapacity: number, beamCapacity: number, maxObjects: number) {
-    this.state = createSimState(nodeCapacity, beamCapacity);
+  constructor(nodeCapacity: number, beamCapacity: number, maxObjects: number, state?: SimState) {
+    if (state && (state.nodeCapacity !== nodeCapacity || state.beamCapacity !== beamCapacity)) throw new RangeError('SimArena: state capacity mismatch');
+    this.state = state ?? createSimState(nodeCapacity, beamCapacity);
     this.maxObjects = maxObjects;
   }
 

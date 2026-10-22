@@ -4,6 +4,8 @@ export default defineConfig({
   test: {
     // tests/e2e/ holds Playwright specs — vitest must not collect them.
     exclude: [...configDefaults.exclude, 'tests/e2e/**'],
+    // R-CORE: the solver kernel for every engine a test creates (CRUMPLE_KERNEL, default simd).
+    setupFiles: ['src/sim/wasm/vitest.setup.ts'],
     projects: [
       {
         extends: true,

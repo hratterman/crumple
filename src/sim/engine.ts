@@ -3,7 +3,6 @@
  * step. Worker-only. Commands (spawn/despawn/reset/input/ground) must be
  * called between steps; step() itself is allocation-free.
  */
-import { applyShell } from './vehicle/shell';
 import type { Vec3 } from '../core/math';
 import { createRng, type Rng } from '../core/rng';
 import type { SnapshotWriter } from '../protocol/codec';
@@ -29,7 +28,6 @@ import {
   type SnapshotCapacity,
   type Transform,
 } from '../protocol/messages';
-import { applyBeamForces } from './beams';
 import { applyColliderContacts, compileColliders, resetColliderContactState } from './collision/colliders';
 import { OBJ_REBUILD_TICKS, OBJ_REBUILD_TICKS_SLOW, OBJ_SLOW_SPEED, ObjectContacts } from './collision/objects';
 import { applyWater, boxNearWater, VEHICLE_FLOOD_LOSS, VEHICLE_FLOOD_TIME_S } from './collision/water';
@@ -38,7 +36,7 @@ import type { ColliderWorld } from './collision/types';
 import { resolveColliders } from '../world/colliders';
 import { WATER_PHYSICS, type ColliderDef, type ResolvedCollider, type WaterBody } from '../world/types';
 import { DEFAULT_MATERIALS } from './collision/materials';
-import { integrateNodes } from './integrator';
+import { defaultKernel, type KernelFactory, type SimKernel } from './kernel';
 import { compileRig } from './rig/builder';
 import type { CompiledRig, RigDef } from './rig/types';
 import { SimArena } from './state';
@@ -53,7 +51,7 @@ import type { RouteNetwork, WorldLayout } from '../world/types';
 import { clampDensity, TrafficSim } from './traffic/traffic';
 import { buildVariant, type TrafficVariant } from './traffic/templates';
 import { AutopilotSet } from './traffic/autopilot';
-import { SPAWN_SETTLE_MAX_S, type SetAutopilotMsg } from '../protocol/messages';
+import { SOLVER_PRESETS, SPAWN_SETTLE_MAX_S, type SetAutopilotMsg, type SolverOptions } from '../protocol/messages';
 import { createTerrainSampler, type HeightfieldSampler } from '../world/sampler';
 import type { TerrainData } from '../world/types';
 import {
@@ -67,6 +65,13 @@ import {
 import type { CompiledVehicle, TransmissionMode, VehicleDef, VehicleRuntime } from './vehicle/types';
 import { setWheelGround } from './vehicle/wheels';
 import type { DrivetrainStateEx } from './vehicle/drivetrain';
+
+/**
+ * R-CORE: solver options of a fresh engine (before any `setSolver`). Main
+ * sends the physics-quality preset (SOLVER_PRESETS) right after `init`.
+ */
+export const SOLVER_DEFAULTS: Readonly<SolverOptions> = SOLVER_PRESETS.standard;
+const SOLVER_OPTION_KEYS = ['triangleContact', 'selfCollision', 'ccd'] as const satisfies readonly (keyof SolverOptions)[];
 
 /** Fixed physics step, s. */
 export const SIM_DT = 1 / 2000;
@@ -84,6 +89,8 @@ export interface EngineConfig {
   debugStrains: boolean;
   capacity?: SnapshotCapacity;
   seed?: number;
+  /** R-CORE solver kernel (js / wasm / simd; bit-identical). Default: `defaultKernel()`. */
+  kernel?: KernelFactory;
 }
 
 const IMPACT_FIELDS = 9;
@@ -231,6 +238,10 @@ export class SimCommandError extends Error {
 export class SimEngine {
   readonly arena: SimArena;
   readonly state: SimState;
+  /** The solver kernel bound to `state` (R-CORE). */
+  readonly kernel: SimKernel;
+  /** Its factory (helper engines, e.g. traffic template settles, use the same kernel). */
+  readonly kernelFactory: KernelFactory;
   readonly capacity: SnapshotCapacity;
   readonly debugStrains: boolean;
   readonly events: PendingEvents;
@@ -295,6 +306,8 @@ export class SimEngine {
   readonly autopilots = new AutopilotSet();
   /** Route network cache (layout id/version + terrain hash). */
   private routeCache: { key: string; net: RouteNetwork } | null = null;
+  /** R-CORE solver options (setSolver). Engines start from SOLVER_DEFAULTS. */
+  readonly solver: SolverOptions = { ...SOLVER_DEFAULTS };
   /** VehicleCatalog id per vehicle objectId (spawnVehicle.catalogId; P7 replay header). */
   readonly catalogIds = new Map<number, string>();
 
@@ -307,7 +320,9 @@ export class SimEngine {
     if (!g || g.length !== 3 || !g.every(Number.isFinite)) throw new TypeError('gravity must be 3 finite numbers');
     this.capacity = { ...cap };
     this.debugStrains = !!config.debugStrains;
-    this.arena = new SimArena(cap.nodeCapacity, cap.beamCapacity, cap.maxObjects);
+    this.kernelFactory = config.kernel ?? defaultKernel();
+    this.kernel = this.kernelFactory.create(cap.nodeCapacity, cap.beamCapacity);
+    this.arena = new SimArena(cap.nodeCapacity, cap.beamCapacity, cap.maxObjects, this.kernel.state);
     this.state = this.arena.state;
     this.events = new PendingEvents(this.arena);
     this.contacts = new ObjectContacts(cap.nodeCapacity, cap.maxObjects);
@@ -740,6 +755,8 @@ export class SimEngine {
     this.arena.remove(objectId);
     this.autopilots.remove(objectId);
     this.rigs.delete(objectId);
+    const gone = this.vehicles.get(objectId);
+    if (gone?.shell) for (const c of gone.shell) this.kernel.releaseShell(c);
     this.vehicles.delete(objectId);
     this.props.delete(objectId);
     this.floods.delete(objectId);
@@ -892,6 +909,23 @@ export class SimEngine {
   }
 
   /** Sets one action by index (clamped). */
+  /**
+   * R-CORE solver options (`setSolver`, logged + replayed). Missing fields
+   * keep their value. Validated: every given field must be a boolean.
+   */
+  setSolver(options: Partial<SolverOptions>): void {
+    if (!options || typeof options !== 'object') throw new SimCommandError('setSolver: options must be an object');
+    for (const key of SOLVER_OPTION_KEYS) {
+      const v = options[key];
+      if (v !== undefined && typeof v !== 'boolean') throw new SimCommandError(`setSolver: ${key} must be a boolean`);
+    }
+    for (const key of SOLVER_OPTION_KEYS) {
+      const v = options[key];
+      if (v !== undefined) this.solver[key] = v;
+    }
+    this.contactsDirty = true;
+  }
+
   setAction(obj: SimObject, index: number, value: number): void {
     const r = ACTION_RANGES[index];
     if (!r) throw new SimCommandError(`invalid action index ${index}`, obj.objectId);
@@ -922,6 +956,7 @@ export class SimEngine {
     const vslots = this.vehicleSlots;
     const pslots = this.propSlots;
     const cw = this.colliderWorld;
+    const kern = this.kernel;
     // The wheel kernels' ground is module state: point it at THIS engine's
     // ground every step (several engines may coexist, e.g. in tests).
     if (this.vehicles.size > 0) setWheelGround(sampler, this.materials, SIM_DT);
@@ -939,7 +974,7 @@ export class SimEngine {
         const travel = obj.hydroTravel;
         for (let h = 0; h < hb.length; h++) restLen[hb[h]!] = base[h]! * (1 + travel[h]! * steer);
       }
-      applyBeamForces(s, obj.beamStart, obj.beamCount, sink, dbg);
+      kern.beams(obj.beamStart, obj.beamCount, sink, dbg);
       const prop = pslots[o];
       if (prop) {
         const anchored = prop.anchorBeams.length > 0 && propAnchored(s, prop, obj.beamStart, sink);
@@ -983,8 +1018,8 @@ export class SimEngine {
       }
       // Feel pass: the rigid shell cluster sees every force of the tick (last pass before integration).
       const vsh = vslots[o]?.shell;
-      if (vsh) for (let c = 0; c < vsh.length; c++) applyShell(s, vsh[c]!, SIM_DT, gx, gy, gz);
-      integrateNodes(s, obj.nodeStart, obj.nodeCount, SIM_DT, gx, gy, gz);
+      if (vsh) for (let c = 0; c < vsh.length; c++) kern.shell(vsh[c]!, SIM_DT, gx, gy, gz);
+      kern.integrate(obj.nodeStart, obj.nodeCount, SIM_DT, gx, gy, gz);
     }
     this.tick++;
   }
@@ -1221,7 +1256,7 @@ export class SimEngine {
     const g: [number, number, number] = [this.gravityX, this.gravityY, this.gravityZ];
     const variants: TrafficVariant[] = compiled.map(({ spec, cv }) =>
       buildVariant(spec.catalogId, cv, spec.weight, spec.paletteCount, spec.vehicle.steering.maxWheelAngleDeg, (nodes, beams) => {
-        const e = new SimEngine({ gravity: g, debugStrains: false, capacity: { maxObjects: 1, nodeCapacity: nodes, beamCapacity: beams } });
+        const e = new SimEngine({ gravity: g, debugStrains: false, capacity: { maxObjects: 1, nodeCapacity: nodes, beamCapacity: beams }, kernel: this.kernelFactory });
         e.setGroundPlane(0, MaterialId.asphalt);
         return e;
       }),

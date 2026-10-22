@@ -1,6 +1,10 @@
 /**
  * Beam kernel: spring-damper forces, plastic deformation, breaking.
  *
+ * R-CORE: src/sim/wasm/kernel.c mirrors this loop for the WASM kernels and
+ * must stay bit-identical (kernelParity.test.ts): change both together; the
+ * constants below reach the C side through set_params.
+ *
  * HOT LOOP: only + - * / and Math.sqrt (numerics contract), no allocation,
  * ascending beam order. Beam type is a small-int branch inside one
  * monomorphic loop.
@@ -61,7 +65,8 @@ export const PLASTIC_REVERSE_FACTOR = 2;
 /** Plastic weakening never takes k below this fraction of k0. */
 export const PLASTIC_K_FLOOR = 0.25;
 /** Below this length a beam has no defined direction and exerts no force. */
-const MIN_DIST = 1e-9;
+export const BEAM_MIN_DIST = 1e-9;
+const MIN_DIST = BEAM_MIN_DIST;
 
 const T_BOUNDED = BeamType.bounded;
 const T_SUPPORT = BeamType.support;

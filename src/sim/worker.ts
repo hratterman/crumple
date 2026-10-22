@@ -25,6 +25,7 @@ import type { WorldContent } from '../world/content/types';
 import { resolveWater } from '../world/water';
 import { resolvePropInstances } from './props/placement';
 import { SIM_DT, SIM_HZ, SimCommandError, SimEngine } from './engine';
+import { setDefaultKernel } from './kernel';
 import { hashSimState } from './replay/hash';
 import { ReplayLog } from './replay/log';
 
@@ -242,6 +243,9 @@ export class WorkerHost {
           engine.resetProps(msg.objectIds);
           this.dirty = true;
           return;
+        case 'setSolver':
+          engine.setSolver(msg.options);
+          return;
         default:
           throw new SimCommandError(`unknown command ${String(type)}`);
       }
@@ -289,7 +293,7 @@ export class WorkerHost {
     this.nextSnapTick = this.snapTickFor(1);
     this.dirty = true;
     this.lastWall = this.scheduler.now();
-    this.post({ type: 'ready' });
+    this.post({ type: 'ready', kernel: engine.kernel.kind });
     this.requestWake(false);
   }
 
@@ -522,13 +526,33 @@ function isWorkerScope(): boolean {
 if (isWorkerScope()) {
   const scope = globalThis as unknown as WorkerScopeLike;
   const host = new WorkerHost((msg, transfer) => scope.postMessage(msg, transfer ?? []));
-  scope.addEventListener('message', (ev) => {
+  const deliver = (msg: MainToWorker): void => {
     try {
-      host.handle((ev as MessageEvent<MainToWorker>).data);
+      host.handle(msg);
     } catch (e) {
       host.fail(e);
     }
+  };
+  // R-CORE: the WASM solver kernel loads lazily (its own chunk); messages queue until it is installed
+  // (or the JS kernel stays the default when WebAssembly / SIMD is unavailable). Bit-identical either way.
+  let queue: MainToWorker[] | null = [];
+  scope.addEventListener('message', (ev) => {
+    const msg = (ev as MessageEvent<MainToWorker>).data;
+    if (queue) queue.push(msg);
+    else deliver(msg);
   });
+  const ready = (): void => {
+    const q = queue ?? [];
+    queue = null;
+    for (const m of q) deliver(m);
+  };
+  import('./wasm/kernel')
+    .then((k) => {
+      const best = k.bestWasmKernel();
+      if (best) setDefaultKernel(best);
+    })
+    .catch(() => {})
+    .finally(ready);
   scope.addEventListener('error', (ev) => {
     const e = ev as ErrorEvent;
     host.fail(e.error ?? new Error(e.message));

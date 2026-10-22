@@ -1,6 +1,7 @@
 /**
  * Semi-implicit (symplectic) Euler node integrator.
  * HOT LOOP: only + - * /, no allocation, ascending node order.
+ * R-CORE: mirrored bit-identically by `integrate` in src/sim/wasm/kernel.c.
  */
 import type { IntegrateNodes } from './types';
 

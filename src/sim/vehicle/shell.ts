@@ -173,6 +173,8 @@ const R = new Float64Array(9);
 /**
  * The shell pass (see header). Runs per vehicle after every force pass of
  * the tick and before integrateNodes. Allocation-free.
+ * R-CORE: mirrored bit-identically by `shell` in src/sim/wasm/kernel.c (the
+ * WASM kernels run that; kernelParity.test.ts). Change both together.
  */
 export function applyShell(s: SimState, rt: ShellRuntime, dt: number, gx: number, gy: number, gz: number): void {
   const nodes = rt.nodes;
@@ -342,6 +344,15 @@ export function applyShell(s: SimState, rt: ShellRuntime, dt: number, gx: number
     frcZ[i]! += f * (beta * uz - kdt * ez);
   }
   rt.maxDev = Math.sqrt(maxDev2);
+  shellRecaptureCheck(s, rt, dt, newRelease, maxRel2, sumRel2, nRel, cx, cy, cz);
+}
+
+/**
+ * The tail of the shell pass (after the force loop): recapture bookkeeping.
+ * Shared by applyShell and the WASM kernel's shell pass (src/sim/wasm/kernel.ts).
+ */
+export function shellRecaptureCheck(s: SimState, rt: ShellRuntime, dt: number, newRelease: boolean, maxRel2: number, sumRel2: number, nRel: number, cx: number, cy: number, cz: number): void {
+  const sh = rt.shell;
   // ---- recapture after a crash once calm
   if (rt.released > 0) {
     rt.quietTicks = newRelease ? 0 : rt.quietTicks + 1;
