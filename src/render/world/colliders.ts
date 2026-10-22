@@ -612,6 +612,7 @@ function buildCollider(c: ResolvedCollider, M: Mats): Group {
         const w = rampGeometry(a, b, d);
         g.add(mesh(w.body, M.concrete), mesh(w.deck, M.deck));
       } else if (c.kind === 'plane') g.add(mesh(boxGeometry([-a, -0.05, -d], [a, 0, d]), M.concrete));
+      else if (c.kind === 'mesh' && c.mesh) g.add(mesh(colliderMeshGeometry(c.mesh), M.concrete));
       else g.add(mesh(boxGeometry([-a, -b, -d], [a, b, d]), M.concrete));
     }
   }
@@ -974,4 +975,14 @@ export function createColliderRenderer(ctx: RenderContext, resolved: readonly Re
       root.removeFromParent();
     },
   };
+}
+
+/** R-CORE static mesh collider (kind 'mesh'): its own triangles (local space; two-sided meshes get both windings). */
+function colliderMeshGeometry(m: NonNullable<ResolvedCollider['mesh']>): BufferGeometry {
+  const geo = new BufferGeometry();
+  geo.setAttribute('position', new BufferAttribute(Float32Array.from(m.positions), 3));
+  const idx = m.twoSided ? [...m.indices, ...m.indices.map((_, k, a) => a[k - (k % 3) + 2 - (k % 3)]!)] : m.indices;
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
 }

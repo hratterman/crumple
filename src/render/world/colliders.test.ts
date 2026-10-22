@@ -91,3 +91,18 @@ describe('collider geometry', () => {
     expect(topHalfWidth).toBeLessThan(0.1);
   });
 });
+
+describe('R-CORE mesh colliders', () => {
+  it('draw their own triangles (both windings when two-sided), not their bounding box', () => {
+    const [g] = colliderGroups([
+      { id: 'm', kind: 'mesh', pos: [0, 1, 0], quat: [0, 0, 0, 1], size: [2, 1, 0.01], material: 5, mesh: { positions: [-2, -1, 0, 2, -1, 0, 2, 1, 0, -2, 1, 0], indices: [0, 1, 2, 0, 2, 3], twoSided: true } },
+    ]);
+    const meshes: Mesh[] = [];
+    g!.traverse((o) => {
+      if (o instanceof Mesh) meshes.push(o);
+    });
+    expect(meshes.length).toBe(1);
+    expect(meshes[0]!.geometry.getAttribute('position').count).toBe(4);
+    expect(meshes[0]!.geometry.getIndex()!.count).toBe(12);
+  });
+});
