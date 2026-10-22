@@ -8,7 +8,8 @@
  *   contact-patch lateral and longitudinal positions, and the vertical load,
  * and reduces them to the standard numbers:
  *   camber gain (deg / cm of bump), bump steer (deg / cm), wheel rate (N/mm),
- *   kinematic roll-centre height h_rc = (t/2)·dy_cp/dz (contact patch moving
+ *   kinematic roll-centre height h_rc = (t/2)·dy_cp/dz (the contact point rigidly
+ *   carried by the upright — a locked wheel — moving
  *   OUTBOARD in bump puts the roll centre above the ground; Milliken RCVD
  *   ch. 17), side-view swing-arm angle at the contact patch, tan θ = dx_cp/dz,
  *   and anti-dive (front) / anti-lift (rear) % = tan θ · L/h · 100 for outboard
@@ -34,6 +35,8 @@ export interface CornerKC {
   /** Contact patch lateral (outboard +) and longitudinal (forward +) position, m. */
   cpY: number[];
   cpX: number[];
+  /** Wheel-centre longitudinal position (forward +), m. */
+  cX: number[];
   load: number[];
 }
 
@@ -45,8 +48,10 @@ export interface KCResult {
   wheelRate: number[];
   rollCentre: number[];
   svsaTan: number[];
-  /** anti-dive (front wheels) / anti-lift (rear wheels), %. */
+  /** anti-dive (front wheels) / anti-lift (rear wheels), %, outboard brakes (locked-wheel contact point path). */
   antiPct: number[];
+  /** anti-squat (driven rear) / anti-lift in acceleration (driven front), %, inboard drive: wheel-centre path, tan θ·L/h. */
+  antiSquatPct: number[];
   /** Compliance: camber / toe change per kN·m of brake torque reaction, deg. */
   brakeCamberPerKNm: number[];
   brakeToePerKNm: number[];
@@ -99,6 +104,27 @@ function toBody(fr: Frame, x: number, y: number, z: number): [number, number, nu
   return [dx * fr.r[0] + dy * fr.r[1] + dz * fr.r[2], dx * fr.u[0] + dy * fr.u[1] + dz * fr.u[2], dx * fr.f[0] + dy * fr.f[1] + dz * fr.f[2]];
 }
 
+/** Upright frame (body coordinates) from hubI, hubO and the upright's first reaction node: origin + 3 unit axes. */
+function uprightFrame(sim: HandlingSim, w: WheelRuntime): { o: [number, number, number]; e: [number, number, number][] } {
+  const s = sim.eng.state;
+  const fr = bodyFrame(sim);
+  const I = toBody(fr, s.posX[w.hubI]!, s.posY[w.hubI]!, s.posZ[w.hubI]!);
+  const O = toBody(fr, s.posX[w.hubO]!, s.posY[w.hubO]!, s.posZ[w.hubO]!);
+  const kn = w.reactNodes && w.reactNodes.length > 0 ? w.reactNodes[0]! : w.attachNodes[0]!;
+  const K = toBody(fr, s.posX[kn]!, s.posY[kn]!, s.posZ[kn]!);
+  const sub = (a: number[], b: number[]): [number, number, number] => [a[0]! - b[0]!, a[1]! - b[1]!, a[2]! - b[2]!];
+  const nrm = (a: [number, number, number]): [number, number, number] => {
+    const l = Math.hypot(a[0], a[1], a[2]) || 1;
+    return [a[0] / l, a[1] / l, a[2] / l];
+  };
+  const e1 = nrm(sub(O, I));
+  const k = sub(K, I);
+  const d = k[0] * e1[0] + k[1] * e1[1] + k[2] * e1[2];
+  const e2 = nrm([k[0] - d * e1[0], k[1] - d * e1[1], k[2] - d * e1[2]]);
+  const e3: [number, number, number] = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+  return { o: I, e: [e1, e2, e3] };
+}
+
 /** Camber (+ top outboard), toe (+ toe-in, deg), centre and contact patch in the body frame. */
 function cornerState(sim: HandlingSim, w: WheelRuntime): { camber: number; toe: number; c: [number, number, number]; cp: [number, number, number] } {
   const s = sim.eng.state;
@@ -112,8 +138,8 @@ function cornerState(sim: HandlingSim, w: WheelRuntime): { camber: number; toe: 
   const l = Math.hypot(ax, ay, az);
   // camber: outboard hub lower → top leans outboard → +
   const camber = (-Math.asin(ay / l) * 180) / Math.PI;
-  // toe-in: the wheel's front points inboard; axle (outboard) rotates with its outer end rearward (−forward)
-  const toe = (-Math.atan2(az, ax) * 180) / Math.PI;
+  // toe-in: the wheel's front points inboard, so the outboard end of the axle swings FORWARD (+forward)
+  const toe = (Math.atan2(az, ax) * 180) / Math.PI;
   const c: [number, number, number] = [(I[0] + O[0]) / 2, (I[1] + O[1]) / 2, (I[2] + O[2]) / 2];
   // contact patch: the load-weighted tread node position (in contact), else the lowest tread node
   let wx = 0;
@@ -184,14 +210,28 @@ export function runKC(def: VehicleDef, travel: number[] = [-0.04, -0.02, 0, 0.02
   // slip plates: no tyre friction (the tyre model rewrites μ from its base every tick)
   for (const t of veh.tyres) t.base.fill(0);
   sim.eng.setInput(1, { gearSelect: 0, brake: 0, handbrake: 0 });
-  const corners: CornerKC[] = veh.wheels.map((w) => ({ id: w.wheel.id, z: [], camberDeg: [], toeDeg: [], cpY: [], cpX: [], load: [] }));
+  const corners: CornerKC[] = veh.wheels.map((w) => ({ id: w.wheel.id, z: [], camberDeg: [], toeDeg: [], cpY: [], cpX: [], cX: [], load: [] }));
   const settleTicks = Math.round(0.6 * SIM_HZ);
   const avgTicks = Math.round(0.2 * SIM_HZ);
   const ref = veh.wheels.map((w) => cornerState(sim, w));
+  // KINEMATIC contact point: the rest contact patch rigidly attached to the upright (a locked, braked wheel;
+  // Milliken RCVD ch. 17): free of tread-node sliding on the frictionless plates
+  const cpLocal = veh.wheels.map((w, k) => {
+    const u = uprightFrame(sim, w);
+    const r = ref[k]!.cp;
+    const d = [r[0] - u.o[0], r[1] - u.o[1], r[2] - u.o[2]];
+    return u.e.map((e) => d[0]! * e[0] + d[1]! * e[1] + d[2]! * e[2]);
+  });
+  const cpKin = (w: WheelRuntime, k: number): [number, number, number] => {
+    const u = uprightFrame(sim, w);
+    const l = cpLocal[k]!;
+    return [0, 1, 2].map((i) => u.o[i]! + l[0]! * u.e[0]![i]! + l[1]! * u.e[1]![i]! + l[2]! * u.e[2]![i]!) as [number, number, number];
+  };
+  const cpRef = veh.wheels.map((w, k) => cpKin(w, k));
   for (const h of travel) {
     sim.eng.setGroundPlane(h, 0);
     stepN(sim, settleTicks);
-    const acc = veh.wheels.map(() => ({ camber: 0, toe: 0, cz: 0, cpy: 0, cpx: 0, load: 0 }));
+    const acc = veh.wheels.map(() => ({ camber: 0, toe: 0, cz: 0, cpy: 0, cpx: 0, cx: 0, load: 0 }));
     for (let t = 0; t < avgTicks; t++) {
       sim.eng.step();
       veh.wheels.forEach((w, k) => {
@@ -201,8 +241,10 @@ export function runKC(def: VehicleDef, travel: number[] = [-0.04, -0.02, 0, 0.02
         a.camber += st.camber;
         a.toe += st.toe;
         a.cz += st.c[1] - ref[k]!.c[1];
-        a.cpy += (st.cp[0] - ref[k]!.cp[0]) * side;
-        a.cpx += st.cp[2] - ref[k]!.cp[2];
+        a.cx += st.c[2] - ref[k]!.c[2];
+        const ck = cpKin(w, k);
+        a.cpy += (ck[0] - cpRef[k]![0]) * side;
+        a.cpx += ck[2] - cpRef[k]![2];
         a.load += w.load;
       });
     }
@@ -213,6 +255,7 @@ export function runKC(def: VehicleDef, travel: number[] = [-0.04, -0.02, 0, 0.02
       c.toeDeg.push(a.toe / avgTicks);
       c.cpY.push(a.cpy / avgTicks);
       c.cpX.push(a.cpx / avgTicks);
+      c.cX.push(a.cx / avgTicks);
       c.load.push(a.load / avgTicks);
     });
   }
@@ -232,18 +275,25 @@ export function runKC(def: VehicleDef, travel: number[] = [-0.04, -0.02, 0, 0.02
   const rollCentre: number[] = [];
   const svsaTan: number[] = [];
   const antiPct: number[] = [];
+  const antiSquatPct: number[] = [];
   corners.forEach((c, k) => {
     camberGain.push(slope(c.z, c.camberDeg) / 100);
     bumpSteer.push(slope(c.z, c.toeDeg) / 100);
     wheelRate.push(slope(c.z, c.load) / 1000);
     const dy = slope(c.z, c.cpY);
     rollCentre.push((track[k]! / 2) * dy);
-    // side-view: contact patch forward motion per bump; a front cp moving REARWARD in bump (dx < 0) = anti-dive
+    // side-view: the locked-wheel contact point's forward motion per bump. Braking pushes the contact point
+    // rearward, so a front contact point moving FORWARD in bump (side-view IC behind the wheel, above the
+    // ground) makes the brake force extend the front suspension = anti-dive; a rear one moving REARWARD
+    // (IC ahead and above) = anti-lift (Milliken RCVD ch. 17.4, by virtual work)
     const dx = slope(c.z, c.cpX);
     const isFront = veh.wheels[k]!.wheel.axle === 'front';
-    const t = isFront ? -dx : dx;
+    const t = isFront ? dx : -dx;
     svsaTan.push(t);
     antiPct.push((t * wheelbase * 100) / cgHeight);
+    // acceleration: a rear wheel centre moving REARWARD in bump (dx < 0) resists squat; a front one moving forward resists lift
+    const dc = slope(c.z, c.cX);
+    antiSquatPct.push(((isFront ? dc : -dc) * wheelbase * 100) / cgHeight);
   });
   // compliance: brake torque reaction at ride height (ground back at 0), 1 kN·m per wheel
   sim.eng.setGroundPlane(0, 0);
@@ -263,6 +313,7 @@ export function runKC(def: VehicleDef, travel: number[] = [-0.04, -0.02, 0, 0.02
     rollCentre,
     svsaTan,
     antiPct,
+    antiSquatPct,
     brakeCamberPerKNm: after.map((a, k) => a.camber - before[k]!.camber),
     brakeToePerKNm: after.map((a, k) => a.toe - before[k]!.toe),
     track,

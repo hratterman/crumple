@@ -451,8 +451,11 @@ const KU_X = HALF_TRACK - HUB_SPACING / 2; // steering axis through hubI (vertic
 const FRONT: CornerGeom = {
   z: Z_F,
   kU: [KU_X, KU_Y, Z_F + 0.03],
+  // R-PHYS: the UPPER arm's pivot axis inclined ≈ 6° in side view (front pivot up; the lower arm — a crash-path
+  // subframe member — untouched) puts the side-view IC behind the wheel: anti-dive ≈ −35 % (pro-dive) → ≈ 20 %;
+  // the tie-rod geometry is unchanged (bump steer −0.09 °/cm, toe-out in bump; realism/suspension.test.ts)
   lowerPivots: [[0.3, Y_W, Z_F - 0.28], [0.3, Y_W, Z_F + 0.26]],
-  upperPivots: [[0.33, KU_Y, Z_F - 0.26], [0.33, KU_Y, Z_F + 0.26]],
+  upperPivots: [[0.33, KU_Y + 0.025, Z_F - 0.26], [0.33, KU_Y - 0.025, Z_F + 0.26]],
   linkPivot: [HALF_TRACK + HUB_SPACING / 2, Y_W, Z_F + LINK_REACH],
   towerStation: 3,
 };
@@ -461,7 +464,8 @@ const REAR: CornerGeom = {
   kU: [KU_X, KU_Y, Z_R],
   lowerPivots: [[0.3, Y_W, Z_R - 0.28], [0.3, Y_W, Z_R + 0.28]],
   upperPivots: [[0.33, KU_Y, Z_R - 0.26], [0.33, KU_Y, Z_R + 0.26]],
-  linkPivot: [HALF_TRACK + HUB_SPACING / 2, Y_W, Z_R - LINK_REACH],
+  // R-PHYS: toe link 0.55 cm above the hub: bump steer +0.13 → ≈ +0.09 °/cm (toe-in in bump, ≤ 0.1 °/° of roll)
+  linkPivot: [HALF_TRACK + HUB_SPACING / 2, Y_W + 0.0055, Z_R - LINK_REACH],
   towerStation: 10,
 };
 

@@ -361,8 +361,11 @@ interface CornerGeom {
 const FRONT: CornerGeom = {
   z: Z_F,
   kU: [0.75, 0.78, Z_F + 0.03],
+  // R-PHYS: the UPPER arm's pivot axis inclined ≈ 6° in side view (front pivot up; the lower arm — a crash-path
+  // subframe member — untouched) puts the side-view IC behind the wheel: anti-dive ≈ −35 % (pro-dive) → ≈ 20 %;
+  // the tie-rod geometry is unchanged (bump steer −0.01 °/cm, toe-out in bump; realism/suspension.test.ts)
   lowerPivots: [[0.36, Y_W, Z_F - 0.3], [0.36, Y_W, Z_F + 0.28]],
-  upperPivots: [[0.42, 0.78, Z_F - 0.26], [0.42, 0.78, Z_F + 0.26]],
+  upperPivots: [[0.42, 0.78 + 0.026, Z_F - 0.26], [0.42, 0.78 - 0.026, Z_F + 0.26]],
   linkPivot: [HALF_TRACK + HUB_SPACING / 2, 0.4, Z_F + LINK_REACH],
 };
 /** Front shock travel to the bump stops, m (long-travel). */
