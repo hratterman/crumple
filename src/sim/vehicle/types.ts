@@ -30,6 +30,7 @@ import type { CompiledRig, RigBeamDef, RigDef, RigNodeDef, RigStats, StabilityRe
 import type { SimState } from '../types';
 import type { CompiledShell, ShellDef } from './shellDefs';
 import type { ShellRuntime } from './shell';
+import type { VehicleWaterState } from '../water/vehicleWater';
 
 export type Vec3Tuple = [number, number, number];
 
@@ -725,6 +726,12 @@ export interface VehicleRuntime {
   telemetry: Float32Array;
   /** Feel pass (additive): rigid shell cluster runtimes (absent / empty = none). */
   shell?: ShellRuntime[];
+  /**
+   * R-PHYS2 (additive): water state — per-node displacement, compartment
+   * flooding and the sticky `hydrolocked` flag the engine model reads
+   * (src/sim/water/vehicleWater.ts). Absent for vehicles without a water spec.
+   */
+  water?: VehicleWaterState;
 }
 
 /**

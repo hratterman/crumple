@@ -558,6 +558,59 @@ export interface SetSolverMsg {
   type: 'setSolver';
   options: Partial<SolverOptions>;
 }
+// ============================================================ R-PHYS2 (additive): trailers, cargo, soft ground
+/** Trailer kinds (src/sim/trailer/defs.ts `buildTrailer`). */
+export type TrailerKind = 'utility' | 'box';
+/**
+ * Spawns a trailer (a VehicleDef with no driven wheel, built by the worker).
+ * With `towObjectId` it is placed on that vehicle's hitch ball (aligned with
+ * its heading, tyres on the ground) and hitched (ball joint + two crossed
+ * safety chains); otherwise at `transform`, unhitched. `ballastKg` at deck
+ * z = `ballastZ` (m, rig-local; −1.25 front … +1.25 rear) changes the load /
+ * tongue weight. A 0.4 s spawn settle applies. Logged (replay).
+ */
+export interface SpawnTrailerMsg {
+  type: 'spawnTrailer';
+  objectId: number;
+  kind: TrailerKind;
+  towObjectId?: number;
+  transform?: Transform;
+  ballastKg?: number;
+  ballastZ?: number;
+}
+/** Hitches a trailer to a tow vehicle's hitch (null = unhitch: joints removed). Logged. */
+export interface HitchTrailerMsg {
+  type: 'hitchTrailer';
+  objectId: number;
+  towObjectId: number | null;
+}
+/** One cargo item: a prop in the dynamic id range on a carrier vehicle (pickup bed, box truck, trailer deck). */
+export interface CargoSpawn {
+  objectId: number;
+  prop: PropKey;
+  carrierObjectId: number;
+  /** The prop's base centre, carrier rig-local (vehicle frame: forward −Z, up +Y). */
+  pos: [number, number, number];
+  /** Unit (x, z) the prop's front faces, carrier rig-local (default (0, −1)). */
+  facing?: [number, number];
+  /** Two pretensioned ratchet straps over the load, crossed (each to an anchor ahead of and behind the load on its side). */
+  strap?: boolean;
+}
+/**
+ * Loads cargo (atomic batch, validated first). Cargo contacts the carrier's
+ * deck / walls / gate surfaces (no node-vs-node contact with it) until it
+ * leaves the carrier; straps break above their rating. Logged.
+ */
+export interface SpawnCargoMsg {
+  type: 'spawnCargo';
+  items: CargoSpawn[];
+}
+/** Opens / closes a carrier's cargo doors (rear doors without a hinged closure; the utility trailer's gate latch). Logged. */
+export interface SetCargoDoorMsg {
+  type: 'setCargoDoor';
+  objectId: number;
+  open: boolean;
+}
 
 export type MainToWorker =
   | InitMsg
@@ -585,7 +638,11 @@ export type MainToWorker =
   | ReplayPauseMsg
   | StateHashRequestMsg
   | ReplayFileRequestMsg
-  | SetSolverMsg;
+  | SetSolverMsg
+  | SpawnTrailerMsg
+  | HitchTrailerMsg
+  | SpawnCargoMsg
+  | SetCargoDoorMsg;
 export type MainToWorkerType = MainToWorker['type'];
 
 // ============================================================ worker → main
@@ -705,6 +762,27 @@ export interface ReplayFileMsg {
   file: ReplayFile;
 }
 
+/**
+ * R-PHYS2 render hook: soft-ground rut tiles whose depths changed (at most
+ * ~4 Hz while ruts form). Tile (tx, tz) covers vertices ix ∈ [tx·tile,
+ * (tx+1)·tile), iz likewise, at x = ix·cell, z = iz·cell; `depth` is
+ * row-major (iz then ix), m below the terrain surface (≥ 0). Data only:
+ * R-WORLD / R-GFX decide how to draw it (decals, displacement). Not logged
+ * (derived state); a replay re-creates it by re-simulation.
+ */
+export interface SoftGroundTile {
+  tx: number;
+  tz: number;
+  version: number;
+  depth: Float32Array;
+}
+export interface SoftGroundMsg {
+  type: 'softGround';
+  cell: number;
+  tile: number;
+  tiles: SoftGroundTile[];
+}
+
 export type WorkerToMain =
   | ReadyMsg
   | SnapshotMsg
@@ -715,5 +793,6 @@ export type WorkerToMain =
   | TrafficReadyMsg
   | ReplayPausedMsg
   | StateHashMsg
-  | ReplayFileMsg;
+  | ReplayFileMsg
+  | SoftGroundMsg;
 export type WorkerToMainType = WorkerToMain['type'];

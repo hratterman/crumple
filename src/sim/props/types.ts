@@ -35,6 +35,13 @@ import type { RigDef } from '../rig/types';
  *  guardrail     4.1 m galvanised W-beam on three driven posts (layout v6, R-WORLD), BREAKABLE anchors, the rail yields
  *  stopSign      the signPost rig with a 0.75 m octagonal STOP plate (layout v6, R-WORLD), BREAKABLE anchor
  *  concreteBlock 1.2 × 0.6 × 0.6 m precast block, 1000 kg (heavy, near-rigid)
+ * R-PHYS2 (additive, defs/barrel.ts + defs/barriers.ts):
+ *  barrelFull    the 200 L drum full of water, 218 kg: hydraulically stiff, bursts at a seam and drains
+ *  waterBarrier  plastic water-filled road barrier, 1.8 m, ≈ 450 kg: deforms, tears, drains
+ *  jerseyBarrier precast concrete F-shape barrier, 3 m, 1800 kg: rigid, end-to-end segments pinned together
+ *  hayBale       round bale 1.5 m Ø × 1.2 m, 320 kg: soft, heavily damped, absorbs a hit
+ *  pallet        48 × 40" wooden pallet, 25 kg, stacks (cargo)
+ *  fencePanel    2.4 m wooden picket fence section on two set posts (BREAKABLE anchors): splinters apart
  */
 export type PropKey =
   | 'cone'
@@ -47,7 +54,13 @@ export type PropKey =
   | 'stopSign'
   | 'guardrail'
   | 'mailbox'
-  | 'concreteBlock';
+  | 'concreteBlock'
+  | 'barrelFull'
+  | 'waterBarrier'
+  | 'jerseyBarrier'
+  | 'hayBale'
+  | 'pallet'
+  | 'fencePanel';
 export const PROP_KEYS: readonly PropKey[] = [
   'cone',
   'barrel',
@@ -60,6 +73,12 @@ export const PROP_KEYS: readonly PropKey[] = [
   'guardrail',
   'mailbox',
   'concreteBlock',
+  'barrelFull',
+  'waterBarrier',
+  'jerseyBarrier',
+  'hayBale',
+  'pallet',
+  'fencePanel',
 ];
 
 /** FX / audio surface class of an object (sparks only from metal/concrete; chips, dust, flakes otherwise). */
@@ -154,6 +173,33 @@ export interface PropDef {
   anchor: PropAnchor | null;
   /** Rig-local node ids (origin, front, top) — visual anchor / orientation basis (like VehicleDef.frame). */
   frame: { origin: string; front: string; top: string };
+  /** R-PHYS2 (additive): liquid contents that drain once the prop is torn (props/runtime.ts). */
+  fluid?: PropFluid;
+}
+
+/**
+ * R-PHYS2: liquid contents of a prop (a full drum, a water-filled barrier).
+ * The contents' mass is part of the rig's node masses (the stiffness solve
+ * makes the full container hydraulically stiff). Once any of the prop's
+ * beams breaks it leaks through the tears: Torricelli outflow
+ * Q = C_d·A·√(2·g·h) with A = areaPerBreak per broken beam (≤ maxArea) and
+ * h = height × the remaining fill; every free node's mass, and every beam's
+ * stiffness, damping, yield and break forces, scale with the total mass
+ * (the explicit ω·dt budget is kept while it empties).
+ */
+export interface PropFluid {
+  /** Contents, kg. */
+  mass: number;
+  /** Open area per broken beam, m², and its cap. */
+  areaPerBreak: number;
+  maxArea: number;
+  /** Liquid column height when full, m. */
+  height: number;
+  /**
+   * Optional: a wall beam whose PLASTIC strain (rest-length change) passes this splits open like a broken one
+   * (a rotomoulded HDPE barrier cracks along a fold long before its wall tears through).
+   */
+  crackStrain?: number;
 }
 
 /**
@@ -174,6 +220,12 @@ export const PROP_RIG_BUDGET: Readonly<Record<PropKey, { nodes: number; beams: n
   guardrail: { nodes: 86, beams: 480 },
   mailbox: { nodes: 24, beams: 110 },
   concreteBlock: { nodes: 14, beams: 60 },
+  barrelFull: { nodes: 40, beams: 180 },
+  waterBarrier: { nodes: 20, beams: 90 },
+  jerseyBarrier: { nodes: 30, beams: 130 },
+  hayBale: { nodes: 24, beams: 100 },
+  pallet: { nodes: 20, beams: 100 },
+  fencePanel: { nodes: 64, beams: 260 },
 };
 /** Design budget for simultaneously awake prop beams (2 kHz). Not enforced in P5 (P6 governor). */
 export const PROP_AWAKE_BEAM_BUDGET = 2500;

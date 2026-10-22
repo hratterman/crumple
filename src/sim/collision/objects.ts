@@ -122,6 +122,18 @@ export class ObjectContacts {
   readonly oStart: Int32Array;
   readonly oCount: Int32Array;
   readonly oId: Float64Array;
+  /**
+   * R-PHYS2 (additive): object pairs with NO node-vs-node contact (`pairKey(idA, idB)`), e.g. a carrier and
+   * the cargo it holds through its deck surfaces (src/sim/trailer/carrier.ts). Checked once per object pair
+   * per rebuild.
+   */
+  readonly excludedPairs = new Set<number>();
+  /**
+   * R-PHYS2: object pairs kept on node-vs-node spheres even when both collide through triangles (a trailer and
+   * its tow vehicle: the coupler sits on the hitch ball, the drawbar under the bumper — only the spheres know to
+   * skip the tongue). Shared with TriangleContacts (`excludedPairs`), which skips these pairs.
+   */
+  readonly triExcludedPairs = new Set<number>();
   readonly oMat: Uint8Array;
   /** 1 = sleeping (static). */
   readonly oStatic: Uint8Array;
@@ -367,7 +379,8 @@ export class ObjectContacts {
         if (q < p && this.oStatic[q] === 0) continue; // awake–awake pairs once, from the lower slot
         const lo = p < q ? p : q;
         const hi = p < q ? q : p;
-        if (this.oTriangles[lo] !== 0 && this.oTriangles[hi] !== 0) continue; // R-CORE: triangle contact instead
+        if (this.oTriangles[lo] !== 0 && this.oTriangles[hi] !== 0 && !(this.triExcludedPairs.size > 0 && this.triExcludedPairs.has(pairKey(this.oId[lo]!, this.oId[hi]!)))) continue; // R-CORE: triangle contact instead
+        if (this.excludedPairs.size > 0 && this.excludedPairs.has(pairKey(this.oId[lo]!, this.oId[hi]!))) continue;
         const margin = this.margin(lo, hi, interval, dt);
         if (!this.boxesNear(lo, hi, this.oRmax[lo]! + this.oRmax[hi]! + margin)) continue;
         this.pairObjects(state, lo, hi, margin);
@@ -792,4 +805,9 @@ export class ObjectContacts {
 /** Integer cell → hash (3 large primes; the caller masks it to the table size). */
 function cellHash(x: number, y: number, z: number): number {
   return Math.imul(x, 73856093) ^ Math.imul(y, 19349663) ^ Math.imul(z, 83492791);
+}
+
+/** Key of an unordered object-id pair for ObjectContacts.excludedPairs. */
+export function pairKey(idA: number, idB: number): number {
+  return idA < idB ? idA * 65536 + idB : idB * 65536 + idA;
 }

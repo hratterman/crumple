@@ -129,9 +129,11 @@ describe('water', () => {
     }
   });
 
-  it('the sedan floats for a moment, floods and sinks to the bottom within ~20 s', () => {
+  // R-PHYS2: the named fleet now runs the compartment model (src/sim/water/vehicleWater.test.ts); a vehicle
+  // without a water spec keeps this P5 law (uniform density 500 + the global flood level).
+  it('a vehicle without a water spec floats for a moment, floods and sinks to the bottom within ~20 s (P5 law)', () => {
     const eng = pond();
-    eng.spawnVehicle(1, SEDAN, at(0, 0.2, 0));
+    eng.spawnVehicle(1, { ...SEDAN, name: 'noWaterSpec' }, at(0, 0.2, 0));
     const ys: number[] = [];
     for (let t = 0; t <= 24 * 2000; t++) {
       if (t % 2000 === 0) ys.push(centroidY(eng, 1));

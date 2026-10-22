@@ -22,6 +22,13 @@ const NOMINAL_MASS: Record<PropKey, [number, number]> = {
   mailbox: [10, 12],
   lightPole: [110, 140],
   concreteBlock: [990, 1010],
+  // R-PHYS2
+  barrelFull: [214, 222],
+  waterBarrier: [430, 470],
+  jerseyBarrier: [1750, 1850],
+  hayBale: [300, 340],
+  pallet: [24, 26],
+  fencePanel: [45, 60],
 };
 
 const PREFIXES: Record<PropKey, RegExp> = {
@@ -36,6 +43,12 @@ const PREFIXES: Record<PropKey, RegExp> = {
   mailbox: /^(anchor_\d|post_(\d_\d|s\d)|box_\d)$/,
   lightPole: /^(anchor_\d|pole_(\d_\d|s\d)|arm_\d_\d|lamp_\d)$/,
   concreteBlock: /^[cf]_\d$/,
+  barrelFull: /^(rim\d_\d+|lidT_c|lidB_c)$/,
+  waterBarrier: /^(s\d_(b|t)[LR]|end_\d|core)$/,
+  jerseyBarrier: /^s\d_[bkt][LR]$/,
+  hayBale: /^(r\d_\d|ax_\d|core)$/,
+  pallet: /^[bt]\d\d$/,
+  fencePanel: /^(anchor_\d|p\d_(\d_\d|c)|rail\d\d_\d|pk\d_[bt])$/,
 };
 
 /** Spawns one prop (awake) on a flat plane and steps `seconds`; returns the engine. */
@@ -84,7 +97,8 @@ describe('prop catalog', () => {
       expect(Math.abs(f[0] - o[0]), key).toBeLessThan(1e-9);
       expect(Math.abs(f[1] - o[1]), key).toBeLessThan(1e-9);
       expect(f[2] - o[2], key).toBeLessThan(-0.05);
-      expect(t[1] - o[1], key).toBeGreaterThan(0.1);
+      // (a flat pallet is 0.144 m thick: its top face is the up reference)
+      expect(t[1] - o[1], key).toBeGreaterThan(key === 'pallet' ? 0.04 : 0.1);
     }
   });
 
@@ -105,7 +119,8 @@ describe('prop catalog', () => {
       const rep = computeStabilityReport(compilePropRig(key), { limit: PROP_OMEGA_DT_LIMIT });
       expect(rep.ok, `${key}: ${JSON.stringify(rep.worst[0])}`).toBe(true);
       expect(rep.massDriftPct, key).toBe(0);
-      expect(rep.worst[0]!.omegaDt, key).toBeGreaterThan(0.3);
+      // (the hay bale is soft by design: its stiffness is solved well below the budget)
+      expect(rep.worst[0]!.omegaDt, key).toBeGreaterThan(key === 'hayBale' ? 0.1 : 0.3);
     }
   });
 

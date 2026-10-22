@@ -18,20 +18,31 @@ const RAD = 0.2925 - R;
 const HEIGHT = 0.88;
 const RING_Y = [R, HEIGHT / 2, HEIGHT - R];
 
-function build() {
+/**
+ * `water` kg of contents spread evenly over the nodes (a FULL drum: 200 L of
+ * water, barrelFull): the stiffness solve then gives the hydraulically
+ * stiffened shell of a full drum (water is incompressible: a full drum does
+ * not dent like an empty one; it bursts at a seam instead — lower break
+ * strains), and the prop runtime drains the contents through the tear
+ * (PropDef.fluid, runtime.ts).
+ */
+function build(name = 'barrel', water = 0) {
   const nodes: PropNodeSpec[] = [];
   const beams: PropBeamSpec[] = [];
-  // Mass: chime rings + lids 13.2 kg, middle wall ring 4.8 kg = 18 kg.
+  // Mass: chime rings + lids 13.2 kg, middle wall ring 4.8 kg = 18 kg (+ the contents, evenly).
   const ringMass = [0.75, 0.6, 0.75];
+  const per = water / (3 * N + 2);
   RING_Y.forEach((y, ring) => {
-    for (let k = 0; k < N; k++) nodes.push({ id: `rim${ring}_${k}`, pos: ringPoint(RAD, y, k, N), mass: ringMass[ring]! });
+    for (let k = 0; k < N; k++) nodes.push({ id: `rim${ring}_${k}`, pos: ringPoint(RAD, y, k, N), mass: ringMass[ring]! + per });
   });
-  nodes.push({ id: 'lidB_c', pos: [0, R, 0], mass: 0.6 });
-  nodes.push({ id: 'lidT_c', pos: [0, HEIGHT - R, 0], mass: 0.6 });
+  nodes.push({ id: 'lidB_c', pos: [0, R, 0], mass: 0.6 + per });
+  nodes.push({ id: 'lidT_c', pos: [0, HEIGHT - R, 0], mass: 0.6 + per });
 
   // Chime rings (rolled lid seams) are stiffer than the wall; everything dents at ~2 % and tears at ~35 %.
-  const wall = { yieldStrain: 0.02, breakStrain: 0.35 };
-  const chime = { yieldStrain: 0.025, breakStrain: 0.4 };
+  // Full: the water carries the load (no denting before the seam lets go at ~6 %: a burst).
+  const full = water > 0;
+  const wall = full ? { yieldStrain: 0.03, breakStrain: 0.06 } : { yieldStrain: 0.02, breakStrain: 0.35 };
+  const chime = full ? { yieldStrain: 0.035, breakStrain: 0.07 } : { yieldStrain: 0.025, breakStrain: 0.4 };
   for (let ring = 0; ring < 3; ring++) {
     const edge = ring === 1 ? wall : chime;
     for (let k = 0; k < N; k++) beams.push({ a: `rim${ring}_${k}`, b: `rim${ring}_${(k + 1) % N}`, w: ring === 1 ? 1 : 1.6, ...edge });
@@ -56,7 +67,10 @@ function build() {
     beams.push({ a: 'lidT_c', b: `rim1_${k + 1}`, w: 0.3, ...wall });
   }
   beams.push({ a: 'lidB_c', b: 'lidT_c', w: 0.5, ...wall });
-  return buildPropRig(nodes, beams, { name: 'barrel', r: R, friction: 0.5, omegaDt: 0.42, zeta: 0.5 });
+  return buildPropRig(nodes, beams, { name, r: R, friction: 0.5, omegaDt: 0.42, zeta: 0.5 });
 }
 
 export const BARREL_RIG = build().rig;
+/** 200 L drum full of water (218 kg): R-PHYS2. */
+export const BARREL_FULL_WATER_KG = 200;
+export const BARREL_FULL_RIG = build('barrelFull', BARREL_FULL_WATER_KG).rig;

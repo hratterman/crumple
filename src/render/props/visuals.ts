@@ -15,7 +15,7 @@ import { bindRigPanels } from '../vehicle/binder';
 import { tessellateSurface } from '../vehicle/loft';
 import type { BindingPanel, BindingSet, PanelDef } from '../vehicle/types';
 import { bindChainPanel, chainLevels, countLevels } from './chain';
-import { MeshBuilder, disc, lathe, roundedBox, tube, type ProfilePoint, type UvRect, type V3 } from './shapes';
+import { MeshBuilder, disc, gridQuad, lathe, rotZ, roundedBox, tube, type ProfilePoint, type UvRect, type V3 } from './shapes';
 import type { PropMaterialSlot, PropVisualDef } from './types';
 
 /** Panel variants (flexFrameU.w) understood by the hooks. */
@@ -600,6 +600,130 @@ function lightPoleVisual(rig: CompiledRig): PropVisual {
   return { prop: 'lightPole', panels };
 }
 
+// ============================================================ R-PHYS2 props
+/** Prism along X over a closed (z, y) section polygon (counter-clockwise seen from +X), flat side faces + end caps. */
+function prismX(b: MeshBuilder, sec: readonly (readonly [number, number])[], x0: number, x1: number, step: number): void {
+  const n = sec.length;
+  const nu = Math.max(1, Math.ceil((x1 - x0) / step));
+  for (let k = 0; k < n; k++) {
+    const [za, ya] = sec[k]!;
+    const [zb, yb] = sec[(k + 1) % n]!;
+    // outward normal of the edge in the (z, y) plane (CCW polygon → right-hand normal)
+    const ez = zb - za;
+    const ey = yb - ya;
+    const l = Math.hypot(ez, ey) || 1;
+    const nrm: V3 = [0, -ez / l, ey / l];
+    const nv = Math.max(1, Math.ceil(l / step));
+    gridQuad(b, [x0, ya, za], [x1 - x0, 0, 0], [0, yb - ya, zb - za], nu, nv, nrm, { u0: x0, u1: x1, v0: 0, v1: l });
+  }
+  for (const [x, sx] of [
+    [x0, -1],
+    [x1, 1],
+  ] as const) {
+    let cz = 0;
+    let cy = 0;
+    for (const [z, y] of sec) {
+      cz += z / n;
+      cy += y / n;
+    }
+    const c = b.vert([x, cy, cz], [sx, 0, 0], cz, cy);
+    const first = b.vertexCount;
+    for (const [z, y] of sec) b.vert([x, y, z], [sx, 0, 0], z, y);
+    for (let k = 0; k < n; k++) b.tri(c, first + k, first + ((k + 1) % n));
+  }
+}
+
+function waterBarrierVisual(): PropVisual {
+  const b = new MeshBuilder();
+  // Yodock-style: a tapered HDPE shell with a moulded fork-lift slot line and fill cap.
+  const sec: [number, number][] = [
+    [0.275, 0],
+    [0.275, 0.06],
+    [0.15, 0.8],
+    [-0.15, 0.8],
+    [-0.275, 0.06],
+    [-0.275, 0],
+  ];
+  prismX(b, sec, -0.9, 0.9, st(0.15));
+  const cap = new MeshBuilder();
+  lathe(cap, [{ r: 0.07, y: 0.8, n: [0, 1] }, { r: 0.07, y: 0.815, crease: true }, { r: 0, y: 0.82, n: [0, 1] }], { segments: seg(16) });
+  cap.transform((q) => q, [0.55, 0, 0]);
+  b.append(cap);
+  return { prop: 'waterBarrier', panels: [panel('shell', 'conePlastic', b, ['s*', 'end_*', 'core'])] };
+}
+
+function jerseyVisual(): PropVisual {
+  const b = new MeshBuilder();
+  // F-shape: 75 mm vertical reveal, 55° lower face to the break point at 330 mm, 84° upper face to 810 mm.
+  const sec: [number, number][] = [
+    [0.305, 0],
+    [0.305, 0.075],
+    [0.2, 0.33],
+    [0.075, 0.81],
+    [-0.075, 0.81],
+    [-0.2, 0.33],
+    [-0.305, 0.075],
+    [-0.305, 0],
+  ];
+  prismX(b, sec, -1.5, 1.5, st(0.25));
+  return { prop: 'jerseyBarrier', panels: [panel('barrier', 'concrete', b, ['s*'])] };
+}
+
+function hayBaleVisual(): PropVisual {
+  const b = new MeshBuilder();
+  const prof: ProfilePoint[] = [
+    { r: 0, y: -0.6, n: [0, -1] },
+    { r: 0.62, y: -0.6, n: [0, -1] },
+    { r: 0.72, y: -0.585, n: [0.6, -1] },
+    { r: 0.75, y: -0.55, crease: true },
+    ...profileRange(-0.5, 0.5, st(0.1), () => 0.75),
+    { r: 0.75, y: 0.55, crease: true },
+    { r: 0.72, y: 0.585, n: [0.6, 1] },
+    { r: 0.62, y: 0.6, n: [0, 1] },
+    { r: 0, y: 0.6, n: [0, 1] },
+  ];
+  lathe(b, prof, { segments: seg(40), uRepeat: 6, vScale: 2 });
+  b.transform(rotZ(Math.PI / 2), [0, 0.75, 0]);
+  return { prop: 'hayBale', panels: [panel('bale', 'cardboard', b, ['r*', 'ax_*', 'core'], { variant: PROP_VARIANT.alt })] };
+}
+
+function palletVisual(): PropVisual {
+  const b = new MeshBuilder();
+  // GMA 48 × 40": three stringers along X, 7 top deck boards and 3 bottom boards across Z.
+  for (const z of [-0.47, 0, 0.47]) roundedBox(b, [0, 0.067, z], [0.61, 0.045, 0.019], { radius: 0.004, step: st(0.2) });
+  for (let i = 0; i < 7; i++) roundedBox(b, [-0.54 + i * 0.18, 0.1335, 0], [0.065, 0.0105, 0.51], { radius: 0.003, step: st(0.2) });
+  for (const x of [-0.54, 0, 0.54]) roundedBox(b, [x, 0.0105, 0], [0.065, 0.0105, 0.51], { radius: 0.003, step: st(0.2) });
+  return { prop: 'pallet', panels: [panel('pallet', 'wood', b, ['b*', 't*'])] };
+}
+
+function fenceVisual(): PropVisual {
+  const panels: PropPanelDef[] = [];
+  const PX = [-1.2 + 0.04 + 0.06, 0, 1.2 - 0.04 - 0.06];
+  PX.forEach((x, p) => {
+    const post = new MeshBuilder();
+    roundedBox(post, [x, 0.55, 0], [0.045, 0.55, 0.045], { radius: 0.006, step: st(0.25) });
+    panels.push(panel(`post${p}`, 'wood', post, [`p${p}_*`], { chain: { prefix: `p${p}_` } }));
+  });
+  for (const [r, y] of [
+    [0, 0.25],
+    [1, 0.85],
+  ] as const) {
+    const rail = new MeshBuilder();
+    roundedBox(rail, [0, y, 0.105], [1.12, 0.044, 0.06], { radius: 0.004, step: st(0.3) });
+    panels.push(panel(`rail${r}`, 'wood', rail, [`rail${r}*`]));
+  }
+  [-0.9, -0.6, -0.3, 0, 0.3, 0.6, 0.9].forEach((x, i) => {
+    const pk = new MeshBuilder();
+    roundedBox(pk, [x, 0.52, 0.2], [0.044, 0.46, 0.01], { radius: 0.003, step: st(0.25) });
+    // dog-ear top
+    const tip = new MeshBuilder();
+    roundedBox(tip, [x, 0.995, 0.2], [0.03, 0.015, 0.01], { radius: 0.003, step: st(0.1) });
+    pk.append(tip);
+    panels.push(panel(`picket${i}`, 'wood', pk, [`pk${i}_*`, 'rail01_*', 'rail11_*'], { variant: PROP_VARIANT.alt }));
+  });
+  return { prop: 'fencePanel', panels };
+}
+
 // ============================================================ registry
 /** LOD1 detail factor (segment counts × this, grid steps ÷ this). */
 export const PROP_LOD1_DETAIL = 0.45;
@@ -629,6 +753,18 @@ function build(key: PropKey, rig: CompiledRig): PropVisual {
       return guardrailVisual();
     case 'mailbox':
       return mailboxVisual();
+    case 'barrelFull':
+      return { ...barrelVisual(), prop: 'barrelFull' };
+    case 'waterBarrier':
+      return waterBarrierVisual();
+    case 'jerseyBarrier':
+      return jerseyVisual();
+    case 'hayBale':
+      return hayBaleVisual();
+    case 'pallet':
+      return palletVisual();
+    case 'fencePanel':
+      return fenceVisual();
   }
 }
 

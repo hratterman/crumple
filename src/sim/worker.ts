@@ -15,6 +15,7 @@ import {
   DEFAULT_SNAPSHOT_HZ,
   type MainToWorker,
   type MainToWorkerType,
+  type SoftGroundTile,
   type WorkerToMain,
 } from '../protocol/messages';
 import type { TerrainData, VegetationExtra, VegetationScatter, WorldLayout } from '../world/types';
@@ -28,6 +29,7 @@ import { SIM_DT, SIM_HZ, SimCommandError, SimEngine } from './engine';
 import { benchKernel, defaultKernel, setDefaultKernel } from './kernel';
 import { hashSimState } from './replay/hash';
 import { ReplayLog } from './replay/log';
+import { SOFT_CELL_M, SOFT_MAX_TILES, SOFT_TILE } from './softground/softground';
 
 export const MAX_STEPS_PER_WAKE = 200;
 
@@ -246,6 +248,20 @@ export class WorkerHost {
         case 'setSolver':
           engine.setSolver(msg.options);
           return;
+        case 'spawnTrailer':
+          engine.spawnTrailer(msg.objectId, msg.kind, { towObjectId: msg.towObjectId, transform: msg.transform, ballastKg: msg.ballastKg, ballastZ: msg.ballastZ });
+          this.dirty = true;
+          return;
+        case 'hitchTrailer':
+          engine.hitchTrailer(msg.objectId, msg.towObjectId);
+          return;
+        case 'spawnCargo':
+          engine.spawnCargo(msg.items);
+          this.dirty = true;
+          return;
+        case 'setCargoDoor':
+          engine.setCargoDoor(msg.objectId, msg.open);
+          return;
         default:
           throw new SimCommandError(`unknown command ${String(type)}`);
       }
@@ -451,6 +467,7 @@ export class WorkerHost {
       const c0 = this.scheduler.now();
       this.runSteps(steps);
       this.noteLoad(this.scheduler.now() - c0, steps * SIM_DT * 1000);
+      this.sendSoftGround();
     } catch (e) {
       this.fail(e);
       return;
@@ -484,6 +501,32 @@ export class WorkerHost {
       }
     }
     if (steps === 0 && this.dirty) this.sendSnapshot();
+  }
+
+  /** Tile versions already sent to main (R-PHYS2 soft-ground render hook). */
+  private readonly softSent = new Uint32Array(SOFT_MAX_TILES);
+  private softSentX = new Int32Array(SOFT_MAX_TILES);
+  private softSentZ = new Int32Array(SOFT_MAX_TILES);
+  private nextSoftTick = 0;
+
+  /** At most every 0.25 s of sim: the rut tiles whose depth changed since they were last sent (copies). */
+  private sendSoftGround(): void {
+    const engine = this.engine;
+    if (!engine || engine.tick < this.nextSoftTick) return;
+    this.nextSoftTick = engine.tick + 500;
+    const sg = engine.softGround;
+    if (sg.tileCount === 0) return;
+    const tiles: SoftGroundTile[] = [];
+    const n = SOFT_TILE * SOFT_TILE;
+    for (let t = 0; t < sg.tileCount; t++) {
+      const v = sg.tileVersion[t]!;
+      if (v === this.softSent[t] && this.softSentX[t] === sg.tileX[t] && this.softSentZ[t] === sg.tileZ[t]) continue;
+      this.softSent[t] = v;
+      this.softSentX[t] = sg.tileX[t]!;
+      this.softSentZ[t] = sg.tileZ[t]!;
+      tiles.push({ tx: sg.tileX[t]!, tz: sg.tileZ[t]!, version: v, depth: sg.depth.slice(t * n, (t + 1) * n) });
+    }
+    if (tiles.length > 0) this.post({ type: 'softGround', cell: SOFT_CELL_M, tile: SOFT_TILE, tiles }, tiles.map((t) => t.depth.buffer as ArrayBuffer));
   }
 
   private sendSnapshot(): void {

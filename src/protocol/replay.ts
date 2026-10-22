@@ -58,6 +58,11 @@ export const REPLAYABLE_COMMANDS = [
   'setAutopilot',
   // R-CORE (additive): solver options (physics quality).
   'setSolver',
+  // R-PHYS2 (additive): trailers + cargo.
+  'spawnTrailer',
+  'hitchTrailer',
+  'spawnCargo',
+  'setCargoDoor',
 ] as const satisfies readonly MainToWorker['type'][];
 export type ReplayableCommandType = (typeof REPLAYABLE_COMMANDS)[number];
 export type ReplayableCommand = Extract<MainToWorker, { type: ReplayableCommandType }>;

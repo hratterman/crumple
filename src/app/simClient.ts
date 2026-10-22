@@ -25,6 +25,9 @@ import {
   type MainToWorker,
   type MaterialId,
   type PropSpawn,
+  type CargoSpawn,
+  type SoftGroundMsg,
+  type TrailerKind,
   type SnapshotCapacity,
   type SetTrafficMsg,
   type TerrainReadyMsg,
@@ -903,6 +906,43 @@ export class SimClient {
     this.post(objectIds ? { type: 'resetProps', objectIds } : { type: 'resetProps' });
   }
 
+  /**
+   * R-PHYS2: spawns a trailer ('utility' | 'box'); with `towObjectId` it is
+   * placed on that vehicle's hitch and hitched (the pickup tows). Main renders
+   * it like any vehicle (compile `buildTrailer(kind, …)` for the node layout).
+   */
+  spawnTrailer(objectId: number, kind: TrailerKind, opts: { towObjectId?: number; transform?: { pos: Vec3; quat: Quat }; ballastKg?: number; ballastZ?: number } = {}): void {
+    this.post({ type: 'spawnTrailer', objectId, kind, ...opts });
+  }
+
+  /** R-PHYS2: hitch a trailer to a tow vehicle (null = unhitch). */
+  hitchTrailer(objectId: number, towObjectId: number | null): void {
+    this.post({ type: 'hitchTrailer', objectId, towObjectId });
+  }
+
+  /** R-PHYS2 cargo API (delivery jobs): props on a carrier's bed / deck, optionally strapped (atomic batch). */
+  spawnCargo(items: CargoSpawn[]): void {
+    this.post({ type: 'spawnCargo', items });
+  }
+
+  /** R-PHYS2: open / close a carrier's cargo doors or a trailer's gate latch (cargo falls out). */
+  setCargoDoor(objectId: number, open: boolean): void {
+    this.post({ type: 'setCargoDoor', objectId, open });
+  }
+
+  /**
+   * R-PHYS2 render hook: listen for soft-ground rut tiles (changed depths,
+   * ≈ 4 Hz while ruts form). Returns an unsubscribe function.
+   */
+  onSoftGround(fn: (msg: SoftGroundMsg) => void): () => void {
+    this.softGroundListeners.push(fn);
+    return () => {
+      const i = this.softGroundListeners.indexOf(fn);
+      if (i >= 0) this.softGroundListeners.splice(i, 1);
+    };
+  }
+  private readonly softGroundListeners: ((msg: SoftGroundMsg) => void)[] = [];
+
   /** Delivers and clears every event received since the last drain, in arrival order per kind. */
   drainEvents(cb: SimEventSink): void {
     if (cb.impact) for (let i = 0; i < this.impacts.count; i++) cb.impact(this.impacts.at(i));
@@ -994,6 +1034,9 @@ export class SimClient {
         break;
       case 'fatal':
         this.fail(msg.message, msg.stack);
+        break;
+      case 'softGround':
+        for (const fn of this.softGroundListeners) fn(msg);
         break;
     }
   }
