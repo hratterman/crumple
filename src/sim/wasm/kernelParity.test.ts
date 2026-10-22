@@ -4,7 +4,7 @@
  * yield, lock up, go slack, degenerate and break, stepped with beams +
  * integrate, compared array-for-array (f64 bits) every 100 steps, break
  * events in order; (2) whole-engine runs (sedan 100 km/h frontal, the box
- * truck launching, Crumple Valley with traffic + props) hash-compared across
+ * truck launching, the HD sedan, a car-vs-car rear-end) hash-compared across
  * kernels.
  */
 import { describe, expect, it } from 'vitest';
@@ -12,7 +12,9 @@ import { createRng } from '../../core/rng';
 import { JS_KERNEL, setDefaultKernel, defaultKernel, type KernelFactory, type SimKernel } from '../kernel';
 import { BeamType, type EventSink, type SimState } from '../types';
 import { SIMD_KERNEL, WASM_KERNEL, simdSupported } from './kernel';
-import { runCrash } from '../vehicle/crash';
+import { runCrash, SEDAN_CRASH_PROBES } from '../vehicle/crash';
+import { runPairCrash } from '../vehicle/crashPair';
+import { SEDAN } from '../vehicle/defs/sedan';
 import { createHandlingSim, stepN } from '../vehicle/handling';
 import { BOXTRUCK } from '../vehicle/defs/boxtruck';
 import type { SimEngine } from '../engine';
@@ -204,6 +206,20 @@ describe('wasm kernel parity (bit-identical to the JS kernel)', () => {
     const ref = run(JS_KERNEL);
     for (const kf of KERNELS) expect(run(kf), kf.kind).toBe(ref);
   }, 120_000);
+
+  it("R-CRASH car-vs-car: a sedan rear-ending a parked sedan at 50 km/h (struck-car shell release) is identical on every kernel", () => {
+    const run = (kf: KernelFactory): { result: string; hash: string } =>
+      withKernel(kf, () => {
+        let last: SimEngine | null = null;
+        const sedan = { def: SEDAN, probes: SEDAN_CRASH_PROBES };
+        const r = runPairCrash({ kind: 'rear', a: { ...sedan, speedKmh: 50 }, b: { ...sedan, speedKmh: 0 }, afterContactS: 0.5, onStep: (eng) => (last = eng) });
+        expect(last!.kernel.kind).toBe(kf.kind);
+        const { spec: _spec, ...rest } = r;
+        return { result: JSON.stringify(rest), hash: hashEngine(last!) };
+      });
+    const ref = run(JS_KERNEL);
+    for (const kf of KERNELS) expect(run(kf), kf.kind).toEqual(ref);
+  }, 300_000);
 
   it("R-RIG's HD sedan (high) 60 km/h frontal: identical crash results and final state on every kernel", () => {
     const v = vehicleVariantSync('sedan', 'high');
