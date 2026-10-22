@@ -6,11 +6,19 @@
  * HOT PATH: only + - * / sqrt, no allocation, fixed iteration order (ring
  * nodes ascending, wheels in declaration order).
  *
+ * R-CORE KERNEL MIRROR: estimateWheelOmega, applyAxleTorque,
+ * applyUprightReaction, applyTreadBrush (+ applyRimTorque) and
+ * applyHoopTension are mirrored operation for operation in
+ * src/sim/wasm/kernel.c (wheel_*), bit-identical (kernelParity.test.ts). Anyone
+ * editing these functions edits kernel.c in the same change and runs
+ * tools/build-wasm.sh; WHEEL_KERNEL_PARAMS passes the constants.
+ *
  * GROUND: the frozen kernel signatures carry no HeightSampler, so the
  * engine registers the active ground with setWheelGround() at init and on
  * every `ground` command (null = no ground: no load/contact, no clamp).
  */
 import { Action } from '../../protocol/messages';
+import { activeKernelFor } from '../kernel';
 import { groundNormalForce, tanhR } from '../collision/ground';
 import { DEFAULT_MATERIALS } from '../collision/materials';
 import type { HeightSampler, MaterialTable, SimState } from '../types';
@@ -145,7 +153,11 @@ function axleFrame(state: SimState, w: WheelRuntime): boolean {
  * t̂_i = s × ρ̂_i, and −ΣF/2 on each hub, so the net force is exactly zero.
  */
 function applyAxleTorque(state: SimState, w: WheelRuntime, tau: number): void {
-  if (tau === 0 || !axleFrame(state, w)) return;
+  if (tau === 0) return;
+  // R-CORE: kernel.c wheel_axle mirrors the rest.
+  const wk = activeKernelFor(state)?.wheels;
+  if (wk !== undefined && wk.axleTorque(w, tau)) return;
+  if (!axleFrame(state, w)) return;
   const { posX, posY, posZ, frcX, frcY, frcZ } = state;
   const cx = frame[0]!;
   const cy = frame[1]!;
@@ -211,6 +223,9 @@ function applyAxleTorque(state: SimState, w: WheelRuntime, tau: number): void {
  * contact force; zero without a registered ground).
  */
 export const estimateWheelOmega: EstimateWheelOmega = (state, w) => {
+  // R-CORE: a WASM kernel runs this function (kernel.c wheel_omega, a mirror of it).
+  const wk = activeKernelFor(state)?.wheels;
+  if (wk !== undefined && wk.omega(w, groundSampler, groundMaterials, groundDt)) return;
   if (!axleFrame(state, w)) {
     w.omega = 0;
     return;
@@ -399,7 +414,11 @@ export const estimateWheelOmega: EstimateWheelOmega = (state, w) => {
  */
 export function applyUprightReaction(state: SimState, w: WheelRuntime, tau: number): void {
   const nodes = w.reactNodes;
-  if (tau === 0 || nodes === undefined || nodes.length === 0 || w.detached !== 0 || !axleFrame(state, w)) return;
+  if (tau === 0 || nodes === undefined || nodes.length === 0 || w.detached !== 0) return;
+  // R-CORE: kernel.c wheel_upright mirrors the rest.
+  const wk = activeKernelFor(state)?.wheels;
+  if (wk !== undefined && wk.uprightReaction(w, tau)) return;
+  if (!axleFrame(state, w)) return;
   const { posX, posY, posZ, frcX, frcY, frcZ } = state;
   const cx = frame[0]!;
   const cy = frame[1]!;
@@ -455,6 +474,11 @@ export function applyUprightReaction(state: SimState, w: WheelRuntime, tau: numb
   frcY[ho] = frcY[ho]! - so * ty;
   frcZ[ho] = frcZ[ho]! - so * tz;
 }
+
+/** Constants the WASM wheel kernel mirrors (kernel.c set_wheel_params). */
+export const WHEEL_KERNEL_PARAMS = {
+  slipRatioMinSpeed: 0, inv2pi: 0, inv4pi: 0, rollRadiusAlpha: 0, treadNodeDamp: 0, attachMinHeight: 0, brushSlipDeadzone: 0, brushShareV0: 0, hoopOmegaMax: 0,
+};
 
 /** Hub speeds (m/s) between which the brake reaction couple fades in (see applyWheelTorques). */
 const REACT_ZERO_SPEED = 0.3;
@@ -578,6 +602,9 @@ const BRUSH_SHARE_V0 = 0.5;
 export const HOOP_OMEGA_MAX = 220;
 
 export function applyHoopTension(state: SimState, w: WheelRuntime): void {
+  // R-CORE: kernel.c wheel_hoop mirrors this function.
+  const wk = activeKernelFor(state)?.wheels;
+  if (wk !== undefined && wk.hoop(w)) return;
   const rim = w.wheel.rimHoop;
   const tread = w.wheel.treadHoop;
   if (!(rim > 0) && !(tread > 0)) return;
@@ -622,6 +649,10 @@ function hoopRing(state: SimState, start: number, n: number, g: number): void {
 export function applyTreadBrush(state: SimState, w: WheelRuntime, dt: number): void {
   const k = w.wheel.brushK;
   if (!(k > 0)) return;
+  // R-CORE: kernel.c wheel_brush mirrors the rest (incl. applyRimTorque), on the ground samples of this
+  // pre-step's wheel_omega.
+  const wk = activeKernelFor(state)?.wheels;
+  if (wk !== undefined && wk.treadBrush(w, groundSampler, dt)) return;
   const sampler = groundSampler;
   const tLoad = w.treadLoad;
   const tNrm = w.treadNormal;
@@ -1065,3 +1096,13 @@ function comSpeed(state: SimState, vehicle: VehicleRuntime): number {
   if (!(m > 0)) return 0;
   return Math.sqrt(px * px + pz * pz) / m;
 }
+
+WHEEL_KERNEL_PARAMS.slipRatioMinSpeed = SLIP_RATIO_MIN_SPEED;
+WHEEL_KERNEL_PARAMS.inv2pi = INV_2PI;
+WHEEL_KERNEL_PARAMS.inv4pi = INV_4PI;
+WHEEL_KERNEL_PARAMS.rollRadiusAlpha = ROLL_RADIUS_ALPHA;
+WHEEL_KERNEL_PARAMS.treadNodeDamp = TREAD_NODE_DAMP;
+WHEEL_KERNEL_PARAMS.attachMinHeight = ATTACH_MIN_HEIGHT;
+WHEEL_KERNEL_PARAMS.brushSlipDeadzone = BRUSH_SLIP_DEADZONE;
+WHEEL_KERNEL_PARAMS.brushShareV0 = BRUSH_SHARE_V0;
+WHEEL_KERNEL_PARAMS.hoopOmegaMax = HOOP_OMEGA_MAX;

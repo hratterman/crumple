@@ -35,12 +35,12 @@ import { applyWater, boxNearWater, VEHICLE_FLOOD_LOSS, VEHICLE_FLOOD_TIME_S } fr
 import { TriangleContacts, type StaticMeshInput, type TriangleSlot } from './collision/triangles';
 import { deriveCollisionTriangles, triangleSetOf } from './rig/triangles';
 import { quatToMatrix } from '../world/colliders';
-import { applyGroundContacts, PlaneSampler, resetGroundContactState } from './collision/ground';
+import { markMirroredSampler, PlaneSampler, resetGroundContactState } from './collision/ground';
 import type { ColliderWorld } from './collision/types';
 import { resolveColliders } from '../world/colliders';
 import { WATER_PHYSICS, type ColliderDef, type ResolvedCollider, type WaterBody } from '../world/types';
 import { DEFAULT_MATERIALS } from './collision/materials';
-import { defaultKernel, type KernelFactory, type SimKernel } from './kernel';
+import { defaultKernel, setActiveKernel, type KernelFactory, type SimKernel } from './kernel';
 import { compileRig } from './rig/builder';
 import type { CompiledRig, RigDef } from './rig/types';
 import { SimArena } from './state';
@@ -420,6 +420,7 @@ export class SimEngine {
     } catch (e) {
       throw new SimCommandError(`invalid terrain: ${e instanceof Error ? e.message : String(e)}`);
     }
+    markMirroredSampler(sampler);
     this.sampler = sampler;
     this.terrain = terrain;
     return sampler;
@@ -840,6 +841,7 @@ export class SimEngine {
     this.rigs.delete(objectId);
     const gone = this.vehicles.get(objectId);
     if (gone?.shell) for (const c of gone.shell) this.kernel.releaseShell(c);
+    if (gone) this.kernel.releaseWheels?.(gone.wheels);
     this.vehicles.delete(objectId);
     this.triById.delete(objectId);
     this.props.delete(objectId);
@@ -1045,6 +1047,8 @@ export class SimEngine {
     // The wheel kernels' ground is module state: point it at THIS engine's
     // ground every step (several engines may coexist, e.g. in tests).
     if (this.vehicles.size > 0) setWheelGround(sampler, this.materials, SIM_DT);
+    setActiveKernel(kern);
+    kern.beginTick?.();
     if (this.contactsDirty || this.tick >= this.nextRebuild) this.broadphase();
     // Phase 1, per awake object ascending: vehicle pre-step → hydros → beams (+ prop damping).
     for (let o = 0; o < objs.length; o++) {
@@ -1098,7 +1102,7 @@ export class SimEngine {
         }
       }
       if (sampler !== null) {
-        applyGroundContacts(s, obj.nodeStart, obj.nodeCount, sampler, this.materials, SIM_DT, obj.objectId, sink, gx, gy, gz);
+        kern.ground(obj.nodeStart, obj.nodeCount, sampler, this.materials, SIM_DT, obj.objectId, sink, gx, gy, gz);
       }
       if (cw !== null) {
         applyColliderContacts(s, obj.nodeStart, obj.nodeCount, cw, this.materials, SIM_DT, obj.objectId, sink, gx, gy, gz);

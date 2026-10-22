@@ -1,6 +1,6 @@
 /**
  * R-CORE solver kernel seam. The engine's hot loops (beam forces, node
- * integration) run through a `SimKernel` bound to the engine's SimState:
+ * integration, shell clusters, ground contact) run through a `SimKernel` bound to the engine's SimState:
  *   'js'     src/sim/beams.ts + integrator.ts (reference, always available)
  *   'wasm'   src/sim/wasm/kernel.c built without SIMD
  *   'simd'   the same with f64x2 lanes (wasm simd128)
@@ -13,9 +13,11 @@
  * the vitest setup installs WASM (CRUMPLE_KERNEL, see vitest.setup.ts).
  */
 import { applyBeamForces } from './beams';
+import { applyGroundContacts } from './collision/ground';
 import { integrateNodes } from './integrator';
 import { createSimState } from './state';
-import type { EventSink, SimState } from './types';
+import type { EventSink, HeightSampler, MaterialTable, SimState } from './types';
+import type { WheelRuntime } from './vehicle/types';
 import { applyShell, type ShellRuntime } from './vehicle/shell';
 
 export type KernelKind = 'js' | 'wasm' | 'simd';
@@ -30,8 +32,49 @@ export interface SimKernel {
   integrate(first: number, count: number, dt: number, gx: number, gy: number, gz: number): void;
   /** applyShell (vehicle/shell.ts) for one cluster runtime. */
   shell(rt: ShellRuntime, dt: number, gx: number, gy: number, gz: number): void;
+  /** applyGroundContacts (collision/ground.ts) over nodes [first, first + count) of one object. */
+  ground(first: number, count: number, sampler: HeightSampler, materials: MaterialTable, dt: number, objectId: number, events: EventSink, gx: number, gy: number, gz: number): void;
+  /** Vehicle body passes (absent on the JS kernel: the TS runs). */
+  readonly body?: BodyKernel;
+  /** Wheel node loops (absent on the JS kernel). */
+  readonly wheels?: WheelKernel;
+  /** Start of an engine step (per-tick caches). */
+  beginTick?(): void;
+  /** The vehicle is gone (despawn): a WASM kernel frees its wheel blocks. */
+  releaseWheels?(wheels: readonly WheelRuntime[]): void;
   /** The cluster runtime is gone (despawn): a WASM kernel frees its block. */
   releaseShell(rt: ShellRuntime): void;
+}
+
+/**
+ * Whole-body node passes of the vehicle pre-step (R-PHYS's runtime.ts applyAero /
+ * applyDriveReaction; the TS stays the reference). WASM kernels only.
+ */
+export interface BodyKernel {
+  /** Σ (1/im)·v over nodes [start, end) with im ≠ 0, in node order → out[0..2]. */
+  momentum(start: number, end: number, out: Float64Array): void;
+  /** frc += a·(1/im) over nodes [start, end) with im ≠ 0. */
+  accel(start: number, end: number, ax: number, ay: number, az: number): void;
+  /** applyDriveReaction's three body passes for the unit couple axis u and |T| = tl. */
+  driveReaction(start: number, end: number, ux: number, uy: number, uz: number, tl: number): void;
+}
+
+/**
+ * R-PHYS's per-wheel node loops (wheels.ts; the TS stays the reference). WASM
+ * kernels only. Every method returns false when the kernel cannot run it (an
+ * unmirrored ground, no valid sample cache): wheels.ts then runs the TS.
+ */
+export interface WheelKernel {
+  /** estimateWheelOmega against the registered ground (null = none). */
+  omega(w: WheelRuntime, sampler: HeightSampler | null, materials: MaterialTable, dt: number): boolean;
+  /** applyAxleTorque (tau ≠ 0). */
+  axleTorque(w: WheelRuntime, tau: number): boolean;
+  /** applyUprightReaction (tau ≠ 0). */
+  uprightReaction(w: WheelRuntime, tau: number): boolean;
+  /** applyTreadBrush incl. the rim torque (brushK > 0), after this pre-step's omega. */
+  treadBrush(w: WheelRuntime, sampler: HeightSampler | null, dt: number): boolean;
+  /** applyHoopTension. */
+  hoop(w: WheelRuntime): boolean;
 }
 
 export interface KernelFactory {
@@ -49,12 +92,28 @@ export const JS_KERNEL: KernelFactory = {
       beams: (first, count, events, dbg, armed) => applyBeamForces(state, first, count, events, dbg, armed ?? false),
       integrate: (first, count, dt, gx, gy, gz) => integrateNodes(state, first, count, dt, gx, gy, gz),
       shell: (rt, dt, gx, gy, gz) => applyShell(state, rt, dt, gx, gy, gz),
+      ground: (first, count, sampler, materials, dt, objectId, events, gx, gy, gz) =>
+        applyGroundContacts(state, first, count, sampler, materials, dt, objectId, events, gx, gy, gz),
       releaseShell: () => {},
     };
   },
 };
 
 let defaultFactory: KernelFactory = JS_KERNEL;
+
+/**
+ * The kernel of the engine that is stepping (SimEngine.step sets it): code that
+ * only receives a SimState (the vehicle pre-step) finds its kernel here. Only
+ * returned for that kernel's own state, so direct calls on another state run TS.
+ */
+let activeKernel: SimKernel | null = null;
+export function setActiveKernel(k: SimKernel | null): void {
+  activeKernel = k;
+}
+export function activeKernelFor(state: SimState): SimKernel | null {
+  const k = activeKernel;
+  return k !== null && k.state === state ? k : null;
+}
 
 /** The kernel new engines use when EngineConfig.kernel is omitted. */
 export function defaultKernel(): KernelFactory {

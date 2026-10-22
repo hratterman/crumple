@@ -8,6 +8,13 @@
  *
  * NUMERICS: the per-node loop uses only + - * / sqrt (no Math.tanh etc.),
  * iterates in ascending index order and allocates nothing.
+ *
+ * R-CORE KERNEL MIRROR: `applyGroundContacts` is mirrored operation for
+ * operation by `ground()` in src/sim/wasm/kernel.c (with the PlaneSampler and
+ * the world/sampler.ts heightfield sampler mirrored too), bit-identical
+ * (kernelParity.test.ts). Anyone editing this loop — including R-TYRE's
+ * tread branch — edits kernel.c in the same change and runs
+ * tools/build-wasm.sh.
  */
 import {
   NODE_FLAG_COLLIDABLE,
@@ -35,7 +42,7 @@ import {
  * stiffness for heavy nodes so the penetration of a resting node stays a
  * few mm (m·g/KC_MAX) without creating 2 kHz ringing.
  */
-const KC_MAX = 2.5e5;
+export const KC_MAX = 2.5e5;
 export const KC_STABILITY = 0.2;
 /**
  * Contact damping ratio ζ. The damper acts in both directions (approach and
@@ -66,7 +73,7 @@ export const CONTACT_ZETA = 0.65;
  * polygon "flat spots" shallow, which removed a fore/aft rocking mode of a
  * parked car (stuck contact nodes, 0.6 Hz, ±5 cm).
  */
-const SOFT_LAYER_ZETA = 0.08;
+export const SOFT_LAYER_ZETA = 0.08;
 /**
  * FRICTION LAW — implicit (backward-Euler) Coulomb, evaluated per node AFTER
  * every other force of this tick has been accumulated (beams, wheel torque,
@@ -108,7 +115,7 @@ export const SKID_COOLDOWN_STEPS = 20;
  * to acos(1/SLOPE_SKIP) ≈ 75.5°; steeper than that a heightfield is a wall,
  * which ground contact does not model anyway.
  */
-const SLOPE_SKIP = 4;
+export const SLOPE_SKIP = 4;
 
 // ------------------------------------------------------------ helpers
 /**
@@ -161,6 +168,26 @@ export function cooldownsFor(state: SimState): Uint8Array {
     skidCooldowns.set(state, cd);
   }
   return cd;
+}
+
+/** R-CORE: a WASM kernel keeps the cooldown table in its own memory (shared with JS through this view). */
+export function adoptGroundCooldowns(state: SimState, table: Uint8Array): void {
+  const cd = skidCooldowns.get(state);
+  if (cd !== undefined) table.set(cd.subarray(0, Math.min(cd.length, table.length)));
+  skidCooldowns.set(state, table);
+}
+
+/**
+ * Heightfield samplers the WASM kernel may mirror (R-CORE): only samplers
+ * built by `createTerrainSampler` and registered by the engine; anything else
+ * (test fixtures, wrappers) runs the JS kernel.
+ */
+const mirroredSamplers = new WeakSet<HeightSampler>();
+export function markMirroredSampler(s: HeightSampler): void {
+  mirroredSamplers.add(s);
+}
+export function isMirroredSampler(s: HeightSampler): boolean {
+  return mirroredSamplers.has(s);
 }
 
 /** Clears skid cooldowns for nodes [first, first+count) (e.g. on reset/spawn). */

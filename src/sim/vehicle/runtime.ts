@@ -9,6 +9,7 @@
  * Hot paths (vehiclePreStep, applyAero) use only + − × ÷ sqrt, fixed order,
  * no allocation. Spawn/recover/reset/telemetry helpers are not per-tick hot.
  */
+import { activeKernelFor } from '../kernel';
 import { createShellRuntime, rebaseShell, resetShell, type ShellRuntime } from './shell';
 import type { Vec3 } from '../../core/math';
 import { TELEMETRY_SLOTS, VEHICLE_EXT_SLOTS } from '../../protocol/layout';
@@ -317,16 +318,25 @@ export function applyAero(state: SimState, vehicle: VehicleRuntime): void {
   const { velX, velY, velZ, frcX, frcY, frcZ, invMass } = state;
   const start = v.nodeStart;
   const end = start + v.vehicle.bodyNodeCount;
+  // R-CORE: a WASM kernel runs the two body passes (kernel.c body_momentum / body_accel, mirrors of the loops here).
+  const bk = activeKernelFor(state)?.body;
   let px = 0;
   let py = 0;
   let pz = 0;
-  for (let i = start; i < end; i++) {
-    const im = invMass[i]!;
-    if (im === 0) continue;
-    const m = 1 / im;
-    px += m * velX[i]!;
-    py += m * velY[i]!;
-    pz += m * velZ[i]!;
+  if (bk) {
+    bk.momentum(start, end, momentumOut);
+    px = momentumOut[0]!;
+    py = momentumOut[1]!;
+    pz = momentumOut[2]!;
+  } else {
+    for (let i = start; i < end; i++) {
+      const im = invMass[i]!;
+      if (im === 0) continue;
+      const m = 1 / im;
+      px += m * velX[i]!;
+      py += m * velY[i]!;
+      pz += m * velZ[i]!;
+    }
   }
   const vx = px / M;
   const vy = py / M;
@@ -370,6 +380,10 @@ export function applyAero(state: SimState, vehicle: VehicleRuntime): void {
       az += lift * uz;
     }
   }
+  if (bk) {
+    bk.accel(start, end, ax, ay, az);
+    return;
+  }
   for (let i = start; i < end; i++) {
     const im = invMass[i]!;
     if (im === 0) continue;
@@ -379,6 +393,8 @@ export function applyAero(state: SimState, vehicle: VehicleRuntime): void {
     frcZ[i] = frcZ[i]! + az * m;
   }
 }
+
+const momentumOut = new Float64Array(3);
 
 /**
  * The vehicle pre-step: ω estimate → drivetrain → wheel torques → parking
@@ -470,6 +486,12 @@ export function applyDriveReaction(state: SimState, vehicle: VehicleRuntime): vo
   const uz = Tz / tl;
   const start = vehicle.nodeStart;
   const end = start + vehicle.vehicle.bodyNodeCount;
+  // R-CORE: a WASM kernel runs the three body passes below (kernel.c drive_reaction, a mirror of them).
+  const bk = activeKernelFor(state)?.body;
+  if (bk) {
+    bk.driveReaction(start, end, ux, uy, uz, tl);
+    return;
+  }
   let m = 0;
   let cx = 0;
   let cy = 0;

@@ -47,6 +47,8 @@ static uint8_t *nodeFlags;
 static float *unloadGain, *unloadTrig;
 static int32_t *crushHold;
 static f64 *hystOff;
+/* Ground contact (collision/ground.ts) per-node inputs. */
+static f64 *radiusArr, *frictionArr, *contactKArr, *treadAxX, *treadAxY, *treadAxZ, *treadF;
 
 /* Pointer table layout (u32 byte offsets), shared with src/sim/wasm/kernel.ts STATE_PTRS. */
 enum {
@@ -55,6 +57,7 @@ enum {
   P_BOUNDSLOW, P_BOUNDSHIGH, P_PRELOAD, P_TYPE, P_ACTIVE, P_STRAINOUT, P_BREAKLIST,
   P_FLAGS,
   P_UNLOADGAIN, P_UNLOADTRIG, P_CRUSHHOLD, P_HYSTOFF,
+  P_RADIUS, P_FRICTION, P_CONTACTK, P_TREADAXX, P_TREADAXY, P_TREADAXZ, P_TREADF,
   P_COUNT
 };
 
@@ -94,6 +97,13 @@ EXPORT(bind_state) void bind_state(void) {
   unloadTrig = (float *)ptrTable[P_UNLOADTRIG];
   crushHold = (int32_t *)ptrTable[P_CRUSHHOLD];
   hystOff = (f64 *)ptrTable[P_HYSTOFF];
+  radiusArr = (f64 *)ptrTable[P_RADIUS];
+  frictionArr = (f64 *)ptrTable[P_FRICTION];
+  contactKArr = (f64 *)ptrTable[P_CONTACTK];
+  treadAxX = (f64 *)ptrTable[P_TREADAXX];
+  treadAxY = (f64 *)ptrTable[P_TREADAXY];
+  treadAxZ = (f64 *)ptrTable[P_TREADAXZ];
+  treadF = (f64 *)ptrTable[P_TREADF];
 }
 
 /* ------------------------------------------------------------ parameters (from beams.ts) */
@@ -750,4 +760,1178 @@ EXPORT(shell) int shell(f64 *H, f64 dt, f64 gx, f64 gy, f64 gz) {
   H[SH_CY] = cy;
   H[SH_CZ] = cz;
   return 1;
+}
+
+/* ------------------------------------------------------------ ground (collision/ground.ts applyGroundContacts) */
+/*
+ * The ground pass of one object, exactly applyGroundContacts' loop body, on
+ * the engine's sampler mirrored here:
+ *   G_PLANE        ground.ts PlaneSampler (height y, one material);
+ *   G_HEIGHTFIELD  world/sampler.ts createTerrainSampler: heightAt (bilinear
+ *                  heights), normalAt (bilinear vertex normals, renormalized),
+ *                  materialAt (nearest sample) — same clamps, same f32 grids.
+ * The heightfield grids stay in JS; the kernel reads a TILE CACHE of them
+ * (32 × 32 cells per tile, with the one-sample apron bilinear reads need):
+ * per grid a tile table (byte offset of a resident tile, 0 = absent). A node
+ * whose tile is absent stops the pass BEFORE anything of that node is
+ * written (ground() returns its index, G_MISS_* say which tile); the glue
+ * copies the tile in and resumes at that node. Impact / skid events are
+ * appended to an event buffer (the glue emits them in order); a pass also
+ * stops before a node when the buffer could overflow.
+ */
+#define NODE_FLAG_COLLIDABLE 1
+#define NODE_FLAG_TREAD 4
+#define TILE 32
+#define TILE_S 33
+#define G_PLANE 1
+#define G_HEIGHTFIELD 2
+
+static f64 KC_MAX_G, KC_STAB, CONTACT_ZETA_G, SOFT_ZETA, SLOPE_SKIP_G, IMPACT_MIN, SKID_SLIP, SKID_LOAD;
+static int32_t SKID_COOLDOWN;
+
+EXPORT(set_ground_params)
+void set_ground_params(f64 kcMax, f64 kcStab, f64 zeta, f64 softZeta, f64 slopeSkip, f64 impactMin, f64 skidSlip, f64 skidLoad, int32_t skidCooldown) {
+  KC_MAX_G = kcMax;
+  KC_STAB = kcStab;
+  CONTACT_ZETA_G = zeta;
+  SOFT_ZETA = softZeta;
+  SLOPE_SKIP_G = slopeSkip;
+  IMPACT_MIN = impactMin;
+  SKID_SLIP = skidSlip;
+  SKID_LOAD = skidLoad;
+  SKID_COOLDOWN = skidCooldown;
+}
+
+/* Ground description + buffers, written by the glue (G_* slots of the header it owns). */
+enum {
+  G_KIND, G_PLANE_Y, G_PLANE_MAT,
+  G_OX, G_OZ, G_NOX, G_NOZ, G_INVS, G_MAXU, G_MAXV, G_NMAXU, G_NMAXV, G_COLS, G_LASTU, G_LASTV,
+  G_HTILES, G_HTX, G_NTILES, G_NTX, G_MTILES, G_MTX,
+  G_MATF, G_COOLDOWN, G_EVENTS, G_EV_CAP,
+  /* per-node sample cache of this tick (wheel_sample → ground): stamp per node, ref = its sample entry */
+  G_CSTAMP, G_CREF, G_STAMP,
+  /* outputs */
+  G_EV_COUNT, G_MISS_GRID, G_MISS_TILE,
+  G_HEADER
+};
+static f64 *GH;
+
+EXPORT(set_ground) void set_ground(f64 *header) { GH = header; }
+
+/*
+ * The heightfield constants, loaded from the header into a local struct once
+ * per call (header loads in the node loop would be re-read after every frc*
+ * store: same memory, may alias).
+ */
+typedef struct {
+  f64 ox, oz, nox, noz, invS, maxU, maxV, nmaxU, nmaxV;
+  int lastU, lastV, htx, ntx, mtx;
+  const uint32_t *ht, *nt, *mt;
+} Hf;
+
+static inline void hf_load(Hf *h) {
+  h->ox = GH[G_OX];
+  h->oz = GH[G_OZ];
+  h->nox = GH[G_NOX];
+  h->noz = GH[G_NOZ];
+  h->invS = GH[G_INVS];
+  h->maxU = GH[G_MAXU];
+  h->maxV = GH[G_MAXV];
+  h->nmaxU = GH[G_NMAXU];
+  h->nmaxV = GH[G_NMAXV];
+  h->lastU = (int)GH[G_LASTU];
+  h->lastV = (int)GH[G_LASTV];
+  h->htx = (int)GH[G_HTX];
+  h->ntx = (int)GH[G_NTX];
+  h->mtx = (int)GH[G_MTX];
+  h->ht = (const uint32_t *)(uint32_t)GH[G_HTILES];
+  h->nt = (const uint32_t *)(uint32_t)GH[G_NTILES];
+  h->mt = (const uint32_t *)(uint32_t)GH[G_MTILES];
+}
+
+/* heightAt's cell (c, r) and fractions; NaN coordinates take cell 0 like `| 0`. */
+static inline void h_cell(const Hf *H, f64 x, f64 z, int *pc, int *pr, f64 *ptx, f64 *ptz) {
+  f64 u = (x - H->ox) * H->invS;
+  f64 v = (z - H->oz) * H->invS;
+  if (u < 0) u = 0;
+  else if (u > H->maxU) u = H->maxU;
+  if (v < 0) v = 0;
+  else if (v > H->maxV) v = H->maxV;
+  int c = u == u ? (int)u : 0;
+  int r = v == v ? (int)v : 0;
+  if (c > H->lastU) c = H->lastU;
+  if (r > H->lastV) r = H->lastV;
+  *pc = c;
+  *pr = r;
+  *ptx = u - c;
+  *ptz = v - r;
+}
+
+/* Tile lookups: 0 when absent (the caller records the miss). */
+static inline const void *tile_at(const uint32_t *table, int tx, int c, int r, int *miss) {
+  const int t = (r >> 5) * tx + (c >> 5);
+  const uint32_t at = table[t];
+  if (at == 0) *miss = t;
+  return (const void *)at;
+}
+
+static inline f64 h_sample(const float *T, int c, int r, f64 tx, f64 tz) {
+  const int l = (r & (TILE - 1)) * TILE_S + (c & (TILE - 1));
+  const f64 h00 = T[l];
+  const f64 h01 = T[l + TILE_S];
+  const f64 a = h00 + ((f64)T[l + 1] - h00) * tx;
+  return a + (h01 + ((f64)T[l + TILE_S + 1] - h01) * tx - a) * tz;
+}
+
+static inline void n_cell(const Hf *H, f64 x, f64 z, int *pc, int *pr, f64 *ptx, f64 *ptz) {
+  f64 u = (x - H->nox) * H->invS;
+  f64 v = (z - H->noz) * H->invS;
+  if (u < 0) u = 0;
+  else if (u > H->nmaxU) u = H->nmaxU;
+  if (v < 0) v = 0;
+  else if (v > H->nmaxV) v = H->nmaxV;
+  const int c = u == u ? (int)u : 0;
+  const int r = v == v ? (int)v : 0;
+  *pc = c;
+  *pr = r;
+  *ptx = u - c;
+  *ptz = v - r;
+}
+
+/* normalAt: three bilinear lerps of the f32 vertex normals, then 1/sqrt renormalization. */
+static inline void n_sample(const float *T, int c, int r, f64 tx, f64 tz, f64 *out) {
+  const int l = (r & (TILE - 1)) * TILE_S + (c & (TILE - 1));
+  const int l1 = l + 1, j = l + TILE_S, j1 = j + 1;
+  const float *X = T, *Y = T + TILE_S * TILE_S, *Z = T + 2 * TILE_S * TILE_S;
+  f64 a = X[l], b = X[j];
+  a = a + ((f64)X[l1] - a) * tx;
+  b = b + ((f64)X[j1] - b) * tx;
+  const f64 nx = a + (b - a) * tz;
+  a = Y[l];
+  b = Y[j];
+  a = a + ((f64)Y[l1] - a) * tx;
+  b = b + ((f64)Y[j1] - b) * tx;
+  const f64 ny = a + (b - a) * tz;
+  a = Z[l];
+  b = Z[j];
+  a = a + ((f64)Z[l1] - a) * tx;
+  b = b + ((f64)Z[j1] - b) * tx;
+  const f64 nz = a + (b - a) * tz;
+  const f64 inv = 1 / __builtin_sqrt(nx * nx + ny * ny + nz * nz);
+  out[0] = nx * inv;
+  out[1] = ny * inv;
+  out[2] = nz * inv;
+}
+
+/* materialAt's nearest sample (c, r). */
+static inline void m_cell(const Hf *H, f64 x, f64 z, int *pc, int *pr) {
+  f64 u = (x - H->ox) * H->invS + 0.5;
+  f64 v = (z - H->oz) * H->invS + 0.5;
+  if (u < 0) u = 0;
+  else if (u > H->maxU) u = H->maxU;
+  if (v < 0) v = 0;
+  else if (v > H->maxV) v = H->maxV;
+  *pc = u == u ? (int)u : 0;
+  *pr = v == v ? (int)v : 0;
+}
+
+/*
+ * applyGroundContacts over nodes [first, first + count). Returns the index of
+ * the first node NOT processed (first + count when done): a missing tile
+ * (G_MISS_GRID 1 heights / 2 normals / 3 material, G_MISS_TILE its index) or
+ * a full event buffer (G_MISS_GRID 0).
+ */
+EXPORT(ground) int ground(int first, int count, f64 dt, f64 gx, f64 gy, f64 gz) {
+  const int end = first + count;
+  const int kind = (int)GH[G_KIND];
+  const f64 *matF = (const f64 *)(uint32_t)GH[G_MATF];
+  uint8_t *cooldown = (uint8_t *)(uint32_t)GH[G_COOLDOWN];
+  f64 *ev = (f64 *)(uint32_t)GH[G_EVENTS];
+  const int evCap = (int)GH[G_EV_CAP];
+  int nev = 0;
+  const f64 invDt = 1 / dt;
+  const f64 kcStab = KC_STAB * invDt * invDt;
+  const f64 planeY = GH[G_PLANE_Y];
+  const int planeMat = (int)GH[G_PLANE_MAT];
+  const f64 kcMax = KC_MAX_G, zeta = CONTACT_ZETA_G, softZeta = SOFT_ZETA, slopeSkip = SLOPE_SKIP_G;
+  const f64 impactMin = IMPACT_MIN, skidSlip = SKID_SLIP, skidLoad = SKID_LOAD;
+  const uint8_t skidCooldown = (uint8_t)SKID_COOLDOWN;
+  Hf H;
+  if (kind == G_HEIGHTFIELD) hf_load(&H);
+  const uint32_t *cStamp = (const uint32_t *)(uint32_t)GH[G_CSTAMP];
+  const uint32_t *cRef = (const uint32_t *)(uint32_t)GH[G_CREF];
+  const uint32_t stamp = (uint32_t)GH[G_STAMP];
+  GH[G_MISS_GRID] = 0;
+  for (int i = first; i < end; i++) {
+    const uint8_t f = nodeFlags[i];
+    if ((f & NODE_FLAG_COLLIDABLE) == 0) {
+      nodeFlags[i] = f & ~NODE_FLAG_IN_CONTACT;
+      continue;
+    }
+    const f64 im = invMass[i];
+    if (im == 0) {
+      nodeFlags[i] = f & ~NODE_FLAG_IN_CONTACT;
+      continue;
+    }
+    if (nev + 2 > evCap) {
+      GH[G_EV_COUNT] = nev;
+      return i;
+    }
+    const f64 x = posX[i];
+    const f64 y = posY[i];
+    const f64 z = posZ[i];
+    const f64 r = radiusArr[i];
+    f64 h;
+    f64 nrm[3];
+    int mat;
+    int skip;
+    if (kind == G_PLANE) {
+      h = planeY;
+      skip = y - h > slopeSkip * r;
+      nrm[0] = 0;
+      nrm[1] = 1;
+      nrm[2] = 0;
+      mat = planeMat;
+    } else {
+      /* Every tile this node may read is checked before anything is written. */
+      if (cStamp[i] == stamp) {
+        /* sampled by this tick's wheel pre-step (same position): its h / normal / material */
+        const f64 *cs = (const f64 *)cRef[i];
+        h = cs[1];
+        skip = y - h > slopeSkip * r;
+        mat = 0;
+        if (!skip) {
+          nrm[0] = cs[2];
+          nrm[1] = cs[3];
+          nrm[2] = cs[4];
+          mat = (int)cs[5];
+        }
+        goto sampled;
+      }
+      int miss = -1, hc, hr, nc, nr, mc, mr;
+      f64 htx, htz, ntx, ntz;
+      h_cell(&H, x, z, &hc, &hr, &htx, &htz);
+      const float *HT = (const float *)tile_at(H.ht, H.htx, hc, hr, &miss);
+      if (HT == 0) {
+        GH[G_MISS_GRID] = 1;
+        GH[G_MISS_TILE] = miss;
+        GH[G_EV_COUNT] = nev;
+        return i;
+      }
+      h = h_sample(HT, hc, hr, htx, htz);
+      skip = y - h > slopeSkip * r;
+      mat = 0;
+      if (!skip) {
+        n_cell(&H, x, z, &nc, &nr, &ntx, &ntz);
+        const float *NT = (const float *)tile_at(H.nt, H.ntx, nc, nr, &miss);
+        if (NT == 0) {
+          GH[G_MISS_GRID] = 2;
+          GH[G_MISS_TILE] = miss;
+          GH[G_EV_COUNT] = nev;
+          return i;
+        }
+        m_cell(&H, x, z, &mc, &mr);
+        const uint8_t *MT = (const uint8_t *)tile_at(H.mt, H.mtx, mc, mr, &miss);
+        if (MT == 0) {
+          GH[G_MISS_GRID] = 3;
+          GH[G_MISS_TILE] = miss;
+          GH[G_EV_COUNT] = nev;
+          return i;
+        }
+        n_sample(NT, nc, nr, ntx, ntz, nrm);
+        mat = MT[(mr & (TILE - 1)) * TILE + (mc & (TILE - 1))];
+      }
+    }
+  sampled:;
+    const uint8_t cd = cooldown[i];
+    if (cd > 0) cooldown[i] = cd - 1;
+    if (skip) {
+      nodeFlags[i] = f & ~NODE_FLAG_IN_CONTACT;
+      continue;
+    }
+    const f64 nx = nrm[0], ny = nrm[1], nz = nrm[2];
+    const f64 depth = (h - y) * ny + r;
+    if (!(depth > 0)) {
+      nodeFlags[i] = f & ~NODE_FLAG_IN_CONTACT;
+      continue;
+    }
+    const f64 m = 1 / im;
+    const f64 kcm = kcStab * m;
+    const f64 soft = contactKArr[i];
+    f64 kc, c;
+    if (soft > 0) {
+      kc = soft < kcm ? soft : kcm;
+      const f64 ramp = depth < r ? depth / r : 1;
+      c = 2 * softZeta * __builtin_sqrt(kc * m) * ramp;
+    } else {
+      kc = kcm < kcMax ? kcm : kcMax;
+      c = 2 * zeta * __builtin_sqrt(kc * m);
+    }
+    const f64 vx = velX[i], vy = velY[i], vz = velZ[i];
+    const f64 vn = vx * nx + vy * ny + vz * nz;
+    f64 fn = kc * depth - c * vn;
+    if (fn < 0) fn = 0;
+    f64 fx = fn * nx, fy = fn * ny, fz = fn * nz;
+    const f64 tx = vx - vn * nx, ty = vy - vn * ny, tz = vz - vn * nz;
+    const f64 vt = __builtin_sqrt(tx * tx + ty * ty + tz * tz);
+    const f64 ax = frcX[i] + m * gx;
+    const f64 ay = frcY[i] + m * gy;
+    const f64 az = frcZ[i] + m * gz;
+    const f64 an = ax * nx + ay * ny + az * nz;
+    const f64 mdt = m * invDt;
+    f64 rx = -(mdt * tx + ax - an * nx);
+    f64 ry = -(mdt * ty + ay - an * ny);
+    f64 rz = -(mdt * tz + az - an * nz);
+    f64 cone = frictionArr[i] * matF[mat] * fn;
+    if ((f & NODE_FLAG_TREAD) != 0) {
+      const f64 fb = treadF[i];
+      const f64 muN = cone;
+      const f64 rem = cone * cone - fb * fb;
+      cone = rem > 0 ? __builtin_sqrt(rem) : 0;
+      f64 lx = treadAxX[i], ly = treadAxY[i], lz = treadAxZ[i];
+      const f64 la = __builtin_sqrt(lx * lx + ly * ly + lz * lz);
+      if (la > 0) {
+        lx /= la;
+        ly /= la;
+        lz /= la;
+      }
+      const f64 rl = rx * lx + ry * ly + rz * lz;
+      const f64 latCap = la * muN - fb > 0 ? la * muN - fb : 0;
+      const f64 rlc = rl > latCap ? latCap : rl < -latCap ? -latCap : rl;
+      const f64 dl = rlc - rl;
+      rx += dl * lx;
+      ry += dl * ly;
+      rz += dl * lz;
+    }
+    const f64 r2 = rx * rx + ry * ry + rz * rz;
+    if (r2 > 0) {
+      if (r2 <= cone * cone) {
+        fx += rx;
+        fy += ry;
+        fz += rz;
+      } else {
+        const f64 sc = cone / __builtin_sqrt(r2);
+        fx += sc * rx;
+        fy += sc * ry;
+        fz += sc * rz;
+      }
+    }
+    frcX[i] = frcX[i] + fx;
+    frcY[i] = frcY[i] + fy;
+    frcZ[i] = frcZ[i] + fz;
+    const f64 px = x - nx * r, py = y - ny * r, pz = z - nz * r;
+    if ((f & NODE_FLAG_IN_CONTACT) == 0) {
+      const f64 impulse = vn < 0 ? -vn * m : 0;
+      if (impulse > impactMin) {
+        f64 *e = ev + 9 * nev++;
+        e[0] = 1; e[1] = mat; e[2] = px; e[3] = py; e[4] = pz; e[5] = nx; e[6] = ny; e[7] = nz; e[8] = impulse;
+      }
+    }
+    nodeFlags[i] = f | NODE_FLAG_IN_CONTACT;
+    if (vt > skidSlip && fn > skidLoad && cooldown[i] == 0) {
+      cooldown[i] = skidCooldown;
+      f64 *e = ev + 9 * nev++;
+      e[0] = 2; e[1] = mat; e[2] = px; e[3] = py; e[4] = pz; e[5] = vt; e[6] = fn; e[7] = 0; e[8] = 0;
+    }
+  }
+  GH[G_EV_COUNT] = nev;
+  return end;
+}
+
+/* Test hooks: the mirrored sampler at one point (out: h, nx, ny, nz, mat); returns 0 on a missing tile. */
+EXPORT(ground_sample) int ground_sample(f64 x, f64 z, f64 *out) {
+  int miss = -1, hc, hr, nc, nr, mc, mr;
+  f64 htx, htz, ntx, ntz;
+  Hf H;
+  hf_load(&H);
+  h_cell(&H, x, z, &hc, &hr, &htx, &htz);
+  n_cell(&H, x, z, &nc, &nr, &ntx, &ntz);
+  m_cell(&H, x, z, &mc, &mr);
+  const float *HT = (const float *)tile_at(H.ht, H.htx, hc, hr, &miss);
+  if (HT == 0) { GH[G_MISS_GRID] = 1; GH[G_MISS_TILE] = miss; return 0; }
+  const float *NT = (const float *)tile_at(H.nt, H.ntx, nc, nr, &miss);
+  if (NT == 0) { GH[G_MISS_GRID] = 2; GH[G_MISS_TILE] = miss; return 0; }
+  const uint8_t *MT = (const uint8_t *)tile_at(H.mt, H.mtx, mc, mr, &miss);
+  if (MT == 0) { GH[G_MISS_GRID] = 3; GH[G_MISS_TILE] = miss; return 0; }
+  out[0] = h_sample(HT, hc, hr, htx, htz);
+  n_sample(NT, nc, nr, ntx, ntz, out + 1);
+  out[4] = MT[(mr & (TILE - 1)) * TILE + (mc & (TILE - 1))];
+  return 1;
+}
+
+/* ------------------------------------------------------------ vehicle body passes (vehicle/runtime.ts) */
+/*
+ * The whole-body node loops of R-PHYS's runtime.ts, operation for operation
+ * (the TS stays the reference; kernelParity covers them):
+ *   body_momentum  applyAero's first pass: Σ m·v over the body (m = 1/im);
+ *   body_accel     applyAero's last pass: frc += a·m;
+ *   drive_reaction applyDriveReaction's three body passes (COM, I about the
+ *                  couple axis, the rigid-body force field).
+ * Sums accumulate in node order (lanes only compute); the force scatter
+ * touches each node once, so SIMD pairs store directly.
+ */
+EXPORT(body_momentum) void body_momentum(int start, int end, f64 *out) {
+  f64 px = 0, py = 0, pz = 0;
+  int i = start;
+#ifdef CRUMPLE_SIMD
+  const v128_t one = wasm_f64x2_splat(1.0);
+  for (; i + 1 < end; i += 2) {
+    const v128_t im = wasm_v128_load(invMass + i);
+    const v128_t m = wasm_f64x2_div(one, im);
+    const v128_t mx = wasm_f64x2_mul(m, wasm_v128_load(velX + i));
+    const v128_t my = wasm_f64x2_mul(m, wasm_v128_load(velY + i));
+    const v128_t mz = wasm_f64x2_mul(m, wasm_v128_load(velZ + i));
+    if (wasm_f64x2_extract_lane(im, 0) != 0) {
+      px += wasm_f64x2_extract_lane(mx, 0);
+      py += wasm_f64x2_extract_lane(my, 0);
+      pz += wasm_f64x2_extract_lane(mz, 0);
+    }
+    if (wasm_f64x2_extract_lane(im, 1) != 0) {
+      px += wasm_f64x2_extract_lane(mx, 1);
+      py += wasm_f64x2_extract_lane(my, 1);
+      pz += wasm_f64x2_extract_lane(mz, 1);
+    }
+  }
+#endif
+  for (; i < end; i++) {
+    const f64 im = invMass[i];
+    if (im == 0) continue;
+    const f64 m = 1 / im;
+    px += m * velX[i];
+    py += m * velY[i];
+    pz += m * velZ[i];
+  }
+  out[0] = px;
+  out[1] = py;
+  out[2] = pz;
+}
+
+EXPORT(body_accel) void body_accel(int start, int end, f64 ax, f64 ay, f64 az) {
+  int i = start;
+#ifdef CRUMPLE_SIMD
+  const v128_t one = wasm_f64x2_splat(1.0), vax = wasm_f64x2_splat(ax), vay = wasm_f64x2_splat(ay), vaz = wasm_f64x2_splat(az);
+  for (; i + 1 < end; i += 2) {
+    const v128_t im = wasm_v128_load(invMass + i);
+    if (wasm_f64x2_extract_lane(im, 0) == 0 || wasm_f64x2_extract_lane(im, 1) == 0) {
+      for (int q = i; q < i + 2; q++) {
+        const f64 iq = invMass[q];
+        if (iq == 0) continue;
+        const f64 m = 1 / iq;
+        frcX[q] = frcX[q] + ax * m;
+        frcY[q] = frcY[q] + ay * m;
+        frcZ[q] = frcZ[q] + az * m;
+      }
+      continue;
+    }
+    const v128_t m = wasm_f64x2_div(one, im);
+    wasm_v128_store(frcX + i, wasm_f64x2_add(wasm_v128_load(frcX + i), wasm_f64x2_mul(vax, m)));
+    wasm_v128_store(frcY + i, wasm_f64x2_add(wasm_v128_load(frcY + i), wasm_f64x2_mul(vay, m)));
+    wasm_v128_store(frcZ + i, wasm_f64x2_add(wasm_v128_load(frcZ + i), wasm_f64x2_mul(vaz, m)));
+  }
+#endif
+  for (; i < end; i++) {
+    const f64 im = invMass[i];
+    if (im == 0) continue;
+    const f64 m = 1 / im;
+    frcX[i] = frcX[i] + ax * m;
+    frcY[i] = frcY[i] + ay * m;
+    frcZ[i] = frcZ[i] + az * m;
+  }
+}
+
+/* One node of applyDriveReaction's last pass. */
+static inline void drive_node(int i, f64 g, f64 cx, f64 cy, f64 cz, f64 ux, f64 uy, f64 uz) {
+  const f64 im = invMass[i];
+  if (im == 0) return;
+  const f64 rx = posX[i] - cx, ry = posY[i] - cy, rz = posZ[i] - cz;
+  const f64 a = rx * ux + ry * uy + rz * uz;
+  const f64 px = rx - a * ux, py = ry - a * uy, pz = rz - a * uz;
+  const f64 k = g / im;
+  frcX[i] = frcX[i] + k * (uy * pz - uz * py);
+  frcY[i] = frcY[i] + k * (uz * px - ux * pz);
+  frcZ[i] = frcZ[i] + k * (ux * py - uy * px);
+}
+
+EXPORT(drive_reaction) void drive_reaction(int start, int end, f64 ux, f64 uy, f64 uz, f64 tl) {
+  f64 m = 0, cx = 0, cy = 0, cz = 0;
+  int i = start;
+#ifdef CRUMPLE_SIMD
+  const v128_t one = wasm_f64x2_splat(1.0);
+  for (; i + 1 < end; i += 2) {
+    const v128_t im = wasm_v128_load(invMass + i);
+    const v128_t mi = wasm_f64x2_div(one, im);
+    const v128_t qx = wasm_f64x2_div(wasm_v128_load(posX + i), im);
+    const v128_t qy = wasm_f64x2_div(wasm_v128_load(posY + i), im);
+    const v128_t qz = wasm_f64x2_div(wasm_v128_load(posZ + i), im);
+    if (wasm_f64x2_extract_lane(im, 0) != 0) {
+      m += wasm_f64x2_extract_lane(mi, 0);
+      cx += wasm_f64x2_extract_lane(qx, 0);
+      cy += wasm_f64x2_extract_lane(qy, 0);
+      cz += wasm_f64x2_extract_lane(qz, 0);
+    }
+    if (wasm_f64x2_extract_lane(im, 1) != 0) {
+      m += wasm_f64x2_extract_lane(mi, 1);
+      cx += wasm_f64x2_extract_lane(qx, 1);
+      cy += wasm_f64x2_extract_lane(qy, 1);
+      cz += wasm_f64x2_extract_lane(qz, 1);
+    }
+  }
+#endif
+  for (; i < end; i++) {
+    const f64 im = invMass[i];
+    if (im == 0) continue;
+    m += 1 / im;
+    cx += posX[i] / im;
+    cy += posY[i] / im;
+    cz += posZ[i] / im;
+  }
+  if (!(m > 0)) return;
+  cx /= m;
+  cy /= m;
+  cz /= m;
+  f64 I = 0;
+  i = start;
+#ifdef CRUMPLE_SIMD
+  const v128_t vcx = wasm_f64x2_splat(cx), vcy = wasm_f64x2_splat(cy), vcz = wasm_f64x2_splat(cz);
+  const v128_t vux = wasm_f64x2_splat(ux), vuy = wasm_f64x2_splat(uy), vuz = wasm_f64x2_splat(uz);
+  for (; i + 1 < end; i += 2) {
+    const v128_t im = wasm_v128_load(invMass + i);
+    const v128_t rx = wasm_f64x2_sub(wasm_v128_load(posX + i), vcx);
+    const v128_t ry = wasm_f64x2_sub(wasm_v128_load(posY + i), vcy);
+    const v128_t rz = wasm_f64x2_sub(wasm_v128_load(posZ + i), vcz);
+    const v128_t a = wasm_f64x2_add(wasm_f64x2_add(wasm_f64x2_mul(rx, vux), wasm_f64x2_mul(ry, vuy)), wasm_f64x2_mul(rz, vuz));
+    const v128_t px = wasm_f64x2_sub(rx, wasm_f64x2_mul(a, vux));
+    const v128_t py = wasm_f64x2_sub(ry, wasm_f64x2_mul(a, vuy));
+    const v128_t pz = wasm_f64x2_sub(rz, wasm_f64x2_mul(a, vuz));
+    const v128_t t = wasm_f64x2_div(
+        wasm_f64x2_add(wasm_f64x2_add(wasm_f64x2_mul(px, px), wasm_f64x2_mul(py, py)), wasm_f64x2_mul(pz, pz)), im);
+    if (wasm_f64x2_extract_lane(im, 0) != 0) I += wasm_f64x2_extract_lane(t, 0);
+    if (wasm_f64x2_extract_lane(im, 1) != 0) I += wasm_f64x2_extract_lane(t, 1);
+  }
+#endif
+  for (; i < end; i++) {
+    const f64 im = invMass[i];
+    if (im == 0) continue;
+    const f64 rx = posX[i] - cx, ry = posY[i] - cy, rz = posZ[i] - cz;
+    const f64 a = rx * ux + ry * uy + rz * uz;
+    const f64 px = rx - a * ux, py = ry - a * uy, pz = rz - a * uz;
+    I += (px * px + py * py + pz * pz) / im;
+  }
+  if (!(I > 1e-9)) return;
+  const f64 g = tl / I;
+  i = start;
+#ifdef CRUMPLE_SIMD
+  const v128_t vg = wasm_f64x2_splat(g);
+  for (; i + 1 < end; i += 2) {
+    const v128_t im = wasm_v128_load(invMass + i);
+    if (wasm_f64x2_extract_lane(im, 0) == 0 || wasm_f64x2_extract_lane(im, 1) == 0) {
+      drive_node(i, g, cx, cy, cz, ux, uy, uz);
+      drive_node(i + 1, g, cx, cy, cz, ux, uy, uz);
+      continue;
+    }
+    const v128_t rx = wasm_f64x2_sub(wasm_v128_load(posX + i), vcx);
+    const v128_t ry = wasm_f64x2_sub(wasm_v128_load(posY + i), vcy);
+    const v128_t rz = wasm_f64x2_sub(wasm_v128_load(posZ + i), vcz);
+    const v128_t a = wasm_f64x2_add(wasm_f64x2_add(wasm_f64x2_mul(rx, vux), wasm_f64x2_mul(ry, vuy)), wasm_f64x2_mul(rz, vuz));
+    const v128_t px = wasm_f64x2_sub(rx, wasm_f64x2_mul(a, vux));
+    const v128_t py = wasm_f64x2_sub(ry, wasm_f64x2_mul(a, vuy));
+    const v128_t pz = wasm_f64x2_sub(rz, wasm_f64x2_mul(a, vuz));
+    const v128_t k = wasm_f64x2_div(vg, im);
+    const v128_t fx = wasm_f64x2_mul(k, wasm_f64x2_sub(wasm_f64x2_mul(vuy, pz), wasm_f64x2_mul(vuz, py)));
+    const v128_t fy = wasm_f64x2_mul(k, wasm_f64x2_sub(wasm_f64x2_mul(vuz, px), wasm_f64x2_mul(vux, pz)));
+    const v128_t fz = wasm_f64x2_mul(k, wasm_f64x2_sub(wasm_f64x2_mul(vux, py), wasm_f64x2_mul(vuy, px)));
+    wasm_v128_store(frcX + i, wasm_f64x2_add(wasm_v128_load(frcX + i), fx));
+    wasm_v128_store(frcY + i, wasm_f64x2_add(wasm_v128_load(frcY + i), fy));
+    wasm_v128_store(frcZ + i, wasm_f64x2_add(wasm_v128_load(frcZ + i), fz));
+  }
+#endif
+  for (; i < end; i++) drive_node(i, g, cx, cy, cz, ux, uy, uz);
+}
+
+/* ------------------------------------------------------------ wheels (vehicle/wheels.ts) */
+/*
+ * R-PHYS's per-wheel node loops, operation for operation (wheels.ts stays the
+ * reference; kernelParity covers them): estimateWheelOmega, applyAxleTorque,
+ * applyUprightReaction, applyTreadBrush (+ applyRimTorque), applyHoopTension.
+ * One header block per WheelRuntime (W_* slots, written by the glue; the
+ * runtime's tread / index arrays live in the block, shared with JS).
+ *
+ * Ground: wheel_omega samples every tyre node the way groundNormalForce would
+ * (plane or the mirrored heightfield, before anything is written: a missing
+ * tile returns 0 like ground()) into the block's sample cache; the tread brush
+ * reads the same samples later in the same pre-step (positions do not move in
+ * between), where wheels.ts samples the JS sampler again — same values.
+ */
+enum {
+  W_HUBI, W_HUBO, W_RIM, W_TIRE, W_N, W_RAYS, W_SPIN, W_TRR, W_RIMR, W_RIMHOOP, W_TREADHOOP, W_BRUSHK, W_BRUSHC,
+  W_NLINK, W_LINKS, W_NATT, W_ATT, W_NREACT, W_REACT, W_TLOAD, W_TNRM, W_TBRUSH, W_SAMP,
+  /* in / out */
+  W_OMEGA, W_ROLLR, W_DETACHED, W_LOAD, W_CONTACT, W_SLIPSPEED, W_SLIPRATIO, W_CACHE,
+  W_HEADER
+};
+
+static f64 WH_SLIP_MIN, WH_INV_2PI, WH_INV_4PI, WH_ROLL_ALPHA, WH_TREAD_DAMP, WH_ATTACH_MIN, WH_DEADZONE, WH_SHARE_V0, WH_HOOP_MAX;
+
+EXPORT(set_wheel_params)
+void set_wheel_params(f64 slipMin, f64 inv2pi, f64 inv4pi, f64 rollAlpha, f64 treadDamp, f64 attachMin, f64 deadzone, f64 shareV0, f64 hoopMax) {
+  WH_SLIP_MIN = slipMin;
+  WH_INV_2PI = inv2pi;
+  WH_INV_4PI = inv4pi;
+  WH_ROLL_ALPHA = rollAlpha;
+  WH_TREAD_DAMP = treadDamp;
+  WH_ATTACH_MIN = attachMin;
+  WH_DEADZONE = deadzone;
+  WH_SHARE_V0 = shareV0;
+  WH_HOOP_MAX = hoopMax;
+}
+
+/* axleFrame: hub midpoint + unit spin axis s; 0 when degenerate. */
+static inline int axle_frame(const f64 *W, f64 *F) {
+  const int hi = (int)W[W_HUBI], ho = (int)W[W_HUBO];
+  const f64 sx = posX[ho] - posX[hi], sy = posY[ho] - posY[hi], sz = posZ[ho] - posZ[hi];
+  const f64 l = __builtin_sqrt(sx * sx + sy * sy + sz * sz);
+  if (!(l > 1e-9)) return 0;
+  const f64 k = W[W_SPIN] / l;
+  F[0] = (posX[hi] + posX[ho]) * 0.5;
+  F[1] = (posY[hi] + posY[ho]) * 0.5;
+  F[2] = (posZ[hi] + posZ[ho]) * 0.5;
+  F[3] = sx * k;
+  F[4] = sy * k;
+  F[5] = sz * k;
+  return 1;
+}
+
+/* Sample cache per tyre node j: [state (0 none, 1 h only, 2 h + normal + material), h, nx, ny, nz, material]. */
+#define WS 6
+
+/* Fills the sample cache for the tyre ring; 0 on a missing tile (GH miss slots set; nothing else written). */
+static int wheel_sample(f64 *W) {
+  f64 *S = (f64 *)(uint32_t)W[W_SAMP];
+  const int t0 = (int)W[W_TIRE], n = (int)W[W_N];
+  const int kind = (int)GH[G_KIND];
+  const f64 slopeSkip = SLOPE_SKIP_G;
+  Hf H;
+  if (kind == G_HEIGHTFIELD) hf_load(&H);
+  const f64 planeY = GH[G_PLANE_Y];
+  const int planeMat = (int)GH[G_PLANE_MAT];
+  uint32_t *cStamp = (uint32_t *)(uint32_t)GH[G_CSTAMP];
+  uint32_t *cRef = (uint32_t *)(uint32_t)GH[G_CREF];
+  const uint32_t stamp = (uint32_t)GH[G_STAMP];
+  for (int j = 0; j < n; j++) {
+    const int i = t0 + j;
+    f64 *s = S + WS * j;
+    s[0] = 0;
+    cStamp[i] = 0;
+    if ((nodeFlags[i] & NODE_FLAG_COLLIDABLE) == 0 || invMass[i] == 0) continue;
+    cRef[i] = (uint32_t)s;
+    const f64 x = posX[i], y = posY[i], z = posZ[i];
+    if (kind == G_PLANE) {
+      s[1] = planeY;
+      if (y - planeY > slopeSkip * radiusArr[i]) {
+        s[0] = 1;
+        continue;
+      }
+      s[0] = 2;
+      s[2] = 0;
+      s[3] = 1;
+      s[4] = 0;
+      s[5] = planeMat;
+      continue;
+    }
+    int miss = -1, hc, hr, nc, nr, mc, mr;
+    f64 htx, htz, ntx, ntz;
+    h_cell(&H, x, z, &hc, &hr, &htx, &htz);
+    const float *HT = (const float *)tile_at(H.ht, H.htx, hc, hr, &miss);
+    if (HT == 0) {
+      GH[G_MISS_GRID] = 1;
+      GH[G_MISS_TILE] = miss;
+      return 0;
+    }
+    const f64 h = h_sample(HT, hc, hr, htx, htz);
+    s[1] = h;
+    if (y - h > slopeSkip * radiusArr[i]) {
+      s[0] = 1;
+      cStamp[i] = stamp;
+      continue;
+    }
+    n_cell(&H, x, z, &nc, &nr, &ntx, &ntz);
+    const float *NT = (const float *)tile_at(H.nt, H.ntx, nc, nr, &miss);
+    if (NT == 0) {
+      GH[G_MISS_GRID] = 2;
+      GH[G_MISS_TILE] = miss;
+      return 0;
+    }
+    m_cell(&H, x, z, &mc, &mr);
+    const uint8_t *MT = (const uint8_t *)tile_at(H.mt, H.mtx, mc, mr, &miss);
+    if (MT == 0) {
+      GH[G_MISS_GRID] = 3;
+      GH[G_MISS_TILE] = miss;
+      return 0;
+    }
+    n_sample(NT, nc, nr, ntx, ntz, s + 2);
+    s[5] = MT[(mr & (TILE - 1)) * TILE + (mc & (TILE - 1))];
+    s[0] = 2;
+    cStamp[i] = stamp;
+  }
+  return 1;
+}
+
+/* groundNormalForce of tyre node j from the cache (nrm out when in contact). */
+static inline f64 wheel_gnf(const f64 *s, int i, f64 dt) {
+  if (s[0] != 2) return 0;
+  const f64 r = radiusArr[i];
+  const f64 nx = s[2], ny = s[3], nz = s[4];
+  const f64 depth = (s[1] - posY[i]) * ny + r;
+  if (!(depth > 0)) return 0;
+  const f64 m = 1 / invMass[i];
+  const f64 invDt = 1 / dt;
+  const f64 kcm = KC_STAB * invDt * invDt * m;
+  const f64 soft = contactKArr[i];
+  f64 kc, c;
+  if (soft > 0) {
+    kc = soft < kcm ? soft : kcm;
+    c = 2 * SOFT_ZETA * __builtin_sqrt(kc * m) * (depth < r ? depth / r : 1);
+  } else {
+    kc = kcm < KC_MAX_G ? kcm : KC_MAX_G;
+    c = 2 * CONTACT_ZETA_G * __builtin_sqrt(kc * m);
+  }
+  const f64 vn = velX[i] * nx + velY[i] * ny + velZ[i] * nz;
+  const f64 fn = kc * depth - c * vn;
+  return fn > 0 ? fn : 0;
+}
+
+/*
+ * estimateWheelOmega. ground: 1 when a ground is registered (else the tyre
+ * loads are cleared). Returns 0 on a missing tile (nothing written).
+ */
+EXPORT(wheel_omega) int wheel_omega(f64 *W, int ground, f64 dt) {
+  f64 F[6];
+  W[W_CACHE] = 0;
+  if (!axle_frame(W, F)) {
+    W[W_OMEGA] = 0;
+    return 1;
+  }
+  if (ground && !wheel_sample(W)) return 0;
+  const f64 cx = F[0], cy = F[1], cz = F[2], sx = F[3], sy = F[4], sz = F[5];
+  const int hi = (int)W[W_HUBI], ho = (int)W[W_HUBO];
+  const f64 vcx = (velX[hi] + velX[ho]) * 0.5;
+  const f64 vcy = (velY[hi] + velY[ho]) * 0.5;
+  const f64 vcz = (velZ[hi] + velZ[ho]) * 0.5;
+  const int n = (int)W[W_N];
+  f64 lSum = 0, iSum = 0;
+  const int r0 = (int)W[W_RIM], r1 = r0 + 2 * n;
+  for (int i = r0; i < r1; i++) {
+    const f64 im = invMass[i];
+    if (im == 0) continue;
+    const f64 rx = posX[i] - cx, ry = posY[i] - cy, rz = posZ[i] - cz;
+    const f64 ax = rx * sx + ry * sy + rz * sz;
+    const f64 px = rx - ax * sx, py = ry - ax * sy, pz = rz - ax * sz;
+    const f64 tx = sy * pz - sz * py, ty = sz * px - sx * pz, tz = sx * py - sy * px;
+    const f64 m = 1 / im;
+    lSum += m * ((velX[i] - vcx) * tx + (velY[i] - vcy) * ty + (velZ[i] - vcz) * tz);
+    iSum += m * (px * px + py * py + pz * pz);
+  }
+  const f64 omega = iSum > 0 ? lSum / iSum : 0;
+  W[W_OMEGA] = omega;
+  f64 *tLoad = (f64 *)(uint32_t)W[W_TLOAD];
+  f64 *tNrm = (f64 *)(uint32_t)W[W_TNRM];
+  const int ts = (int)W[W_TIRE];
+  {
+    const int half = n >> 1;
+    f64 cSum = 0, per = 0;
+    int cN = 0;
+    for (int row = 0; row < 2; row++) {
+      const int b0 = ts + row * half;
+      for (int q = 0; q < half; q++) {
+        const int q1 = q + 1 == half ? 0 : q + 1;
+        const int a = b0 + q, b = b0 + q1;
+        const f64 ex = posX[b] - posX[a], ey = posY[b] - posY[a], ez = posZ[b] - posZ[a];
+        const f64 len = __builtin_sqrt(ex * ex + ey * ey + ez * ez);
+        per += len;
+        if (tLoad[row * half + q] > 0 && tLoad[row * half + q1] > 0) {
+          cSum += len;
+          cN++;
+        }
+      }
+    }
+    const f64 target = cN > 0 ? (cSum / cN) * half * WH_INV_2PI : per * WH_INV_4PI;
+    W[W_ROLLR] = W[W_ROLLR] + (target - W[W_ROLLR]) * WH_ROLL_ALPHA;
+  }
+  if (W[W_DETACHED] == 0) {
+    const int nl = (int)W[W_NLINK];
+    if (nl > 0) {
+      const int32_t *links = (const int32_t *)(uint32_t)W[W_LINKS];
+      int broken = 0;
+      for (int j = 0; j < nl; j++)
+        if (activeArr[links[j]] == 0) broken++;
+      if (broken == nl) W[W_DETACHED] = 1;
+    }
+  }
+  f64 load = 0, slipSum = 0, gnx = 0, gny = 0, gnz = 0;
+  int contacts = 0;
+  if (ground) {
+    const f64 *S = (const f64 *)(uint32_t)W[W_SAMP];
+    for (int j = 0; j < n; j++) {
+      const int i = ts + j;
+      const f64 *s = S + WS * j;
+      const f64 fn = wheel_gnf(s, i, dt);
+      if (!(fn > 0)) {
+        tLoad[j] = 0;
+        continue;
+      }
+      const f64 nx = s[2], ny = s[3], nz = s[4];
+      tLoad[j] = fn;
+      tNrm[3 * j] = nx;
+      tNrm[3 * j + 1] = ny;
+      tNrm[3 * j + 2] = nz;
+      const f64 vx = velX[i], vy = velY[i], vz = velZ[i];
+      const f64 vn = vx * nx + vy * ny + vz * nz;
+      const f64 tx = vx - vn * nx, ty = vy - vn * ny, tz = vz - vn * nz;
+      slipSum += __builtin_sqrt(tx * tx + ty * ty + tz * tz);
+      load += fn;
+      gnx += fn * nx;
+      gny += fn * ny;
+      gnz += fn * nz;
+      contacts++;
+    }
+    W[W_CACHE] = 1;
+  } else {
+    for (int j = 0; j < n; j++) tLoad[j] = 0;
+  }
+  W[W_LOAD] = load;
+  W[W_CONTACT] = contacts > 0 ? 1 : 0;
+  W[W_SLIPSPEED] = contacts > 0 ? slipSum / contacts : 0;
+  if (contacts > 0) {
+    const f64 gl = __builtin_sqrt(gnx * gnx + gny * gny + gnz * gnz);
+    gnx /= gl;
+    gny /= gl;
+    gnz /= gl;
+  } else {
+    gnx = 0;
+    gny = 1;
+    gnz = 0;
+  }
+  f64 fx = sy * gnz - sz * gny, fy = sz * gnx - sx * gnz, fz = sx * gny - sy * gnx;
+  const f64 fl = __builtin_sqrt(fx * fx + fy * fy + fz * fz);
+  f64 vFwd = 0;
+  if (fl > 1e-9) {
+    fx /= fl;
+    fy /= fl;
+    fz /= fl;
+    vFwd = vcx * fx + vcy * fy + vcz * fz;
+  }
+  const f64 den = vFwd < 0 ? -vFwd : vFwd;
+  W[W_SLIPRATIO] = (omega * W[W_ROLLR] - vFwd) / (den > WH_SLIP_MIN ? den : WH_SLIP_MIN);
+  return 1;
+}
+
+/* applyAxleTorque. */
+EXPORT(wheel_axle) void wheel_axle(f64 *W, f64 tau) {
+  f64 F[6];
+  if (tau == 0 || !axle_frame(W, F)) return;
+  const f64 cx = F[0], cy = F[1], cz = F[2], sx = F[3], sy = F[4], sz = F[5];
+  const int n = (int)W[W_N];
+  const f64 coef = tau / (n * W[W_TRR]);
+  f64 sumX = 0, sumY = 0, sumZ = 0;
+  const int t0 = (int)W[W_TIRE], t1 = t0 + n;
+  for (int i = t0; i < t1; i++) {
+    const f64 rx = posX[i] - cx, ry = posY[i] - cy, rz = posZ[i] - cz;
+    const f64 ax = rx * sx + ry * sy + rz * sz;
+    const f64 px = rx - ax * sx, py = ry - ax * sy, pz = rz - ax * sz;
+    const f64 pl = __builtin_sqrt(px * px + py * py + pz * pz);
+    if (!(pl > 1e-9)) continue;
+    const f64 g = coef / pl;
+    const f64 fx = g * (sy * pz - sz * py), fy = g * (sz * px - sx * pz), fz = g * (sx * py - sy * px);
+    frcX[i] = frcX[i] + fx;
+    frcY[i] = frcY[i] + fy;
+    frcZ[i] = frcZ[i] + fz;
+    sumX += fx;
+    sumY += fy;
+    sumZ += fz;
+  }
+  const f64 hx = -0.5 * sumX, hy = -0.5 * sumY, hz = -0.5 * sumZ;
+  const int hi = (int)W[W_HUBI], ho = (int)W[W_HUBO];
+  frcX[hi] = frcX[hi] + hx;
+  frcY[hi] = frcY[hi] + hy;
+  frcZ[hi] = frcZ[hi] + hz;
+  frcX[ho] = frcX[ho] + hx;
+  frcY[ho] = frcY[ho] + hy;
+  frcZ[ho] = frcZ[ho] + hz;
+}
+
+/* applyUprightReaction (the glue checks reactNodes / detached); si = caliperInboard. */
+EXPORT(wheel_upright) void wheel_upright(f64 *W, f64 tau, f64 si) {
+  f64 F[6];
+  const int nr = (int)W[W_NREACT];
+  if (tau == 0 || nr == 0 || W[W_DETACHED] != 0 || !axle_frame(W, F)) return;
+  const int32_t *nodes = (const int32_t *)(uint32_t)W[W_REACT];
+  const f64 cx = F[0], cy = F[1], cz = F[2], sx = F[3], sy = F[4], sz = F[5];
+  f64 r2 = 0;
+  for (int q = 0; q < nr; q++) {
+    const int i = nodes[q];
+    const f64 rx = posX[i] - cx, ry = posY[i] - cy, rz = posZ[i] - cz;
+    const f64 ax = rx * sx + ry * sy + rz * sz;
+    const f64 px = rx - ax * sx, py = ry - ax * sy, pz = rz - ax * sz;
+    r2 += px * px + py * py + pz * pz;
+  }
+  if (!(r2 > 1e-6)) return;
+  const f64 k = -tau / r2;
+  f64 tx = 0, ty = 0, tz = 0;
+  for (int q = 0; q < nr; q++) {
+    const int i = nodes[q];
+    const f64 rx = posX[i] - cx, ry = posY[i] - cy, rz = posZ[i] - cz;
+    const f64 ax = rx * sx + ry * sy + rz * sz;
+    const f64 px = rx - ax * sx, py = ry - ax * sy, pz = rz - ax * sz;
+    const f64 fx = k * (sy * pz - sz * py), fy = k * (sz * px - sx * pz), fz = k * (sx * py - sy * px);
+    frcX[i] = frcX[i] + fx;
+    frcY[i] = frcY[i] + fy;
+    frcZ[i] = frcZ[i] + fz;
+    tx += fx;
+    ty += fy;
+    tz += fz;
+  }
+  const int hi = (int)W[W_HUBI], ho = (int)W[W_HUBO];
+  const f64 so = 1 - si;
+  frcX[hi] = frcX[hi] - si * tx;
+  frcY[hi] = frcY[hi] - si * ty;
+  frcZ[hi] = frcZ[hi] - si * tz;
+  frcX[ho] = frcX[ho] - so * tx;
+  frcY[ho] = frcY[ho] - so * ty;
+  frcZ[ho] = frcZ[ho] - so * tz;
+}
+
+/* applyRimTorque with the frame F of the calling pass. */
+static void rim_torque(const f64 *W, const f64 *F, f64 tau) {
+  if (tau == 0) return;
+  const f64 cx = F[0], cy = F[1], cz = F[2], sx = F[3], sy = F[4], sz = F[5];
+  const int n = (int)W[W_N];
+  const f64 per = tau / n;
+  f64 sumX = 0, sumY = 0, sumZ = 0;
+  const int r0 = (int)W[W_RIM], r1 = r0 + n;
+  for (int i = r0; i < r1; i++) {
+    const f64 rx = posX[i] - cx, ry = posY[i] - cy, rz = posZ[i] - cz;
+    const f64 ax = rx * sx + ry * sy + rz * sz;
+    const f64 px = rx - ax * sx, py = ry - ax * sy, pz = rz - ax * sz;
+    const f64 p2 = px * px + py * py + pz * pz;
+    if (!(p2 > 1e-12)) continue;
+    const f64 g = per / p2;
+    const f64 fx = g * (sy * pz - sz * py), fy = g * (sz * px - sx * pz), fz = g * (sx * py - sy * px);
+    frcX[i] = frcX[i] + fx;
+    frcY[i] = frcY[i] + fy;
+    frcZ[i] = frcZ[i] + fz;
+    sumX += fx;
+    sumY += fy;
+    sumZ += fz;
+  }
+  const int hi = (int)W[W_HUBI], ho = (int)W[W_HUBO];
+  frcX[hi] = frcX[hi] - 0.5 * sumX;
+  frcY[hi] = frcY[hi] - 0.5 * sumY;
+  frcZ[hi] = frcZ[hi] - 0.5 * sumZ;
+  frcX[ho] = frcX[ho] - 0.5 * sumX;
+  frcY[ho] = frcY[ho] - 0.5 * sumY;
+  frcZ[ho] = frcZ[ho] - 0.5 * sumZ;
+}
+
+/*
+ * applyTreadBrush (brushK > 0 checked by the glue). ground: a ground is
+ * registered (the sample cache of this pre-step's wheel_omega is valid).
+ */
+EXPORT(wheel_brush) void wheel_brush(f64 *W, int ground, f64 dt, f64 slipRatio, f64 latMu) {
+  f64 F[6];
+  const f64 k = W[W_BRUSHK];
+  const int n = (int)W[W_N];
+  const int t0 = (int)W[W_TIRE];
+  f64 *brush = (f64 *)(uint32_t)W[W_TBRUSH];
+  if (!ground || !axle_frame(W, F)) {
+    for (int j = 0; j < 3 * n; j++) brush[j] = 0;
+    for (int j = 0; j < n; j++) treadF[t0 + j] = 0;
+    return;
+  }
+  const f64 *tLoad = (const f64 *)(uint32_t)W[W_TLOAD];
+  const f64 *tNrm = (const f64 *)(uint32_t)W[W_TNRM];
+  const f64 *S = (const f64 *)(uint32_t)W[W_SAMP];
+  const f64 *matF = (const f64 *)(uint32_t)GH[G_MATF];
+  const f64 cx = F[0], cy = F[1], cz = F[2], sx = F[3], sy = F[4], sz = F[5];
+  const int hi = (int)W[W_HUBI], ho = (int)W[W_HUBO];
+  const f64 vcx = (velX[hi] + velX[ho]) * 0.5;
+  const f64 vcy = (velY[hi] + velY[ho]) * 0.5;
+  const f64 vcz = (velZ[hi] + velZ[ho]) * 0.5;
+  const f64 c = W[W_BRUSHC];
+  const f64 invDt = 1 / dt;
+  const f64 fwx = -sz, fwz = sx;
+  const f64 fl = __builtin_sqrt(fwx * fwx + fwz * fwz);
+  f64 uxLong = 0;
+  if (fl > 1e-6) {
+    f64 vf = (vcx * fwx + vcz * fwz) / fl;
+    if (vf < 0) vf = -vf;
+    const f64 sr = slipRatio < 0 ? -slipRatio : slipRatio;
+    if (sr > WH_DEADZONE) uxLong = (sr - WH_DEADZONE) * (vf > 1 ? vf : 1);
+  }
+  f64 Fx = 0, Fy = 0, Fz = 0, Mx = 0, My = 0, Mz = 0;
+  for (int j = 0; j < n; j++) {
+    const int i = t0 + j;
+    const f64 fn = tLoad[j];
+    if (!(fn > 0)) {
+      brush[3 * j] = 0;
+      treadAxX[i] = 0;
+      treadAxY[i] = 0;
+      treadAxZ[i] = 0;
+      treadF[i] = 0;
+      continue;
+    }
+    const int j3 = 3 * j;
+    const f64 nx = tNrm[j3], ny = tNrm[j3 + 1], nz = tNrm[j3 + 2];
+    const f64 sn = sx * nx + sy * ny + sz * nz;
+    f64 ax = sx - sn * nx, ay = sy - sn * ny, az = sz - sn * nz;
+    const f64 al = __builtin_sqrt(ax * ax + ay * ay + az * az);
+    if (!(al > 1e-6)) {
+      brush[j3] = 0;
+      treadF[i] = 0;
+      continue;
+    }
+    ax /= al;
+    ay /= al;
+    az /= al;
+    const f64 u = vcx * ax + vcy * ay + vcz * az;
+    f64 d = brush[j3] + u * dt;
+    f64 f = -k * d - c * u;
+    const f64 ua = u < 0 ? -u : u;
+    const f64 share = (ua + WH_SHARE_V0) / (__builtin_sqrt(u * u + uxLong * uxLong) + WH_SHARE_V0);
+    const f64 *s = S + WS * j;
+    const f64 cap = share * latMu * frictionArr[i] * matF[(int)s[5]] * fn;
+    if (f > cap || f < -cap) {
+      f = f > 0 ? cap : -cap;
+      const f64 dMax = cap / k;
+      if (d > dMax) d = dMax;
+      else if (d < -dMax) d = -dMax;
+    }
+    brush[j3] = d;
+    treadAxX[i] = ax * latMu;
+    treadAxY[i] = ay * latMu;
+    treadAxZ[i] = az * latMu;
+    treadF[i] = f < 0 ? -f : f;
+    const f64 px = posX[i], py = posY[i], pz = posZ[i];
+    const f64 hgt = (py - s[1]) * ny;
+    const f64 rx = px - nx * hgt - cx, ry = py - ny * hgt - cy, rz = pz - nz * hgt - cz;
+    const f64 fx = f * ax, fy = f * ay, fz = f * az;
+    Fx += fx;
+    Fy += fy;
+    Fz += fz;
+    Mx += ry * fz - rz * fy;
+    My += rz * fx - rx * fz;
+    Mz += rx * fy - ry * fx;
+    const f64 cn = (WH_TREAD_DAMP * invDt) / invMass[i];
+    const f64 wl = (velX[i] - vcx) * ax + (velY[i] - vcy) * ay + (velZ[i] - vcz) * az;
+    frcX[i] = frcX[i] - cn * wl * ax;
+    frcY[i] = frcY[i] - cn * wl * ay;
+    frcZ[i] = frcZ[i] - cn * wl * az;
+  }
+  const f64 ms = Mx * sx + My * sy + Mz * sz;
+  f64 mpx = Mx - ms * sx, mpy = My - ms * sy, mpz = Mz - ms * sz;
+  f64 hx = 0.5 * Fx, hy = 0.5 * Fy, hz = 0.5 * Fz;
+  const int na = (int)W[W_NATT];
+  if (na > 0) {
+    const int32_t *att = (const int32_t *)(uint32_t)W[W_ATT];
+    f64 gnx = 0, gny = 0, gnz = 0;
+    for (int j = 0; j < n; j++) {
+      const f64 fnj = tLoad[j];
+      gnx += fnj * tNrm[3 * j];
+      gny += fnj * tNrm[3 * j + 1];
+      gnz += fnj * tNrm[3 * j + 2];
+    }
+    const f64 gl = __builtin_sqrt(gnx * gnx + gny * gny + gnz * gnz);
+    f64 ax = 0, ay = 0, az = 0;
+    for (int q = 0; q < na; q++) {
+      const int a = att[q];
+      ax += posX[a];
+      ay += posY[a];
+      az += posZ[a];
+    }
+    ax = ax / na - cx;
+    ay = ay / na - cy;
+    az = az / na - cz;
+    if (gl > 0) {
+      gnx /= gl;
+      gny /= gl;
+      gnz /= gl;
+      const f64 h = ax * gnx + ay * gny + az * gnz;
+      f64 fwx2 = sy * gnz - sz * gny, fwy2 = sz * gnx - sx * gnz, fwz2 = sx * gny - sy * gnx;
+      const f64 fwl = __builtin_sqrt(fwx2 * fwx2 + fwy2 * fwy2 + fwz2 * fwz2);
+      if (h > WH_ATTACH_MIN && fwl > 1e-6) {
+        fwx2 /= fwl;
+        fwy2 /= fwl;
+        fwz2 /= fwl;
+        const f64 mf = mpx * fwx2 + mpy * fwy2 + mpz * fwz2;
+        mpx -= mf * fwx2;
+        mpy -= mf * fwy2;
+        mpz -= mf * fwz2;
+        const f64 g = mf / h;
+        const f64 vx = (fwy2 * gnz - fwz2 * gny) * g;
+        const f64 vy = (fwz2 * gnx - fwx2 * gnz) * g;
+        const f64 vz = (fwx2 * gny - fwy2 * gnx) * g;
+        const f64 per = 1.0 / na;
+        for (int q = 0; q < na; q++) {
+          const int a = att[q];
+          frcX[a] = frcX[a] + vx * per;
+          frcY[a] = frcY[a] + vy * per;
+          frcZ[a] = frcZ[a] + vz * per;
+        }
+        hx -= 0.5 * vx;
+        hy -= 0.5 * vy;
+        hz -= 0.5 * vz;
+      }
+    }
+  }
+  const f64 lx = posX[ho] - posX[hi], ly = posY[ho] - posY[hi], lz = posZ[ho] - posZ[hi];
+  const f64 l2 = lx * lx + ly * ly + lz * lz;
+  const f64 qx = (mpy * lz - mpz * ly) / l2;
+  const f64 qy = (mpz * lx - mpx * lz) / l2;
+  const f64 qz = (mpx * ly - mpy * lx) / l2;
+  frcX[ho] = frcX[ho] + hx + qx;
+  frcY[ho] = frcY[ho] + hy + qy;
+  frcZ[ho] = frcZ[ho] + hz + qz;
+  frcX[hi] = frcX[hi] + hx - qx;
+  frcY[hi] = frcY[hi] + hy - qy;
+  frcZ[hi] = frcZ[hi] + hz - qz;
+  rim_torque(W, F, ms);
+}
+
+/* hoopRing: tension m·g along each segment of the closed ring start..start+n−1. */
+static void hoop_ring(int start, int n, f64 g) {
+  for (int k = 0; k < n; k++) {
+    const int a = start + k;
+    const int b = k + 1 == n ? start : a + 1;
+    const f64 dx = posX[b] - posX[a], dy = posY[b] - posY[a], dz = posZ[b] - posZ[a];
+    const f64 L = __builtin_sqrt(dx * dx + dy * dy + dz * dz);
+    if (!(L > 1e-9)) continue;
+    const f64 sc = (0.5 * (1 / invMass[a] + 1 / invMass[b]) * g) / L;
+    frcX[a] = frcX[a] + sc * dx;
+    frcY[a] = frcY[a] + sc * dy;
+    frcZ[a] = frcZ[a] + sc * dz;
+    frcX[b] = frcX[b] - sc * dx;
+    frcY[b] = frcY[b] - sc * dy;
+    frcZ[b] = frcZ[b] - sc * dz;
+  }
+}
+
+/* applyHoopTension (uses W_OMEGA). */
+EXPORT(wheel_hoop) void wheel_hoop(f64 *W) {
+  const f64 rim = W[W_RIMHOOP], tread = W[W_TREADHOOP];
+  if (!(rim > 0) && !(tread > 0)) return;
+  const f64 w0 = W[W_OMEGA];
+  f64 om = w0 < 0 ? -w0 : w0;
+  if (om > WH_HOOP_MAX) om = WH_HOOP_MAX;
+  const f64 w2 = om * om;
+  if (!(w2 > 0)) return;
+  const int n = (int)W[W_RAYS];
+  if (rim > 0) {
+    const f64 g = w2 * rim * W[W_RIMR];
+    hoop_ring((int)W[W_RIM], n, g);
+    hoop_ring((int)W[W_RIM] + n, n, g);
+  }
+  if (tread > 0) {
+    const f64 g = w2 * tread * W[W_TRR];
+    hoop_ring((int)W[W_TIRE], n, g);
+    hoop_ring((int)W[W_TIRE] + n, n, g);
+  }
 }
