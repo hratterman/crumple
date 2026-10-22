@@ -23,6 +23,7 @@ describe('settings', () => {
       timeOfDay: DEFAULT_SETTINGS.timeOfDay,
       timeSpeed: 0,
       weather: 'clear',
+      physicsQuality: 'auto',
     });
     // R-GFX environment fields
     expect(sanitizeSettings({ timeOfDay: 25.5, timeSpeed: 60, weather: 'rain' })).toMatchObject({ timeOfDay: 1.5, timeSpeed: 60, weather: 'rain' });

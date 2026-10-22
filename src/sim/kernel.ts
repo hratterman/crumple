@@ -64,3 +64,64 @@ export function defaultKernel(): KernelFactory {
 export function setDefaultKernel(f: KernelFactory): void {
   defaultFactory = f;
 }
+
+/**
+ * Boot kernel bench (R-CORE physics-quality 'auto'): million beam-updates per
+ * second of `f`'s beam pass on a synthetic 600-node / 3000-beam lattice (car-like
+ * spacing and stiffness, every beam within its plastic limit), timed for about
+ * `budgetMs` after a warm-up. One core, wall clock; deterministic setup.
+ */
+export function benchKernel(f: KernelFactory, budgetMs = 60): number {
+  const N = 600;
+  const M = 3000;
+  const k = f.create(N, M);
+  const s = k.state;
+  s.nodeCount = N;
+  s.beamCount = M;
+  let seed = 0x2545f491;
+  const rnd = (): number => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+  for (let i = 0; i < N; i++) {
+    s.posX[i] = (i % 10) * 0.25 + 0.05 * rnd();
+    s.posY[i] = (Math.floor(i / 10) % 6) * 0.25 + 0.05 * rnd();
+    s.posZ[i] = Math.floor(i / 60) * 0.25 + 0.05 * rnd();
+    s.velX[i] = rnd() - 0.5;
+    s.invMass[i] = 1 / (2 + 8 * rnd());
+  }
+  for (let b = 0; b < M; b++) {
+    const a = Math.floor(rnd() * N);
+    let c = a + 1 + Math.floor(rnd() * 70);
+    if (c >= N) c = a - 1 - Math.floor(rnd() * 70);
+    if (c < 0) c = (a + 1) % N;
+    const dx = s.posX[c]! - s.posX[a]!, dy = s.posY[c]! - s.posY[a]!, dz = s.posZ[c]! - s.posZ[a]!;
+    s.aIdx[b] = a;
+    s.bIdx[b] = c;
+    s.k[b] = s.k0[b] = 2e5;
+    s.d[b] = 400;
+    s.restLen[b] = s.restLen0[b] = Math.sqrt(dx * dx + dy * dy + dz * dz) * (0.99 + 0.02 * rnd());
+    s.deform[b] = Infinity;
+    s.breakF[b] = Infinity;
+    s.active[b] = 1;
+  }
+  const sink: EventSink = { impact() {}, beamBreak() {}, skid() {} };
+  // Short windows, best one wins: the first runs execute baseline code (V8 Liftoff for wasm, the
+  // interpreter for JS) until the optimizing tier lands in the background; a busy page steals slices.
+  const window = budgetMs / 4;
+  let best = 0;
+  const start = performance.now();
+  while (performance.now() - start < 4 * budgetMs) {
+    let passes = 0;
+    const t0 = performance.now();
+    let t = t0;
+    while (t - t0 < window) {
+      for (let r = 0; r < 10; r++) k.beams(0, M, sink, false);
+      passes += 10;
+      t = performance.now();
+    }
+    const rate = (passes * M) / ((t - t0) * 1000);
+    if (rate > best) best = rate;
+  }
+  return best;
+}

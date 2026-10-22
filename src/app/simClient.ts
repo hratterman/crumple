@@ -31,6 +31,8 @@ import {
   type TrafficReadyMsg,
   type Transform,
   type WorkerToMain,
+  type PhysicsKernelKind,
+  type SolverOptions,
 } from '../protocol/messages';
 import { createTrafficAgentFrame, TRAFFIC_FLAG_AWAKE, TRAFFIC_FLAG_TELEPORTED, type TrafficAgentFrame, type TrafficDensity } from '../protocol/traffic';
 import { NODE_STRIDE } from '../protocol/layout';
@@ -43,6 +45,13 @@ import type { TransmissionMode, VehicleDef } from '../sim/vehicle/types';
 import type { ColliderDef, WorldLayout } from '../world/types';
 import type { ReplayFile } from '../protocol/replay';
 import { NodeHistory, RenderClock } from './renderClock';
+
+/** R-CORE: what the worker reported with `ready`. */
+export interface SimReadyInfo {
+  kernel: PhysicsKernelKind;
+  /** M beam-updates/s of the boot kernel bench (0 = not measured). */
+  kernelBench: number;
+}
 
 export interface SimClientOptions {
   seed: number;
@@ -168,6 +177,9 @@ export class SimClient {
   private readonly trafficPrev = createTrafficAgentFrame();
 
   private _ready = false;
+  /** R-CORE: the worker's solver kernel + boot kernel bench (ReadyMsg). */
+  private _readyInfo: SimReadyInfo | null = null;
+  private readonly readyWaiters: ((info: SimReadyInfo) => void)[] = [];
   private _fatal: string | null = null;
   private disposed = false;
 
@@ -459,6 +471,11 @@ export class SimClient {
     this.post({ type: 'setTransmission', objectId, mode });
   }
 
+  /** R-CORE solver options (SetSolverMsg; logged + replayed by the worker). */
+  setSolver(options: Partial<SolverOptions>): void {
+    this.post({ type: 'setSolver', options: { ...options } });
+  }
+
   /** Driver assists (SetAssistsMsg): traction control on/off. */
   setAssists(objectId: number, assists: { tractionControl?: boolean; abs?: boolean; esc?: boolean; clutchAssist?: boolean }): void {
     const msg: MainToWorker = { type: 'setAssists', objectId };
@@ -683,6 +700,15 @@ export class SimClient {
   // ------------------------------------------------------------ state
   get ready(): boolean {
     return this._ready;
+  }
+  /** R-CORE: the kernel the worker runs and its boot bench (null before `ready`). */
+  get readyInfo(): SimReadyInfo | null {
+    return this._readyInfo;
+  }
+  /** Resolves with the ready info once the worker has applied `init` (at once if it already has). */
+  whenReady(): Promise<SimReadyInfo> {
+    if (this._readyInfo) return Promise.resolve(this._readyInfo);
+    return new Promise((resolve) => this.readyWaiters.push(resolve));
   }
   get fatal(): string | null {
     return this._fatal;
@@ -912,9 +938,13 @@ export class SimClient {
       case 'snapshot':
         this.onSnapshot(msg.buffer);
         break;
-      case 'ready':
+      case 'ready': {
         this._ready = true;
+        const info: SimReadyInfo = { kernel: msg.kernel ?? 'js', kernelBench: msg.kernelBench ?? 0 };
+        this._readyInfo = info;
+        for (const w of this.readyWaiters.splice(0)) w(info);
         break;
+      }
       case 'error':
         console.warn(
           `[sim] ${msg.command} rejected${msg.objectId !== undefined ? ` (object ${msg.objectId})` : ''}: ${msg.message}`,

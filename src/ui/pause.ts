@@ -454,6 +454,19 @@ export class PauseMenu {
         },
       },
       {
+        key: 'physicsQuality',
+        label: 'Physics quality',
+        note: 'Rig density + contact model (Auto: from a CPU bench at boot); respawns the car',
+        options: [
+          { value: 'auto', label: 'Auto' },
+          { value: 'standard', label: 'Standard' },
+          { value: 'high', label: 'High' },
+          { value: 'ultra', label: 'Ultra' },
+        ],
+        get: () => o.settings().physicsQuality,
+        set: (v) => set({ physicsQuality: v as GameSettings['physicsQuality'] }),
+      },
+      {
         key: 'traffic',
         label: 'Traffic density',
         options: [

@@ -34,6 +34,8 @@ import { createVehicleVisual, type VehicleVisualHandle } from '../render/vehicle
 import type { PaintDef, VehicleFrameInput, VehicleVisualDef } from '../render/vehicle/types';
 import { compileVehicle } from '../sim/vehicle/builder';
 import type { CompiledVehicle, VehicleDef } from '../sim/vehicle/types';
+import { loadVehicleVariant, variantTiers, type VehicleVariant } from '../sim/vehicle/defs/hd/variants';
+import type { PhysicsQuality } from '../protocol/messages';
 import type { StorageLike } from './quality';
 import { unitsPerKmh, type SpeedUnits } from './settings';
 import type { RestPose } from './spawn';
@@ -126,6 +128,8 @@ export function chaseFramingFor(entry: VehicleCatalogEntry, scale: number): Chas
 // ------------------------------------------------------------ assets
 export interface PlayerAssets {
   entry: VehicleCatalogEntry;
+  /** R-CORE: the physics-quality tier this rig is (≤ the one asked for: a car without it falls back). */
+  quality: PhysicsQuality;
   sim: VehicleDef;
   visual: VehicleVisualDef;
   /** What the worker compiles (canonical order; triads, FX and placement index into it). */
@@ -136,19 +140,42 @@ export interface PlayerAssets {
 
 const assetCache = new Map<string, Promise<PlayerAssets>>();
 
-/** Loads (dynamic import) and compiles a catalog vehicle once per page; rejects for unbuilt entries. */
-export function loadPlayerAssets(entry: VehicleCatalogEntry): Promise<PlayerAssets> {
-  let p = assetCache.get(entry.id);
+/**
+ * Loads (dynamic import) and compiles a catalog vehicle once per page and
+ * physics quality; rejects for unbuilt entries. 'high' / 'ultra' resolve
+ * R-RIG's variant (`loadVehicleVariant`: its own lazy chunk, falling back to
+ * the next lower tier) with the visual re-pointed at its sheets
+ * (`vehicleVisualSync`, lazy too); the variant's skin collision triangles
+ * become the def's `body.triangles` (R-CORE format) unless it declares some.
+ */
+export function loadPlayerAssets(entry: VehicleCatalogEntry, quality: PhysicsQuality = 'standard'): Promise<PlayerAssets> {
+  const key = `${entry.id}|${quality}`;
+  let p = assetCache.get(key);
   if (!p) {
-    p = entry.load().then(({ sim, visual }) => {
-      const compiled = compileVehicle(sim);
-      return { entry, sim, visual, compiled, rest: compiled.rig };
-    });
+    p = loadAt(entry, quality);
     // A failed load (network hiccup on a lazy chunk) may be retried later.
-    p.catch(() => assetCache.delete(entry.id));
-    assetCache.set(entry.id, p);
+    p.catch(() => assetCache.delete(key));
+    assetCache.set(key, p);
   }
   return p;
+}
+
+async function loadAt(entry: VehicleCatalogEntry, quality: PhysicsQuality): Promise<PlayerAssets> {
+  const base = await entry.load();
+  const assets = (sim: VehicleDef, visual: VehicleVisualDef, q: PhysicsQuality): PlayerAssets => {
+    const compiled = compileVehicle(sim);
+    return { entry, quality: q, sim, visual, compiled, rest: compiled.rig };
+  };
+  if (quality === 'standard' || !variantTiers(entry.id).includes(quality)) return assets(base.sim, base.visual, 'standard');
+  const standard = async (): Promise<VehicleVariant> => ({ car: entry.id, quality: 'standard', def: base.sim, probes: undefined as unknown as VehicleVariant['probes'] });
+  const v = await loadVehicleVariant(entry.id, quality, standard);
+  if (v.quality === 'standard') return assets(base.sim, base.visual, 'standard');
+  const { vehicleVisualSync } = await import('../render/vehicle/defs/hd/index');
+  let def = v.def;
+  if (v.collision && v.collision.length > 0 && !def.body.triangles) {
+    def = { ...def, body: { ...def.body, triangles: v.collision.map((t) => ({ a: t.a, b: t.b, c: t.c })) } };
+  }
+  return assets(def, vehicleVisualSync(entry.id as Parameters<typeof vehicleVisualSync>[0], v.quality), v.quality);
 }
 
 // ------------------------------------------------------------ live player visual

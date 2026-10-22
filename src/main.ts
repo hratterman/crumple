@@ -36,6 +36,8 @@ import type { FxState } from './render/fx/types';
 import { createTrafficController, type TrafficController } from './app/traffic';
 import { placeOnGround, repairSpot, yawOf, yawOfQuat, type Aabb, type RestPose } from './app/spawn';
 import { SPAWN_HOLD_BRAKE, SPAWN_HOLD_INPUT_EPS, SpawnHold } from './app/spawnHold';
+import { resolvePhysicsQuality, solverFor } from './app/physicsQuality';
+import type { PhysicsQuality } from './protocol/messages';
 import { chaseFramingFor, drivableEntry, hasStoredChoice, loadPlayerAssets, loadVehicleChoice, PlayerVehicle, saveVehicleChoice, speedoMax, type PlayerAssets } from './app/player';
 import { chaseScale, loadSettings, saveSettings, trafficDensityFor, type GameSettings } from './app/settings';
 import { DEFAULT_VEHICLE_ID, getVehicleEntry, PLAYER_VEHICLE_IDS, type VehicleChoice } from './game/catalog';
@@ -266,10 +268,24 @@ const bootChoice: VehicleChoice = loadVehicleChoice(location.search);
 const firstLaunch = !hasStoredChoice();
 const settings: GameSettings = loadSettings();
 /** Start loading the player's vehicle modules right away (dynamic chunks; overlaps the terrain). */
-const bootAssetsP: Promise<PlayerAssets> = loadPlayerAssets(drivableEntry(bootChoice.id)).catch((e: unknown) => {
-  console.error(`[vehicle] '${bootChoice.id}' failed to load; falling back to the sedan`, e);
-  return loadPlayerAssets(getVehicleEntry(DEFAULT_VEHICLE_ID));
+/**
+ * R-CORE physics quality: resolved once the worker reports its kernel + boot bench (`ready`, right after
+ * init, long before the terrain), then sent as the solver preset (a logged, replayed command). The player
+ * rig is loaded at that tier (R-RIG variants; the standard rig when a car has no HD tier).
+ */
+let physicsQuality: PhysicsQuality = 'standard';
+const physicsQualityP: Promise<PhysicsQuality> = client.whenReady().then((info) => {
+  physicsQuality = resolvePhysicsQuality(settings.physicsQuality, info, location.search);
+  client.setSolver(solverFor(physicsQuality));
+  console.info(`[physics] kernel ${info.kernel}, bench ${info.kernelBench.toFixed(0)} M beam-updates/s → quality ${physicsQuality}`);
+  return physicsQuality;
 });
+const bootAssetsP: Promise<PlayerAssets> = physicsQualityP
+  .then((q) => loadPlayerAssets(drivableEntry(bootChoice.id), q))
+  .catch((e: unknown) => {
+    console.error(`[vehicle] '${bootChoice.id}' failed to load; falling back to the standard sedan`, e);
+    return loadPlayerAssets(getVehicleEntry(DEFAULT_VEHICLE_ID));
+  });
 /** The live player vehicle (null until boot loads it). */
 let player: PlayerVehicle | null = null;
 let transmission: TransmissionMode = 'auto';
@@ -809,6 +825,15 @@ function setSetting(patch: Partial<GameSettings>): void {
     if (trafficStarted) traffic?.setQuality(trafficPreset(ctx.quality));
     else startTraffic();
   }
+  // R-CORE physics quality: new solver preset now; the player car respawns in place at the new rig tier.
+  if (patch.physicsQuality !== undefined && client.readyInfo) {
+    const q = resolvePhysicsQuality(patch.physicsQuality, client.readyInfo); // an explicit choice beats ?physics=
+    if (q !== physicsQuality) {
+      physicsQuality = q;
+      client.setSolver(solverFor(q));
+      if (player && player.assets.quality !== q) void swapVehicle({ id: player.id as VehicleChoice['id'], palette: player.palette.id }, null).catch((e: unknown) => console.error('[physics] quality respawn failed', e));
+    }
+  }
   // R-GFX time of day / weather
   const env = lightingStack?.env;
   if (env) {
@@ -859,7 +884,7 @@ function wrapProfiling(p: PlayerVehicle): void {
 async function swapVehicle(choice: VehicleChoice, spawnAt: number | null): Promise<void> {
   if (!terrain || !sampler || !player) throw new Error('swapVehicle before boot');
   const entry = drivableEntry(choice.id);
-  const assets = await loadPlayerAssets(entry);
+  const assets = await loadPlayerAssets(entry, physicsQuality);
   const next = new PlayerVehicle(assets, choice.palette, visualDeps);
   const obj = next.object;
   if (obj && post) {
@@ -1115,6 +1140,7 @@ function perfData(): PerfOverlayData {
     gpu: passCounter.snapshot(),
     extra: {
       quality: quality ? `${quality.preset.level} ×${quality.scale.toFixed(2)}` : '-',
+      physics: `${physicsQuality} · ${client.readyInfo?.kernel ?? '?'} · ${client.readyInfo ? client.readyInfo.kernelBench.toFixed(0) : '?'} M beam/s · load ${(100 * client.workerLoad).toFixed(0)} %${player ? ` · ${player.assets.compiled.rig.beamCount} beams` : ''}`,
       buffer: `${renderer.domElement.width}×${renderer.domElement.height}`,
       programs: info.programs?.length ?? 0,
       'geometries/textures': `${info.memory.geometries}/${info.memory.textures}`,
@@ -1134,6 +1160,20 @@ let pinnedCamera: { pos: [number, number, number]; target: [number, number, numb
 const crumple = {
   get tick(): number {
     return client.latestTick;
+  },
+  /** R-CORE: physics quality in effect, the worker's kernel + boot bench, the player rig's size; set() = the settings row. */
+  get physics() {
+    return {
+      quality: physicsQuality,
+      setting: settings.physicsQuality,
+      kernel: client.readyInfo?.kernel ?? null,
+      kernelBench: client.readyInfo?.kernelBench ?? 0,
+      playerQuality: player ? player.assets.quality : null,
+      playerBeams: player ? player.assets.compiled.rig.beamCount : 0,
+      playerNodes: player ? player.assets.compiled.rig.nodeCount : 0,
+      swaps: swapCount,
+      set: (q: GameSettings['physicsQuality']) => setSetting({ physicsQuality: q }),
+    };
   },
   build: __BUILD_HASH__,
   get nodes(): number {

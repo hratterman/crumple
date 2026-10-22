@@ -25,7 +25,7 @@ import type { WorldContent } from '../world/content/types';
 import { resolveWater } from '../world/water';
 import { resolvePropInstances } from './props/placement';
 import { SIM_DT, SIM_HZ, SimCommandError, SimEngine } from './engine';
-import { setDefaultKernel } from './kernel';
+import { benchKernel, defaultKernel, setDefaultKernel } from './kernel';
 import { hashSimState } from './replay/hash';
 import { ReplayLog } from './replay/log';
 
@@ -293,7 +293,7 @@ export class WorkerHost {
     this.nextSnapTick = this.snapTickFor(1);
     this.dirty = true;
     this.lastWall = this.scheduler.now();
-    this.post({ type: 'ready', kernel: engine.kernel.kind });
+    this.post({ type: 'ready', kernel: engine.kernel.kind, ...(kernelBench > 0 ? { kernelBench } : {}) });
     this.requestWake(false);
   }
 
@@ -510,6 +510,9 @@ export class WorkerHost {
   }
 }
 
+/** R-CORE boot kernel bench (M beam-updates/s; 0 = not measured, e.g. in tests): sent with `ready`. */
+let kernelBench = 0;
+
 // ------------------------------------------------------------ global install
 interface WorkerScopeLike {
   postMessage(msg: unknown, transfer?: Transferable[]): void;
@@ -550,7 +553,15 @@ if (isWorkerScope()) {
       if (best) setDefaultKernel(best);
     })
     .catch(() => {})
-    .finally(ready);
+    .finally(() => {
+      // Boot bench of the installed kernel (≈ 240 ms, before any engine exists): ReadyMsg.kernelBench.
+      try {
+        kernelBench = benchKernel(defaultKernel());
+      } catch {
+        kernelBench = 0;
+      }
+      ready();
+    });
   scope.addEventListener('error', (ev) => {
     const e = ev as ErrorEvent;
     host.fail(e.error ?? new Error(e.message));

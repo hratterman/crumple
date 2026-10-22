@@ -1,0 +1,58 @@
+import { expect, test } from '@playwright/test';
+
+interface PhysicsDebug {
+  quality: string;
+  setting: string;
+  kernel: string | null;
+  kernelBench: number;
+  playerQuality: string | null;
+  playerBeams: number;
+  playerNodes: number;
+  swaps: number;
+  set(q: string): void;
+}
+interface CrumpleGlobal {
+  ready: boolean;
+  vehicle: { speed: number } | null;
+  physics: PhysicsDebug;
+}
+
+const phys = (page: import('@playwright/test').Page) =>
+  page.evaluate(() => {
+    const p = (window as unknown as { __crumple: CrumpleGlobal }).__crumple.physics;
+    return { quality: p.quality, kernel: p.kernel, bench: p.kernelBench, playerQuality: p.playerQuality, beams: p.playerBeams, swaps: p.swaps };
+  });
+
+test('physics quality: the WASM SIMD kernel runs, ?physics=ultra spawns the HD sedan and drives, the setting respawns it at standard', async ({ page }) => {
+  test.setTimeout(480_000);
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+  await page.setViewportSize({ width: 480, height: 270 });
+  await page.goto('/crumple/?q=low&traffic=0&vehicle=sedan&physics=ultra');
+  await page.waitForFunction(() => {
+    const c = (window as unknown as { __crumple?: CrumpleGlobal }).__crumple;
+    return !!c && c.ready && c.vehicle !== null;
+  }, null, { timeout: 300_000 });
+  await page.waitForTimeout(1000);
+  const a = await phys(page);
+  console.log(`[e2e] physics: ${JSON.stringify(a)}`);
+  expect(a.kernel).toBe('simd');
+  expect(a.bench).toBeGreaterThan(0);
+  expect(a.quality).toBe('ultra');
+  expect(a.playerQuality).toBe('ultra');
+  expect(a.beams).toBeGreaterThan(8000);
+  // Drive it: hold W (releases the spawn hold, like drive.spec).
+  await page.keyboard.down('KeyW');
+  await page.waitForTimeout(4000);
+  const v = await page.evaluate(() => (window as unknown as { __crumple: CrumpleGlobal }).__crumple.vehicle!.speed);
+  await page.keyboard.up('KeyW');
+  console.log(`[e2e] HD ultra sedan speed after 4 s of W: ${v.toFixed(1)} m/s`);
+  expect(v).toBeGreaterThan(2);
+  // Settings → standard: respawned in place with the standard rig.
+  await page.evaluate(() => (window as unknown as { __crumple: CrumpleGlobal }).__crumple.physics.set('standard'));
+  await page.waitForFunction(() => (window as unknown as { __crumple: CrumpleGlobal }).__crumple.physics.playerQuality === 'standard', null, { timeout: 60_000 });
+  const b = await phys(page);
+  expect(b.beams).toBeLessThan(3500);
+  expect(b.swaps).toBe(a.swaps + 1);
+  expect(errors).toEqual([]);
+});

@@ -6,6 +6,7 @@
  * to its default) and storage errors are ignored, like the quality level
  * (`crumple.quality.v1`, owned by app/quality.ts).
  */
+import { PHYSICS_QUALITY_SETTINGS, type PhysicsQualitySetting } from './physicsQuality';
 import type { TrafficDensity } from '../protocol/traffic';
 import { TRAFFIC_MAX_AGENTS } from '../protocol/traffic';
 import { DEFAULT_TIME_OF_DAY, WEATHER_PRESETS, type WeatherPreset } from '../render/lighting/environment';
@@ -40,6 +41,8 @@ export interface GameSettings {
   timeSpeed: number;
   /** R-GFX: weather preset. */
   weather: WeatherPreset;
+  /** R-CORE: physics quality (rig tier + solver); 'auto' = from the worker's boot kernel bench. */
+  physicsQuality: PhysicsQualitySetting;
 }
 
 export const SPEED_UNITS: readonly SpeedUnits[] = ['kmh', 'mph'];
@@ -64,6 +67,7 @@ export const DEFAULT_SETTINGS: Readonly<GameSettings> = {
   timeOfDay: DEFAULT_TIME_OF_DAY,
   timeSpeed: 0,
   weather: 'clear',
+  physicsQuality: 'auto',
 };
 
 export const KMH_PER_MPH = 1.609344;
@@ -122,6 +126,7 @@ export function sanitizeSettings(raw: unknown): GameSettings {
     timeOfDay: typeof o.timeOfDay === 'number' && Number.isFinite(o.timeOfDay) ? ((o.timeOfDay % 24) + 24) % 24 : d.timeOfDay,
     timeSpeed: pick(TIME_SPEED_CHOICES, o.timeSpeed, d.timeSpeed),
     weather: pick(WEATHER_PRESETS, o.weather, d.weather),
+    physicsQuality: pick(PHYSICS_QUALITY_SETTINGS, o.physicsQuality, d.physicsQuality),
   };
 }
 
