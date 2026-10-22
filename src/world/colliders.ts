@@ -23,7 +23,7 @@ export const COLLIDER_QUAT_TOLERANCE = 1e-6;
 /** One-sided plane colliders are a slab this deep below their surface (m); mirrors the sim's COLLIDER_PLANE_DEPTH. */
 export const PLANE_SLAB_DEPTH = 0.5;
 
-const KINDS: readonly ColliderKind[] = ['box', 'cylinder', 'sphere', 'plane', 'ramp'];
+const KINDS: readonly ColliderKind[] = ['box', 'cylinder', 'sphere', 'plane', 'ramp', 'mesh'];
 
 /**
  * Layout v6 (R-WORLD) visuals drawn by src/render/world/content/** from the WorldContent, never by
@@ -89,6 +89,7 @@ export function colliderLocalBounds(c: Pick<ResolvedCollider, 'kind' | 'size'>):
   switch (c.kind) {
     case 'box':
     case 'ramp':
+    case 'mesh':
       return [-a, -b, -cc, a, b, cc];
     case 'cylinder':
       return [-a, -b, -a, a, b, a];
@@ -156,6 +157,18 @@ export const resolveColliders: ResolveColliders = (colliders, heightAt) => {
     const need = c.kind === 'sphere' ? [0] : c.kind === 'cylinder' ? [0, 1] : c.kind === 'plane' ? [0, 2] : [0, 1, 2];
     for (const k of need) if (!(s[k]! > 0)) fail(`size[${k}] must be > 0 for a ${c.kind}`);
     if (!Number.isInteger(c.material) || c.material < 0 || c.material >= MATERIAL_COUNT) fail(`invalid material ${String(c.material)}`);
+    if (c.kind === 'mesh') {
+      // R-CORE static mesh: vertices inside the declared local half extents, triangles index them.
+      const m = c.mesh;
+      if (!m || !Array.isArray(m.positions) || !Array.isArray(m.indices)) fail('mesh needs positions and indices');
+      const P = m!.positions;
+      const I = m!.indices;
+      if (P.length === 0 || P.length % 3 !== 0 || !P.every(finite)) fail('mesh.positions must be 3n finite numbers');
+      if (I.length === 0 || I.length % 3 !== 0) fail('mesh.indices must be 3n vertex indices');
+      const nv = P.length / 3;
+      for (const v of I) if (!Number.isInteger(v) || v < 0 || v >= nv) fail(`mesh index ${String(v)} out of range`);
+      for (let v = 0; v < P.length; v++) if (Math.abs(P[v]!) > s[v % 3]! + 1e-6) fail('mesh vertex outside the size half extents');
+    } else if (c.mesh !== undefined) fail('mesh is only valid for kind mesh');
     if (c.breakable !== undefined && !(finite(c.breakable.anchorForce) && c.breakable.anchorForce > 0)) {
       fail('breakable.anchorForce must be > 0');
     }

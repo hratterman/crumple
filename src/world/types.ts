@@ -217,7 +217,21 @@ export interface PadDef {
  * quat (rotation about +Y); resolveColliders() (src/world/colliders.ts,
  * P4 agent 5) rejects a tilted collider with y null.
  */
-export type ColliderKind = 'box' | 'cylinder' | 'sphere' | 'plane' | 'ramp';
+/** 'mesh' (R-CORE, additive): static triangle mesh (`ColliderDef.mesh`), node-vs-triangle contact with CCD. */
+export type ColliderKind = 'box' | 'cylinder' | 'sphere' | 'plane' | 'ramp' | 'mesh';
+/**
+ * R-CORE static collision mesh (kind 'mesh'): local-space positions (x, y, z
+ * per vertex) and triangles (3 vertex indices each, wound counter-clockwise
+ * seen from the solid's outside: right-hand normal points out). Transformed by
+ * the collider's pos / quat; `size` = the local AABB half extents (validation,
+ * broadphase), as for a box. One-sided unless `twoSided` (thin decks, walls,
+ * guard rails: collide from the side the node came from).
+ */
+export interface ColliderMesh {
+  positions: number[];
+  indices: number[];
+  twoSided?: boolean;
+}
 /** Render style hint (the sim ignores it). Default by kind: box 'block', cylinder 'pole', sphere 'block', plane 'plate', ramp 'ramp'. */
 export type ColliderVisual =
   | 'wall'
@@ -266,6 +280,8 @@ export interface ColliderDef {
    */
   breakable?: { anchorForce: number };
   visual?: ColliderVisual;
+  /** R-CORE: kind 'mesh' only (required there). */
+  mesh?: ColliderMesh;
 }
 /** A ColliderDef with y resolved against the terrain (resolveColliders output, both sides). */
 export interface ResolvedCollider extends Omit<ColliderDef, 'pos'> {

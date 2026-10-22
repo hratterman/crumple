@@ -56,6 +56,8 @@ export const REPLAYABLE_COMMANDS = [
   'setTrafficDensity',
   // P8 (additive): challenge opponents' worker-side driver.
   'setAutopilot',
+  // R-CORE (additive): solver options (physics quality).
+  'setSolver',
 ] as const satisfies readonly MainToWorker['type'][];
 export type ReplayableCommandType = (typeof REPLAYABLE_COMMANDS)[number];
 export type ReplayableCommand = Extract<MainToWorker, { type: ReplayableCommandType }>;

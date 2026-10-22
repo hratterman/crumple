@@ -564,6 +564,7 @@ export const applyColliderContacts: ApplyColliderContacts = (state, first, count
       const lvy = r01 * vx + r11 * vy + r21 * vz;
       const lvz = r02 * vx + r12 * vy + r22 * vz;
       const kind = kinds[c]!;
+      if (kind === ColliderKindId.mesh) continue; // R-CORE: static meshes run in the triangle pass
       if (kind === ColliderKindId.box) {
         boxDistance(lx, ly, lz, lvx, lvy, lvz, S[c3]!, S[c3 + 1]!, S[c3 + 2]!);
       } else if (kind === ColliderKindId.cylinder) {

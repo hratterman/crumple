@@ -65,7 +65,8 @@ import type { ResolvedCollider } from '../../world/types';
 import type { EventSink, MaterialTable, SimState } from '../types';
 
 /** Numeric collider kind ids (CompiledColliders.kind). */
-export const ColliderKindId = { box: 0, cylinder: 1, sphere: 2, plane: 3, ramp: 4 } as const;
+/** R-CORE: mesh = 5 (its triangles go to the static triangle-mesh contact pass; the primitive kernel skips it). */
+export const ColliderKindId = { box: 0, cylinder: 1, sphere: 2, plane: 3, ramp: 4, mesh: 5 } as const;
 export type ColliderKindId = (typeof ColliderKindId)[keyof typeof ColliderKindId];
 
 /** Penalty stiffness cap for collider contacts, N/m (see header WHY). */

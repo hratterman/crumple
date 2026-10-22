@@ -514,6 +514,38 @@ export interface SetAutopilotMsg {
   seed?: number;
 }
 
+// ============================================================ R-CORE: solver + physics quality (additive)
+/** Solver kernel the worker runs (bit-identical results; informational). */
+export type PhysicsKernelKind = 'js' | 'wasm' | 'simd';
+/**
+ * Physics quality (R-CORE scaffold): selects the rig VARIANT main spawns
+ * (R-RIG `loadVehicleVariant`, src/sim/vehicle/defs/hd/variants.ts, whose
+ * `PhysicsQuality` is this same union and whose PHYSICS_QUALITY_BUDGETS are
+ * the per-tier rig budgets) and the solver options below. 'auto' (settings only) resolves from the worker's
+ * boot kernel bench (`ReadyMsg.kernelBench`, src/app/physicsQuality.ts).
+ */
+export type PhysicsQuality = 'standard' | 'high' | 'ultra';
+export const PHYSICS_QUALITIES: readonly PhysicsQuality[] = ['standard', 'high', 'ultra'];
+/** Solver options (all deterministic; changing them is a logged, replayed command). */
+export interface SolverOptions {
+  /** Node-vs-triangle contact between objects that both have collision triangles (else node-vs-node spheres). */
+  triangleContact: boolean;
+  /** Node-vs-triangle contact within one object (selfCollide nodes vs its own triangles). */
+  selfCollision: boolean;
+  /** Speculative (swept) contacts against static colliders / meshes and triangles: no tunnelling at speed. */
+  ccd: boolean;
+}
+export const SOLVER_PRESETS: Readonly<Record<PhysicsQuality, SolverOptions>> = {
+  standard: { triangleContact: true, selfCollision: false, ccd: true },
+  high: { triangleContact: true, selfCollision: true, ccd: true },
+  ultra: { triangleContact: true, selfCollision: true, ccd: true },
+};
+/** Merge solver options (missing fields keep the current value). Replayable. */
+export interface SetSolverMsg {
+  type: 'setSolver';
+  options: Partial<SolverOptions>;
+}
+
 export type MainToWorker =
   | InitMsg
   | GroundMsg
@@ -539,13 +571,18 @@ export type MainToWorker =
   | ReplaySeekMsg
   | ReplayPauseMsg
   | StateHashRequestMsg
-  | ReplayFileRequestMsg;
+  | ReplayFileRequestMsg
+  | SetSolverMsg;
 export type MainToWorkerType = MainToWorker['type'];
 
 // ============================================================ worker → main
 /** Sent once after `init` has been applied. */
 export interface ReadyMsg {
   type: 'ready';
+  /** R-CORE (additive): the solver kernel in use. */
+  kernel?: PhysicsKernelKind;
+  /** R-CORE (additive): boot kernel bench, million beam-updates per second (one core; picks 'auto' physics quality). */
+  kernelBench?: number;
 }
 /** A filled snapshot buffer (layout.ts). Transferred; main must return it via `returnBuffer`. */
 export interface SnapshotMsg {

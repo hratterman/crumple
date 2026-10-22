@@ -65,6 +65,68 @@ export interface RigNodeDef {
    * Compiled into CompiledRig.nodeObjRadius (U1 adds it in the rig builder).
    */
   objRadius?: number;
+  /**
+   * R-CORE contact material of this node (additive): selects the material
+   * PAIR law (μ, damping, restitution, sparks; collision/contactMaterials.ts)
+   * for node-vs-triangle, node-vs-node and static-mesh contacts. Default:
+   * the object's material (vehicles: metal; tread nodes: rubber; props:
+   * PropDef.material). Ground / box-collider contacts keep the frozen
+   * node friction × ground material law.
+   */
+  material?: number;
+  /**
+   * R-CORE self-collision participant (additive): the node is tested
+   * against its OWN object's collision triangles (crushed parts must not
+   * pass through each other: engine vs firewall, tyre vs wheel well).
+   * Default = `collidable`. Nodes that are a triangle's vertex, share a
+   * beam with one of its vertices or lie within contact range of it in the
+   * rest pose never collide with that triangle.
+   */
+  selfCollide?: boolean;
+}
+
+/**
+ * R-CORE COLLISION TRIANGLE (BeamNG-style collision surface, additive):
+ * three node ids of the same rig, wound so the right-hand normal
+ * (b − a) × (c − a) points OUT of the body (one-sided unless `twoSided`).
+ * Other objects' nodes (and this object's selfCollide nodes) collide with
+ * the triangle's surface; the reaction goes to a, b, c by barycentric
+ * weights. Triangles deform with their nodes and drop out when every beam
+ * along one of their edges is broken (or an edge has no beam and a vertex
+ * detached). Declared by the rig author (R-RIG / R-CRASH) on panels, floor,
+ * firewall, wheel wells, engine block; a vehicle that declares none gets
+ * `deriveCollisionTriangles` (rig/triangles.ts) at compile time.
+ */
+export interface RigTriangleDef {
+  a: string;
+  b: string;
+  c: string;
+  /** Contact material (MaterialId). Default: the object's material (vehicles metal). */
+  material?: number;
+  /** Panels / glass with no inside: collide from both sides (side = where the node was last tick). Default false. */
+  twoSided?: boolean;
+  /** Half thickness of the surface, m (added to the node radius). Default 0. */
+  thickness?: number;
+  /** Takes part in self-collision of its own object. Default true. */
+  selfCollide?: boolean;
+}
+
+/** Compiled triangle flags (CompiledTriangles.flags). */
+export const RIG_TRI_FLAG_TWO_SIDED = 1 << 0;
+export const RIG_TRI_FLAG_SELF = 1 << 1;
+
+/** R-CORE: compiled collision triangles (declaration order; node indices rig-local). */
+export interface CompiledTriangles {
+  count: number;
+  a: Int32Array;
+  b: Int32Array;
+  c: Int32Array;
+  /** RIG_TRI_FLAG_* bits. */
+  flags: Uint8Array;
+  /** MaterialId per triangle. */
+  material: Uint8Array;
+  /** Half thickness, m. */
+  thickness: Float64Array;
 }
 
 /** P5: compiled node flag — node-vs-node contact participant (sim NODE_FLAG_OBJ_CONTACT, same bit; U1 sets it in compileRig). */
@@ -118,6 +180,8 @@ export interface RigDef {
   nodes: RigNodeDef[];
   beams: RigBeamDef[];
   groupDefaults?: Record<string, RigGroupDefaults>;
+  /** R-CORE collision triangles (additive; see RigTriangleDef). [] = none (no derivation). */
+  triangles?: RigTriangleDef[];
 }
 
 /** Defaults applied by compileRig (RoR reference values). */
@@ -197,6 +261,12 @@ export interface CompiledRig {
   beamBoundsHigh: Float64Array;
   beamPreload: Float64Array;
   beamHydroTravel: Float64Array;
+  /** R-CORE contact material per node (RigNodeDef.material; 255 = the object's default). Additive, optional. */
+  nodeMaterial?: Uint8Array;
+  /** R-CORE self-collision participant per node (RigNodeDef.selfCollide, default collidable): 1 / 0. Additive, optional. */
+  nodeSelfCollide?: Uint8Array;
+  /** R-CORE collision triangles (RigDef.triangles or derived). Additive, optional. */
+  triangles?: CompiledTriangles;
 }
 
 /** Per-node stability analysis (validator, P2). Limit: ω·dt = sqrt(Σk/m)·dt ≤ limit. */
