@@ -700,8 +700,11 @@ export function buildPickupVisual(opts: PickupBuildOptions = { lod: 0 }): Vehicl
   // ---------------------------------------------------------------- bind sets (rig ids)
   const hoodBind = ['hood_*'];
   const clipBind = (s: 'L' | 'R') => sideBind(['s0_fd_$', 's0_rh_$', 's0_rl_$', 's1_*_$', 's2_*_$'], s);
-  const doorFBind = (s: 'L' | 'R') => sideBind(['c0_hp_$', 'c0_sl_$', 'c0_ap_$', 'c1_sl_$', 'c1_dm_$', 'c1_bt_$', 'c2_sl_$', 'c2_dm_$', 'c2_bt_$'], s);
-  const doorRBind = (s: 'L' | 'R') => sideBind(['c2_sl_$', 'c2_dm_$', 'c2_bt_$', 'c3_sl_$', 'c3_dm_$', 'c3_bt_$', 'c4_sl_$', 'c4_qm_$', 'c4_bt_$'], s);
+  // R-CRASH hinged doors (src/sim/vehicle/closures.ts): the crew-cab doors are their own sub-rigs in the sim
+  // (dF* / dR*), so their panels, seals, handles, cards, door glass and the door-mounted mirrors bind to the
+  // door nodes (skin rows 0–3, not the inboard `_i*` nodes) and swing with them
+  const doorFBind = (s: 'L' | 'R'): string[] => [0, 1, 2, 3].map((r) => `dF${s}_${r}*`);
+  const doorRBind = (s: 'L' | 'R'): string[] => [0, 1, 2, 3].map((r) => `dR${s}_${r}*`);
   const cabBackBind = ['c4_*'];
   const roofBind = ['c0_ap_*', 'c0_cw', 'c1_rf*', 'c1_bt_*', 'c2_rf*', 'c2_bt_*', 'c3_rf*', 'c3_bt_*', 'c4_rf*', 'c4_bt_*'];
   const bedSideBind = (s: 'L' | 'R') => sideBind(['b0_bo_$', 'b0_rl_$', 'b0_fl_$', 'b1_bo_$', 'b1_rl_$', 'b1_fl_$', 'b2_bo_$', 'b2_rl_$', 'b2_fl_$', 'b3_bo_$', 'b3_rl_$', 'b3_fl_$'], s);
@@ -776,9 +779,13 @@ export function buildPickupVisual(opts: PickupBuildOptions = { lod: 0 }): Vehicl
   for (const s of SIDES) {
     const dlo: Cut[] = [uAboveBy(S4, 0, 0.003, 'seam'), uBelowBy(S4, dloTop, 0.006, 'seam')];
     const fg = cut(S4, [...dlo, zBelow(B_FRONT + 0.03, 'seam'), zAbove(SAIL_Z - 0.02, 'seam')], { offset: -0.012, border: 'seam', where: (p) => p[2] < 0.2 });
-    add(`glass${s}F`, 'glass', 'glass', perSide(fg.mesh, s), sideBind(['c0_ap_$', 'c0_hp_$', 'c1_bt_$', 'c1_rf_$', 'c2_bt_$', 'c2_rf_$'], s), { ...glassOpts, glass: glassSpec(false, pairs(GLASS_BEAMS.side(1, s))) });
+    // door glass on the door's belt row + frame top: cracks from the frame's quad diagonals (a bent door) or the
+    // aperture's cage diagonals (a racked opening)
+    const frameF = [[`dF${s}_20`, `dF${s}_31`], [`dF${s}_21`, `dF${s}_32`], [`dF${s}_22`, `dF${s}_31`]];
+    add(`glass${s}F`, 'glass', 'glass', perSide(fg.mesh, s), [`dF${s}_2*`, `dF${s}_3*`], { ...glassOpts, glass: glassSpec(false, pairs([...frameF, ...GLASS_BEAMS.side(1, s)])) });
     const rg = cut(S4, [...dlo, zAbove(B_REAR - 0.03, 'seam'), zBelow(DLO_TAIL + 0.02, 'seam')], { offset: -0.012, border: 'seam', where: (p) => p[2] > 0.1 && p[2] < 0.95 });
-    add(`glass${s}R`, 'glass', 'glass', perSide(rg.mesh, s), sideBind(['c2_bt_$', 'c2_rf_$', 'c3_bt_$', 'c3_rf_$', 'c4_bt_$', 'c4_rf_$'], s), { ...glassOpts, glass: glassSpec(false, pairs([...GLASS_BEAMS.side(2, s), ...GLASS_BEAMS.side(3, s)])) });
+    const frameR = [[`dR${s}_20`, `dR${s}_31`], [`dR${s}_21`, `dR${s}_30`], [`dR${s}_22`, `dR${s}_31`]];
+    add(`glass${s}R`, 'glass', 'glass', perSide(rg.mesh, s), [`dR${s}_2*`, `dR${s}_3*`], { ...glassOpts, glass: glassSpec(false, pairs([...frameR, ...GLASS_BEAMS.side(2, s), ...GLASS_BEAMS.side(3, s)])) });
     // Black B-pillar, mirror sail, C-pillar strip and the DLO sash band.
     const vTail = vAtZ(S4, dloTop, M4_LAST);
     const band = stripMesh(S4, {
@@ -1232,7 +1239,8 @@ export function buildPickupVisual(opts: PickupBuildOptions = { lod: 0 }): Vehicl
     const arm = mergeMeshes([roundedBoxMesh([1.03, 1.33, -0.86], [0.05, 0.02, 0.025], 0.01, { segs: SS }), roundedBoxMesh([1.03, 1.44, -0.86], [0.05, 0.015, 0.02], 0.01, { segs: SS })]);
     const base = roundedBoxMesh([0.99, 1.36, -0.88], [0.02, 0.06, 0.07], 0.015, { segs: SS });
     for (const s of SIDES) {
-      const bind = sideBind(['c0_ap_$', 'c0_hp_$', 'c1_bt_$', 'c1_dm_$'], s);
+      // door-mounted mirrors: on the front door's front-top corner (they swing with the door)
+      const bind = [`dF${s}_10`, `dF${s}_20`, `dF${s}_21`, `dF${s}_31`];
       const det = { attach: 'boundary', minBrokenFraction: 0.34, mode: 'hide' } as const;
       add(`mirror${s}`, 'mirror', 'trim', perSide(mergeMeshes([housing, arm, base]), s), bind, { detach: det, damageWeight: 0.8 });
       add(`mirrorCap${s}`, 'mirror', 'chrome', perSide(cap, s), bind, { detach: det, damageWeight: 0.8 });
