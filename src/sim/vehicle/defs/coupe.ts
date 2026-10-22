@@ -1585,6 +1585,10 @@ export const COUPE_CRASH_PROBES: CrashProbes = {
   latch: [['hood_0C', 's2_rt']],
   bumperPrefix: 's0_',
   windscreen: ['s5_cw', 's6_rf'],
+  structure: {
+    ref: ['s7_*', 's8_*'],
+    points: { lowerHingePillar: 's5_hp_$', upperHingePillar: 's5_cw_$', toepan: 's5_fw_$', rocker: 's5_sl_$' },
+  },
 };
 
 /** The coupe VehicleDef (plain JSON). Wheels FL, FR, RL, RR. */

@@ -1550,4 +1550,8 @@ export const SEDAN_TRAFFIC_CRASH_PROBES: CrashProbes = {
   latch: [],
   bumperPrefix: 's0_',
   windscreen: ['s5_cw', 's7_rf'],
+  structure: {
+    ref: ['s7_*', 's8_*', 's9_*'],
+    points: { lowerHingePillar: 's5_hp_$', upperHingePillar: 's5_cw_$', toepan: 's5_fw_$', rocker: 's5_sl_$' },
+  },
 };

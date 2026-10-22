@@ -65,6 +65,45 @@ export interface CrashProbes {
    * clips to the bumper beam are not the bumper's mounts.
    */
   generatedPrefixes?: readonly string[];
+  /** IIHS-style structural intrusion points (optional; see StructureProbes). */
+  structure?: StructureProbes;
+}
+
+/** IIHS structural measurement points (frontal / offset tests; the driver's side). */
+export type StructurePoint = 'lowerHingePillar' | 'upperHingePillar' | 'toepan' | 'rocker';
+/**
+ * R-CRASH IIHS-style structure measurement (moderate / small-overlap frontal): the post-crash displacement of
+ * the occupant compartment's front points relative to its undeformed rear, as the IIHS measures it (pre- vs
+ * post-test points in a frame fixed to the rear of the compartment). `ref`: rear-compartment nodes (B-pillar and
+ * behind), rigid-fitted from the settled pose to the final one; `points`: node ids, `$` = the measured side
+ * (the left, the driver's: the struck side of the offset tests).
+ */
+export interface StructureProbes {
+  ref: readonly string[];
+  points: Readonly<Partial<Record<StructurePoint, string>>>;
+}
+/**
+ * IIHS structural rating bands, maximum intrusion in m: [good <, acceptable <, marginal <] (poor beyond),
+ * from the IIHS frontal-offset structure rating guidelines (hinge pillars, instrument panel, lower dash /
+ * toepans). The rocker is reported, not rated.
+ */
+export const IIHS_STRUCTURE_BANDS: Readonly<Partial<Record<StructurePoint, readonly [number, number, number]>>> = {
+  lowerHingePillar: [0.15, 0.225, 0.3],
+  upperHingePillar: [0.075, 0.125, 0.175],
+  toepan: [0.15, 0.225, 0.3],
+};
+export type StructureRating = 'good' | 'acceptable' | 'marginal' | 'poor';
+const RATINGS: readonly StructureRating[] = ['good', 'acceptable', 'marginal', 'poor'];
+/** Worst band over the rated points (IIHS: the structure rating follows the worst measure). */
+export function rateStructure(m: Readonly<Partial<Record<StructurePoint, number>>>): StructureRating {
+  let worst = 0;
+  for (const [k, band] of Object.entries(IIHS_STRUCTURE_BANDS) as [StructurePoint, readonly [number, number, number]][]) {
+    const x = m[k];
+    if (x === undefined) continue;
+    const r = x < band[0] ? 0 : x < band[1] ? 1 : x < band[2] ? 2 : 3;
+    worst = Math.max(worst, r);
+  }
+  return RATINGS[worst]!;
 }
 
 export const SEDAN_CRASH_PROBES: CrashProbes = {
@@ -82,6 +121,10 @@ export const SEDAN_CRASH_PROBES: CrashProbes = {
   latch: [['hood_0C', 's2_rt']],
   bumperPrefix: 's0_',
   windscreen: ['s5_cw', 's6_rf'],
+  structure: {
+    ref: ['s7_*', 's8_*', 's9_*'],
+    points: { lowerHingePillar: 's5_hp_$', upperHingePillar: 's5_cw_$', toepan: 's5_fw_$', rocker: 's5_sl_$' },
+  },
 };
 
 export interface CrashSpec {
@@ -154,6 +197,9 @@ export interface CrashResult {
   /** Node id of the final cellDev. */
   cellWorst: string;
   doorWave: number;
+  /** IIHS-style structural intrusion (final, m) of the driver-side points and its rating (probes.structure; not for the pole). */
+  structure?: Partial<Record<StructurePoint, number>>;
+  structureRating?: StructureRating;
 }
 
 const G = 9.81;
@@ -281,6 +327,12 @@ export function runCrash(spec: CrashSpec): CrashResult {
     if (cv.rig.nodeGroup[i] === bodyGroup && z >= Math.min(zF, zR) - 0.02 && z <= Math.max(zF, zR) + 0.02 && !generatedNode(i)) cell.push(i);
   }
   const cellRef = cell.map((i) => P(i));
+  // IIHS structure points (driver's side = left) and their rear-compartment reference, settled pose
+  const sp = spec.kind !== 'pole' ? pr.structure : undefined;
+  const structRef = sp ? nodesMatching(cv, sp.ref) : [];
+  const structRefRest = structRef.map((i) => P(i));
+  const structPts = sp ? (Object.entries(sp.points) as [StructurePoint, string][]).map(([k, id]) => [k, nodesMatching(cv, [id.replace(/\$/g, 'L')])[0]!] as const) : [];
+  const structPtsRest = structPts.map(([, i]) => P(i));
 
   // Body extent after settling (vehicle frame = world here: identity spawn).
   let minZ = Infinity;
@@ -481,8 +533,18 @@ export function runCrash(spec: CrashSpec): CrashResult {
   const windscreen = ws ? beamsWhere((a, c) => a.startsWith(ws[0]) && c.startsWith(ws[1])) : [];
 
   const fit = cell.length > 3 ? cellFit(cell, cellRef, P, cellKeep) : { max: 0, wave: 0, worst: -1 };
+  let structure: Partial<Record<StructurePoint, number>> | undefined;
+  if (structPts.length > 0) {
+    const map = rigidMap(structRefRest, structRef.map(P));
+    structure = {};
+    structPts.forEach(([k, i], j) => {
+      const q = map(structPtsRest[j]!);
+      structure![k] = dist(P(i), q);
+    });
+  }
   return {
     spec,
+    ...(structure ? { structure, structureRating: rateStructure(structure) } : {}),
     cellDev: fit.max,
     cellWorst: fit.worst >= 0 ? cv.rig.nodeIds[fit.worst]! : '',
     cellDevMax: Math.max(cellDevMax, fit.max),
@@ -576,6 +638,25 @@ function cellFit(ids: number[], ref: number[][], P: (i: number) => [number, numb
   return { max, wave: cnt > 0 ? Math.sqrt((3 * sum) / cnt) : 0, worst };
 }
 
+/** Rigid best fit (polar decomposition) of `ref` onto `cur`: maps a point of the ref pose into the current pose. */
+function rigidMap(ref: readonly number[][], cur: readonly number[][]): (q: readonly number[]) => number[] {
+  const n = ref.length;
+  const c = [0, 0, 0];
+  const r = [0, 0, 0];
+  for (let k = 0; k < n; k++) for (let d = 0; d < 3; d++) {
+    c[d]! += cur[k]![d]! / n;
+    r[d]! += ref[k]![d]! / n;
+  }
+  const A = new Float64Array(9);
+  for (let k = 0; k < n; k++) for (let u = 0; u < 3; u++) for (let v = 0; v < 3; v++) A[3 * u + v]! += (cur[k]![u]! - c[u]!) * (ref[k]![v]! - r[v]!);
+  const R = new Float64Array(9);
+  if (!polar3(A, R)) R.set([1, 0, 0, 0, 1, 0, 0, 0, 1]);
+  return (q) => {
+    const x = [q[0]! - r[0]!, q[1]! - r[1]!, q[2]! - r[2]!];
+    return [0, 1, 2].map((d) => c[d]! + R[3 * d]! * x[0]! + R[3 * d + 1]! * x[1]! + R[3 * d + 2]! * x[2]!);
+  };
+}
+
 function solve3(m: number[], b: number[]): number[] {
   const det = (a: number[]): number => a[0]! * (a[4]! * a[8]! - a[5]! * a[7]!) - a[1]! * (a[3]! * a[8]! - a[5]! * a[6]!) + a[2]! * (a[3]! * a[7]! - a[4]! * a[6]!);
   const d = det(m);
@@ -628,7 +709,10 @@ export function formatCrash(r: CrashResult): string {
     `broken ${r.brokenBeams}, plastic ${f(r.plasticFraction * 100)} %, wheels ${r.wheelsDetached}, ` +
     `latch ${r.latchBroken ? 'broken' : 'held'}, bumper ${f(r.bumperBrokenFraction * 100, 0)} %, ` +
     `windscreen ${f(r.windscreenBrokenFraction * 100, 0)} %, KE ${f(r.keRatio * 100)} %, ` +
-    `cell ${cm(r.cellDev)} cm ${r.cellWorst} (max ${cm(r.cellDevMax)}), doorWave ${f(r.doorWave * 1000)} mm, vLate ${f(r.maxSpeedLate, 2)}/${f(r.initialSpeed, 2)} (${r.fastestLateNode})`+(r.poleViolator ? ` poleViolator ${r.poleViolator}` : '')+`, span ${f(r.maxSpan, 2)} m, finite ${r.finite}`
+    `cell ${cm(r.cellDev)} cm ${r.cellWorst} (max ${cm(r.cellDevMax)}), doorWave ${f(r.doorWave * 1000)} mm, vLate ${f(r.maxSpeedLate, 2)}/${f(r.initialSpeed, 2)} (${r.fastestLateNode})`+(r.poleViolator ? ` poleViolator ${r.poleViolator}` : '')+`, span ${f(r.maxSpan, 2)} m, finite ${r.finite}` +
+    (r.structure
+      ? `, structure (IIHS) ${(Object.entries(r.structure) as [string, number][]).map(([k, x]) => `${k} ${cm(x)}`).join(' / ')} cm: ${r.structureRating}`
+      : '')
   );
 }
 
