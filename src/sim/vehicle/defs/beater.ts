@@ -60,7 +60,9 @@ export const WHEEL_TUNING_BEATER_10 = {
   tireContactSpring: WHEEL_TUNING_205_55R16.tireContactSpring * RAY_SCALE * 0.5,
   rollingResistance: 0.011,
   // R-PHYS: 0.95 → 1.1 μ_x, μ_y 0.85 μ_x (fresh budget tyres on the old car: ABS stops ≈ 0.9 g, skidpad ≈ 0.8 g)
-  friction: 1.1,
+  // R-TYRE: 1.1 → 1.15 — with the friction ellipse per tread node (ground.ts) the FWD open-diff car's inner front
+  // spins at the limit and pays for its traction in side force (R40 0.77 → 0.73 g, skidpad 0.77 → 0.68 g; with 1.15: 0.74 / ≥ 0.70 g)
+  friction: 1.15,
   tyreLateralMu: 0.85,
 } as const satisfies Partial<WheelDef>;
 

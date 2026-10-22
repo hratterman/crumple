@@ -104,8 +104,9 @@ export const COUPE_TYRE = {
   rimMass: 24,
   tireMass: 9.4,
   // R-PHYS: 1.35 → 1.6 μ_x with μ_y = 0.81 μ_x (a 255/35R19 max-performance tyre): ABS stops ≈ 1.15–1.2 g
-  // (100–0 ≈ 34 m), skidpad ≈ 1.03 g
-  friction: 1.6,
+  // (100–0 ≈ 34 m), skidpad ≈ 1.03 g. R-TYRE: 1.6 → 1.63 — the per-node friction ellipse (ground.ts) no longer lets
+  // the brush's side force ride on top of the braking force; the ABS stop grew 33.8 → 34.2 m
+  friction: 1.63,
   tyreLateralMu: 0.81,
   // R-PHYS tyre model (tyre.ts)
   tyreLoadSensitivity: 0.06,
