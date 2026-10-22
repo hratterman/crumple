@@ -200,7 +200,27 @@ export interface CrashResult {
   /** IIHS-style structural intrusion (final, m) of the driver-side points and its rating (probes.structure; not for the pole). */
   structure?: Partial<Record<StructurePoint, number>>;
   structureRating?: StructureRating;
+  /** Crash pulse at the B-pillar base (frontal / offset; see crashPulse). */
+  pulse?: CrashPulse;
 }
+
+/**
+ * R-CRASH crash pulse, as a crash-test accelerometer on the B-pillar base reads it: SAE J211 CFC 60
+ * (zero-phase 4-pole Butterworth, 100 Hz) deceleration peak, the time the compartment's velocity crosses
+ * zero (the dynamic-crush time), and the OCCUPANT LOAD CRITERION (Kübler 2009, Euro NCAP MPDB): a virtual
+ * occupant flies free for 65 mm relative to the compartment, then is brought to the compartment's velocity
+ * by a CONSTANT deceleration within another 235 mm; OLC is that deceleration. Real 56 km/h full-width
+ * rigid-barrier pulses (NHTSA NCAP, mid-size cars): peak 35–50 g, zero velocity at 65–95 ms, OLC 25–35 g.
+ */
+export interface CrashPulse {
+  /** CFC 60 peak deceleration, g. */
+  peakG: number;
+  /** Time from first contact to the compartment's velocity crossing zero, s (Infinity: it never stopped). */
+  tStop: number;
+  /** Occupant load criterion, g. */
+  olcG: number;
+}
+const PULSE_S = 0.3;
 
 const G = 9.81;
 const SETTLE_S = 0.5;
@@ -427,6 +447,13 @@ export function runCrash(spec: CrashSpec): CrashResult {
   let poleViolator = '';
   let fastestLateNode = '';
   const crushTrace: number[] = [];
+  // crash pulse: the B-pillar-base (accelerometer) velocity along the travel direction, every tick from contact
+  const pulseV: number[] = [];
+  const cabinVel = (): number => {
+    let vd = 0;
+    for (const i of bpillar) vd += s.velX[n0 + i]! * dir[0] + s.velY[n0 + i]! * dir[1] + s.velZ[n0 + i]! * dir[2];
+    return vd / bpillar.length;
+  };
   const comVel = (): number => {
     let m = 0;
     let vd = 0;
@@ -461,6 +488,7 @@ export function runCrash(spec: CrashSpec): CrashResult {
     if (touching) inContact = true;
     else if (inContact) contactEnded = true;
     const since = t - contactTick;
+    if (since < PULSE_S * SIM_HZ) pulseV.push(cabinVel());
     spec.onStep?.(eng, obj, since);
     const crush = crushNow();
     const intr = intrRest - dist(mean(firewall), mean(bpillar));
@@ -545,6 +573,7 @@ export function runCrash(spec: CrashSpec): CrashResult {
   return {
     spec,
     ...(structure ? { structure, structureRating: rateStructure(structure) } : {}),
+    ...(spec.kind !== 'pole' ? { pulse: crashPulse(pulseV, 1 / SIM_HZ) } : {}),
     cellDev: fit.max,
     cellWorst: fit.worst >= 0 ? cv.rig.nodeIds[fit.worst]! : '',
     cellDevMax: Math.max(cellDevMax, fit.max),
@@ -638,6 +667,86 @@ function cellFit(ids: number[], ref: number[][], P: (i: number) => [number, numb
   return { max, wave: cnt > 0 ? Math.sqrt((3 * sum) / cnt) : 0, worst };
 }
 
+/** SAE J211 CFC 60 (zero-phase: a 2-pole Butterworth run forward and backward) of samples at `dt`. */
+function cfc60(x: readonly number[], dt: number): number[] {
+  const cfc = 60;
+  const wd = 2 * Math.PI * cfc * 2.0775;
+  const wa = Math.sin((wd * dt) / 2) / Math.cos((wd * dt) / 2);
+  const a0 = (wa * wa) / (1 + Math.SQRT2 * wa + wa * wa);
+  const a1 = 2 * a0;
+  const a2 = a0;
+  const b1 = (-2 * (wa * wa - 1)) / (1 + Math.SQRT2 * wa + wa * wa);
+  const b2 = (-1 + Math.SQRT2 * wa - wa * wa) / (1 + Math.SQRT2 * wa + wa * wa);
+  // history initialised at the first sample's steady state (raw first samples fed into the recursion ring)
+  const pass = (u: readonly number[]): number[] => {
+    const y: number[] = [];
+    let x1 = u[0] ?? 0;
+    let x2 = x1;
+    let y1 = x1;
+    let y2 = x1;
+    for (const x of u) {
+      const v = a0 * x + a1 * x1 + a2 * x2 + b1 * y1 + b2 * y2;
+      y.push(v);
+      x2 = x1;
+      x1 = x;
+      y2 = y1;
+      y1 = v;
+    }
+    return y;
+  };
+  return pass(pass(x).reverse()).reverse();
+}
+
+/** The crash pulse of a compartment velocity trace `v` (m/s along the travel direction, from contact, step `dt`). */
+export function crashPulse(v: readonly number[], dt: number): CrashPulse {
+  const n = v.length;
+  const acc: number[] = [];
+  for (let i = 0; i < n; i++) acc.push(i === 0 ? 0 : (v[i]! - v[i - 1]!) / dt);
+  const a = cfc60(acc, dt);
+  let peak = 0;
+  for (const x of a) peak = Math.max(peak, -x);
+  let tStop = Infinity;
+  for (let i = 1; i < n; i++) if (v[i]! <= 0 && v[i - 1]! > 0) {
+    tStop = (i - 1 + v[i - 1]! / (v[i - 1]! - v[i]!)) * dt;
+    break;
+  }
+  // OLC: compartment displacement x(t); occupant free flight at v0 until it is 65 mm ahead, then a constant
+  // deceleration that matches the compartment's velocity exactly when it is 300 mm ahead
+  const v0 = v[0]!;
+  const x: number[] = [0];
+  for (let i = 1; i < n; i++) x.push(x[i - 1]! + 0.5 * (v[i]! + v[i - 1]!) * dt);
+  let i1 = -1;
+  for (let i = 0; i < n; i++) if (v0 * i * dt - x[i]! >= 0.065) {
+    i1 = i;
+    break;
+  }
+  let olc = NaN;
+  if (i1 >= 0) {
+    const t1 = i1 * dt;
+    const rel = (aOlc: number): number => {
+      // occupant decelerating at aOlc from t1: first time its velocity ≤ the compartment's → its lead there
+      for (let i = i1; i < n; i++) {
+        const t = i * dt;
+        const vo = v0 - aOlc * (t - t1);
+        if (vo <= v[i]!) {
+          const xo = v0 * t1 + v0 * (t - t1) - 0.5 * aOlc * (t - t1) ** 2;
+          return xo - x[i]!;
+        }
+      }
+      return Infinity;
+    };
+    let lo = 0;
+    let hi = 2000;
+    for (let k = 0; k < 60; k++) {
+      const mid = 0.5 * (lo + hi);
+      if (rel(mid) > 0.3) lo = mid;
+      else hi = mid;
+    }
+    olc = (0.5 * (lo + hi)) / G;
+  }
+  return { peakG: peak / G, tStop, olcG: olc };
+}
+
 /** Rigid best fit (polar decomposition) of `ref` onto `cur`: maps a point of the ref pose into the current pose. */
 function rigidMap(ref: readonly number[][], cur: readonly number[][]): (q: readonly number[]) => number[] {
   const n = ref.length;
@@ -712,7 +821,8 @@ export function formatCrash(r: CrashResult): string {
     `cell ${cm(r.cellDev)} cm ${r.cellWorst} (max ${cm(r.cellDevMax)}), doorWave ${f(r.doorWave * 1000)} mm, vLate ${f(r.maxSpeedLate, 2)}/${f(r.initialSpeed, 2)} (${r.fastestLateNode})`+(r.poleViolator ? ` poleViolator ${r.poleViolator}` : '')+`, span ${f(r.maxSpan, 2)} m, finite ${r.finite}` +
     (r.structure
       ? `, structure (IIHS) ${(Object.entries(r.structure) as [string, number][]).map(([k, x]) => `${k} ${cm(x)}`).join(' / ')} cm: ${r.structureRating}`
-      : '')
+      : '') +
+    (r.pulse ? `, pulse peak ${f(r.pulse.peakG)} g, stop ${f(r.pulse.tStop * 1000, 0)} ms, OLC ${f(r.pulse.olcG)} g` : '')
   );
 }
 
