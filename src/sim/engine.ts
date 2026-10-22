@@ -88,7 +88,8 @@ const SOLVER_OPTION_KEYS = ['triangleContact', 'selfCollision', 'ccd'] as const 
 
 /**
  * R-CORE collision triangles of an object, resolved lazily (derivation of a
- * vehicle surface is ~10–150 ms once per def; single-object sims never need it).
+ * vehicle surface is ~0.1–0.6 s once per def; single-object sims never need
+ * it), or at spawn when triangle contact is on.
  */
 interface LazyTriangles {
   rig: CompiledRig;
@@ -567,7 +568,11 @@ export class SimEngine {
     }
     const obj = this.spawnCompiled(objectId, compiled.rig, transform);
     // Vehicles always have collision triangles: declared ones, else the derived body surface.
-    this.triById.set(objectId, { rig: compiled.rig, bodyNodeCount: compiled.bodyNodeCount, defKey: compiled.rig.triangles ? null : (defKey ?? null), slot: undefined });
+    const lazy: LazyTriangles = { rig: compiled.rig, bodyNodeCount: compiled.bodyNodeCount, defKey: compiled.rig.triangles ? null : (defKey ?? null), slot: undefined };
+    this.triById.set(objectId, lazy);
+    // With triangle contact on, derive now (a spawn already compiles) rather than at the first approach (an
+    // HD rig's surface takes ~0.2–0.6 s once per def).
+    if (this.solver.triangleContact) resolveTriangles(lazy);
     const rt = createVehicleRuntime(objectId, compiled, obj.nodeStart, obj.beamStart, transmission);
     this.vehicles.set(objectId, rt);
     this.syncVehicles();

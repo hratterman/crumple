@@ -18,7 +18,11 @@
  *   3. a crossbraced quad yields four overlapping coplanar triangles: in
  *      canonical (a < b < c) order, a candidate that shares an edge with an
  *      accepted coplanar triangle and lies on the same side of that edge is
- *      dropped (one diagonal survives).
+ *      dropped (one diagonal survives);
+ *   4. CAPS (addCaps): both ends of the long axis and the underbody, where
+ *      the beam surfaces leave them open (bumper / crash-box / radiator
+ *      fronts, floors between rails), get a Delaunay cap over their extreme
+ *      layer of nodes.
  * Rest-pose geometry only; O(T · rays · cells) through a uniform grid.
  */
 import {
@@ -109,6 +113,8 @@ class TriGrid {
   readonly nz: number;
   readonly start: Int32Array;
   readonly items: Int32Array;
+  /** Per candidate: vertex a, edges a→b and a→c (9 f64) for the ray tests. */
+  private readonly geo: Float64Array;
   constructor(
     private readonly P: Float64Array,
     private readonly cands: readonly Cand[],
@@ -122,6 +128,21 @@ class TriGrid {
       }
     }
     this.cell = cell;
+    this.geo = new Float64Array(9 * cands.length);
+    for (let i = 0; i < cands.length; i++) {
+      const t = cands[i]!;
+      const g = 9 * i;
+      const ax = P[3 * t.a]!, ay = P[3 * t.a + 1]!, az = P[3 * t.a + 2]!;
+      this.geo[g] = ax;
+      this.geo[g + 1] = ay;
+      this.geo[g + 2] = az;
+      this.geo[g + 3] = P[3 * t.b]! - ax;
+      this.geo[g + 4] = P[3 * t.b + 1]! - ay;
+      this.geo[g + 5] = P[3 * t.b + 2]! - az;
+      this.geo[g + 6] = P[3 * t.c]! - ax;
+      this.geo[g + 7] = P[3 * t.c + 1]! - ay;
+      this.geo[g + 8] = P[3 * t.c + 2]! - az;
+    }
     this.ox = x0 - cell;
     this.oy = y0 - cell;
     this.oz = z0 - cell;
@@ -156,8 +177,8 @@ class TriGrid {
     const zs = [t.a, t.b, t.c].map((v) => ix(v, 2, this.oz, this.nz));
     return [Math.min(...xs), Math.min(...ys), Math.min(...zs), Math.max(...xs), Math.max(...ys), Math.max(...zs)];
   }
-  /** True when the ray from (x, y, z) along unit (dx, dy, dz) hits a candidate other than `self` (3D DDA). */
-  hits(x: number, y: number, z: number, dx: number, dy: number, dz: number, self: number, mark: Int32Array, stamp: number): boolean {
+  /** True when the ray from (x, y, z) along unit (dx, dy, dz) hits a candidate other than `self` within maxT (3D DDA). */
+  hits(x: number, y: number, z: number, dx: number, dy: number, dz: number, self: number, mark: Int32Array, stamp: number, maxT = Infinity): boolean {
     const c = this.cell;
     let cx = Math.floor((x - this.ox) / c);
     let cy = Math.floor((y - this.oy) / c);
@@ -177,8 +198,10 @@ class TriGrid {
         const t = this.items[k]!;
         if (t === self || mark[t] === stamp) continue;
         mark[t] = stamp;
-        if (rayHitsTri(this.P, this.cands[t]!, x, y, z, dx, dy, dz)) return true;
+        const th = rayHitGeo(this.geo, 9 * t, x, y, z, dx, dy, dz);
+        if (th > 0 && th <= maxT) return true;
       }
+      if (Math.min(tmx, tmy, tmz) > maxT) return false;
       if (tmx <= tmy && tmx <= tmz) {
         cx += sx;
         tmx += tdx;
@@ -194,23 +217,23 @@ class TriGrid {
   }
 }
 
-/** Möller–Trumbore, t > 0, edges inclusive. */
-function rayHitsTri(P: Float64Array, t: Cand, ox: number, oy: number, oz: number, dx: number, dy: number, dz: number): boolean {
-  const ax = P[3 * t.a]!, ay = P[3 * t.a + 1]!, az = P[3 * t.a + 2]!;
-  const e1x = P[3 * t.b]! - ax, e1y = P[3 * t.b + 1]! - ay, e1z = P[3 * t.b + 2]! - az;
-  const e2x = P[3 * t.c]! - ax, e2y = P[3 * t.c + 1]! - ay, e2z = P[3 * t.c + 2]! - az;
+/** rayHitTri over a TriGrid's precomputed vertex + edges (same arithmetic). */
+function rayHitGeo(G: Float64Array, g: number, ox: number, oy: number, oz: number, dx: number, dy: number, dz: number): number {
+  const ax = G[g]!, ay = G[g + 1]!, az = G[g + 2]!;
+  const e1x = G[g + 3]!, e1y = G[g + 4]!, e1z = G[g + 5]!;
+  const e2x = G[g + 6]!, e2y = G[g + 7]!, e2z = G[g + 8]!;
   const px = dy * e2z - dz * e2y, py = dz * e2x - dx * e2z, pz = dx * e2y - dy * e2x;
   const det = e1x * px + e1y * py + e1z * pz;
-  if (Math.abs(det) < 1e-12) return false;
+  if (Math.abs(det) < 1e-12) return -1;
   const inv = 1 / det;
   const sx = ox - ax, sy = oy - ay, sz = oz - az;
   const u = (sx * px + sy * py + sz * pz) * inv;
-  if (u < -1e-9 || u > 1 + 1e-9) return false;
+  if (u < -1e-9 || u > 1 + 1e-9) return -1;
   const qx = sy * e1z - sz * e1y, qy = sz * e1x - sx * e1z, qz = sx * e1y - sy * e1x;
   const v = (dx * qx + dy * qy + dz * qz) * inv;
-  if (v < -1e-9 || u + v > 1 + 1e-9) return false;
+  if (v < -1e-9 || u + v > 1 + 1e-9) return -1;
   const tt = (e2x * qx + e2y * qy + e2z * qz) * inv;
-  return tt > 1e-9;
+  return tt > 1e-9 ? tt : -1;
 }
 
 export interface DeriveOptions {
@@ -218,6 +241,8 @@ export interface DeriveOptions {
   nodeCount?: number;
   /** Contact material of the derived triangles. Default metal. */
   material?: number;
+  /** Step 4 end / underbody caps (default true). */
+  caps?: boolean;
 }
 
 /**
@@ -313,8 +338,9 @@ export function deriveCollisionTriangles(rig: CompiledRig, opts: DeriveOptions =
   }
   quadTris = cands.length - triCount;
   if (cands.length === 0) return emptyTriangles();
-  // 2. open sides
-  const grid = new TriGrid(P, cands, 0.25);
+  // 2. open sides (the grid only accelerates the exact ray tests: its cell size never changes a result;
+  // half a median candidate edge per cell keeps the per-cell lists short on dense HD skins)
+  const grid = new TriGrid(P, cands, gridCell(P, cands));
   const mark = new Int32Array(cands.length);
   let stamp = 0;
   /** Rays (of 4) along sgn·n that escape the candidate set. */
@@ -394,6 +420,11 @@ export function deriveCollisionTriangles(rig: CompiledRig, opts: DeriveOptions =
       list.push(id);
     }
   }
+  const material: number[] = new Array<number>(keptA.length).fill(opts.material ?? TRIANGLE_DEFAULT_MATERIAL);
+  // 4. caps over the open parts of the ends and the underbody
+  if ((opts.caps ?? capsDefault) && keptA.length > 0) {
+    addCaps(P, use, N, keptA, keptB, keptC, keptFlags, material);
+  }
   const n = keptA.length;
   return {
     count: n,
@@ -401,9 +432,196 @@ export function deriveCollisionTriangles(rig: CompiledRig, opts: DeriveOptions =
     b: Int32Array.from(keptB),
     c: Int32Array.from(keptC),
     flags: Uint8Array.from(keptFlags),
-    material: new Uint8Array(n).fill(opts.material ?? TRIANGLE_DEFAULT_MATERIAL),
+    material: Uint8Array.from(material),
     thickness: new Float64Array(n),
   };
+}
+
+let capsDefault = true;
+/** Tests / diagnostics: whether derivations without an explicit `caps` option add caps (default true). */
+export function setDeriveCaps(on: boolean): void {
+  capsDefault = on;
+}
+
+/** Depth (m) behind the extreme node that a cap's vertices may come from: ends / underbody. */
+const CAP_DEPTH_END = 0.45;
+const CAP_DEPTH_UNDER = 0.3;
+/** A cap vertex is occluded (dropped) when another one within this projected radius is this much more extreme. */
+const CAP_OCC_R = 0.12;
+const CAP_OCC_D = 0.06;
+/** Longest projected cap edge, m (wider gaps are real openings, e.g. a wheel arch). */
+const CAP_MAX_EDGE = 0.75;
+/** Cap triangles must face their end: |n · axis| at least this. */
+const CAP_MIN_FACING = 0.35;
+/** A cap point counts as already covered when the surface is within this distance along ±axis. */
+const CAP_COVER = 0.5;
+/** Bumper-cover material at the ends (MaterialId.plastic), metal underneath. */
+const CAP_END_MATERIAL = 7;
+
+/**
+ * Step 4: CAPS. The beam surfaces of a body leave its ends (bumper bar, crash boxes and radiator support
+ * with open space between them) and parts of its underbody (rails without a floor between them) open, so a
+ * striking node can pass between members into the body. Per end of the long horizontal axis and for the
+ * underbody: the body's extreme layer of nodes (within CAP_DEPTH of the extreme, occluded nodes dropped) is
+ * triangulated in the projection plane (2-D Delaunay), long edges and side-on triangles dropped, and a cap
+ * triangle is kept only where the surface derived so far leaves that area open along the cap axis (of 4
+ * sample points, at least 2 see no surface within CAP_COVER inward or outward). Caps are wound outward,
+ * not self-collision faces (they cut through structure by design).
+ */
+function addCaps(P: Float64Array, use: Uint8Array, N: number, A: number[], B: number[], C: number[], F: number[], M: number[]): void {
+  let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+  for (let i = 0; i < N; i++) {
+    if (!use[i]) continue;
+    x0 = Math.min(x0, P[3 * i]!);
+    x1 = Math.max(x1, P[3 * i]!);
+    z0 = Math.min(z0, P[3 * i + 2]!);
+    z1 = Math.max(z1, P[3 * i + 2]!);
+  }
+  const long = z1 - z0 >= x1 - x0 ? 2 : 0;
+  const sides: [number, number, number][] = [
+    [long, -1, CAP_DEPTH_END],
+    [long, 1, CAP_DEPTH_END],
+    [1, -1, CAP_DEPTH_UNDER],
+  ];
+  // Coverage tests run against the derived surface only (caps do not cover each other).
+  const base: Cand[] = [];
+  for (let t = 0; t < A.length; t++) base.push(candOf(P, A[t]!, B[t]!, C[t]!));
+  const grid = new TriGrid(P, base, gridCell(P, base));
+  const mark = new Int32Array(base.length);
+  let stamp = 0;
+  for (const [ax, sgn, depth] of sides) {
+    const u = ax === 0 ? 1 : 0;
+    const v = ax === 2 ? 1 : 2;
+    let ext = sgn > 0 ? -Infinity : Infinity;
+    for (let i = 0; i < N; i++) if (use[i]) ext = sgn > 0 ? Math.max(ext, P[3 * i + ax]!) : Math.min(ext, P[3 * i + ax]!);
+    const layer: number[] = [];
+    for (let i = 0; i < N; i++) if (use[i] && sgn * (P[3 * i + ax]! - ext) >= -depth) layer.push(i);
+    const pts = layer.filter((i) => {
+      for (const j of layer) {
+        if (j === i) continue;
+        const du = P[3 * j + u]! - P[3 * i + u]!;
+        const dv = P[3 * j + v]! - P[3 * i + v]!;
+        if (du * du + dv * dv > CAP_OCC_R * CAP_OCC_R) continue;
+        const dd = sgn * (P[3 * j + ax]! - P[3 * i + ax]!);
+        if (dd > CAP_OCC_D || (dd > 0 && du * du + dv * dv < 1e-6) || (dd === 0 && du * du + dv * dv < 1e-6 && j < i)) return false;
+      }
+      return true;
+    });
+    if (pts.length < 3) continue;
+    const tris = delaunay2(pts.map((i) => P[3 * i + u]!), pts.map((i) => P[3 * i + v]!));
+    for (let t = 0; t < tris.length; t += 3) {
+      let a = pts[tris[t]!]!, b = pts[tris[t + 1]!]!, c = pts[tris[t + 2]!]!;
+      const e = (p: number, q: number): number => Math.hypot(P[3 * q + u]! - P[3 * p + u]!, P[3 * q + v]! - P[3 * p + v]!);
+      if (Math.max(e(a, b), e(b, c), e(c, a)) > CAP_MAX_EDGE) continue;
+      const cand = candOf(P, a, b, c);
+      if (!Number.isFinite(cand.nx)) continue;
+      const facing = ax === 0 ? cand.nx : ax === 1 ? cand.ny : cand.nz;
+      if (Math.abs(facing) < CAP_MIN_FACING) continue;
+      if (facing * sgn < 0) [b, c] = [c, b];
+      // Open along the axis at ≥ 2 of 4 sample points (centroid + halfway to each vertex)?
+      const gx = (P[3 * a]! + P[3 * b]! + P[3 * c]!) / 3;
+      const gy = (P[3 * a + 1]! + P[3 * b + 1]! + P[3 * c + 1]!) / 3;
+      const gz = (P[3 * a + 2]! + P[3 * b + 2]! + P[3 * c + 2]!) / 3;
+      let openPts = 0;
+      for (let k = 0; k < 4; k++) {
+        let x = gx, y = gy, z = gz;
+        if (k > 0) {
+          const w = k === 1 ? a : k === 2 ? b : c;
+          x = 0.5 * (gx + P[3 * w]!);
+          y = 0.5 * (gy + P[3 * w + 1]!);
+          z = 0.5 * (gz + P[3 * w + 2]!);
+        }
+        let covered = false;
+        for (const dir of [1, -1]) {
+          const d = [0, 0, 0];
+          d[ax] = dir;
+          stamp++;
+          if (grid.hits(x, y, z, d[0]!, d[1]!, d[2]!, -1, mark, stamp, CAP_COVER)) covered = true;
+        }
+        if (!covered) openPts++;
+      }
+      if (openPts < 2) continue;
+      A.push(a);
+      B.push(b);
+      C.push(c);
+      F.push(0);
+      M.push(ax === 1 ? TRIANGLE_DEFAULT_MATERIAL : CAP_END_MATERIAL);
+    }
+  }
+}
+
+/** Grid cell for the visibility rays: half the median candidate edge, within [0.03, 0.25] m. */
+function gridCell(P: Float64Array, cands: readonly Cand[]): number {
+  const step = Math.max(1, Math.floor(cands.length / 512));
+  const e: number[] = [];
+  for (let t = 0; t < cands.length; t += step) {
+    const c = cands[t]!;
+    e.push(Math.hypot(P[3 * c.b]! - P[3 * c.a]!, P[3 * c.b + 1]! - P[3 * c.a + 1]!, P[3 * c.b + 2]! - P[3 * c.a + 2]!));
+  }
+  e.sort((x, y) => x - y);
+  const med = e.length ? e[e.length >> 1]! : 0.125;
+  return Math.min(0.25, Math.max(0.03, 0.5 * med));
+}
+
+function candOf(P: Float64Array, a: number, b: number, c: number): Cand {
+  const e1x = P[3 * b]! - P[3 * a]!, e1y = P[3 * b + 1]! - P[3 * a + 1]!, e1z = P[3 * b + 2]! - P[3 * a + 2]!;
+  const e2x = P[3 * c]! - P[3 * a]!, e2y = P[3 * c + 1]! - P[3 * a + 1]!, e2z = P[3 * c + 2]! - P[3 * a + 2]!;
+  const cx = e1y * e2z - e1z * e2y, cy = e1z * e2x - e1x * e2z, cz = e1x * e2y - e1y * e2x;
+  const len = Math.sqrt(cx * cx + cy * cy + cz * cz);
+  return { a, b, c, nx: cx / len, ny: cy / len, nz: cz / len };
+}
+
+/**
+ * 2-D Delaunay triangulation (Bowyer–Watson, deterministic for a given point order) → vertex index
+ * triples (counter-clockwise). Coincident points are skipped.
+ */
+export function delaunay2(xs: readonly number[], ys: readonly number[]): number[] {
+  const n = xs.length;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (let i = 0; i < n; i++) {
+    x0 = Math.min(x0, xs[i]!);
+    x1 = Math.max(x1, xs[i]!);
+    y0 = Math.min(y0, ys[i]!);
+    y1 = Math.max(y1, ys[i]!);
+  }
+  const d = Math.max(x1 - x0, y1 - y0, 1e-6) * 20;
+  const mx = 0.5 * (x0 + x1), my = 0.5 * (y0 + y1);
+  const X = [...xs, mx - d, mx + d, mx];
+  const Y = [...ys, my - d, my - d, my + d];
+  let tris: [number, number, number][] = [[n, n + 1, n + 2]];
+  const ccw = (a: number, b: number, c: number): boolean => (X[b]! - X[a]!) * (Y[c]! - Y[a]!) - (Y[b]! - Y[a]!) * (X[c]! - X[a]!) > 0;
+  const inCircle = (t: [number, number, number], p: number): boolean => {
+    const [a, b, c] = t;
+    const adx = X[a]! - X[p]!, ady = Y[a]! - Y[p]!;
+    const bdx = X[b]! - X[p]!, bdy = Y[b]! - Y[p]!;
+    const cdx = X[c]! - X[p]!, cdy = Y[c]! - Y[p]!;
+    const det = (adx * adx + ady * ady) * (bdx * cdy - cdx * bdy) - (bdx * bdx + bdy * bdy) * (adx * cdy - cdx * ady) + (cdx * cdx + cdy * cdy) * (adx * bdy - bdx * ady);
+    return det > 0;
+  };
+  for (let p = 0; p < n; p++) {
+    let dup = false;
+    for (let q = 0; q < p && !dup; q++) if (Math.abs(X[q]! - X[p]!) < 1e-9 && Math.abs(Y[q]! - Y[p]!) < 1e-9) dup = true;
+    if (dup) continue;
+    const bad: [number, number, number][] = [];
+    const keep: [number, number, number][] = [];
+    for (const t of tris) (inCircle(t, p) ? bad : keep).push(t);
+    const edges = new Map<string, [number, number]>();
+    for (const [a, b, c] of bad) {
+      for (const [u, v] of [[a, b], [b, c], [c, a]] as const) {
+        const k = u < v ? `${u},${v}` : `${v},${u}`;
+        if (edges.has(k)) edges.delete(k);
+        else edges.set(k, [u, v]);
+      }
+    }
+    for (const [u, v] of edges.values()) {
+      const t: [number, number, number] = ccw(u, v, p) ? [u, v, p] : [v, u, p];
+      keep.push(t);
+    }
+    tris = keep;
+  }
+  const out: number[] = [];
+  for (const [a, b, c] of tris) if (a < n && b < n && c < n) out.push(a, b, c);
+  return out;
 }
 
 /** Third vertices w (candidate) and o (accepted) on the same side of edge (u, v), in the plane of the candidate. */

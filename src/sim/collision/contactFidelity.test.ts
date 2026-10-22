@@ -15,7 +15,7 @@ import { setDefaultSolver, SimEngine, SOLVER_DEFAULTS } from '../engine';
 import { setMotion } from '../vehicle/handling';
 import { runCrash } from '../vehicle/crash';
 import type { RigDef } from '../rig/types';
-import { deriveCollisionTriangles } from '../rig/triangles';
+import { deriveCollisionTriangles, setDeriveCaps } from '../rig/triangles';
 import { compileVehicle } from '../vehicle/builder';
 import { NODE_FLAG_COLLIDABLE } from '../types';
 import { SEDAN } from '../vehicle/defs/sedan';
@@ -268,7 +268,8 @@ describe('contact fidelity (engine, real rigs)', () => {
     // B's true surface = its derived collision triangles; A's collidable nodes inside a triangle's
     // projection and behind it (≤ 0.5 m) count as penetrating by that depth. Sampled every 10 ticks.
     const cvB = compileVehicle(SEDAN_TRAFFIC);
-    const trisB = deriveCollisionTriangles(cvB.rig, { nodeCount: cvB.bodyNodeCount });
+    // (the beam surface only: the caps' interior side is not "inside the car" for this measure)
+    const trisB = deriveCollisionTriangles(cvB.rig, { nodeCount: cvB.bodyNodeCount, caps: false });
     const rows: string[] = [];
     const stats: Record<string, { n: number; p50: number; p95: number; max: number }> = {};
     for (const mode of ['standard', 'high'] as const) {
@@ -322,5 +323,71 @@ describe('contact fidelity (engine, real rigs)', () => {
     // Node-vs-triangle keeps most of the striking car's nodes out of the struck car (spheres let them slip
     // between the struck car's node spheres into its interior).
     expect(stats.high!.n).toBeLessThan(stats.standard!.n / 3);
+  }, 300_000);
+
+  it('caps: a sedan rear-ending a parked traffic sedan at 50 km/h (high) — striking nodes inside the struck car with and without end / underbody caps', () => {
+    // Measured against B's derived surface WITH caps (its bumper-cover / underbody closure) in both runs;
+    // the runs differ only in whether the simulation has the caps. Fresh def objects per run (the engine
+    // caches derived triangles per def).
+    const cvB = compileVehicle(SEDAN_TRAFFIC);
+    const trisB = deriveCollisionTriangles(cvB.rig, { nodeCount: cvB.bodyNodeCount, caps: true });
+    const res: Record<string, { n: number; p95: number; gap: number }> = {};
+    for (const caps of [false, true]) {
+      setDeriveCaps(caps);
+      try {
+        const eng = engine(SOLVER_PRESETS.high);
+        eng.setGroundPlane(0, MaterialId.asphalt);
+        eng.spawnVehicle(1, { ...SEDAN }, { pos: [0, 0.01, 5.6], quat: [0, 0, 0, 1] });
+        eng.spawnVehicle(2, { ...SEDAN_TRAFFIC }, { pos: [0, 0.01, 0], quat: [0, 0, 0, 1] });
+        eng.setInput(2, { brake: 1, handbrake: 1, gearSelect: 0 });
+        for (let i = 0; i < 1000; i++) eng.step();
+        const A = eng.arena.get(1)!;
+        const B = eng.arena.get(2)!;
+        const veh = eng.getVehicle(1)!;
+        setMotion({ eng, obj: A, veh, cv: veh.vehicle, objectId: 1 }, 50 / 3.6);
+        const s = eng.state;
+        const depths: number[] = [];
+        for (let t = 0; t < 1200; t++) {
+          eng.step();
+          eng.events.clear();
+          if (t % 10 !== 0) continue;
+          for (let i = A.nodeStart; i < A.nodeStart + A.nodeCount; i++) {
+            if ((s.flags[i]! & NODE_FLAG_COLLIDABLE) === 0) continue;
+            let worst = 0;
+            for (let k = 0; k < trisB.count; k++) {
+              const a = B.nodeStart + trisB.a[k]!, b = B.nodeStart + trisB.b[k]!, c = B.nodeStart + trisB.c[k]!;
+              const e1 = [s.posX[b]! - s.posX[a]!, s.posY[b]! - s.posY[a]!, s.posZ[b]! - s.posZ[a]!];
+              const e2 = [s.posX[c]! - s.posX[a]!, s.posY[c]! - s.posY[a]!, s.posZ[c]! - s.posZ[a]!];
+              const n = [e1[1]! * e2[2]! - e1[2]! * e2[1]!, e1[2]! * e2[0]! - e1[0]! * e2[2]!, e1[0]! * e2[1]! - e1[1]! * e2[0]!];
+              const ln = Math.hypot(n[0]!, n[1]!, n[2]!);
+              if (!(ln > 1e-9)) continue;
+              const w = [s.posX[i]! - s.posX[a]!, s.posY[i]! - s.posY[a]!, s.posZ[i]! - s.posZ[a]!];
+              const d = (w[0]! * n[0]! + w[1]! * n[1]! + w[2]! * n[2]!) / ln;
+              if (d >= 0 || d < -0.5) continue;
+              const d00 = e1[0]! ** 2 + e1[1]! ** 2 + e1[2]! ** 2, d11 = e2[0]! ** 2 + e2[1]! ** 2 + e2[2]! ** 2;
+              const d01 = e1[0]! * e2[0]! + e1[1]! * e2[1]! + e1[2]! * e2[2]!;
+              const d20 = w[0]! * e1[0]! + w[1]! * e1[1]! + w[2]! * e1[2]!, d21 = w[0]! * e2[0]! + w[1]! * e2[1]! + w[2]! * e2[2]!;
+              const den = d00 * d11 - d01 * d01;
+              const v = (d11 * d20 - d01 * d21) / den, u2 = (d00 * d21 - d01 * d20) / den;
+              if (v < 0 || u2 < 0 || v + u2 > 1) continue;
+              if (-d > worst) worst = -d;
+            }
+            if (worst > 0) depths.push(worst);
+          }
+        }
+        depths.sort((x, y) => x - y);
+        const gap = com(eng, 2)[2] - com(eng, 1)[2];
+        res[caps ? 'caps' : 'none'] = { n: depths.length, p95: depths.length ? depths[Math.floor(0.95 * (depths.length - 1))]! : 0, gap };
+        for (let i = 0; i < s.nodeCount; i++) expect(Number.isFinite(s.posX[i]!)).toBe(true);
+      } finally {
+        setDeriveCaps(true);
+      }
+    }
+    console.log(
+      `[fidelity] high, sedan 50 km/h into a parked traffic sedan's rear: striking-car node samples inside the struck car (caps surface) — without caps ${res.none!.n} (95th ${(100 * res.none!.p95).toFixed(1)} cm), with caps ${res.caps!.n} (95th ${(100 * res.caps!.p95).toFixed(1)} cm); COM gap at the end ${res.none!.gap.toFixed(2)} / ${res.caps!.gap.toFixed(2)} m`,
+    );
+    // the cars met (A ends up within a car length of B, momentum shared)
+    expect(Math.abs(res.caps!.gap)).toBeLessThan(4.5);
+    expect(res.caps!.n).toBeLessThanOrEqual(res.none!.n);
   }, 300_000);
 });

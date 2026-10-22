@@ -145,8 +145,8 @@ const assetCache = new Map<string, Promise<PlayerAssets>>();
  * physics quality; rejects for unbuilt entries. 'high' / 'ultra' resolve
  * R-RIG's variant (`loadVehicleVariant`: its own lazy chunk, falling back to
  * the next lower tier) with the visual re-pointed at its sheets
- * (`vehicleVisualSync`, lazy too); the variant's skin collision triangles
- * become the def's `body.triangles` (R-CORE format) unless it declares some.
+ * (`vehicleVisualSync`, lazy too). Collision triangles: the engine's derived
+ * surface (R-CORE), not the variant's skin-only `collision` list.
  */
 export function loadPlayerAssets(entry: VehicleCatalogEntry, quality: PhysicsQuality = 'standard'): Promise<PlayerAssets> {
   const key = `${entry.id}|${quality}`;
@@ -171,11 +171,10 @@ async function loadAt(entry: VehicleCatalogEntry, quality: PhysicsQuality): Prom
   const v = await loadVehicleVariant(entry.id, quality, standard);
   if (v.quality === 'standard') return assets(base.sim, base.visual, 'standard');
   const { vehicleVisualSync } = await import('../render/vehicle/defs/hd/index');
-  let def = v.def;
-  if (v.collision && v.collision.length > 0 && !def.body.triangles) {
-    def = { ...def, body: { ...def.body, triangles: v.collision.map((t) => ({ a: t.a, b: t.b, c: t.c })) } };
-  }
-  return assets(def, vehicleVisualSync(entry.id as Parameters<typeof vehicleVisualSync>[0], v.quality), v.quality);
+  // Collision surface: the engine derives it from the HD rig (beam surfaces of the skins and structure plus
+  // end / underbody caps). R-RIG's `collision` list covers the outer sheets only (from inside the cabin, rays
+  // escape through 47–100 % of directions: no underbody, bumpers or glass), so it is not declared.
+  return assets(v.def, vehicleVisualSync(entry.id as Parameters<typeof vehicleVisualSync>[0], v.quality), v.quality);
 }
 
 // ------------------------------------------------------------ live player visual
