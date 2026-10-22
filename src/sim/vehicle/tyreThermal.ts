@@ -31,7 +31,12 @@
  * area A_leak) bleeds mass through an orifice, choked while p_abs > 1.89·p_atm:
  *   ṁ = C_d·A·p_abs·√(γ/(R·T))·(2/(γ+1))^((γ+1)/(2(γ−1))) = 0.0404·C_d·A·p_abs/√T (air, SI)
  * else subsonic ṁ = C_d·A·√(2·ρ·Δp). C_d = 0.6.
- * COMPOUND WINDOW: μ factor of the tread temperature T_t = 0.6·T_s + 0.4·T_c,
+ * COMPOUND WINDOW: μ factor of the BULK tread temperature T_t = 0.3·T_s + 0.7·T_c
+ * (the temperature a pyrometer reads in the tread after a run, which is what
+ * compound windows are quoted against; the 0.7 mm skin flashes to 150 °C+
+ * within a second of sliding and cools as fast — its effect on μ is the
+ * sliding fall-off, f_slip in tyre.ts — so a short slide does not fade the
+ * tyre, a sustained one does as the carcass heats),
  * 1 inside [T_lo, T_hi], falling parabolically outside (cold: 1 − c·((T_lo −
  * T)/40 K)², hot: 1 − h·((T − T_hi)/60 K)²), floored at 0.6. Road compounds
  * work from 20 °C (summer tyres are designed for cold starts: ≈ 5 % less grip
@@ -271,7 +276,7 @@ export function inflationRatio(p: TyreThermalParams, s: TyreThermalState): numbe
 
 /** Tread temperature that sets the compound's grip, °C. */
 export function treadTemp(s: TyreThermalState): number {
-  return 0.6 * s.tSurf + 0.4 * s.tCarc;
+  return 0.3 * s.tSurf + 0.7 * s.tCarc;
 }
 
 /** Tyre geometry and construction a WheelDef gives (spawn-time builder input). */

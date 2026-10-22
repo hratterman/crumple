@@ -245,7 +245,7 @@ export function wheelNodeId(wheelId: string, part: WheelNodePart, k?: number): s
  */
 export const WHEEL_BEAMS_PER_RAY = 22;
 export const WHEEL_RAYS_MIN = 10;
-export const WHEEL_RAYS_MAX = 14;
+export const WHEEL_RAYS_MAX = 16;
 
 // ====================================================================== drivetrain
 export type DiffType = 'open' | 'locked' | 'limited';
@@ -673,14 +673,16 @@ export interface WheelRuntime {
    * R-TYRE combined slip (wheels.ts applyTreadBrush; additive, optional, 0 when
    * absent): the patch's longitudinal friction utilisation Σ|F_lon|/Σ μ_x·N
    * and its sliding fraction (load-weighted share of tread nodes whose stick
-   * slid), both from the last ground pass, low-passed over 10 ms.
+   * slid), both from the last ground pass, low-passed over 40 ms.
    */
   patchLon?: number;
   patchSlide?: number;
-  /** R-TYRE: the contact nodes' mean longitudinal sliding speed, m/s (load-weighted, low-passed 10 ms). */
+  /** R-TYRE: the contact nodes' mean longitudinal sliding speed, m/s (load-weighted, low-passed 40 ms). */
   patchUx?: number;
   /** R-TYRE: lateral carcass deflection at the patch, m (along the brush axis; wheels.ts applyTreadBrush). */
   carcassY?: number;
+  /** R-TYRE: carcassY low-passed over one tread-node passage (the base a touching-down bristle anchors under). */
+  carcassYbar?: number;
   /**
    * R-TYRE: the patch's lateral brush force (N, signed along the axle) and the
    * sum of its longitudinal friction magnitudes (N) of the last tick

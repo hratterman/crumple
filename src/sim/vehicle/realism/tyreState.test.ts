@@ -10,9 +10,14 @@
  *  [FMVSS138] TPMS: warn at 25 % below the cold placard pressure.
  *  [TIRE]  Tyre makers: a sudden deflation pulls the car toward the flat
  *          corner and the flat wheel drags (C_rr of a flat ≈ 0.1–0.3).
+ *  [KERB]  Tyre makers' impact-damage guidance: rolling over a kerb at
+ *          walking pace is harmless; hitting a square kerb at town speed
+ *          pinches the tyre against the rim (sidewall cut / bent rim: air
+ *          loss).
  */
 import { describe, expect, it } from 'vitest';
 import { MaterialId } from '../../../protocol/messages';
+import type { ColliderDef } from '../../../world/types';
 import { createWheelFrame, WHEEL_FLAG_FLAT, WHEEL_FLAG_TPMS } from '../../../protocol/wheels';
 import { hashSimState } from '../../replay/hash';
 import { SEDAN } from '../defs/sedan';
@@ -148,5 +153,36 @@ describe('tyre state on the car (sedan)', () => {
     const a = go(true);
     expect(go(true)).toBe(a);
     expect(go(false)).not.toBe(a);
+  }, 120_000);
+
+  it('kerb strike: a 15 cm square kerb at 8 km/h is harmless; at 45 km/h the front tyres bottom on their rims and lose air [KERB]', () => {
+    const hit = (kmh: number): { leak: number[]; strike: number } => {
+      const sim = settled();
+      const k = kinematics(sim);
+      // a kerb across the path 4 m ahead of the car's centre (box half extents: 3 m wide, 7.5 cm tall, 15 cm deep)
+      const yaw = Math.atan2(k.fx, k.fz);
+      const kerb: ColliderDef = {
+        id: 'kerb',
+        kind: 'box',
+        pos: [k.cx + 4 * k.fx, 0.075, k.cz + 4 * k.fz],
+        quat: [0, Math.sin(yaw / 2), 0, Math.cos(yaw / 2)],
+        size: [3, 0.075, 0.15],
+        material: MaterialId.concrete,
+      };
+      sim.eng.setExtraColliders([kerb]);
+      setMotion(sim, kmh / 3.6);
+      sim.eng.setInput(1, { throttle: 0, brake: 0, steer: 0 });
+      let strike = 0;
+      for (let i = 0; i < 1.5 * HZ; i++) {
+        sim.eng.step();
+        for (const t of ex(sim).tyres) if (t.rimStrike > strike) strike = t.rimStrike;
+      }
+      return { leak: ex(sim).tyres.map((t) => t.thermal.leakArea), strike };
+    };
+    const slow = hit(8);
+    expect(slow.leak.every((a) => a === 0)).toBe(true);
+    const fast = hit(45);
+    expect(fast.strike).toBeGreaterThan(1.5);
+    expect(fast.leak[0]! > 0 || fast.leak[1]! > 0).toBe(true);
   }, 120_000);
 });

@@ -535,10 +535,10 @@ export const applyWheelTorques: ApplyWheelTorques = (state, w, driveTorque, brak
  *         ρ = the patch's longitudinal friction utilisation Σ|F_lon|/Σμ_x N and
  *         λ its sliding fraction (load share of nodes whose stick slid) from
  *         the last ground pass (state.treadFl, negative = slid), low-passed
- *         10 ms; d_y = (μ_y|u| + V0)/(|(μ_y u, μ_x u_x)| + V0) the lateral part
+ *         40 ms; d_y = (μ_y|u| + V0)/(|(μ_y u, μ_x u_x)| + V0) the lateral part
  *         of the sliding direction (anisotropic Coulomb: a sliding node's force
  *         opposes its slip velocity on the ellipse), u_x = the contact nodes'
- *         mean longitudinal sliding speed (load-weighted, 10 ms), V0 = 0.5 m/s. A patch in
+ *         mean longitudinal sliding speed (load-weighted, 40 ms), V0 = 0.5 m/s. A patch in
  *         adhesion keeps what the longitudinal force leaves of the ellipse
  *         (drive slip at speed costs no side force until the tyre nears its
  *         limit); a sliding one splits along its slip (locked / spinning
@@ -549,7 +549,12 @@ export const applyWheelTorques: ApplyWheelTorques = (state, w, driveTorque, brak
  * Pacejka 2012 §3.4 / §7: massless base, so e follows the force at once).
  * Each bristle deflects by d_j + e (d_j = the hub's lateral travel since the
  * node touched down) and a node touching down anchors under the displaced
- * base (d_j starts at −e: unloaded). Steady cornering is unchanged; a change
+ * base (d_j starts at −ē: unloaded), ē = e low-passed over one node passage
+ * (spacing / speed): e jumps each time a loaded node leaves the patch, and
+ * entries correlate with exits at a phase set by the patch length, so
+ * anchoring under the instantaneous e made the steady C_α depend on how
+ * many nodes fit the patch (bench: C_α(Fz) non-monotonic, −30…+40 %).
+ * Steady cornering is unchanged; a change
  * of slip builds up over the RELAXATION LENGTH σ_α ≈ C_α/C_y, a distance as on
  * real tyres, where the rigid-carcass brush built its force within one patch
  * length plus a time lag (bench: 0.12 m at 5 m/s, 0.28 m at 30 m/s; passenger
@@ -581,8 +586,8 @@ export const applyWheelTorques: ApplyWheelTorques = (state, w, driveTorque, brak
 const TREAD_NODE_DAMP = 0.1;
 /** Minimum attach-node height above the wheel centre (m) for the ball-joint load path. */
 const ATTACH_MIN_HEIGHT = 0.05;
-/** Per-tick low-pass of the patch statistics, dt/(τ + dt) with τ = 10 ms at dt = 1/2000 (see applyTreadBrush). */
-const PATCH_ALPHA = 1 / 21;
+/** Per-tick low-pass of the patch statistics, dt/(τ + dt) with τ = 40 ms at dt = 1/2000 (see applyTreadBrush). WHY 40 ms: at 10 ms the brush cap followed the ABS cycle so closely that it pumped the pickup's solid rear axle into braking hop (rear wheels airborne and locked at 1 s into a 100–0 stop). */
+const PATCH_ALPHA = 1 / 81;
 /** Brush scratch per tread node (pre-pass → main pass): lateral slip speed, μN. Grown on demand (spawn sizes). */
 let brushU = new Float64Array(64);
 let brushMuN = new Float64Array(64);
@@ -593,6 +598,8 @@ export function reserveBrushScratch(n: number): void {
     brushMuN = new Float64Array(n);
   }
 }
+/** 2π (the node passage time of the carcass base filter, applyTreadBrush). */
+const TWO_PI_DIV = 6.283185307179586;
 /** Combined-slip blend speed, m/s (see applyTreadBrush). */
 const BRUSH_SHARE_V0 = 0.5;
 
@@ -719,7 +726,7 @@ export function applyTreadBrush(state: SimState, w: WheelRuntime, dt: number): v
   // the doc: the ellipse left by the patch's longitudinal friction, or the lateral part of the sliding direction,
   // whichever is larger), kept in brushU / treadBrush[3j + 1].
   const cy0 = w.carcassK ?? 0;
-  const ePrev = cy0 > 0 ? (w.carcassY ?? 0) : 0;
+  const ePrev = cy0 > 0 ? (w.carcassYbar ?? 0) : 0;
   let nCont = 0;
   for (let j = 0; j < n; j++) {
     const j3 = 3 * j;
@@ -867,7 +874,17 @@ export function applyTreadBrush(state: SimState, w: WheelRuntime, dt: number): v
     frcZ[i] = frcZ[i]! - cn * wl * az;
   }
   // the carcass deflection that carries the brush force applied this tick (caps included)
-  if (cy0 > 0) w.carcassY = pN > 0 ? Fb / cy0 : 0;
+  if (cy0 > 0) {
+    const e = pN > 0 ? Fb / cy0 : 0;
+    w.carcassY = e;
+    // ē: low-passed over one node passage (spacing / speed, 2–50 ms; see the CARCASS doc)
+    let vs = vcx * fhx + vcz * fhz;
+    if (vs < 0) vs = -vs;
+    let tau = (w.wheel.tireRingRadius * TWO_PI_DIV) / (w.wheel.rays * (vs > 0.1 ? vs : 0.1));
+    tau = tau < 0.002 ? 0.002 : tau > 0.05 ? 0.05 : tau;
+    const eb = w.carcassYbar ?? 0;
+    w.carcassYbar = eb + (e - eb) * (dt / (tau + dt));
+  }
   w.patchFy = Fb;
   w.patchFx = pLon;
   w.patchLon = lonU + ((pMu > 0 ? pLon / pMu : 0) - lonU) * PATCH_ALPHA;

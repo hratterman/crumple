@@ -1,7 +1,7 @@
 /**
  * SEDAN high-density variants (R-RIG; docs/CONTRACTS.md "R-RIG"): the
  * standard SEDAN as the backbone (ids, hardpoints, suspension, drivetrain,
- * shell zones unchanged) with every exterior panel rebuilt as a sheet-metal
+ * shell zones unchanged; the wheels as R-TYRE's high-resolution tyre) with every exterior panel rebuilt as a sheet-metal
  * skin sampled from the render body (skins/sedan.<tier>.ts) at the tier's
  * pitch, fastened by its real seam (spot-weld / hem / bolts / clips), and the
  * mass redistributed so total and CG match the standard car.
@@ -13,6 +13,7 @@
 import { refineVehicle, type RefinedVehicle } from '../../../rig/gen/refine';
 import type { SkinPanelData, SkinSet, SkinSpec } from '../../../rig/gen/types';
 import type { CrashProbes } from '../../crash';
+import { hiResWheels, HIRES_ROLL_DELTA_205_55R16 } from '../../tyreHiRes';
 import { SEDAN } from '../sedan';
 import { SKINS as HIGH } from './skins/sedan.high';
 import { SKINS as ULTRA } from './skins/sedan.ultra';
@@ -53,7 +54,9 @@ const cache = new Map<HdTier, RefinedVehicle>();
 export function sedanHD(tier: HdTier): RefinedVehicle {
   let r = cache.get(tier);
   if (!r) {
-    r = refineVehicle(SEDAN, { name: `sedan.${tier}`, skins: SKINS[tier], skinSpec: sedanSkinSpec });
+    // R-TYRE: the high-resolution tyre (16 rays, carcass compliance: tyreHiRes.ts) on both HD tiers
+    const base = { ...SEDAN, wheels: hiResWheels(SEDAN.wheels, { rollDelta: HIRES_ROLL_DELTA_205_55R16 }) };
+    r = refineVehicle(base, { name: `sedan.${tier}`, skins: SKINS[tier], skinSpec: sedanSkinSpec });
     cache.set(tier, r);
   }
   return r;

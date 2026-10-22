@@ -368,7 +368,9 @@ export const applyGroundContacts: ApplyGroundContacts = (
         let latCap = (remL > 0 ? L * Math.sqrt(remL) : 0) - fb;
         if (latCap < 0) latCap = 0;
         const rlc = rl > latCap ? latCap : rl < -latCap ? -latCap : rl;
-        state.treadFl[i] = slid ? -ol : ol;
+        // slid with nothing left (the brush took the whole ellipse): still report the slide (−0 would read as
+        // adhesion, the brush kept its full cap and a locked wheel could never spin up again: pickup rear axle)
+        state.treadFl[i] = slid ? (ol > 1e-9 ? -ol : -1e-9) : ol;
         rx = rlc * lx + ox;
         ry = rlc * ly + oy;
         rz = rlc * lz + oz;

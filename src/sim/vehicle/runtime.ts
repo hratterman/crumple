@@ -169,6 +169,7 @@ function makeWheel(vehicle: CompiledVehicle, index: number): WheelRuntime {
     caliperInboard: cw.caliperInboard ?? 0.5,
     latMu: cw.tyre?.lateralMu ?? 1,
     carcassY: 0,
+    carcassYbar: 0,
     carcassK: cw.tyre?.lateralStiffness ?? 0,
     wheel: cw,
     hubI: cw.hubI,
@@ -300,6 +301,7 @@ export function resetVehicleRuntime(vehicle: VehicleRuntime): void {
     w.patchSlide = 0;
     w.patchUx = 0;
     w.carcassY = 0;
+    w.carcassYbar = 0;
   }
   resetDrivetrainState(vehicle.drivetrain as DrivetrainStateEx, vehicle.vehicle.drivetrain);
   const bs = (vehicle as VehicleRuntimeEx).brakeSys;
@@ -846,5 +848,6 @@ export function recoverVehicle(
     w.patchSlide = 0;
     w.patchUx = 0;
     w.carcassY = 0;
+    w.carcassYbar = 0;
   }
 }

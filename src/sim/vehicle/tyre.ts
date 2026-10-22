@@ -144,6 +144,15 @@ const SIDE_FIRST = 12;
 const SIDE_COUNT = 8;
 const BEAMS_PER_RAY = 22;
 
+/**
+ * Feature switches of the R-TYRE state (harness / A-B diagnostics only; the
+ * game never changes them, and a run must not toggle them mid-way: they are
+ * not part of the replayed state). Each off = that factor stays at its
+ * nominal value (μ factor 1, no pressure-driven carcass / rolling change,
+ * no rim damage).
+ */
+export const TYRE_FEATURES = { thermalGrip: true, inflation: true, rimDamage: true, wear: true };
+
 // ------------------------------------------------------------ environment (module state, set by the engine)
 /** Surface water and weather the tyres see (engine `setSurfaceWetness`, a logged command). */
 export const tyreEnv = { wetness: 0, rain: 0, ambient: T_REF };
@@ -338,9 +347,13 @@ export const LEAK_AREA = {
 } as const;
 /**
  * RIM STRIKES: a rim node in contact means the tyre has bottomed out (the rim
- * sits ≈ 10 cm inside the tread on a car tyre); the hub's approach speed
- * toward that contact (the contact normal of a circle passes through its
- * centre) grades the damage. A corner mass of ≈ 400 kg on a ≈ 200 kN/m tyre
+ * sits ≈ 10 cm inside the tread on a car tyre); its approach speed grades
+ * the damage: the HUB's approach speed (the tyre's compression rate; a rim
+ * node's own velocity carries the spin) — on the ground along the ground
+ * normal at the node (a flat rolling on its rim, or a rim grazing the road
+ * at speed, reads ≈ 0; a pothole's far edge reads the hub's speed into it),
+ * on a collider (kerb face or edge) toward the node (a round rim's contact
+ * normal passes near its centre). A corner mass of ≈ 400 kg on a ≈ 200 kN/m tyre
  * bottoms its 8 cm at ≈ 1.8 m/s; a kerb or a sharp pothole edge hit at
  * 30–50 km/h meets the rim at ≈ 3–6 m/s. Graded (m/s): a bent flange / nicked
  * bead (slow leak, the classic kerb-strike leak), a pinch cut / sidewall
@@ -354,6 +367,8 @@ export const LEAK_AREA = {
  * a flat debeads, a half-inflated tyre needs ≈ 1.1·Fz0 of side force.
  */
 export const RIM_STRIKE = { slow: 1.5, fast: 3.5, debead: 7 } as const;
+/** A rim node this close above the ground (beyond its radius, m) is on the ground, not a collider. */
+export const RIM_GROUND_SLOP = 0.01;
 export const BEAD_FROM = 0.5;
 export const BEAD_HOLD0 = 0.45;
 export const BEAD_HOLD_P = 1.3;
@@ -454,6 +469,7 @@ export function fillWheelFrame(state: SimState, w: WheelRuntime, t: TyreState, o
 }
 
 // ------------------------------------------------------------ module scratch
+const nrm = new Float64Array(3);
 const heat: TyreHeatInputs = { slipPower: 0, rollPower: 0, speed: 0, contact: 0, discTemp: T_REF, ambient: T_REF, road: T_REF };
 
 /**
@@ -533,7 +549,7 @@ export function stepTyre(
   // ---- thermal / inflation / wear
   const th = t.thermal;
   const p0 = t.thermalP.p0;
-  let pr = th.pressure / p0;
+  let pr = TYRE_FEATURES.inflation ? th.pressure / p0 : 1;
   if (pr < 0) pr = 0;
   // rolling-resistance factor of the inflation, (p/p0)^−0.375 = 1/√(√x·√(√x)) (x clamped ≥ 0.25: a flat rides on the rim)
   const xr = pr > 0.25 ? pr : 0.25;
@@ -560,6 +576,7 @@ export function stepTyre(
     pr = th.pressure / p0;
     if (pr < 0) pr = 0;
   }
+  if (!TYRE_FEATURES.inflation) pr = 1;
   // ---- tyre damage (see the RIM STRIKES doc): the rim bottoming on the ground or a collider (last tick's contact
   // flags), and the bead unseating under side load at low pressure
   {
@@ -570,24 +587,37 @@ export function stepTyre(
     const cxh = (posX[hi]! + posX[ho]!) * 0.5;
     const cyh = (posY[hi]! + posY[ho]!) * 0.5;
     const czh = (posZ[hi]! + posZ[ho]!) * 0.5;
+    const rad = state.radius;
     for (let i = r0; i < r0 + rn; i++) {
       if ((fl[i]! & NODE_FLAG_IN_CONTACT) === 0) continue;
-      const dx = posX[i]! - cxh;
-      const dy = posY[i]! - cyh;
-      const dz = posZ[i]! - czh;
-      const dl = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      if (!(dl > 1e-6)) continue;
-      // the contact normal of a circle passes through its centre: the hub's speed toward the contact
-      const v = (vx * dx + vy * dy + vz * dz) / dl;
+      const x = posX[i]!;
+      const z = posZ[i]!;
+      let v: number;
+      if (sampler !== null && posY[i]! - sampler.heightAt(x, z) < rad[i]! + RIM_GROUND_SLOP) {
+        // on the ground: the hub's approach speed along the ground normal (the tyre's compression rate; a rim node's
+        // own velocity carries the spin — ω·r_rim·sin θ downward just ahead of the bottom, 14 m/s at 260 km/h)
+        sampler.normalAt(x, z, nrm);
+        v = -(vx * nrm[0]! + vy * nrm[1]! + vz * nrm[2]!);
+      } else {
+        // on a collider (a kerb face, an edge): its contact normal through a round rim passes near the centre —
+        // the hub's speed toward the node (the rim's spin is tangential)
+        const dx = x - cxh;
+        const dy = posY[i]! - cyh;
+        const dz = z - czh;
+        const dl = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (!(dl > 1e-6)) continue;
+        v = (vx * dx + vy * dy + vz * dz) / dl;
+      }
       if (v > vn) vn = v;
     }
     t.rimStrike = vn;
+    if (!TYRE_FEATURES.rimDamage) vn = 0;
     if (vn > RIM_STRIKE.debead) punctureTyre(t, 'debead');
     else if (vn > RIM_STRIKE.fast) punctureTyre(t, 'fast');
     else if (vn > RIM_STRIKE.slow) punctureTyre(t, 'slow');
     const fyP = w.patchFy ?? 0;
     t.beadFy += ((fyP < 0 ? -fyP : fyP) - t.beadFy) * (dt / (BEAD_TAU + dt));
-    if (!t.debeaded && pr < BEAD_FROM && t.beadFy > t.fz0 * (BEAD_HOLD0 + BEAD_HOLD_P * pr)) punctureTyre(t, 'debead');
+    if (TYRE_FEATURES.rimDamage && !t.debeaded && pr < BEAD_FROM && t.beadFy > t.fz0 * (BEAD_HOLD0 + BEAD_HOLD_P * pr)) punctureTyre(t, 'debead');
   }
   // carcass: vertical (sidewall beams) and lateral stiffness follow the inflation
   let kc = CARCASS_STRUCT + (1 - CARCASS_STRUCT) * pr;
@@ -646,10 +676,10 @@ export function stepTyre(
       x = x < 0 ? 0 : x > 1 ? 1 : x;
       fs = 1 - (1 - t.slideRatio) * x * x * (3 - 2 * x);
     }
-    const fT = compoundFactor(t.thermalP.compound, treadTemp(th));
+    const fT = TYRE_FEATURES.thermalGrip ? compoundFactor(t.thermalP.compound, treadTemp(th)) : 1;
     let fp = 1 - PRESSURE_GRIP * (pr - 1);
     fp = fp < 0.95 ? 0.95 : fp > 1.08 ? 1.08 : fp;
-    const fw = 1 + WEAR_DRY_GAIN * (worn > 0 ? worn : 0);
+    const fw = TYRE_FEATURES.wear ? 1 + WEAR_DRY_GAIN * (worn > 0 ? worn : 0) : 1;
     let fwet = 1;
     let lift = 0;
     let wd = 0;
