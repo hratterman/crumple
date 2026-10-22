@@ -66,7 +66,8 @@ export const COUPE_TARGETS = {
     circleR40G: 1.05,
     stepSteerOvershoot: 1.35,
     topSpeed: { lowKmh: 250, highKmh: 260, straightFromKmh: 245 },
-    frontal50: { crush: [0.35, 0.6], crushMax: 0.7, intrusion: 0.08, springback: 0.25, rebound: [1, 4] },
+    // rebound m/s: R-CRASH 5–15 % of the 13.9 m/s impact (real cars; the old [1, 4] was 7–29 %)
+    frontal50: { crush: [0.35, 0.6], crushMax: 0.7, intrusion: 0.08, springback: 0.25, rebound: [0.69, 2.08] },
     frontal30: { crush: [0.15, 0.3], intrusion: 0.03, springback: 0.25 },
     frontal10: { crush: 0.03, plastic: 0.05 },
     pole30: { door: [0.2, 0.4] },
@@ -161,10 +162,10 @@ const SHELL_BUDGET_PER_KG = (SHELL_OMEGA_DT_TARGET / DT) ** 2;
  */
 const REAR_BAY_FACTOR = 10;
 const CLASSES = {
-  bumper: { w: 1.0, zeta: 0.4, yieldStrain: 0.025, minDeform: 1.5e3, breakRatio: 5 },
+  bumper: { w: 1.0, zeta: 0.4, yieldStrain: 0.04, minDeform: 1.5e3, breakRatio: 5 },
   /** Crash cans (station 1 and its links to the radiator support): strain-yield, see COUPE CRASH TUNING. */
-  can: { w: 1.0, zeta: 0.55, yieldStrain: 0.025, minDeform: 3e3, breakRatio: 6 },
-  crash: { w: 1.0, zeta: 0.55, yieldStrain: 0.018, minDeform: 6e3, breakRatio: 6 },
+  can: { w: 1.0, zeta: 0.55, yieldStrain: 0.04, minDeform: 3e3, breakRatio: 6 },
+  crash: { w: 1.0, zeta: 0.55, yieldStrain: 0.0234, minDeform: 6e3, breakRatio: 6 },
   bay: { w: 1.0, zeta: 0.55, yieldStrain: 0.015, minDeform: 6e3, breakRatio: 6 },
   cage: { w: 1.3, zeta: 0.3, yieldStrain: 0.1, minDeform: 1.6e4, breakRatio: 5 },
   /** Brittle: elastic, shatters at GLASS_BREAK_STRAIN. */
@@ -280,7 +281,8 @@ const FIREWALL_PANEL = /^s5_fw_/;
 const DOOR_NODES = /^s6_(dm|bt|sl|fl)_/;
 const isDoor = (a: string, b: string): boolean => DOOR_NODES.test(a) || DOOR_NODES.test(b);
 /** Bumper beam ↔ crash-can links: brittle relative to their yield, so a hard hit tears the bumper off. */
-const BUMPER_MOUNT_BREAK_RATIO = 3;
+// R-CRASH 3 → 1.9: the bumper yield strain went 0.025 → 0.04 (30 km/h crush at the 8 MN/m wall); the mounts keep their break FORCE.
+const BUMPER_MOUNT_BREAK_RATIO = 1.9;
 const BUMPER_STATION = new RegExp(`^s(0|${REAR_BUMPER})_`);
 const isBumperMount = (a: string, b: string): boolean => BUMPER_STATION.test(a) !== BUMPER_STATION.test(b);
 /** Load-path members that change tag across a gap ([gap, front tag, rear tag]): longitudinal share. */

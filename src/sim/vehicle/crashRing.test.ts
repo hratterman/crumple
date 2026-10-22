@@ -5,9 +5,10 @@
  * Before this pass the crushed front swung for 0.5–2 s after the impact (50 km/h sedan: ±2 cm at ~4 Hz to
  * 0.6 s; 100 km/h sedan / traffic: 3–5 cm still at 0.5 s): the released crumple zone and cell were a loose
  * beam mechanism until the 1 s calm recapture. The post-impact set (shellDefs RECAPTURE_IMPACT_*) re-sets
- * the shell in its crushed shape once the impact is over. The rebound bounds are no-regression limits
- * measured at the same time (the 5–15 % real-car range is met by the pickup, beater and box truck; the
- * sedans and the coupe still rebound 21–23 %, see CONTRACTS "Crash settling" and PLAN).
+ * the shell in its crushed shape once the impact is over.
+ * R-CRASH: every vehicle's wall rebound lies in the real-car band, 5–15 % of the impact speed, at 50 and
+ * 100 km/h (before: sedan 21 / 23 %, coupe 21 / 22 %, traffic 21 / 15 %; beams.ts crush unloading +
+ * colliders.ts hysteretic contact, CONTRACTS "R-CRASH").
  */
 import { describe, expect, it } from 'vitest';
 import { crushSettle, runCrash, SEDAN_CRASH_PROBES, type CrashProbes } from './crash';
@@ -25,7 +26,7 @@ interface Case {
   probes: CrashProbes;
   /** Max |crush − final| from 0.5 s after the peak, m, at 50 / 100 km/h. */
   ring: [number, number];
-  /** Max rebound / impact speed at 50 / 100 km/h. */
+  /** Rebound / impact speed band, both speeds. */
   rebound: [number, number];
 }
 
@@ -38,19 +39,23 @@ const CASES: Case[] = [
   // (the same build with linear dampers: 15.8 / 9.6 / 8.2 / 25.1 / 7.1): the 100 km/h value is noise around ≈ 10 cm,
   // so its limit only catches a crush that never settles (> 22 cm). Limits widened to the measured spread (see
   // CONTRACTS "R-PHYS ↔ R-CRASH").
-  { name: 'sedan', def: SEDAN, probes: SEDAN_CRASH_PROBES, ring: [0.01, 0.22], rebound: [0.23, 0.25] },
-  { name: 'coupe', def: COUPE, probes: COUPE_CRASH_PROBES, ring: [0.013, 0.025], rebound: [0.23, 0.24] },
-  { name: 'pickup', def: PICKUP, probes: PICKUP_CRASH_PROBES as CrashProbes, ring: [0.01, 0.025], rebound: [0.13, 0.1] },
-  { name: 'beater', def: BEATER, probes: BEATER_CRASH_PROBES, ring: [0.02, 0.045], rebound: [0.15, 0.1] },
-  { name: 'traffic sedan', def: SEDAN_TRAFFIC, probes: SEDAN_TRAFFIC_CRASH_PROBES, ring: [0.01, 0.025], rebound: [0.23, 0.17] },
+  { name: 'sedan', def: SEDAN, probes: SEDAN_CRASH_PROBES, ring: [0.01, 0.22], rebound: [0.05, 0.15] },
+  { name: 'coupe', def: COUPE, probes: COUPE_CRASH_PROBES, ring: [0.013, 0.025], rebound: [0.05, 0.15] },
+  { name: 'pickup', def: PICKUP, probes: PICKUP_CRASH_PROBES as CrashProbes, ring: [0.01, 0.025], rebound: [0.05, 0.15] },
+  // ring 50 km/h 2 → 3.5 cm (R-CRASH): chaotic in the impact speed like the sedan's above — with R-PHYS's tyres the
+  // paper beater at 47 / 48.5 / 50 / 51.5 / 53 km/h rings 1.9 / 1.1 / 2.6 / 3.2 / 0.9 cm 0.5 s after the peak
+  { name: 'beater', def: BEATER, probes: BEATER_CRASH_PROBES, ring: [0.035, 0.045], rebound: [0.05, 0.15] },
+  { name: 'traffic sedan', def: SEDAN_TRAFFIC, probes: SEDAN_TRAFFIC_CRASH_PROBES, ring: [0.01, 0.025], rebound: [0.05, 0.15] },
+  // ring 50 km/h 2 → 3 cm (R-CRASH): with the 8 MN/m wall contact the frame horns no longer sink 10 cm into the wall, so the box's late
+  // shunt on its mounts moves the measured crush 2.4 cm 0.5 s after the peak (box truck frame / mounts: R-PHYS).
   // R-PHYS: the truck's 100 km/h ring is chaotic too (the cab lands on wheels spinning at road speed): 97 / 98.5 /
   // 100 / 101.5 / 103 km/h read 2.4 / 2.8 / 3.8 / 3.0 / 7.6 cm with the recalibrated rolling-loss tables.
-  { name: 'box truck', def: BOXTRUCK, probes: BOXTRUCK_CRASH_PROBES as unknown as CrashProbes, ring: [0.02, 0.08], rebound: [0.17, 0.07] },
+  { name: 'box truck', def: BOXTRUCK, probes: BOXTRUCK_CRASH_PROBES as unknown as CrashProbes, ring: [0.03, 0.08], rebound: [0.05, 0.15] },
 ];
 
 describe('post-crash settling (rigid wall frontal)', () => {
   for (const c of CASES) {
-    it(`${c.name}: 50 and 100 km/h — the crush stops moving within 0.5 s of its peak, rebound does not regress`, () => {
+    it(`${c.name}: 50 and 100 km/h — the crush stops moving within 0.5 s of its peak, rebound 5–15 %`, () => {
       const lines: string[] = [];
       const checks: (() => void)[] = [];
       ([50, 100] as const).forEach((v, k) => {
@@ -65,7 +70,8 @@ describe('post-crash settling (rigid wall frontal)', () => {
         );
         checks.push(() => expect(r.finite).toBe(true));
         checks.push(() => expect(ring).toBeLessThan(c.ring[k]!));
-        checks.push(() => expect(reb).toBeLessThan(c.rebound[k]!));
+        checks.push(() => expect(reb).toBeGreaterThanOrEqual(c.rebound[0]));
+        checks.push(() => expect(reb).toBeLessThanOrEqual(c.rebound[1]));
       });
       console.log(`[settle] ${c.name}\n  ${lines.join("\n  ")}`);
       for (const ch of checks) ch();

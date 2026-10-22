@@ -76,6 +76,20 @@ export const NODE_FLAG_IN_CONTACT = 1 << 1;
 export const NODE_FLAG_TREAD = 1 << 2;
 /** P5: node-vs-node contact participant (= RIG_NODE_FLAG_OBJ_CONTACT; collision/objects.ts). */
 export const NODE_FLAG_OBJ_CONTACT = 1 << 3;
+/**
+ * R-CRASH: the node touched ANOTHER OBJECT's node this tick (set by collision/objects.ts, cleared the next
+ * tick). Kept apart from NODE_FLAG_IN_CONTACT (ground / static contact: tyres, telemetry, parking clamp);
+ * the shell's contact release (shell.ts CONTACT_RELEASE) honours both, so a car pushed by another car
+ * releases its crumple zone instead of being carried along rigid.
+ */
+export const NODE_FLAG_OBJ_TOUCH = 1 << 4;
+/**
+ * R-CRASH: …and was struck by it at ≥ OBJ_IMPACT_RELEASE_SPEED (collision/objects.ts) this tick. A crumple
+ * zone (shell whole + yield tier) with such a node releases whole: a car pushed by another car moves as a
+ * rigid block otherwise (the shell's implicit damper spreads the contact impulse over the whole body and
+ * the node never leaves its 4 mm yield bond), so a 50 km/h rear-end crushed the struck rear 1 cm.
+ */
+export const NODE_FLAG_OBJ_IMPACT = 1 << 5;
 
 /** SimObject.flags bits (same value as protocol OBJECT_FLAG_SLEEPING). */
 export const SIM_OBJECT_FLAG_SLEEPING = 1 << 0;
@@ -160,6 +174,15 @@ export interface SimState {
    * written by applyBeamForces only when debugStrains.
    */
   strainOut: Float32Array;
+  /**
+   * R-CRASH crush unloading (beams.ts CRUSH_UNLOAD_HOLD): per beam the unloading gain α − 1 (0 = off;
+   * > 0 permanent, < 0 temporary offset), the trigger force (N), the ticks left in the crash-loaded
+   * window and the temporary rest-length offset (m). Loaded from CompiledRig.beamUnload / beamUnloadTrig.
+   */
+  unloadGain: Float32Array;
+  unloadTrig: Float32Array;
+  crushHold: Int32Array;
+  hystOff: Float64Array;
 }
 
 // ============================================================ objects
@@ -230,6 +253,8 @@ export type ApplyBeamForces = (
   count: number,
   events: EventSink,
   debugStrains: boolean,
+  /** R-CRASH: the object is in a crash, crush unloading may arm (beams.ts CRUSH_UNLOAD_HOLD). Default false. */
+  crashArmed?: boolean,
 ) => void;
 
 /**

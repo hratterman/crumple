@@ -3,6 +3,7 @@
  * step. Worker-only. Commands (spawn/despawn/reset/input/ground) must be
  * called between steps; step() itself is allocation-free.
  */
+import { shellCrashArmed } from './vehicle/shell';
 import type { Vec3 } from '../core/math';
 import { createRng, type Rng } from '../core/rng';
 import type { SnapshotWriter } from '../protocol/codec';
@@ -1058,7 +1059,7 @@ export class SimEngine {
         const travel = obj.hydroTravel;
         for (let h = 0; h < hb.length; h++) restLen[hb[h]!] = base[h]! * (1 + travel[h]! * steer);
       }
-      kern.beams(obj.beamStart, obj.beamCount, sink, dbg);
+      kern.beams(obj.beamStart, obj.beamCount, sink, dbg, veh ? shellCrashArmed(veh.shell) : false);
       const prop = pslots[o];
       if (prop) {
         const anchored = prop.anchorBeams.length > 0 && propAnchored(s, prop, obj.beamStart, sink);

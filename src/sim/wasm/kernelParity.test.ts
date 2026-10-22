@@ -73,6 +73,10 @@ function fillBlob(s: SimState, seed: number): void {
     s.boundsHigh[b] = rng.range(0.05, 0.2);
     s.preload[b] = s.type[b] === BeamType.shock ? rng.range(0, 200) : 0;
     s.active[b] = rng.float() < 0.03 ? 0 : 1;
+    // R-CRASH crush unloading: permanent (gain > 0), temporary (< 0) and off, some never triggered
+    const g = rng.float();
+    s.unloadGain[b] = g < 0.35 ? rng.range(1, 60) : g < 0.7 ? -rng.range(1, 60) : 0;
+    s.unloadTrig[b] = rng.float() < 0.15 ? Infinity : rng.range(0.1, 0.6) * (Number.isFinite(s.deform[b]!) ? s.deform[b]! : k * rest * 0.1);
   }
 }
 
@@ -91,14 +95,16 @@ function expectSameState(ref: SimState, got: SimState, where: string): void {
     expect(at, `${where}: ${key}[${at}] ${ref[key][at]} vs ${got[key][at]}`).toBe(-1);
   }
   expect(sameBits(ref.strainOut, got.strainOut, BEAMS), `${where}: strainOut`).toBe(-1);
+  expect(sameBits(ref.hystOff, got.hystOff, BEAMS), `${where}: hystOff`).toBe(-1);
+  for (let b = 0; b < BEAMS; b++) if (ref.crushHold[b] !== got.crushHold[b]) expect.fail(`${where}: crushHold[${b}]`);
   for (let b = 0; b < BEAMS; b++) if (ref.active[b] !== got.active[b]) expect.fail(`${where}: active[${b}]`);
 }
 
-function stepBlob(k: SimKernel, ev: EventSink, dbg: boolean, steps: number): void {
+function stepBlob(k: SimKernel, ev: EventSink, dbg: boolean, steps: number, armed: boolean): void {
   for (let i = 0; i < steps; i++) {
     // Two "objects" so ranges with odd starts / lengths hit the SIMD tail.
-    k.beams(0, 451, ev, dbg);
-    k.beams(451, BEAMS - 451, ev, dbg);
+    k.beams(0, 451, ev, dbg, armed);
+    k.beams(451, BEAMS - 451, ev, dbg, armed);
     k.integrate(0, 77, 1 / 2000, 0, -9.81, 0);
     k.integrate(77, NODES - 77, 1 / 2000, 0, -9.81, 0);
   }
@@ -116,8 +122,9 @@ describe('wasm kernel parity (bit-identical to the JS kernel)', () => {
         const evGot = new BreakLog();
         for (let w = 0; w < 30; w++) {
           const dbg = w % 3 !== 1;
-          stepBlob(ref, evRef, dbg, 100);
-          stepBlob(got, evGot, dbg, 100);
+          const armed = w % 4 < 2;
+          stepBlob(ref, evRef, dbg, 100, armed);
+          stepBlob(got, evGot, dbg, 100, armed);
           expectSameState(ref.state, got.state, `seed ${seed} window ${w}`);
         }
         expect(evGot.log).toEqual(evRef.log);
@@ -126,6 +133,10 @@ describe('wasm kernel parity (bit-identical to the JS kernel)', () => {
         for (let b = 0; b < BEAMS; b++) if (ref.state.restLen[b] !== ref.state.restLen0[b] && ref.state.type[b] !== BeamType.hydro) plastic++;
         expect(evRef.log.length / 4).toBeGreaterThan(20);
         expect(plastic).toBeGreaterThan(50);
+        // …and the crush unloading (holds started, offsets taken)
+        let held = 0;
+        for (let b = 0; b < BEAMS; b++) if (ref.state.hystOff[b] !== 0 || ref.state.crushHold[b] !== 0) held++;
+        expect(held).toBeGreaterThan(0);
       }
     });
   }

@@ -378,6 +378,13 @@ export interface VehicleDef {
    */
   shell?: ShellDef | readonly ShellDef[] | false;
   /**
+   * R-CRASH (additive, optional): unloading stiffness multiple α of the body's crush-yielded members
+   * (beams.ts CRUSH_UNLOAD_*). Default CRUSH_UNLOAD_DEFAULT; 1 = off (plain elastic unloading).
+   */
+  crushUnload?: number;
+  /** R-CRASH: the same for HELD / never-yielding members (temporary offset). Default crushUnload; 1 = off. */
+  crushUnloadHeld?: number;
+  /**
    * R-PHYS (additive, optional): asymmetric digressive dampers on the shock
    * beams (dampers.ts), per axle; a shock beam belongs to the axle of the
    * wheel whose hub is nearest. Omitted: linear symmetric d·v (pre-R-PHYS).

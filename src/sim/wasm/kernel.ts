@@ -7,7 +7,20 @@
  * [0, KERNEL_RESERVED) stack + kernel statics, then the SimState arrays
  * (16-byte aligned, order of createSimState) and the break list.
  */
-import { BOUND_STIFFNESS_RAMP, PLASTIC_COMPRESS_FLOOR, PLASTIC_K_FLOOR, PLASTIC_RATCHET, PLASTIC_REVERSE_FACTOR, PLASTIC_WEAKEN, BEAM_MIN_DIST } from '../beams';
+import {
+  BOUND_STIFFNESS_RAMP,
+  PLASTIC_COMPRESS_FLOOR,
+  PLASTIC_K_FLOOR,
+  PLASTIC_RATCHET,
+  PLASTIC_REVERSE_FACTOR,
+  PLASTIC_WEAKEN,
+  BEAM_MIN_DIST,
+  CRUSH_HELD_HOLD,
+  CRUSH_HYST_DT,
+  CRUSH_RELAX_KEEP,
+  CRUSH_RELAX_KEEP_CRUMPLE,
+  CRUSH_UNLOAD_HOLD,
+} from '../beams';
 import type { KernelFactory, KernelKind, SimKernel } from '../kernel';
 import { createSimState, simStateBytes, type StateAllocator } from '../state';
 import type { EventSink, SimState } from '../types';
@@ -23,7 +36,8 @@ interface KernelExports {
   ptr_table(): number;
   bind_state(): void;
   set_params(boundRamp: number, ratchet: number, compressFloor: number, weaken: number, reverse: number, kFloor: number, minDist: number): void;
-  beams(first: number, count: number, dbg: number): number;
+  set_crash_params(hystDt: number, relaxKeep: number, relaxKeepCrumple: number, unloadHold: number, heldHold: number): void;
+  beams(first: number, count: number, dbg: number, armed: number): number;
   integrate(first: number, count: number, dt: number, gx: number, gy: number, gz: number): void;
   shell(header: number, dt: number, gx: number, gy: number, gz: number): number;
   __heap_base: WebAssembly.Global;
@@ -123,7 +137,7 @@ function moduleFor(kind: 'wasm' | 'simd'): WebAssembly.Module {
 }
 
 /** Number of u32 entries in kernel.c's pointer table (enum order below). */
-const STATE_PTRS = 27;
+const STATE_PTRS = 31;
 
 function createWasmKernel(kind: 'wasm' | 'simd', nodeCapacity: number, beamCapacity: number): SimKernel {
   const auxBytes = 96 * nodeCapacity + (256 << 10);
@@ -156,11 +170,13 @@ function createWasmKernel(kind: 'wasm' | 'simd', nodeCapacity: number, beamCapac
     state.aIdx, state.bIdx, state.k, state.d, state.restLen, state.restLen0, state.k0, state.deform, state.breakF,
     state.boundsLow, state.boundsHigh, state.preload, state.type, state.active, state.strainOut, breakList,
     state.flags,
+    state.unloadGain, state.unloadTrig, state.crushHold, state.hystOff,
   ];
   if (ptrs.length !== STATE_PTRS) throw new Error('kernel pointer table mismatch');
   for (let i = 0; i < ptrs.length; i++) table[i] = ptrs[i]!.byteOffset;
   ex.bind_state();
   ex.set_params(BOUND_STIFFNESS_RAMP, PLASTIC_RATCHET, PLASTIC_COMPRESS_FLOOR, PLASTIC_WEAKEN, PLASTIC_REVERSE_FACTOR, PLASTIC_K_FLOOR, BEAM_MIN_DIST);
+  ex.set_crash_params(CRUSH_HYST_DT, CRUSH_RELAX_KEEP, CRUSH_RELAX_KEEP_CRUMPLE, CRUSH_UNLOAD_HOLD, CRUSH_HELD_HOLD);
   const wBeams = ex.beams;
   const wIntegrate = ex.integrate;
   const wShell = ex.shell;
@@ -229,8 +245,8 @@ function createWasmKernel(kind: 'wasm' | 'simd', nodeCapacity: number, beamCapac
   return {
     kind,
     state,
-    beams(first: number, count: number, events: EventSink, dbg: boolean): void {
-      const n = wBeams(first, count, dbg ? 1 : 0);
+    beams(first: number, count: number, events: EventSink, dbg: boolean, armed?: boolean): void {
+      const n = wBeams(first, count, dbg ? 1 : 0, armed ? 1 : 0);
       for (let i = 0; i < n; i++) {
         const b = breakList[i]!;
         const ia = state.aIdx[b]!;

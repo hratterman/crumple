@@ -32,7 +32,7 @@ export const JS_ALLOCATOR: StateAllocator = {
 /** Bytes a SimState of this capacity needs (allocators that pre-size, 16-byte aligned arrays). */
 export function simStateBytes(nodeCapacity: number, beamCapacity: number): number {
   const al = (b: number): number => (b + 15) & ~15;
-  return 18 * al(8 * nodeCapacity) + al(nodeCapacity) + 12 * al(8 * beamCapacity) + 2 * al(4 * beamCapacity) + 2 * al(beamCapacity) + al(4 * beamCapacity);
+  return 18 * al(8 * nodeCapacity) + al(nodeCapacity) + 13 * al(8 * beamCapacity) + 4 * al(4 * beamCapacity) + 2 * al(beamCapacity) + 2 * al(4 * beamCapacity);
 }
 
 export function createSimState(nodeCapacity: number, beamCapacity: number, alloc: StateAllocator = JS_ALLOCATOR): SimState {
@@ -78,11 +78,16 @@ export function createSimState(nodeCapacity: number, beamCapacity: number, alloc
     type: alloc.u8(m),
     active: alloc.u8(m),
     strainOut: alloc.f32(m),
+    // R-CRASH crush unloading (beams.ts CRUSH_UNLOAD_HOLD; mirrored by kernel.c)
+    unloadGain: alloc.f32(m),
+    unloadTrig: alloc.f32(m),
+    crushHold: alloc.i32(m),
+    hystOff: alloc.f64(m),
   };
 }
 
 type NodeArray = Float64Array | Uint8Array;
-type BeamArray = Float64Array | Float32Array | Int32Array | Uint8Array;
+type BeamArray = Float64Array | Float32Array | Int32Array | Uint8Array | Uint16Array;
 
 function nodeArrays(s: SimState): NodeArray[] {
   return [
@@ -94,7 +99,7 @@ function nodeArrays(s: SimState): NodeArray[] {
 function beamArrays(s: SimState): BeamArray[] {
   return [
     s.aIdx, s.bIdx, s.k, s.d, s.restLen, s.restLen0, s.k0, s.deform, s.breakF,
-    s.boundsLow, s.boundsHigh, s.preload, s.type, s.active, s.strainOut,
+    s.boundsLow, s.boundsHigh, s.preload, s.type, s.active, s.strainOut, s.unloadGain, s.unloadTrig, s.crushHold, s.hystOff,
   ];
 }
 
@@ -197,6 +202,10 @@ export function loadRigBeams(state: SimState, obj: SimObject, rig: CompiledRig):
     state.type[g] = rig.beamType[i]!;
     state.active[g] = 1;
     state.strainOut[g] = 0;
+    state.unloadGain[g] = rig.beamUnload ? rig.beamUnload[i]! : 0;
+    state.unloadTrig[g] = rig.beamUnloadTrig ? rig.beamUnloadTrig[i]! : Infinity;
+    state.crushHold[g] = 0;
+    state.hystOff[g] = 0;
   }
 }
 

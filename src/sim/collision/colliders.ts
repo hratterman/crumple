@@ -184,9 +184,46 @@ function memoryFor(state: SimState): Uint8Array {
   return m;
 }
 
+/** Per node: deepest (capped) penetration of the current contact, m (CONTACT_UNLOAD). */
+const depthMemory = new WeakMap<SimState, Float64Array>();
+function depthMaxFor(state: SimState): Float64Array {
+  let m = depthMemory.get(state);
+  if (m === undefined || m.length < state.nodeCapacity) {
+    const next = new Float64Array(state.nodeCapacity);
+    if (m !== undefined) next.set(m);
+    m = next;
+    depthMemory.set(state, m);
+  }
+  return m;
+}
+/**
+ * R-CRASH hysteretic contact (Walton–Braun): the penalty spring loads at kc and UNLOADS at
+ * kc / CONTACT_UNLOAD_E2 from the deepest point of the contact, F = (kc/e²)·(d − d0), d0 = d_max·(1 − e²)
+ * (continuous at d_max, zero at d0; reloading follows the unloading line back up to d_max, then kc).
+ * WHY: a rigid barrier stores no energy, but the stability-capped penalty holds ½·F²/kc per node: a
+ * 50 km/h frontal pressed the engine and the suspension pivots 4–5 cm into the wall (at the old 2 MN/m
+ * cap) and the contact springs gave back 1.3–2.4 kJ of the rebound (coupe: 2.4 of its 3.6 kJ rebound
+ * KE). e² = 0.05 (contact restitution ≈ 0.22) dissipates ~95 % of that store; at rest (no unloading)
+ * the law is the plain penalty.
+ */
+export const CONTACT_UNLOAD_E2 = 0.05;
+/**
+ * …and the remembered deepest point relaxes toward the current depth with this time constant, s: a rigid
+ * barrier keeps no indentation, so a node left at rest inside the unloading line (zero force at 95 % of its
+ * deepest penetration) is eased back out instead of staying embedded in the wall.
+ */
+export const CONTACT_UNLOAD_RELAX_S = 0.2;
+/**
+ * The unloading stiffness never exceeds this × m/dt² (ω·dt = 1, half the explicit-Euler bound): for a light
+ * node already at the 0.2·m/dt² stability cap, kc/e² would sit at ω·dt = 2 and ring (the effective e² is
+ * then kc / this ≥ 0.2: a node of ≤ 10 kg keeps ≥ 80 % of the dissipation).
+ */
+export const CONTACT_UNLOAD_STAB = 1.0;
+
 /** Clears collider contact memory for nodes [first, first+count) (spawn/reset/despawn re-pack). */
 export function resetColliderContactState(state: SimState, first: number, count: number): void {
   memoryFor(state).fill(0, first, first + count);
+  depthMaxFor(state).fill(0, first, first + count);
 }
 
 // ------------------------------------------------------------------ narrow phase
@@ -506,14 +543,19 @@ export const applyColliderContacts: ApplyColliderContacts = (state, first, count
     // Nothing near: only forget last tick's contacts.
     const mem = memoryFor(state);
     mem.fill(0, first, end);
+    depthMaxFor(state).fill(0, first, end);
     return;
   }
 
   // ---- narrow phase + contact law
   const mem = memoryFor(state);
+  const dmax = depthMaxFor(state);
+  const ie2 = 1 / CONTACT_UNLOAD_E2;
+  const relax = dt / CONTACT_UNLOAD_RELAX_S;
   const cooldown = cooldownsFor(state);
   const matFriction = materials.friction;
   const invDt = 1 / dt;
+  const kuStab = CONTACT_UNLOAD_STAB * invDt * invDt;
   const kcStab = KC_STABILITY * invDt * invDt;
   const P = C.pos;
   const R = C.rot;
@@ -527,6 +569,7 @@ export const applyColliderContacts: ApplyColliderContacts = (state, first, count
     const im = invMass[i]!;
     if ((f0 & NODE_FLAG_COLLIDABLE) === 0 || im === 0) {
       mem[i] = 0;
+      dmax[i] = 0;
       continue;
     }
     const x = posX[i]!;
@@ -596,7 +639,20 @@ export const applyColliderContacts: ApplyColliderContacts = (state, first, count
       const kc = kcm < COLLIDER_KC_MAX ? kcm : COLLIDER_KC_MAX;
       const cd = 2 * CONTACT_ZETA * Math.sqrt(kc * m);
       const vn = vx * nx + vy * ny + vz * nz;
-      let fn = kc * (depth < DEPTH_CAP ? depth : DEPTH_CAP) - cd * vn;
+      const dc = depth < DEPTH_CAP ? depth : DEPTH_CAP;
+      const dm = dmax[i]!;
+      let fs = kc * dc;
+      if (dc >= dm) dmax[i] = dc;
+      else {
+        // unloading / reloading below the deepest point: steep line through d0 = dm·(1 − kc/ku)
+        let ku = kc * ie2;
+        const kum = kuStab * m;
+        if (ku > kum) ku = kum;
+        const fu = kc * dm - ku * (dm - dc);
+        fs = fu < 0 ? 0 : fu;
+        dmax[i] = dm - (dm - dc) * relax;
+      }
+      let fn = fs - cd * vn;
       if (fn < 0) fn = 0;
       let fx = fn * nx;
       let fy = fn * ny;
@@ -649,5 +705,6 @@ export const applyColliderContacts: ApplyColliderContacts = (state, first, count
     }
     mem[i] = touched;
     if (touched !== 0) flags[i] = flags[i]! | NODE_FLAG_IN_CONTACT;
+    else dmax[i] = 0;
   }
 };

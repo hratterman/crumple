@@ -43,6 +43,10 @@ static float *strainOut;
 /* Beams broken by the last beams() call, in discovery order (JS emits the events). */
 static int32_t *breakList;
 static uint8_t *nodeFlags;
+/* R-CRASH crush unloading (beams.ts CRUSH_UNLOAD_HOLD): per-beam gain α − 1, trigger, hold ticks + permanent bit, offset. */
+static float *unloadGain, *unloadTrig;
+static int32_t *crushHold;
+static f64 *hystOff;
 
 /* Pointer table layout (u32 byte offsets), shared with src/sim/wasm/kernel.ts STATE_PTRS. */
 enum {
@@ -50,6 +54,7 @@ enum {
   P_AIDX, P_BIDX, P_K, P_D, P_RESTLEN, P_RESTLEN0, P_K0, P_DEFORM, P_BREAKF,
   P_BOUNDSLOW, P_BOUNDSHIGH, P_PRELOAD, P_TYPE, P_ACTIVE, P_STRAINOUT, P_BREAKLIST,
   P_FLAGS,
+  P_UNLOADGAIN, P_UNLOADTRIG, P_CRUSHHOLD, P_HYSTOFF,
   P_COUNT
 };
 
@@ -85,6 +90,10 @@ EXPORT(bind_state) void bind_state(void) {
   strainOut = (float *)ptrTable[P_STRAINOUT];
   breakList = (int32_t *)ptrTable[P_BREAKLIST];
   nodeFlags = (uint8_t *)ptrTable[P_FLAGS];
+  unloadGain = (float *)ptrTable[P_UNLOADGAIN];
+  unloadTrig = (float *)ptrTable[P_UNLOADTRIG];
+  crushHold = (int32_t *)ptrTable[P_CRUSHHOLD];
+  hystOff = (f64 *)ptrTable[P_HYSTOFF];
 }
 
 /* ------------------------------------------------------------ parameters (from beams.ts) */
@@ -101,6 +110,19 @@ void set_params(f64 boundRamp, f64 ratchet, f64 compressFloor, f64 weaken, f64 r
   MIN_DIST = minDist;
 }
 
+/* R-CRASH crush unloading constants (beams.ts, passed by set_crash_params). */
+static f64 HYST_DT, RELAX_KEEP, RELAX_KEEP_CRUMPLE;
+static int32_t UNLOAD_HOLD, HELD_HOLD;
+
+EXPORT(set_crash_params)
+void set_crash_params(f64 hystDt, f64 relaxKeep, f64 relaxKeepCrumple, int32_t unloadHold, int32_t heldHold) {
+  HYST_DT = hystDt;
+  RELAX_KEEP = relaxKeep;
+  RELAX_KEEP_CRUMPLE = relaxKeepCrumple;
+  UNLOAD_HOLD = unloadHold;
+  HELD_HOLD = heldHold;
+}
+
 #define T_BOUNDED 1
 #define T_SUPPORT 2
 #define T_SHOCK 4
@@ -110,7 +132,7 @@ void set_params(f64 boundRamp, f64 ratchet, f64 compressFloor, f64 weaken, f64 r
  * One beam, exactly applyBeamForces' loop body. Returns 1 when the beam
  * broke (caller appends it to breakList).
  */
-static inline int beam_scalar(int b, int dbg) {
+static inline int beam_scalar(int b, int dbg, int armed) {
   if (activeArr[b] == 0) return 0;
   const int32_t ia = aIdx[b];
   const int32_t ib = bIdx[b];
@@ -124,7 +146,37 @@ static inline int beam_scalar(int b, int dbg) {
   }
   const f64 inv = 1.0 / dist;
   const f64 kb = kArr[b];
-  const f64 rest = restLen[b];
+  f64 rest = restLen[b];
+  const f64 gain = (f64)unloadGain[b];
+  if (gain != 0) {
+    /* crush unloading (beams.ts CRUSH_UNLOAD_HOLD); rest = the EFFECTIVE rest length below */
+    f64 off = hystOff[b];
+    const int32_t hold = crushHold[b];
+    if (hold != 0) {
+      const int32_t ticks = (hold & 0x7fff) - 1;
+      crushHold[b] = ticks > 0 ? (hold & 0x8000) | ticks : 0;
+      const f64 re = rest + off;
+      const f64 vr = ((velX[ib] - velX[ia]) * dx + (velY[ib] - velY[ia]) * dy + (velZ[ib] - velZ[ia]) * dz) * inv;
+      if ((dist < re && vr > 0) || (dist > re && vr < 0)) {
+        f64 r = re - (gain < 0 ? -gain : gain) * vr * HYST_DT;
+        if (vr > 0 ? r < dist : r > dist) r = dist;
+        const f64 floor = COMPRESS_FLOOR * restLen0[b];
+        if (r < floor) r = floor < re ? floor : re;
+        if ((hold & 0x8000) != 0) {
+          rest = r - off;
+          restLen[b] = rest;
+        } else {
+          off = r - rest;
+          hystOff[b] = off;
+        }
+      }
+    } else if (off != 0) {
+      off = off * (gain > 0 ? RELAX_KEEP_CRUMPLE : RELAX_KEEP);
+      if (off < 1e-7 && off > -1e-7) off = 0;
+      hystOff[b] = off;
+    }
+    rest += off;
+  }
   const f64 stretch = dist - rest;
   const int t = typeArr[b];
 
@@ -148,6 +200,12 @@ static inline int beam_scalar(int b, int dbg) {
 
   const f64 fAbs = fs < 0 ? -fs : fs;
   const f64 bf = breakFArr[b];
+  if (armed && gain != 0 && fAbs > (f64)unloadTrig[b]) {
+    /* crash loaded: a crumple member that yielded unloads plastically */
+    const int perm = gain > 0 && restLen[b] != restLen0[b];
+    const int32_t cur = crushHold[b];
+    crushHold[b] = perm || (cur & 0x8000) != 0 ? 0x8000 | UNLOAD_HOLD : HELD_HOLD;
+  }
   if (fAbs > bf && !(fs < 0 && rest <= COMPRESS_FLOOR * restLen0[b])) {
     activeArr[b] = 0;
     strainOut[b] = __builtin_nanf("");
@@ -167,6 +225,8 @@ static inline int beam_scalar(int b, int dbg) {
         const f64 r = rest - RATCHET * excess;
         restLen[b] = r > floor ? r : floor < rest ? floor : rest;
       }
+      /* a yielding member's temporary crush offset becomes part of its (plastic) rest length */
+      if (gain != 0) hystOff[b] = 0;
       const f64 kFloor = K_FLOOR * k0Arr[b];
       const f64 kNew = kb * WEAKEN;
       kArr[b] = kNew > kFloor ? kNew : kFloor;
@@ -200,11 +260,13 @@ static inline int beam_scalar(int b, int dbg) {
  * both beams run the scalar path (nothing was written yet). Returns a
  * bitmask: bit 0 = beam b broke, bit 1 = beam b + 1 broke.
  */
-static inline int beam_pair(int b, int dbg) {
+static inline int beam_pair(int b, int dbg, int armed) {
   const int b1 = b + 1;
-  if ((activeArr[b] & activeArr[b1]) == 0 || (typeArr[b] | typeArr[b1]) != 0) {
-    const int r0 = beam_scalar(b, dbg);
-    return r0 | (beam_scalar(b1, dbg) << 1);
+  /* crush unloading in flight (a hold or an offset) runs the scalar path */
+  if ((activeArr[b] & activeArr[b1]) == 0 || (typeArr[b] | typeArr[b1]) != 0 || (crushHold[b] | crushHold[b1]) != 0 ||
+      hystOff[b] != 0 || hystOff[b1] != 0) {
+    const int r0 = beam_scalar(b, dbg, armed);
+    return r0 | (beam_scalar(b1, dbg, armed) << 1);
   }
   const int32_t ia0 = aIdx[b], ia1 = aIdx[b1];
   const int32_t ib0 = bIdx[b], ib1 = bIdx[b1];
@@ -221,9 +283,12 @@ static inline int beam_pair(int b, int dbg) {
   const v128_t rare = wasm_v128_or(
       wasm_v128_or(wasm_f64x2_lt(dist, wasm_f64x2_splat(MIN_DIST)), wasm_f64x2_gt(fAbs, bf)),
       wasm_f64x2_gt(fAbs, wasm_v128_load(deformArr + b)));
-  if (wasm_v128_any_true(rare)) {
-    const int r0 = beam_scalar(b, dbg);
-    return r0 | (beam_scalar(b1, dbg) << 1);
+  /* a crash trigger (armed, gain ≠ 0, |F| past the trigger) starts a hold: scalar path */
+  const int trig = armed && ((unloadGain[b] != 0 && wasm_f64x2_extract_lane(fAbs, 0) > (f64)unloadTrig[b]) ||
+                             (unloadGain[b1] != 0 && wasm_f64x2_extract_lane(fAbs, 1) > (f64)unloadTrig[b1]));
+  if (wasm_v128_any_true(rare) || trig) {
+    const int r0 = beam_scalar(b, dbg, armed);
+    return r0 | (beam_scalar(b1, dbg, armed) << 1);
   }
   const v128_t inv = wasm_f64x2_div(wasm_f64x2_splat(1.0), dist);
   const v128_t dvx = wasm_f64x2_sub(wasm_f64x2_make(velX[ib0], velX[ib1]), wasm_f64x2_make(velX[ia0], velX[ia1]));
@@ -264,13 +329,13 @@ static inline int beam_pair(int b, int dbg) {
  * applyBeamForces over beams [first, first + count). Returns the number of
  * beams broken; their indices are breakList[0..n) in discovery order.
  */
-EXPORT(beams) int beams(int first, int count, int dbg) {
+EXPORT(beams) int beams(int first, int count, int dbg, int armed) {
   const int end = first + count;
   int nb = 0;
   int b = first;
 #ifdef CRUMPLE_SIMD
   for (; b + 1 < end; b += 2) {
-    const int r = beam_pair(b, dbg);
+    const int r = beam_pair(b, dbg, armed);
     if (r != 0) {
       if (r & 1) breakList[nb++] = b;
       if (r & 2) breakList[nb++] = b + 1;
@@ -278,7 +343,7 @@ EXPORT(beams) int beams(int first, int count, int dbg) {
   }
 #endif
   for (; b < end; b++) {
-    if (beam_scalar(b, dbg)) breakList[nb++] = b;
+    if (beam_scalar(b, dbg, armed)) breakList[nb++] = b;
   }
   return nb;
 }
@@ -324,6 +389,8 @@ enum {
 };
 
 #define NODE_FLAG_IN_CONTACT 2
+#define NODE_FLAG_OBJ_TOUCH 16
+#define NODE_FLAG_OBJ_IMPACT 32
 #define POLAR_ITERS 12
 
 /* polar3 of shell.ts: rotation factor by scaled Newton iteration; 0 when det ≤ 1e-30. */
@@ -491,7 +558,9 @@ EXPORT(shell) int shell(f64 *H, f64 dt, f64 gx, f64 gy, f64 gz) {
       w[q] = 0;
       if (wq == 1) releasedInc++;
       newRelease = 1;
-    } else if (yields[tq] != 0 && u2 <= vlo * vlo && ((nodeFlags[i] & NODE_FLAG_IN_CONTACT) == 0 || e2 <= cr * cr)) {
+    } else if (yields[tq] != 0 && u2 <= vlo * vlo && ((nodeFlags[i] & (NODE_FLAG_IN_CONTACT | NODE_FLAG_OBJ_TOUCH)) == 0 || e2 <= cr * cr) &&
+               /* R-CRASH: a crumple-zone node struck by another object releases its zone */
+               !((nodeFlags[i] & NODE_FLAG_OBJ_IMPACT) != 0 && whole[tq] != 0)) {
       if (e2 > lo * lo) {
         const f64 f = 1 - lo / __builtin_sqrt(e2);
         const f64 fx = ex * f, fy = ey * f, fz = ez * f;
@@ -499,8 +568,11 @@ EXPORT(shell) int shell(f64 *H, f64 dt, f64 gx, f64 gy, f64 gz) {
         rest[3 * q + 1] += r1 * fx + r4 * fy + r7 * fz;
         rest[3 * q + 2] += r2 * fx + r5 * fy + r8 * fz;
       }
-    } else if (e2 > lo * lo || u2 > vlo * vlo) {
+    } else if (e2 > lo * lo || u2 > vlo * vlo || ((nodeFlags[i] & NODE_FLAG_OBJ_IMPACT) != 0 && whole[tq] != 0)) {
       f64 t = e2 > lo * lo && yields[tq] == 0 ? (rel[ro + 1] - __builtin_sqrt(e2)) / (rel[ro + 1] - lo) : 1;
+      /* R-CRASH: pressed into a contact past CONTACT_RELEASE, or struck by another object (whole tiers): let go now */
+      const uint8_t fl = nodeFlags[i];
+      if (yields[tq] != 0 && ((((fl & (NODE_FLAG_IN_CONTACT | NODE_FLAG_OBJ_TOUCH)) != 0) && e2 > cr * cr) || ((fl & NODE_FLAG_OBJ_IMPACT) != 0 && whole[tq] != 0))) t = 0;
       if (u2 > vlo * vlo) {
         const f64 tv = (rel[ro + 3] - __builtin_sqrt(u2)) / (rel[ro + 3] - vlo);
         if (tv < t) t = tv;

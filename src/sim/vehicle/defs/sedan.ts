@@ -112,9 +112,16 @@ const SHELL_BUDGET_PER_KG = (SHELL_OMEGA_DT_TARGET / DT) ** 2;
  * spring-back 26.5 % → 24 %, crush 45 → 48 cm).
  */
 const REAR_BAY_FACTOR = 8;
+/**
+ * R-CRASH: the rear crumple zone (gaps s10 → s11 → s12, non-cage) yields at this multiple of its class
+ * strain. At 1× a 50 km/h rear-end by another sedan folded the trunk 70 cm (to the rear axle) while the
+ * striker's nose crushed 21 cm; real car-to-car rear impacts crush the struck rear ≈ 30–45 cm. At 6×:
+ * struck rear 45 cm, striker 17 cm (crashPair rear-end, 50 km/h into a parked sedan).
+ */
+const REAR_ZONE_FACTOR = 6;
 const CLASSES = {
-  bumper: { w: 1.0, zeta: 0.4, yieldStrain: 0.025, minDeform: 1.5e3, breakRatio: 5 },
-  crash: { w: 1.0, zeta: 0.4, yieldStrain: 0.018, minDeform: 3e3, breakRatio: 6 },
+  bumper: { w: 1.0, zeta: 0.4, yieldStrain: 0.029, minDeform: 1.5e3, breakRatio: 5 },
+  crash: { w: 1.0, zeta: 0.4, yieldStrain: 0.021, minDeform: 3e3, breakRatio: 6 },
   bay: { w: 1.0, zeta: 0.4, yieldStrain: 0.015, minDeform: 4e3, breakRatio: 6 },
   cage: { w: 1.3, zeta: 0.3, yieldStrain: 0.1, minDeform: 1.6e4, breakRatio: 5 },
   /** Brittle: elastic, shatters at GLASS_BREAK_STRAIN (yieldStrain/breakRatio unused). */
@@ -1339,7 +1346,8 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
     if (section === 0 && isCabinSpan(a, b)) section = CABIN_SPAN_YIELD_STRAIN * k * dist(a, b);
     const rearBay = (g === 3 || g === 4 || (g < 0 && (stationOf.get(a) === 4 || stationOf.get(b) === 4) && stationOf.get(a) === stationOf.get(b))) && cls !== 'cage';
     const base = section > 0 ? section : spec.yieldStrain * k * dist(a, b);
-    const deform = sig3(Math.max(rearBay ? base * REAR_BAY_FACTOR : base, spec.minDeform));
+    const rearZone = (g === 10 || g === 11) && cls !== 'cage';
+    const deform = sig3(Math.max(rearBay ? base * REAR_BAY_FACTOR : rearZone ? base * REAR_ZONE_FACTOR : base, spec.minDeform));
     const mount = isBumperMount(a, b);
     return { a, b, type: 'normal', k, d, deform, breakF: sig3((mount ? BUMPER_MOUNT_BREAK_RATIO : spec.breakRatio) * deform) };
   });

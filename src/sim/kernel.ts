@@ -24,8 +24,8 @@ export type KernelKind = 'js' | 'wasm' | 'simd';
 export interface SimKernel {
   readonly kind: KernelKind;
   readonly state: SimState;
-  /** applyBeamForces over beams [first, first + count) (events in discovery order). */
-  beams(first: number, count: number, events: EventSink, debugStrains: boolean): void;
+  /** applyBeamForces over beams [first, first + count) (events in discovery order; crashArmed: R-CRASH crush unloading). */
+  beams(first: number, count: number, events: EventSink, debugStrains: boolean, crashArmed?: boolean): void;
   /** integrateNodes over nodes [first, first + count). */
   integrate(first: number, count: number, dt: number, gx: number, gy: number, gz: number): void;
   /** applyShell (vehicle/shell.ts) for one cluster runtime. */
@@ -46,7 +46,7 @@ export const JS_KERNEL: KernelFactory = {
     return {
       kind: 'js',
       state,
-      beams: (first, count, events, dbg) => applyBeamForces(state, first, count, events, dbg),
+      beams: (first, count, events, dbg, armed) => applyBeamForces(state, first, count, events, dbg, armed ?? false),
       integrate: (first, count, dt, gx, gy, gz) => integrateNodes(state, first, count, dt, gx, gy, gz),
       shell: (rt, dt, gx, gy, gz) => applyShell(state, rt, dt, gx, gy, gz),
       releaseShell: () => {},

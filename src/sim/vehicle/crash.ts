@@ -21,7 +21,7 @@
 import { MaterialId } from '../../protocol/messages';
 import type { ColliderDef } from '../../world/types';
 import { SimEngine, SIM_HZ } from '../engine';
-import type { SimObject } from '../types';
+import { NODE_FLAG_COLLIDABLE, type SimObject } from '../types';
 import { SEDAN } from './defs/sedan';
 import { setMotion, type HandlingSim } from './handling';
 import type { CompiledVehicle, VehicleDef, VehicleRuntime } from './types';
@@ -128,7 +128,7 @@ export interface CrashResult {
   bumperBrokenFraction: number;
   /** Fraction of windscreen glass beams (s5_cw* ↔ s6_rf*) broken. */
   windscreenBrokenFraction: number;
-  /** Pole: every node stayed on the impact side of the pole axis (else the first offender). */
+  /** Pole: no node was pulled through the pole (its centre never inside the pole; else the first offender). */
   poleSideKept: boolean;
   poleViolator: string;
   /** Node id of maxSpeedLate. */
@@ -155,8 +155,13 @@ const SETTLE_S = 0.5;
 /** Gap between the vehicle and the barrier at release, m. */
 const GAP = 0.03;
 const POLE_RADIUS = 0.15;
-/** Pole pull-through check: nodes within this distance (along the car) of the pole axis, i.e. inside its footprint (r 0.15 + node radius); nodes farther away may wrap past the axis plane. */
-const POLE_NEAR = 0.2;
+/**
+ * Pole pull-through check (R-CRASH): a collidable node counts as pulled through when its CENTRE gets inside
+ * the pole's cross-section (it penetrated deeper than its own contact radius: at ≤ 4 mm per tick nothing
+ * crosses a 30 cm pole without passing that). Wrapping round the pole is not pull-through: the first check
+ * (centre past the axis plane within 0.2 m, then within the pole radius) flagged the A-pillar base / hinge
+ * pillar of a car wrapped ~150° round the pole, 24–29 cm from the axis (coupe at 30 km/h, pen 1.8 cm).
+ */
 
 interface Sim extends HandlingSim {
   eng: SimEngine;
@@ -329,8 +334,9 @@ export function runCrash(spec: CrashSpec): CrashResult {
     ke0 += 0.5 * m * (s.velX[i]! ** 2 + s.velY[i]! ** 2 + s.velZ[i]! ** 2);
   }
 
-  /** Penetration of node i into the barrier (> 0 = inside the contact shell). */
+  /** Penetration of node i into the barrier (> 0 = inside the contact shell); non-collidable (virtual) nodes never touch it. */
   const penetration = (i: number): number => {
+    if ((s.flags[n0 + i]! & NODE_FLAG_COLLIDABLE) === 0) return -Infinity;
     const p = P(i);
     const r = s.radius[n0 + i]!;
     if (spec.kind === 'pole') {
@@ -338,8 +344,13 @@ export function runCrash(spec: CrashSpec): CrashResult {
       const dz = p[2] - barrier.pos[2];
       return r + POLE_RADIUS - Math.hypot(dx, dz);
     }
-    const inX = spec.kind === 'frontal' || p[0] <= barrier.pos[0] + barrier.size[0];
-    return inX && p[1] < 3 ? r - (p[2] - faceZ) : -Infinity;
+    if (p[1] >= 3) return -Infinity;
+    if (spec.kind === 'frontal') return r - (p[2] - faceZ);
+    // offset: depth past the nearer of the front face and the barrier's end face (a corner node sliding
+    // down the end face is beside the wall, not 1 m into it)
+    const inZ = faceZ - p[2];
+    const inX = barrier.pos[0] + barrier.size[0] - p[0];
+    return r + (inZ < inX ? inZ : inX);
   };
 
   const maxSteps = Math.round((spec.afterContactS ?? 2.0) * SIM_HZ);
@@ -380,7 +391,7 @@ export function runCrash(spec: CrashSpec): CrashResult {
         touching = true;
         if (pen > maxPen) maxPen = pen;
       }
-      if (spec.kind === 'pole' && P(i)[0] > poleX && Math.abs(P(i)[2] - barrier.pos[2]) < POLE_NEAR && poleSideKept) {
+      if (spec.kind === 'pole' && pen > s.radius[n0 + i]! && poleSideKept) {
         poleSideKept = false;
         poleViolator = `${cv.rig.nodeIds[i]!}@${t - contactTick} past ${((P(i)[0] - poleX) * 100).toFixed(1)} cm, dz ${((P(i)[2] - barrier.pos[2]) * 100).toFixed(1)} cm`;
       }

@@ -44,7 +44,7 @@
  * crumpled car drives on as a stiff crumpled car). Reset (repair) restores
  * the original rest shape and weights.
  */
-import { NODE_FLAG_IN_CONTACT, type SimState } from '../types';
+import { NODE_FLAG_IN_CONTACT, NODE_FLAG_OBJ_IMPACT, NODE_FLAG_OBJ_TOUCH, type SimState } from '../types';
 import type { CompiledRig } from '../rig/types';
 import { CONTACT_RELEASE, RECAPTURE_IMPACT_MAX_S, RECAPTURE_IMPACT_S, RECAPTURE_IMPACT_SPEED, RECAPTURE_SPEED, type CompiledShell } from './shellDefs';
 
@@ -107,6 +107,16 @@ export function rebaseShell(rt: ShellRuntime, nodeStart: number, beamStart: numb
   const s = rt.shell.nodes;
   for (let k = 0; k < s.length; k++) rt.nodes[k] = nodeStart + s[k]!;
   rt.beamOffset = beamStart;
+}
+
+/**
+ * R-CRASH: the vehicle is in a crash (beams.ts crush unloading armed): some shell node has been released by
+ * an impact since the last capture. Driving loads, kerbs and drops release nothing (bodyflex tests).
+ */
+export function shellCrashArmed(shells: readonly ShellRuntime[] | undefined): boolean {
+  if (shells === undefined) return false;
+  for (let c = 0; c < shells.length; c++) if (shells[c]!.released > 0) return true;
+  return false;
 }
 
 /** Full repair: original rest shape, every node rejoined. */
@@ -304,7 +314,13 @@ export function applyShell(s: SimState, rt: ShellRuntime, dt: number, gx: number
       w[q] = 0;
       if (wq === 1) rt.released++;
       newRelease = true;
-    } else if (yields[tq] !== 0 && u2 <= vlo * vlo && ((flags[i]! & NODE_FLAG_IN_CONTACT) === 0 || e2 <= CONTACT_RELEASE * CONTACT_RELEASE)) {
+    } else if (
+      yields[tq] !== 0 &&
+      u2 <= vlo * vlo &&
+      ((flags[i]! & (NODE_FLAG_IN_CONTACT | NODE_FLAG_OBJ_TOUCH)) === 0 || e2 <= CONTACT_RELEASE * CONTACT_RELEASE) &&
+      // R-CRASH: a crumple-zone node struck by another object (NODE_FLAG_OBJ_IMPACT) releases its zone
+      !((flags[i]! & NODE_FLAG_OBJ_IMPACT) !== 0 && whole[tq] !== 0)
+    ) {
       // plastic flow: the rest position follows past lo (this tick's force uses the full e: momentum exact)
       if (e2 > lo * lo) {
         const f = 1 - lo / Math.sqrt(e2);
@@ -313,9 +329,13 @@ export function applyShell(s: SimState, rt: ShellRuntime, dt: number, gx: number
         rest[3 * q + 1]! += r1 * fx + r4 * fy + r7 * fz;
         rest[3 * q + 2]! += r2 * fx + r5 * fy + r8 * fz;
       }
-    } else if (e2 > lo * lo || u2 > vlo * vlo) {
+    } else if (e2 > lo * lo || u2 > vlo * vlo || ((flags[i]! & NODE_FLAG_OBJ_IMPACT) !== 0 && whole[tq] !== 0)) {
       // a yield tier gets here only by speed (an impact at this node) or pressed into a contact: release
       let t = e2 > lo * lo && yields[tq] === 0 ? (rel[ro + 1]! - Math.sqrt(e2)) / (rel[ro + 1]! - lo) : 1;
+      // pressed into a contact past CONTACT_RELEASE, or struck by another object (whole tiers): let go now
+      // (R-CRASH: the yield-tier contact release computed t = 1 here and never released)
+      const fl = flags[i]!;
+      if (yields[tq] !== 0 && (((fl & (NODE_FLAG_IN_CONTACT | NODE_FLAG_OBJ_TOUCH)) !== 0 && e2 > CONTACT_RELEASE * CONTACT_RELEASE) || ((fl & NODE_FLAG_OBJ_IMPACT) !== 0 && whole[tq] !== 0))) t = 0;
       if (u2 > vlo * vlo) {
         const tv = (rel[ro + 3]! - Math.sqrt(u2)) / (rel[ro + 3]! - vlo);
         if (tv < t) t = tv;
