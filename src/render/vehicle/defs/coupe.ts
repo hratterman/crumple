@@ -790,14 +790,18 @@ export function buildCoupeVisual(opts: CoupeBuildOptions = { lod: 0 }): VehicleV
     });
     add('cowl', 'trim', 'trim', m.mesh, ['s5_cw*', 's5_fw_*', 's4_fd_*', 's5_hp_*'], { damageWeight: 0.6 });
   }
-  const trunkBind = ['s9_dk*', 's10_ld*', 's11_ld*'];
+  // R-CRASH hinged closures (src/sim/vehicle/closures.ts): the trunk lid (tk_*) and the doors (dR_* / dL_*)
+  // are their own sub-rigs in the sim, so their panels, handles, cards, door glass and mirrors bind to the
+  // closure nodes and swing with them
+  const trunkBind = ['tk_0*', 'tk_1*', 'tk_2*'];
   {
     const m = cutC(S1, [uAbove(S1, u1(K.hood)), planLine(TRUNK_FRONT, 'rear'), vBelow(S1, 1)], { where: (p) => p[2] > 1.45 && p[1] > 0.85 });
     add('trunk', 'trunk', 'paint', m.mesh, trunkBind);
     add('trunkSeal', 'trim', 'rubber', m.seal, trunkBind, { damageWeight: 0, castShadow: false });
   }
 
-  const doorBind = (s: 'L' | 'R') => sideBind(['s5_hp_$', 's5_sl_$', 's5_cw_$', 's6_sl_$', 's6_dm_$', 's6_bt_$', 's7_sl_$', 's7_dm_$', 's7_bt_$'], s);
+  /** A door closure's skin grid (rows 0–3; not its inner-panel nodes `_i*`, 14 cm inboard). */
+  const doorBind = (s: 'L' | 'R'): string[] => [0, 1, 2, 3].map((r) => `d${s}_${r}*`);
   for (const s of SIDES) {
     {
       const m = cut(S1, [uBelow(S1, u1(K.hood)), vAbove(S1, 0), vline(FENDER_LINE, 'front'), archF()], { where: (p) => p[2] < -0.5 });
@@ -867,7 +871,10 @@ export function buildCoupeVisual(opts: CoupeBuildOptions = { lod: 0 }): VehicleV
   for (const s of SIDES) {
     const dlo: Cut[] = [uAboveBy(S4, 0, 0.003, 'seam'), uBelowBy(S4, dloTop, 0.006, 'seam')];
     const dg = cut(S4, [...dlo, zBelow(Q_FRONT + 0.004, 'seam'), zAbove(SAIL_Z - 0.02, 'seam')], { offset: -0.01, border: 'seam', where: (p) => p[2] < 0.55 });
-    add(`glass${s}`, 'glass', 'glass', perSide(dg.mesh, s), sideBind(['s5_cw_$', 's5_hp_$', 's6_bt_$', 's6_rf_$', 's7_bt_$', 's7_rf_$'], s), { ...glassOpts, glass: glassSpec(false, pairs(GLASS_BEAMS.door(s))) });
+    // frameless door glass: on the door's belt row + frame top (it swings with the door); cracks from the door
+    // frame's quad diagonals (a bent door) or the aperture's cage diagonals (a racked opening)
+    const doorGlass = [[`d${s}_20`, `d${s}_31`], [`d${s}_21`, `d${s}_32`], [`d${s}_22`, `d${s}_31`], ...GLASS_BEAMS.door(s).map((q) => [...q])];
+    add(`glass${s}`, 'glass', 'glass', perSide(dg.mesh, s), [`d${s}_2*`, `d${s}_3*`], { ...glassOpts, glass: glassSpec(false, pairs(doorGlass)) });
     const qg = cut(S4, [...dlo, zAbove(Q_REAR - 0.03, 'seam'), zBelow(DLO_TAIL - 0.03, 'seam')], { offset: -0.012, border: 'seam', where: (p) => p[2] > 0.35 && p[2] < 1.15 });
     add(`glass${s}Q`, 'glass', 'glass', perSide(qg.mesh, s), sideBind(['s7_bt_$', 's7_rf_$', 's8_bt_$', 's8_rf_$', 's8_qm_$', 's9_dk_$'], s), { ...glassOpts, glass: glassSpec(false, pairs(GLASS_BEAMS.quarter(s))) });
     // Black DLO surround band + the slim divider between the door glass and the quarter window + the mirror sail.
@@ -1349,7 +1356,8 @@ export function buildCoupeVisual(opts: CoupeBuildOptions = { lod: 0 }): VehicleV
     const glassM = roundedBoxMesh([0.99, 0.933, -0.49 + 0.066], [0.06, 0.038, 0.003], 0.002, { segs: 1 });
     const baseM = roundedBoxMesh([0.845, 0.878, -0.5], [0.018, 0.022, 0.055], 0.01, { segs: SS });
     for (const s of SIDES) {
-      const bind = sideBind(['s5_cw_$', 's5_hp_$', 's6_bt_$', 's6_dm_$'], s);
+      // door-mounted mirrors: on the door's front-top corner (they swing with the door)
+      const bind = [`d${s}_10`, `d${s}_20`, `d${s}_21`, `d${s}_31`];
       const det = { attach: 'boundary', minBrokenFraction: 0.34, mode: 'hide' } as const;
       add(`mirror${s}`, 'mirror', 'paint', perSide(housing, s), bind, { detach: det, damageWeight: 0.8 });
       add(`mirrorGlass${s}`, 'mirror', 'mirror', perSide(glassM, s), bind, { detach: det, damageWeight: 0 });

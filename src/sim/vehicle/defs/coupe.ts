@@ -26,7 +26,8 @@
  * bumper < crash cans / tail < engine bay < safety cell, so the ends fold
  * first; brittle glass beams in the window strips; a physical hood sub-rig.
  */
-import { shellLayout } from '../shellDefs';
+import { addClosureNodes, buildClosureSet, dormantClosureShells, planClosures, stationDoorSpec, type ClosureSpec } from '../closures';
+import { SHELL_GROUPS, SHELL_RELEASE_CELL, shellLayout } from '../shellDefs';
 import type { RigBeamDef, RigNodeDef } from '../../rig/types';
 import type { CrashProbes } from '../crash';
 import { wheelNodeId, type DrivetrainDef, type VehicleDef, type WheelDef } from '../types';
@@ -68,7 +69,9 @@ export const COUPE_TARGETS = {
     staticSag: [0.02, 0.05],
     zeroTo100S: [3.9, 4.6],
     launchDriftDeg: 3,
-    brake100M: 34,
+    // R-CRASH 34 → 34.5: the hinged doors + lid moved the stop 33.8 → 34.1 m (mass, CG and axle split unchanged);
+    // a 300 kW / 1300 kg coupe on sticky tyres stops from 100 km/h in 33–35 m
+    brake100M: 34.5,
     circleR40G: 1.05,
     stepSteerOvershoot: 1.35,
     topSpeed: { lowKmh: 250, highKmh: 260, straightFromKmh: 245 },
@@ -455,6 +458,26 @@ const HOOD_HALF_X = 0.62;
 /** Centre-line crown, m. */
 const HOOD_CROWN = 0.025;
 const HOOD_NODE_MASS = 1;
+
+/*
+ * R-CRASH hinged closures (closures.ts; the sedan's rules, see defs/sedan.ts): one long door per side
+ * (hinge axis s5_sl → s5_hp on the A-pillar, latch on the B-pillar s7_dm + s7_fl) and the short ducktail
+ * trunk lid (hinge s9_dk_L → s9_dk_R at the fastback base, latch s11_tf + s11_ld, gas struts). Skin nodes
+ * are fixed masses in the structure solve (0.5 kg door / 0.7 kg lid nodes, the cage keeps the rest: see the
+ * sedan for why light).
+ */
+const DOOR_NODE_MASS = 0.5;
+const TRUNK_NODE_MASS = 0.7;
+/** Door-aperture racking sensors break at this strain (the latch pops when its opening distorts). */
+const DOOR_RACK_STRAIN = 0.05;
+const CLOSURE = {
+  skin: { zeta: 0.5, yieldStrain: 0.03, minDeform: 2.5e3, breakRatio: 8 },
+  /** Hinges bend from 12 kN and tear off at 30 kN; each latch beam pops at 11 kN (FMVSS 206 primary latch). */
+  hingeDeform: 1.2e4,
+  hingeBreak: 3e4,
+  latchBreak: 1.1e4,
+  stopBreak: 1.5e4,
+};
 const HOOD = {
   zeta: 0.5,
   yieldStrain: 0.03,
@@ -691,6 +714,67 @@ function buildCoupe(): { def: VehicleDef; design: CoupeDesign } {
     }
     hoodIds.push(row);
   });
+
+  // ---- hinged closures (R-CRASH): nodes now (fixed masses, outside the structure solve), beams after the solve
+  const closureSpecs: { spec: ClosureSpec; openSign: 1 | -1 }[] = [];
+  {
+    const P = (id: string): V3 => pos.get(id)!;
+    const common = { nodeMass: DOOR_NODE_MASS, budgetPerKg: BUDGET_PER_KG, ...CLOSURE, rackStrain: DOOR_RACK_STRAIN, holdOpenDeg: 35, maxOpenDeg: 68, strapForce: 75 };
+    for (const side of ['R', 'L'] as const) {
+      const spec = stationDoorSpec(
+        P,
+        { id: `d${side}`, side, hinge: 's5', mid: 's6', latch: 's7', hingeTag: 'hp', latchTag: 'dm', rackTag: 'cw', rails: ['s6', 's7'], top: [false, true, true], strapTo: sid(5, 'fw', side), tunnel: sid(7, 'tn') },
+        common,
+      );
+      closureSpecs.push({ spec, openSign: 1 });
+    }
+    // trunk lid: rows across the car (L, centre, R), columns hinge (fastback base) → shut edge (ducktail)
+    const lidGrid: V3[][] = [-0.55, 0, 0.55].map((x) => [
+      [x, x === 0 ? 0.985 : 0.955, 1.33],
+      [x, x === 0 ? 0.925 : 0.915, 1.64],
+      [x, x === 0 ? 0.925 : 0.915, 1.91],
+    ] as V3[]);
+    closureSpecs.push({
+      spec: {
+        id: 'tk',
+        group: 'trunk',
+        grid: lidGrid,
+        nodeMass: TRUNK_NODE_MASS,
+        hingeAxis: [sid(9, 'dk', 'L'), sid(9, 'dk', 'R')],
+        hinged: [[0, 0], [1, 0], [2, 0]],
+        latches: [
+          { cell: [1, 2], to: sid(11, 'tf') },
+          { cell: [1, 2], to: sid(11, 'ld') },
+        ],
+        stops: [
+          { cell: [0, 2], to: sid(11, 'rh', 'L') },
+          { cell: [2, 2], to: sid(11, 'rh', 'R') },
+          { cell: [0, 1], to: sid(10, 'rh', 'L') },
+          { cell: [2, 1], to: sid(10, 'rh', 'R') },
+          { cell: [1, 1], to: sid(10, 'tf') },
+        ],
+        strap: { cell: [1, 1], to: sid(9, 'tf') },
+        // gas struts: an unlatched lid rises to (nearly) fully open
+        strapForce: 500,
+        stopCandidates: [],
+        stopRows: [1],
+        inner: [[0, 0.8, 1.62]],
+        innerReach: 0.9,
+        rack: [
+          [sid(9, 'dk', 'L'), sid(11, 'ld', 'R')],
+          [sid(9, 'dk', 'R'), sid(11, 'ld', 'L')],
+        ],
+        rackStrain: DOOR_RACK_STRAIN,
+        holdOpenDeg: 68,
+        maxOpenDeg: 75,
+        budgetPerKg: BUDGET_PER_KG,
+        ...CLOSURE,
+      },
+      openSign: 1,
+    });
+    planClosures(closureSpecs, pos, (id) => /^s\d+_/.test(id));
+    addClosureNodes(closureSpecs, addNode);
+  }
 
   // ---- wheels
   const unsprungWheelOf = (front: boolean): number => hubMass(front) + COUPE_TYRE.rimMass + COUPE_TYRE.tireMass;
@@ -1205,7 +1289,9 @@ function buildCoupe(): { def: VehicleDef; design: CoupeDesign } {
    */
   const fixedK = new Map<string, number>();
   const addK = (id: string, k: number): void => void fixedK.set(id, (fixedK.get(id) ?? 0) + k);
-  for (const b of [...fixed, ...hoodBeams]) {
+  // ---- hinged closure beams (R-CRASH), counted as fixed k at their body nodes like the hood's
+  const closures = buildClosureSet(closureSpecs, pos, massOf, seen, key, SHELL_RELEASE_CELL);
+  for (const b of [...fixed, ...hoodBeams, ...closures.beams]) {
     addK(b.a, b.k!);
     addK(b.b, b.k!);
   }
@@ -1314,22 +1400,32 @@ function buildCoupe(): { def: VehicleDef; design: CoupeDesign } {
    */
   {
     const sumD = new Map<string, number>();
-    for (const b of [...autoBeams, ...fixed, ...hoodBeams]) {
+    for (const b of [...autoBeams, ...fixed, ...hoodBeams, ...closures.beams]) {
       for (const id of [b.a, b.b]) sumD.set(id, (sumD.get(id) ?? 0) + (b.d ?? 0));
     }
     for (const w of wheels) for (const id of w.attach) sumD.set(id, (sumD.get(id) ?? 0) + 2 * (w.attachDamp ?? 0));
+    // the scalable share (auto / hood / closure beams): when the uniform factor still leaves a node over the
+    // validator's limit (its fixed suspension dampers alone near it: a shock tower once the R-CRASH closures
+    // took 42 kg out of the structure solve), the scalable beams take the whole cut
+    const scalableD = new Map<string, number>();
+    for (const b of [...autoBeams, ...hoodBeams, ...closures.beams]) for (const id of [b.a, b.b]) scalableD.set(id, (scalableD.get(id) ?? 0) + (b.d ?? 0));
     const scale = (id: string): number => {
       const m = massOf.get(id);
       if (m === undefined) return 1;
-      const z = (sumD.get(id)! * DT) / m;
-      return z > DAMP_BUDGET ? DAMP_BUDGET / z : 1;
+      const sum = sumD.get(id)!;
+      const z = (sum * DT) / m;
+      if (z <= DAMP_BUDGET) return 1;
+      const sc = scalableD.get(id) ?? 0;
+      const f = DAMP_BUDGET / z;
+      if (((sum - sc * (1 - f)) * DT) / m <= 1) return f;
+      return sc > 0 ? Math.max(0, (DAMP_BUDGET * m) / DT - (sum - sc)) / sc : 1;
     };
-    for (const b of [...autoBeams, ...hoodBeams]) {
+    for (const b of [...autoBeams, ...hoodBeams, ...closures.beams]) {
       const f = Math.min(scale(b.a), scale(b.b));
       if (f < 1) b.d = sig3(b.d! * f);
     }
   }
-  const beams = [...autoBeams, ...fixed, ...hoodBeams];
+  const beams = [...autoBeams, ...fixed, ...hoodBeams, ...closures.beams];
   // R-CRASH roof strength (roof.ts; roofStrength.ts platen): the roof ring's members yield at the roof's collapse load
   capRoofYield(beams, ROOF_RING, ROOF_YIELD);
   const def: VehicleDef = {
@@ -1344,6 +1440,8 @@ function buildCoupe(): { def: VehicleDef; design: CoupeDesign } {
         subframe: { friction: 0.5, radius: 0.04 },
         knuckle: { friction: 0.5, radius: 0.03 },
         hood: { friction: 0.5, radius: 0.03 },
+        door: { friction: 0.5, radius: 0.03 },
+        trunk: { friction: 0.5, radius: 0.03 },
       },
     },
     wheels,
@@ -1364,12 +1462,21 @@ function buildCoupe(): { def: VehicleDef; design: CoupeDesign } {
     frame: { origin: sid(7, 'tn'), front: sid(2, 'rs'), top: sid(7, 'rf') },
     // Feel pass: rigid shell cluster (shell.ts) — crumple zones released whole on impact, firewall, safety cell.
     crushSet: ROOF_RING,
-    shell: shellLayout({
-      front: ['s0_*', 's1_*', 's2_*', 's3_*', 's4_*', 'hood_*', 'FL_*', 'FR_*'],
-      rear: ['s9_*', 's10_*', 's11_*', 's12_*', 'RL_*', 'RR_*'],
-      firewall: ['s5_*'],
-      cell: ['s5_hp_*', 's5_sl_*', 's6_*', 's7_*', 's8_*'],
-    }),
+    // R-CRASH: each hinged closure is a LATCHED zone of the body cluster (free on its hinges once its latch
+    // breaks) plus its own dormant cluster that wakes then (the free panel stays a stiff panel)
+    shell: [
+      {
+        ...shellLayout({
+          front: ['s0_*', 's1_*', 's2_*', 's3_*', 's4_*', 'hood_*', 'FL_*', 'FR_*'],
+          rear: ['s9_*', 's10_*', 's11_*', 's12_*', 'RL_*', 'RR_*'],
+          firewall: ['s5_*'],
+          cell: ['s5_hp_*', 's5_sl_*', 's6_*', 's7_*', 's8_*'],
+          extra: closures.zones,
+        }),
+        groups: [...SHELL_GROUPS, 'door', 'trunk'],
+      },
+      ...dormantClosureShells(closureSpecs, SHELL_RELEASE_CELL),
+    ],
   };
   const design: CoupeDesign = {
     totalMass,

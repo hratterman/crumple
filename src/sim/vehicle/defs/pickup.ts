@@ -36,7 +36,8 @@
  * leaf springs' front eyes) and a Panhard rod; coil-over "leaf" springs
  * from the brackets to the frame spring towers.
  */
-import { SHELL_RELEASE_FRAME, shellLayout } from '../shellDefs';
+import { addClosureNodes, buildClosureSet, dormantClosureShells, planClosures, stationDoorSpec, type ClosureSpec } from '../closures';
+import { SHELL_GROUPS, SHELL_RELEASE_CELL, SHELL_RELEASE_FRAME, shellLayout } from '../shellDefs';
 import type { RigBeamDef, RigNodeDef } from '../../rig/types';
 import { wheelNodeId, type DrivetrainDef, type VehicleDef, type WheelDef } from '../types';
 import { capRoofYield } from '../roof';
@@ -435,6 +436,29 @@ const K_TRAIL = 1.6e6;
 /** Each of the two crossed Panhard rods (together ≈ one 1.8e6 rod laterally). */
 const K_PANHARD = 1.0e6;
 
+// ====================================================================== hinged doors (R-CRASH)
+/*
+ * Crew-cab doors (closures.ts; the sedan's rules, see defs/sedan.ts): front doors hinge on the A-pillar
+ * (c0_sl → c0_hp) and latch on the B-pillar (c2_dm + c2_fl); rear doors hinge on the B-pillar (c2_sl → c2_dm)
+ * and latch on the C-pillar (c4_qm + c4_fl), stop ≈ 80° (crew-cab rear doors open wider). 0.5 kg skin
+ * nodes, fixed masses in the structure solve (see the sedan for why light).
+ */
+const DOOR_NODE_MASS = 0.5;
+/**
+ * Door-aperture racking sensors break at this strain (the latch pops when its opening distorts): 7 %, not
+ * the sedan's 5 %: the crew cab's 1.3 m aperture diagonals shorten 5 % (6.5 cm) in the 30 km/h side pole,
+ * where FMVSS 214 requires the doors to stay shut (they do at 7 %).
+ */
+const DOOR_RACK_STRAIN = 0.07;
+const CLOSURE = {
+  skin: { zeta: 0.5, yieldStrain: 0.03, minDeform: 2.5e3, breakRatio: 8 },
+  /** Hinges bend from 12 kN and tear off at 30 kN; each latch beam pops at 11 kN (FMVSS 206 primary latch). */
+  hingeDeform: 1.2e4,
+  hingeBreak: 3e4,
+  latchBreak: 1.1e4,
+  stopBreak: 1.5e4,
+};
+
 // ====================================================================== hood / tailgate
 const HOOD_Z = [-2.52, -2.0, -1.5, -1.08] as const;
 const HOOD_Y = [1.18, 1.22, 1.26, 1.29] as const;
@@ -726,6 +750,29 @@ function buildPickup(): { def: VehicleDef; design: PickupDesign } {
   for (let r = 0; r < 2; r++)
     for (const c of ['L', 'C', 'R'] as const)
       for (const l of ['i', 'o'] as const) addNode(tg(r, c, l), [c === 'C' ? 0 : c === 'R' ? TG_X : -TG_X, TG_Y[r]!, TG_Z[l]], TG_NODE_MASS, 'tailgate', true, false);
+
+  // ---- hinged doors (R-CRASH): nodes now (fixed masses, outside the structure solve), beams after the solve
+  const closureSpecs: { spec: ClosureSpec; openSign: 1 | -1 }[] = [];
+  {
+    const P = (id: string): V3 => pos.get(id)!;
+    const common = { nodeMass: DOOR_NODE_MASS, budgetPerKg: BUDGET_PER_KG, ...CLOSURE, rackStrain: DOOR_RACK_STRAIN, holdOpenDeg: 35, maxOpenDeg: 68, strapForce: 75 };
+    for (const side of ['R', 'L'] as const) {
+      const front = stationDoorSpec(
+        P,
+        { id: `dF${side}`, side, hinge: 'c0', mid: 'c1', latch: 'c2', hingeTag: 'hp', latchTag: 'dm', rackTag: 'ap', rails: ['c1', 'c2'], top: [false, true, true], strapTo: sid('c0', 'fw', side), tunnel: sid('c2', 'tn') },
+        common,
+      );
+      const rear = stationDoorSpec(
+        P,
+        { id: `dR${side}`, side, hinge: 'c2', mid: 'c3', latch: 'c4', hingeTag: 'dm', latchTag: 'qm', rackTag: 'dm', rails: ['c3', 'c4'], top: [true, true, false], strapTo: sid('c2', 'tn'), tunnel: sid('c4', 'tn') },
+        // crew-cab rear doors open wider (≈ 80°): the stop is the door's edge reaching the B-pillar foot
+        { ...common, maxOpenDeg: 80 },
+      );
+      closureSpecs.push({ spec: front, openSign: 1 }, { spec: rear, openSign: 1 });
+    }
+    planClosures(closureSpecs, pos, (id) => /^(c|s|b)\d+_/.test(id));
+    addClosureNodes(closureSpecs, addNode);
+  }
 
   // ---- wheels
   const unsprungWheelOf = (front: boolean): number => (front ? FRONT_HUB_MASS : REAR_HUB_MASS) + PICKUP_TIRE.rimMass + PICKUP_TIRE.tireMass;
@@ -1357,7 +1404,9 @@ function buildPickup(): { def: VehicleDef; design: PickupDesign } {
   // ---- auto stiffness: split each node's budget by class weight (sedan.ts)
   const fixedK = new Map<string, number>();
   const addK = (id: string, k: number): void => void fixedK.set(id, (fixedK.get(id) ?? 0) + k);
-  for (const b of [...fixed, ...subBeams]) {
+  // ---- hinged door beams (R-CRASH), counted as fixed k at their body nodes like the sub-rigs'
+  const closures = buildClosureSet(closureSpecs, pos, massOf, seen, key, SHELL_RELEASE_CELL);
+  for (const b of [...fixed, ...subBeams, ...closures.beams]) {
     addK(b.a, b.k!);
     addK(b.b, b.k!);
   }
@@ -1456,7 +1505,7 @@ function buildPickup(): { def: VehicleDef; design: PickupDesign } {
   // ---- damping budget: (Σd/m)·dt ≤ DAMP_BUDGET per node (auto + sub-rig beams scaled down).
   {
     const sumD = new Map<string, number>();
-    for (const b of [...autoBeams, ...fixed, ...subBeams]) for (const id of [b.a, b.b]) sumD.set(id, (sumD.get(id) ?? 0) + (b.d ?? 0));
+    for (const b of [...autoBeams, ...fixed, ...subBeams, ...closures.beams]) for (const id of [b.a, b.b]) sumD.set(id, (sumD.get(id) ?? 0) + (b.d ?? 0));
     for (const w of wheels) for (const id of w.attach) sumD.set(id, (sumD.get(id) ?? 0) + 2 * (w.attachDamp ?? 0));
     const scale = (id: string): number => {
       const m = massOf.get(id);
@@ -1464,14 +1513,14 @@ function buildPickup(): { def: VehicleDef; design: PickupDesign } {
       const z = (sumD.get(id)! * DT) / m;
       return z > DAMP_BUDGET ? DAMP_BUDGET / z : 1;
     };
-    for (const b of [...autoBeams, ...subBeams]) {
+    for (const b of [...autoBeams, ...subBeams, ...closures.beams]) {
       const f = Math.min(scale(b.a), scale(b.b));
       if (f < 1) b.d = sig3(b.d! * f);
     }
   }
 
   // Sub-rigs (hood, tailgate) declared last, like the sedan's hood.
-  const beams = [...autoBeams, ...fixed, ...subBeams];
+  const beams = [...autoBeams, ...fixed, ...subBeams, ...closures.beams];
   // R-CRASH roof strength (roof.ts; roofStrength.ts platen): the roof ring's members yield at the roof's collapse load
   capRoofYield(beams, ROOF_RING, ROOF_YIELD);
   const def: VehicleDef = {
@@ -1488,6 +1537,7 @@ function buildPickup(): { def: VehicleDef; design: PickupDesign } {
         axle: { friction: 0.5, radius: 0.06 },
         hood: { friction: 0.5, radius: 0.03 },
         tailgate: { friction: 0.5, radius: 0.03 },
+        door: { friction: 0.5, radius: 0.03 },
       },
     },
     wheels,
@@ -1505,15 +1555,22 @@ function buildPickup(): { def: VehicleDef; design: PickupDesign } {
     crushUnload: 3,
     crushUnloadHeld: 1,
     crushSet: ROOF_RING,
-    shell: shellLayout({
-      front: ['f0_*', 'f1_*', 'f2_*', 'f3_*', 's0_*', 's1_*', 's2_*', 'bf_*', 'hood_*', 'FL_*', 'FR_*'],
-      rear: ['b0_*', 'b1_*', 'b2_*', 'b3_*', 'br_*', 'tg_*', 'hitch*', 'f8_*', 'f9_*', 'f10_*', 'f11_*', 'RL_*', 'RR_*'],
-      firewall: ['c0_*'],
-      cell: ['c1_*', 'c2_*', 'c3_*', 'c4_*'],
-      cellWhole: true,
-      // frame rails under the cab: rigid while driving, bend (plastically) in a big crash
-      extra: [{ ids: ['f4_*', 'f5_*', 'f6_*', 'f7_*'], release: SHELL_RELEASE_FRAME, yield: true }],
-    }),
+    // R-CRASH: each hinged door is a LATCHED zone of the body cluster plus its own dormant cluster (closures.ts)
+    shell: [
+      {
+        ...shellLayout({
+          front: ['f0_*', 'f1_*', 'f2_*', 'f3_*', 's0_*', 's1_*', 's2_*', 'bf_*', 'hood_*', 'FL_*', 'FR_*'],
+          rear: ['b0_*', 'b1_*', 'b2_*', 'b3_*', 'br_*', 'tg_*', 'hitch*', 'f8_*', 'f9_*', 'f10_*', 'f11_*', 'RL_*', 'RR_*'],
+          firewall: ['c0_*'],
+          cell: ['c1_*', 'c2_*', 'c3_*', 'c4_*'],
+          cellWhole: true,
+          // frame rails under the cab: rigid while driving, bend (plastically) in a big crash
+          extra: [{ ids: ['f4_*', 'f5_*', 'f6_*', 'f7_*'], release: SHELL_RELEASE_FRAME, yield: true }, ...closures.zones],
+        }),
+        groups: [...SHELL_GROUPS, 'door'],
+      },
+      ...dormantClosureShells(closureSpecs, SHELL_RELEASE_CELL),
+    ],
   };
   const design: PickupDesign = {
     totalMass,
