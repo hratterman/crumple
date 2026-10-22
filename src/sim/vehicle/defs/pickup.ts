@@ -39,6 +39,12 @@
 import { SHELL_RELEASE_FRAME, shellLayout } from '../shellDefs';
 import type { RigBeamDef, RigNodeDef } from '../../rig/types';
 import { wheelNodeId, type DrivetrainDef, type VehicleDef, type WheelDef } from '../types';
+import { capRoofYield } from '../roof';
+
+// R-CRASH roof strength (see defs/sedan.ts "roof strength", roof.ts)
+/** Roof-ring members' yield force cap, N. Measured (roofStrength.ts platen): SWR 2.7 (56 kN at 127 mm): soft, its cab lattice (open: below FMVSS 216a's 3 for ≤ 2722 kg). */
+const ROOF_YIELD = 4e4;
+const ROOF_RING = ['c0_ap*', 'c0_cw*', 'c1_rf*', 'c2_rf*', 'c3_rf*', 'c4_rf*'];
 
 // ====================================================================== targets
 const DT = 1 / 2000;
@@ -1466,6 +1472,8 @@ function buildPickup(): { def: VehicleDef; design: PickupDesign } {
 
   // Sub-rigs (hood, tailgate) declared last, like the sedan's hood.
   const beams = [...autoBeams, ...fixed, ...subBeams];
+  // R-CRASH roof strength (roof.ts; roofStrength.ts platen): the roof ring's members yield at the roof's collapse load
+  capRoofYield(beams, ROOF_RING, ROOF_YIELD);
   const def: VehicleDef = {
     name: 'pickup',
     body: {
@@ -1496,6 +1504,7 @@ function buildPickup(): { def: VehicleDef; design: PickupDesign } {
     // body-on-frame front already rebounded 8–10 %; α 40 took it to 5 %, α 3: 6.6 / 7.2 % at 50 / 100 km/h).
     crushUnload: 3,
     crushUnloadHeld: 1,
+    crushSet: ROOF_RING,
     shell: shellLayout({
       front: ['f0_*', 'f1_*', 'f2_*', 'f3_*', 's0_*', 's1_*', 's2_*', 'bf_*', 'hood_*', 'FL_*', 'FR_*'],
       rear: ['b0_*', 'b1_*', 'b2_*', 'b3_*', 'br_*', 'tg_*', 'hitch*', 'f8_*', 'f9_*', 'f10_*', 'f11_*', 'RL_*', 'RR_*'],

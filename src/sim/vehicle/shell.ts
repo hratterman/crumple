@@ -69,6 +69,10 @@ export interface ShellRuntime {
   gone: Uint8Array;
   /** Per tier: a WHOLE tier has tripped (all its nodes released). */
   tripped: Uint8Array;
+  /** R-CRASH per tier: its latch has broken (ShellZone.latch): released for good until repair. */
+  latchOff: Uint8Array;
+  /** R-CRASH per tier: dormant closure clusters woken when this tier unlatches (linked by linkDormantShells). */
+  sleepers: ShellRuntime[][];
   calmTicks: number;
   /** Ticks since a node last newly released (post-impact set, RECAPTURE_IMPACT_S). */
   quietTicks: number;
@@ -89,12 +93,14 @@ export function createShellRuntime(shell: CompiledShell, rig: CompiledRig): Shel
     nodes: Int32Array.from(shell.nodes),
     beamOffset: 0,
     rest: Float64Array.from(shell.rest),
-    w: new Float64Array(n).fill(1),
+    w: new Float64Array(n).fill(shell.dormant ? 0 : 1),
     mass,
     R: Float64Array.of(1, 0, 0, 0, 1, 0, 0, 0, 1),
     released: 0,
-    gone: new Uint8Array(n),
+    gone: new Uint8Array(n).fill(shell.dormant ? 1 : 0),
     tripped: new Uint8Array(shell.whole.length),
+    latchOff: new Uint8Array(shell.whole.length),
+    sleepers: Array.from({ length: shell.whole.length }, () => []),
     calmTicks: 0,
     quietTicks: 0,
     maxDev: 0,
@@ -122,9 +128,10 @@ export function shellCrashArmed(shells: readonly ShellRuntime[] | undefined): bo
 /** Full repair: original rest shape, every node rejoined. */
 export function resetShell(rt: ShellRuntime): void {
   rt.rest.set(rt.shell.rest);
-  rt.w.fill(1);
-  rt.gone.fill(0);
+  rt.w.fill(rt.shell.dormant ? 0 : 1);
+  rt.gone.fill(rt.shell.dormant ? 1 : 0);
   rt.tripped.fill(0);
+  rt.latchOff.fill(0);
   rt.released = 0;
   rt.calmTicks = 0;
   rt.quietTicks = 0;
@@ -181,6 +188,75 @@ const A = new Float64Array(9);
 const R = new Float64Array(9);
 
 /**
+ * R-CRASH latched zones (ShellZone.latch): a broken latch beam trips its zone for good, and every latch
+ * beam of the zone lets go with it (a racking sensor broke: the latch has popped). Runs at the start of the
+ * shell pass, before the force loop; the WASM kernel's shell pass runs it in JS first (src/sim/wasm/kernel.ts).
+ */
+export function shellLatchPass(s: SimState, rt: ShellRuntime): void {
+  const ls = rt.shell.latchStart;
+  const lb = rt.shell.latchBeams;
+  const active = s.active;
+  for (let t = 1; t + 1 < ls.length; t++) {
+    if (rt.latchOff[t] !== 0) continue;
+    for (let j = ls[t]!; j < ls[t + 1]!; j++) {
+      if (active[rt.beamOffset + lb[j]!] === 0) {
+        rt.latchOff[t] = 1;
+        rt.tripped[t] = 1;
+        for (let q = ls[t]!; q < ls[t + 1]!; q++) active[rt.beamOffset + lb[q]!] = 0;
+        const sl = rt.sleepers[t]!;
+        for (let k = 0; k < sl.length; k++) wakeShell(s, sl[k]!);
+        break;
+      }
+    }
+  }
+}
+
+/** Links each dormant closure cluster to the latched tier that wakes it (vehicle runtime creation). */
+export function linkDormantShells(shells: readonly ShellRuntime[]): void {
+  for (const rt of shells) {
+    const d = rt.shell.dormant;
+    if (d) shells[d.cluster]!.sleepers[d.tier]!.push(rt);
+  }
+}
+
+/**
+ * Wakes a dormant closure cluster in the closure's current shape (rest = positions about their mass
+ * centroid, identity frame): from now on the unlatched panel moves as one stiff piece on its hinge beams.
+ */
+export function wakeShell(s: SimState, rt: ShellRuntime): void {
+  const n = rt.nodes.length;
+  let W = 0;
+  let cx = 0;
+  let cy = 0;
+  let cz = 0;
+  for (let k = 0; k < n; k++) {
+    const i = rt.nodes[k]!;
+    const m = rt.mass[k]!;
+    W += m;
+    cx += m * s.posX[i]!;
+    cy += m * s.posY[i]!;
+    cz += m * s.posZ[i]!;
+  }
+  if (!(W > 0)) return;
+  cx /= W;
+  cy /= W;
+  cz /= W;
+  for (let k = 0; k < n; k++) {
+    const i = rt.nodes[k]!;
+    rt.rest[3 * k] = s.posX[i]! - cx;
+    rt.rest[3 * k + 1] = s.posY[i]! - cy;
+    rt.rest[3 * k + 2] = s.posZ[i]! - cz;
+    rt.w[k] = 1;
+    rt.gone[k] = 0;
+  }
+  rt.R.set([1, 0, 0, 0, 1, 0, 0, 0, 1]);
+  rt.tripped.fill(0);
+  rt.released = 0;
+  rt.calmTicks = 0;
+  rt.quietTicks = 0;
+}
+
+/**
  * The shell pass (see header). Runs per vehicle after every force pass of
  * the tick and before integrateNodes. Allocation-free.
  * R-CORE: mirrored bit-identically by `shell` in src/sim/wasm/kernel.c (the
@@ -190,6 +266,7 @@ export function applyShell(s: SimState, rt: ShellRuntime, dt: number, gx: number
   const nodes = rt.nodes;
   const n = nodes.length;
   const w = rt.w;
+  shellLatchPass(s, rt);
   const mass = rt.mass;
   const rest = rt.rest;
   const vs = rt.vs;
@@ -403,8 +480,9 @@ function recapture(s: SimState, rt: ShellRuntime, cx: number, cy: number, cz: nu
         break;
       }
     }
-    rt.w[k] = intact ? 1 : 0;
-    rt.gone[k] = intact ? 0 : 1;
+    const keep = intact && rt.latchOff[sh.tier[k]!] === 0;
+    rt.w[k] = keep ? 1 : 0;
+    rt.gone[k] = keep ? 0 : 1;
   }
   rt.tripped.fill(0);
   rt.released = 0;

@@ -90,6 +90,14 @@ export interface ShellDef {
   zones?: readonly ShellZone[];
   /** Node ids (exact or prefix*) left out of the cluster (e.g. anti-roll bar arms in the body group). */
   exclude?: readonly string[];
+  /**
+   * R-CRASH DORMANT cluster of a hinged closure: its nodes (`ids`) are those of a LATCHED zone of an earlier
+   * cluster (the node matching this pattern picks the zone). It sleeps (every weight 0) while that zone holds
+   * the closure in the body; when the zone's latch breaks it wakes in the closure's current shape, so an
+   * unlatched door / lid swings, flaps and tears off as a stiff panel instead of a 1 kg-node lattice. Its
+   * nodes are shared with the latched zone (never claimed); a repair puts it back to sleep.
+   */
+  dormantLatch?: string;
 }
 
 export interface ShellZone {
@@ -104,6 +112,12 @@ export interface ShellZone {
    * under crash loads and dents (permanently) only where a load exceeds that.
    */
   yield?: boolean;
+  /**
+   * R-CRASH LATCHED zone (a door / trunk lid held in the body cluster while latched): beam endpoint pairs
+   * (node ids) of its latch. Once any of them is broken the zone releases whole and its nodes stay out of
+   * the cluster (no recapture) until a repair: the closure then swings on its own hinge beams.
+   */
+  latch?: readonly (readonly [string, string])[];
 }
 
 /**
@@ -117,6 +131,8 @@ export function shellLayout(o: {
   firewall?: readonly string[];
   cell: readonly string[];
   extra?: readonly ShellZone[];
+  /** Zones that claim their nodes BEFORE the cell (R-CRASH: the roof / greenhouse yield tier). */
+  preCell?: readonly ShellZone[];
   exclude?: readonly string[];
   freqHz?: number;
   zeta?: number;
@@ -136,6 +152,7 @@ export function shellLayout(o: {
     { ids: o.front, release: zr, whole: true, yield: true },
     { ids: o.rear, release: zr, whole: true, yield: true },
   ];
+  zones.push(...(o.preCell ?? []));
   zones.push(
     o.cellWhole
       ? { ids: o.cell, release: { ...SHELL_RELEASE_CELL_WHOLE, ...o.cellRelease }, whole: true }
@@ -176,6 +193,11 @@ export interface CompiledShell {
   yields: Uint8Array;
   /** Per tier: [lo, hi, vLo, vHi]. */
   release: Float64Array;
+  /** R-CRASH: per tier, CSR into `latchBeams` (rig-local beam indices of the zone's latch; ShellZone.latch). */
+  latchStart: Int32Array;
+  latchBeams: Int32Array;
+  /** R-CRASH: a dormant closure cluster wakes when this (earlier) cluster's tier unlatches (ShellDef.dormantLatch). */
+  dormant: { cluster: number; tier: number } | null;
 }
 
 /** Compiles VehicleDef.shell: clusters in order, a node claimed by an earlier cluster is skipped by later ones. */
@@ -185,6 +207,22 @@ export function compileShells(rig: CompiledRig, bodyNodeCount: number, def: Shel
   const taken = new Uint8Array(rig.nodeCount);
   const out: CompiledShell[] = [];
   for (const d of defs) {
+    if (d?.dormantLatch !== undefined) {
+      // shares its nodes with the latched zone (never claimed); linked to that zone's cluster + tier
+      const c = compileShell(rig, bodyNodeCount, d, new Uint8Array(rig.nodeCount));
+      if (!c) continue;
+      const pat = d.dormantLatch;
+      let link: { cluster: number; tier: number } | null = null;
+      out.forEach((o, ci) => {
+        o.nodes.forEach((n, k) => {
+          if (!link && globMatch(rig.nodeIds[n]!, pat) && o.latchStart[o.tier[k]! + 1]! > o.latchStart[o.tier[k]!]!) link = { cluster: ci, tier: o.tier[k]! };
+        });
+      });
+      if (!link) throw new Error(`shell: dormant cluster ${pat}: no latched zone holds it`);
+      c.dormant = link;
+      out.push(c);
+      continue;
+    }
     const c = compileShell(rig, bodyNodeCount, d, taken);
     if (c) out.push(c);
   }
@@ -249,6 +287,24 @@ function compileShell(rig: CompiledRig, bodyNodeCount: number, def: ShellDef | u
     }),
   );
   const tiers = [{ ...SHELL_RELEASE_CRUMPLE, ...def?.release }, ...zones.map((z) => ({ ...SHELL_RELEASE_CELL, ...z.release }))];
+  // latch beams per tier (tier 0 has none)
+  const beamOf = new Map<string, number>();
+  for (let b = 0; b < rig.beamCount; b++) {
+    const a = rig.nodeIds[rig.beamA[b]!]!;
+    const c = rig.nodeIds[rig.beamB[b]!]!;
+    beamOf.set(`${a}|${c}`, b);
+    beamOf.set(`${c}|${a}`, b);
+  }
+  const latchStart = [0, 0];
+  const latchBeams: number[] = [];
+  for (const z of zones) {
+    for (const [a, c] of z.latch ?? []) {
+      const b = beamOf.get(`${a}|${c}`);
+      if (b === undefined) throw new Error(`shell: latch beam ${a}–${c} not in the rig`);
+      latchBeams.push(b);
+    }
+    latchStart.push(latchBeams.length);
+  }
   return {
     nodes: Int32Array.from(nodes),
     rest,
@@ -261,6 +317,9 @@ function compileShell(rig: CompiledRig, bodyNodeCount: number, def: ShellDef | u
     release: Float64Array.from(tiers.flatMap((r) => [r.lo, r.hi, r.vLo, r.vHi])),
     whole: Uint8Array.from([def?.whole ? 1 : 0, ...zones.map((z) => (z.whole ? 1 : 0))]),
     yields: Uint8Array.from([0, ...zones.map((z) => (z.yield ? 1 : 0))]),
+    latchStart: Int32Array.from(latchStart),
+    latchBeams: Int32Array.from(latchBeams),
+    dormant: null,
   };
 }
 

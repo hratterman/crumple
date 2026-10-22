@@ -37,6 +37,31 @@ describe('rollover harness', { timeout: 300_000 }, () => {
     expect(r.worst.roof).toBe('s7');
   });
 
+  /*
+   * R-CRASH roof crush (roof.ts / defs/sedan.ts "roof strength"; SWR 3.8 in roofStrength.test.ts). Real
+   * rollovers dent a roof 5–20 cm with the A-pillar buckling (NHTSA dolly / FMVSS 216 correlation:
+   * SWR 3.5–4 roofs crush ≈ 10 cm in a 2–4 quarter-turn roll); before R-CRASH no roll or drop dented the
+   * sedan's roof (the safety cell's rigid shell held it; ≤ 0.2 cm permanent).
+   */
+  it('roof crush: an inverted 1 m drop dents the roof 5–20 cm and it stays dented; a 0.5 m drop less', () => {
+    const roof: CrushProbe[] = [
+      { name: 'AL', roof: ['s6_rf_L'], floor: ['s6_fl_L'], across: ['s6_sl_L', 's6_sl_R'] },
+      { name: 'AR', roof: ['s6_rf_R'], floor: ['s6_fl_R'], across: ['s6_sl_L', 's6_sl_R'] },
+      { name: 'B', roof: ['s7_rf_L', 's7_rf_R'], floor: ['s7_fl_L', 's7_fl_R'], across: ['s7_sl_L', 's7_sl_R'] },
+    ];
+    const big = runRollover(SEDAN, { speedKmh: 30, rollRate: 0, invertedDropM: 1.0, durationS: 3, probes: { roof } });
+    const small = runRollover(SEDAN, { speedKmh: 50, rollRate: 0, invertedDropM: 0.5, durationS: 3, probes: { roof } });
+    console.log(
+      `[roof crush] inverted drop 1.0 m: ${(big.crush.roof! * 100).toFixed(1)} cm (${big.worst.roof}, peak ${(big.crushMax.roof! * 100).toFixed(1)}); ` +
+        `0.5 m: ${(small.crush.roof! * 100).toFixed(1)} cm (peak ${(small.crushMax.roof! * 100).toFixed(1)})`,
+    );
+    expect(big.finite && small.finite).toBe(true);
+    expect(big.crush.roof).toBeGreaterThan(0.05);
+    expect(big.crush.roof).toBeLessThan(0.2);
+    expect(small.crush.roof).toBeGreaterThan(0.01);
+    expect(small.crush.roof).toBeLessThan(big.crush.roof!);
+  });
+
   it('the low sedan holds 0.35 g with a few degrees of roll and all four wheels down; a 40 km/h full-lock J-turn does not tip it', () => {
     const st = runSteadyLateral(SEDAN, { latG: 0.35 });
     expect(st.latG).toBeGreaterThan(0.32);

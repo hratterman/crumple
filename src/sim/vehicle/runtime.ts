@@ -10,7 +10,7 @@
  * no allocation. Spawn/recover/reset/telemetry helpers are not per-tick hot.
  */
 import { activeKernelFor } from '../kernel';
-import { createShellRuntime, rebaseShell, resetShell, type ShellRuntime } from './shell';
+import { createShellRuntime, linkDormantShells, rebaseShell, resetShell, type ShellRuntime } from './shell';
 import type { Vec3 } from '../../core/math';
 import { TELEMETRY_SLOTS, VEHICLE_EXT_SLOTS } from '../../protocol/layout';
 import { Action } from '../../protocol/messages';
@@ -237,7 +237,7 @@ export function createVehicleRuntime(
     telemetry: new Float32Array(TELEMETRY_SLOTS),
     damageBeams: Int32Array.from(dmg),
     bodyMass,
-    shell: vehicle.shell.map((c) => createShellRuntime(c, rig)),
+    shell: ((rts) => (linkDormantShells(rts), rts))(vehicle.shell.map((c) => createShellRuntime(c, rig))),
     brakeSys: undefined as unknown as BrakeSystemState,
     dampers: null,
     engineSys: undefined as unknown as EngineSystemsState,
