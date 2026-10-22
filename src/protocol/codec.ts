@@ -64,6 +64,8 @@ import {
   VEHICLE_EXT_SLOTS,
   HDR_U32_TRAFFIC_OFFSET,
   SNAPSHOT_FLAG_TRAFFIC,
+  HDR_U32_WHEELS_OFFSET,
+  SNAPSHOT_FLAG_WHEELS,
   HDR_F64_SIMTIME,
   HDR_U32_BEAM_BREAK_COUNT,
   HDR_U32_BEAM_BREAK_OVERFLOW,
@@ -125,6 +127,28 @@ import {
   packTrafficLook,
   type TrafficAgentFrame,
 } from './traffic';
+import {
+  WHEEL_RECORD_WORDS,
+  WHEEL_SECTION_HEADER_WORDS,
+  WHEEL_SECTION_RECORDS,
+  WR_FLAGS,
+  WR_GRIP,
+  WR_LIFT,
+  WR_LOAD,
+  WR_MATERIAL,
+  WR_OBJECT_ID,
+  WR_PRESSURE,
+  WR_SINKAGE,
+  WR_SLIP_ANGLE,
+  WR_SLIP_RATIO,
+  WR_T_CARCASS,
+  WR_T_DISC,
+  WR_T_GAS,
+  WR_T_SURFACE,
+  WR_TREAD,
+  WR_WHEEL,
+  type WheelFrame,
+} from './wheels';
 
 export const SNAPSHOT_POOL_SIZE = 3;
 
@@ -175,6 +199,8 @@ export class SnapshotWriter {
   private readonly brokenW: number;
   private readonly trafficW: number;
   private readonly extW: number;
+  private readonly wheelsW: number;
+  private readonly wheelsCountW: number;
   private lastObjectId = -1;
   private lastAgent = -1;
 
@@ -189,6 +215,8 @@ export class SnapshotWriter {
     this.brokenW = layout.brokenOffset >> 2;
     this.trafficW = layout.trafficOffset >> 2;
     this.extW = layout.vehicleExtOffset >> 2;
+    this.wheelsCountW = layout.wheelsOffset >> 2;
+    this.wheelsW = this.wheelsCountW + WHEEL_SECTION_HEADER_WORDS;
   }
 
   /** Binds the writer to `buffer` (creates views) and writes the static header. */
@@ -204,7 +232,12 @@ export class SnapshotWriter {
     for (let i = 0; i < HEADER_BYTES >> 2; i++) u[i] = 0;
     u[HDR_U32_MAGIC] = SNAPSHOT_MAGIC;
     u[HDR_U32_VERSION] = SNAPSHOT_VERSION;
-    u[HDR_U32_FLAGS] = (L.debugStrains ? SNAPSHOT_FLAG_DEBUG_STRAINS : 0) | SNAPSHOT_FLAG_BROKEN_BEAMS | SNAPSHOT_FLAG_TRAFFIC | SNAPSHOT_FLAG_VEHICLE_EXT;
+    u[HDR_U32_FLAGS] =
+      (L.debugStrains ? SNAPSHOT_FLAG_DEBUG_STRAINS : 0) |
+      SNAPSHOT_FLAG_BROKEN_BEAMS |
+      SNAPSHOT_FLAG_TRAFFIC |
+      SNAPSHOT_FLAG_VEHICLE_EXT |
+      SNAPSHOT_FLAG_WHEELS;
     u[HDR_U32_OBJECTS_OFFSET] = L.objectsOffset;
     u[HDR_U32_IMPACTS_OFFSET] = L.impactsOffset;
     u[HDR_U32_BEAM_BREAKS_OFFSET] = L.beamBreaksOffset;
@@ -218,6 +251,7 @@ export class SnapshotWriter {
     u[HDR_U32_BROKEN_OFFSET] = L.brokenOffset;
     u[HDR_U32_TRAFFIC_OFFSET] = L.trafficOffset;
     u[HDR_U32_VEHICLE_EXT_OFFSET] = L.vehicleExtOffset;
+    u[HDR_U32_WHEELS_OFFSET] = L.wheelsOffset;
     this.lastObjectId = -1;
     this.lastAgent = -1;
     return this;
@@ -239,6 +273,7 @@ export class SnapshotWriter {
     u[HDR_U32_SKID_COUNT] = 0;
     u[HDR_U32_SKID_OVERFLOW] = 0;
     u[HDR_U32_TRAFFIC_COUNT] = 0;
+    u[this.wheelsCountW] = 0;
     this.f32[HDR_F32_WORKER_LOAD] = 0;
     this.lastObjectId = -1;
     this.lastAgent = -1;
@@ -280,6 +315,36 @@ export class SnapshotWriter {
     f[w + TR_BRAKE] = rec.brake;
     u[w + TR_PATH] = rec.path;
     u[HDR_U32_TRAFFIC_COUNT] = i + 1;
+    return i;
+  }
+
+  /**
+   * R-TYRE: appends one wheel record (wheels.ts layout); returns its index, or
+   * −1 when the section is full (the tail is dropped). Allocation-free.
+   */
+  pushWheel(rec: Readonly<WheelFrame>): number {
+    const u = this.u32;
+    const f = this.f32;
+    const i = u[this.wheelsCountW]!;
+    if (i >= WHEEL_SECTION_RECORDS) return -1;
+    const w = this.wheelsW + i * WHEEL_RECORD_WORDS;
+    u[w + WR_OBJECT_ID] = rec.objectId;
+    u[w + WR_WHEEL] = rec.wheel;
+    u[w + WR_FLAGS] = rec.flags;
+    u[w + WR_MATERIAL] = rec.materialId;
+    f[w + WR_PRESSURE] = rec.pressureKpa;
+    f[w + WR_T_SURFACE] = rec.tSurface;
+    f[w + WR_T_CARCASS] = rec.tCarcass;
+    f[w + WR_T_GAS] = rec.tGas;
+    f[w + WR_TREAD] = rec.treadMm;
+    f[w + WR_T_DISC] = rec.tDisc;
+    f[w + WR_SINKAGE] = rec.sinkage;
+    f[w + WR_GRIP] = rec.grip;
+    f[w + WR_LIFT] = rec.lift;
+    f[w + WR_SLIP_RATIO] = rec.slipRatio;
+    f[w + WR_SLIP_ANGLE] = rec.slipAngle;
+    f[w + WR_LOAD] = rec.load;
+    u[this.wheelsCountW] = i + 1;
     return i;
   }
 
@@ -552,6 +617,8 @@ export class SnapshotReader {
   private brokenW = 0;
   private trafficW = 0;
   private _trafficCount = 0;
+  private wheelsW = 0;
+  private _wheelCount = 0;
   private _hasBroken = false;
   private _objectCount = 0;
   private _nodeTotal = 0;
@@ -590,6 +657,9 @@ export class SnapshotReader {
     this.trafficW = u[HDR_U32_TRAFFIC_OFFSET]! >> 2;
     this._trafficCount = (u[HDR_U32_FLAGS]! & SNAPSHOT_FLAG_TRAFFIC) !== 0 && this.trafficW !== 0 ? u[HDR_U32_TRAFFIC_COUNT]! : 0;
     this.extW = (u[HDR_U32_FLAGS]! & SNAPSHOT_FLAG_VEHICLE_EXT) !== 0 ? u[HDR_U32_VEHICLE_EXT_OFFSET]! >> 2 : 0;
+    const wo = u[HDR_U32_WHEELS_OFFSET]! >> 2;
+    this.wheelsW = wo + WHEEL_SECTION_HEADER_WORDS;
+    this._wheelCount = (u[HDR_U32_FLAGS]! & SNAPSHOT_FLAG_WHEELS) !== 0 && wo !== 0 ? u[wo]! : 0;
     this.nodesView = null;
     this.strainsView = null;
     const n = this._objectCount;
@@ -968,6 +1038,44 @@ export class SnapshotReader {
     out.steer = f[w + TR_STEER]!;
     out.brake = f[w + TR_BRAKE]!;
     out.path = u[w + TR_PATH]!;
+    return out;
+  }
+
+  // ---------------- wheels (R-TYRE)
+  /** Wheel records in this snapshot (0 when absent). */
+  get wheelCount(): number {
+    return this._wheelCount;
+  }
+  /** Index of (objectId, wheel), −1 if absent (records ascend by object, then wheel). */
+  findWheel(objectId: number, wheel: number): number {
+    const u = this.u32;
+    for (let i = 0; i < this._wheelCount; i++) {
+      const w = this.wheelsW + i * WHEEL_RECORD_WORDS;
+      if (u[w + WR_OBJECT_ID] === objectId && u[w + WR_WHEEL] === wheel) return i;
+    }
+    return -1;
+  }
+  /** Decodes record i into `out` (allocation-free). */
+  readWheel(i: number, out: WheelFrame): WheelFrame {
+    const u = this.u32;
+    const f = this.f32;
+    const w = this.wheelsW + i * WHEEL_RECORD_WORDS;
+    out.objectId = u[w + WR_OBJECT_ID]!;
+    out.wheel = u[w + WR_WHEEL]!;
+    out.flags = u[w + WR_FLAGS]!;
+    out.materialId = u[w + WR_MATERIAL]!;
+    out.pressureKpa = f[w + WR_PRESSURE]!;
+    out.tSurface = f[w + WR_T_SURFACE]!;
+    out.tCarcass = f[w + WR_T_CARCASS]!;
+    out.tGas = f[w + WR_T_GAS]!;
+    out.treadMm = f[w + WR_TREAD]!;
+    out.tDisc = f[w + WR_T_DISC]!;
+    out.sinkage = f[w + WR_SINKAGE]!;
+    out.grip = f[w + WR_GRIP]!;
+    out.lift = f[w + WR_LIFT]!;
+    out.slipRatio = f[w + WR_SLIP_RATIO]!;
+    out.slipAngle = f[w + WR_SLIP_ANGLE]!;
+    out.load = f[w + WR_LOAD]!;
     return out;
   }
 }

@@ -149,6 +149,22 @@ export interface WheelDef {
   /** Lateral / longitudinal peak friction ratio μ_y/μ_x applied to the tread brush cap (default 1). */
   tyreLateralMu?: number;
   /**
+   * R-TYRE (additive, optional): lateral stiffness of the CARCASS between the
+   * rim and the contact patch, N/m at the cold inflation pressure (0 / absent =
+   * rigid, the P2–R-PHYS tyre). In series with the tread brush it sets the
+   * relaxation length σ_α ≈ C_α/C_y (wheels.ts applyTreadBrush). Passenger
+   * radials ≈ 1.5–2.5e5 N/m (Pacejka 2012 §7: σ_α ≈ 0.3–0.6 m).
+   */
+  tyreLateralStiffness?: number;
+  /**
+   * R-TYRE (additive, optional): cold inflation (gauge) kPa at 25 °C (default
+   * 230), compound grip window (tyreThermal.ts TYRE_COMPOUNDS: 'road' default,
+   * 'performance', 'truck') and new tread depth, mm (default 8).
+   */
+  tyrePressure?: number;
+  tyreCompound?: 'road' | 'performance' | 'track' | 'truck';
+  tyreTreadDepth?: number;
+  /**
    * R-PHYS (additive): share of the brake reaction couple's hub force taken by
    * hubI (the caliper bracket's inboard bias), 0..1, default 0.5. Sets the
    * brake compliance steer of the beam upright (wheels.ts applyUprightReaction).
@@ -229,7 +245,7 @@ export function wheelNodeId(wheelId: string, part: WheelNodePart, k?: number): s
  */
 export const WHEEL_BEAMS_PER_RAY = 22;
 export const WHEEL_RAYS_MIN = 10;
-export const WHEEL_RAYS_MAX = 14;
+export const WHEEL_RAYS_MAX = 16;
 
 // ====================================================================== drivetrain
 export type DiffType = 'open' | 'locked' | 'limited' | 'viscous';
@@ -507,6 +523,14 @@ export interface CompiledWheel {
     /** 0 = the car's weight shared over its wheels. */
     designLoad: number;
     lateralMu: number;
+    /** R-TYRE: carcass lateral stiffness, N/m (0 = rigid). */
+    lateralStiffness?: number;
+    /** R-TYRE: cold inflation kPa, compound, new tread mm; and the WheelDef width / tireMass (thermal, soil). */
+    pressure?: number;
+    compound?: 'road' | 'performance' | 'track' | 'truck';
+    treadDepth?: number;
+    width?: number;
+    tyreMass?: number;
   };
   /** WheelDef.caliperInboard ?? 0.5 (R-PHYS, additive optional). */
   caliperInboard?: number;
@@ -683,6 +707,29 @@ export interface WheelRuntime {
    * reacting on the upright. Additive, optional.
    */
   extraTorque?: number;
+  /**
+   * R-TYRE combined slip (wheels.ts applyTreadBrush; additive, optional, 0 when
+   * absent): the patch's longitudinal friction utilisation Σ|F_lon|/Σ μ_x·N
+   * and its sliding fraction (load-weighted share of tread nodes whose stick
+   * slid), both from the last ground pass, low-passed over 40 ms.
+   */
+  patchLon?: number;
+  patchSlide?: number;
+  /** R-TYRE: the contact nodes' mean longitudinal sliding speed, m/s (load-weighted, low-passed 40 ms). */
+  patchUx?: number;
+  /** R-TYRE: lateral carcass deflection at the patch, m (along the brush axis; wheels.ts applyTreadBrush). */
+  carcassY?: number;
+  /** R-TYRE: carcassY low-passed over one tread-node passage (the base a touching-down bristle anchors under). */
+  carcassYbar?: number;
+  /**
+   * R-TYRE: the patch's lateral brush force (N, signed along the axle) and the
+   * sum of its longitudinal friction magnitudes (N) of the last tick
+   * (wheels.ts applyTreadBrush; the tyre's frictional heat, tyre.ts).
+   */
+  patchFy?: number;
+  patchFx?: number;
+  /** R-TYRE: carcass lateral stiffness this tick, N/m (CompiledWheel.tyre.lateralStiffness × the inflation factor; 0 = rigid). */
+  carcassK?: number;
 }
 
 export interface DrivetrainState {

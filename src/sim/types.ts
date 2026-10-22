@@ -136,6 +136,13 @@ export interface SimState {
   treadAxY: Float64Array;
   treadAxZ: Float64Array;
   treadF: Float64Array;
+  /**
+   * R-TYRE: tread nodes' LONGITUDINAL friction (N, magnitude) applied by the
+   * last ground pass (the stick's part off the brush axis); 0 off the
+   * ground. The tread brush reads it to share the node's friction ellipse
+   * (wheels.ts applyTreadBrush).
+   */
+  treadFl: Float64Array;
   /** P5 node-vs-node contact radius, m (CompiledRig.nodeObjRadius). f64: contact math. */
   objRadius: Float64Array;
   /** NODE_FLAG_* bits (u8: dense, bit tests only). */

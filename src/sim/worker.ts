@@ -227,6 +227,12 @@ export class WorkerHost {
         case 'setAssists':
           engine.setAssists(msg.objectId, msg);
           return;
+        case 'setSurfaceWetness':
+          engine.setSurfaceWetness(msg.wetness, msg.rain);
+          return;
+        case 'setTyre':
+          engine.setTyre(msg);
+          return;
         case 'recover':
           engine.recover(msg.objectId, msg.pos);
           this.dirty = true;

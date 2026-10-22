@@ -56,7 +56,7 @@ import type {
   VehicleRuntime,
   WheelRuntime,
 } from './types';
-import { applyHoopTension, applyParkingClamp, applyTreadBrush, applyWheelTorques, estimateWheelOmega, setDriveOnUpright } from './wheels';
+import { applyHoopTension, applyParkingClamp, applyTreadBrush, applyWheelTorques, estimateWheelOmega, reserveBrushScratch, setDriveOnUpright, wheelGroundMaterials, wheelGroundSampler } from './wheels';
 import { brakeFade, createBrakeHeat, resetBrakeHeat, stepDiscTemp, type BrakeHeatState } from './brakeHeat';
 import { DERATE_START_C, LOW_OIL, createEngineSystems, detectEngineDamage, engineSystemsPost, engineSystemsPre, resetEngineSystems, type EngineSystemsState } from './engineSystems';
 import { applyDampers, createVehicleDampers, rebaseDampers, type DamperState } from './dampers';
@@ -165,12 +165,16 @@ function reactionNodes(vehicle: CompiledVehicle, cw: CompiledWheel): Int32Array 
 
 function makeWheel(vehicle: CompiledVehicle, index: number): WheelRuntime {
   const cw = vehicle.wheels[index]!;
+  reserveBrushScratch(2 * cw.rays);
   const reactLocal = reactionNodes(vehicle, cw);
   return {
     reactLocal,
     reactNodes: new Int32Array(reactLocal.length),
     caliperInboard: cw.caliperInboard ?? 0.5,
     latMu: cw.tyre?.lateralMu ?? 1,
+    carcassY: 0,
+    carcassYbar: 0,
+    carcassK: cw.tyre?.lateralStiffness ?? 0,
     wheel: cw,
     hubI: cw.hubI,
     hubO: cw.hubO,
@@ -251,12 +255,15 @@ export function createVehicleRuntime(
       // design load: the car's weight shared over its wheels
       const t = cw.tyre;
       const fz0 = t && t.designLoad > 0 ? t.designLoad : (vehicle.totalMass * 9.81) / vehicle.wheels.length;
-      return createTyreState(base, fz0, {
-        tyreLoadSensitivity: t?.loadSensitivity,
-        tyreSlideRatio: t?.slideRatio,
-        tyrePeakSlip: t?.peakSlip,
-        tyreSlideSlip: t?.slideSlip,
-        rollingLossComp: t?.rollingLossComp,
+      return createTyreState({
+        cw,
+        base,
+        fz0,
+        beamK: rig.beamK,
+        attachCount: cw.attachNodes.length,
+        nodeRadius: rig.nodeRadius[cw.tireStart]!,
+        contactK: rig.nodeContactK[cw.tireStart]!,
+        objectId,
       });
     }),
   };
@@ -276,6 +283,8 @@ export const rebaseVehicle: RebaseVehicle = (vehicle, nodeStart, beamStart) => {
   if (sh) for (const c of sh) rebaseShell(c, nodeStart, beamStart);
   const dm = (vehicle as VehicleRuntimeEx).dampers;
   if (dm) rebaseDampers(dm, beamStart);
+  const ty = (vehicle as VehicleRuntimeEx).tyres;
+  if (ty) for (const t of ty) t.beamBase = beamStart;
   for (const w of vehicle.wheels) {
     const cw = w.wheel;
     w.hubI = nodeStart + cw.hubI;
@@ -303,6 +312,11 @@ export function resetVehicleRuntime(vehicle: VehicleRuntime): void {
     w.brakeTorque = 0;
     w.treadLoad.fill(0);
     w.treadBrush.fill(0);
+    w.patchLon = 0;
+    w.patchSlide = 0;
+    w.patchUx = 0;
+    w.carcassY = 0;
+    w.carcassYbar = 0;
   }
   resetDrivetrainState(vehicle.drivetrain as DrivetrainStateEx, vehicle.vehicle.drivetrain);
   const bs = (vehicle as VehicleRuntimeEx).brakeSys;
@@ -530,9 +544,12 @@ export function vehiclePreStep(state: SimState, vehicle: VehicleRuntime, actions
   const onAxle = vehicle.vehicle.drivetrain.driveReaction === 'axle';
   setDriveOnUpright(onAxle);
   const ty = (vehicle as VehicleRuntimeEx).tyres;
+  const bhT = (vehicle as VehicleRuntimeEx).brakeHeat;
+  const gs = wheelGroundSampler();
+  const gm = wheelGroundMaterials();
   for (let w = 0; w < wheels.length; w++) {
     const wr = wheels[w]!;
-    if (ty) wr.extraTorque = stepTyre(state, wr, ty[w]!, dt);
+    if (ty) wr.extraTorque = stepTyre(state, wr, ty[w]!, dt, gs, bhT && bhT.mass[w]! > 0 ? bhT.temp[w]! : undefined, gm);
     applyWheelTorques(state, wr, wr.driveTorque, wr.brakeTorque);
     applyTreadBrush(state, wr, dt);
     applyHoopTension(state, wr);
@@ -1049,5 +1066,10 @@ export function recoverVehicle(
     w.slipSpeed = 0;
     w.treadLoad.fill(0);
     w.treadBrush.fill(0);
+    w.patchLon = 0;
+    w.patchSlide = 0;
+    w.patchUx = 0;
+    w.carcassY = 0;
+    w.carcassYbar = 0;
   }
 }

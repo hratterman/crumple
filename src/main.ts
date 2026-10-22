@@ -48,6 +48,7 @@ import { createInputMapper } from './input/actions';
 import { attachInputDevices } from './input/devices';
 import type { BeamBreakEvent, ImpactEvent, SkidEvent } from './protocol/events';
 import { GAME_CAPACITY, isPropObjectId, SPAWN_SETTLE_S, type ActionState, type Transform } from './protocol/messages';
+import { createWheelFrame, type WheelFrame } from './protocol/wheels';
 import { VehicleTelemetry } from './protocol/telemetry';
 import { TRAFFIC_FLAG_BRAKE, TRAFFIC_FLAG_HEADLIGHTS, type TrafficAgentFrame } from './protocol/traffic';
 import { DEFAULT_CHASE_OPTIONS, vehiclePoseFromNodes, type ChaseTarget } from './render/cameras/chase';
@@ -297,6 +298,8 @@ let terrain: TerrainData | null = null;
 let sampler: TerrainSampler | null = null;
 let quality: QualityController | null = null;
 let post: PostStack | null = null;
+/** R-TYRE: the surface water last sent to the worker (setSurfaceWetness). */
+const tyreWater = { wetness: 0, rain: 0 };
 /** R-GFX: the world lighting stack (time of day + weather live on `lightingStack.env`). */
 let lightingStack: LightingStack | null = null;
 /** R-GFX night lights (light grid + the player's shadowed headlights), null before boot. */
@@ -1241,6 +1244,20 @@ const crumple = {
   setTractionControl(on: boolean): void {
     setTractionControl(on);
   },
+  /** R-TYRE: the player's tyres from the latest snapshot (TPMS, temperatures, grip, wear; protocol/wheels.ts). */
+  get tyres(): WheelFrame[] {
+    const out: WheelFrame[] = [];
+    for (let w = 0; w < 8; w++) {
+      const f = createWheelFrame();
+      if (!client.readWheel(VEHICLE_ID, w, f)) break;
+      out.push(f);
+    }
+    return out;
+  },
+  /** R-TYRE: tyre service on the player (logged: replays reproduce it). */
+  setTyre(op: { wheel?: number; pressureKpa?: number; puncture?: 'slow' | 'fast' | 'debead'; repair?: boolean; treadMm?: number }): void {
+    client.setTyre(VEHICLE_ID, op);
+  },
   get timescale(): number {
     return paused ? 0 : slowMo ? SLOW_MO_SCALE : 1;
   },
@@ -1965,6 +1982,16 @@ async function boot(): Promise<void> {
     prof.lap('camera');
     // R-GFX: time of day advances with the world (frozen while paused or replaying)
     lighting.env?.advance(paused || replay.active ? 0 : dt);
+    // R-TYRE: the weather's surface water reaches the tyres as a LOGGED command (replays reproduce the grip), only
+    // when it moved by > 0.02 and never while replaying (main sends no commands then)
+    if (!replay.active && lighting.env) {
+      const wx = lighting.env.weather;
+      if (Math.abs(wx.wetness - tyreWater.wetness) > 0.02 || Math.abs(wx.rain - tyreWater.rain) > 0.02) {
+        tyreWater.wetness = wx.wetness;
+        tyreWater.rain = wx.rain;
+        client.setSurfaceWetness(wx.wetness, wx.rain);
+      }
+    }
     lighting.update(camera);
     updateNearCasters(lighting);
     prof.lap('csm');

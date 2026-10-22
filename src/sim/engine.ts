@@ -66,9 +66,15 @@ import {
   vehiclePreStep,
   writeVehicleTelemetry,
   writeVehicleTelemetryExt,
+  type VehicleRuntimeEx,
 } from './vehicle/runtime';
 import type { CompiledVehicle, TransmissionMode, VehicleDef, VehicleRuntime } from './vehicle/types';
 import { setWheelGround } from './vehicle/wheels';
+import { fillWheelFrame, punctureTyre, repairTyre, setTreadDepth, setTyreEnvironment, setTyrePressure, tyreEnv } from './vehicle/tyre';
+import { createWheelFrame } from '../protocol/wheels';
+
+/** Snapshot scratch for the wheel records (never retained). */
+const wheelScratch = createWheelFrame();
 import type { DrivetrainStateEx } from './vehicle/drivetrain';
 
 /**
@@ -306,6 +312,9 @@ export class SimEngine {
   /** The installed heightfield (setGroundTerrain), null for plane / no ground. */
   terrain: TerrainData | null = null;
   materials: MaterialTable = DEFAULT_MATERIALS;
+  /** R-TYRE: surface water (setSurfaceWetness), 0..1. */
+  wetness = 0;
+  rain = 0;
   /** Fixed steps taken since init. */
   tick = 0;
   /** Layout colliders (installed with the heightfield), then the setColliders extra set. */
@@ -613,6 +622,42 @@ export class SimEngine {
     if (abs !== undefined) dts.abs = abs;
     if (esc !== undefined) dts.esc = esc;
     if (ca !== undefined) dts.clutchAssist = ca;
+  }
+
+  /** R-TYRE: surface water the tyres see (protocol `setSurfaceWetness`, logged; clamped to [0, 1]). */
+  setSurfaceWetness(wetness: number, rain: number): void {
+    if (typeof wetness !== 'number' || !Number.isFinite(wetness) || typeof rain !== 'number' || !Number.isFinite(rain)) {
+      throw new SimCommandError('setSurfaceWetness: wetness and rain must be finite numbers');
+    }
+    this.wetness = wetness < 0 ? 0 : wetness > 1 ? 1 : wetness;
+    this.rain = rain < 0 ? 0 : rain > 1 ? 1 : rain;
+  }
+
+  /** R-TYRE: tyre service (protocol `setTyre`, logged): inflate / air down, puncture, repair. */
+  setTyre(msg: { objectId: number; wheel?: number; pressureKpa?: number; puncture?: 'slow' | 'fast' | 'debead'; repair?: boolean; treadMm?: number }): void {
+    const v = this.vehicles.get(msg.objectId) as VehicleRuntimeEx | undefined;
+    if (!v) throw new SimCommandError(`objectId ${msg.objectId} is not a vehicle`, msg.objectId);
+    const n = v.tyres.length;
+    if (msg.wheel !== undefined && (!Number.isInteger(msg.wheel) || msg.wheel < 0 || msg.wheel >= n)) {
+      throw new SimCommandError(`setTyre: wheel ${String(msg.wheel)} out of range`, msg.objectId);
+    }
+    if (msg.pressureKpa !== undefined && !(Number.isFinite(msg.pressureKpa) && msg.pressureKpa >= 0 && msg.pressureKpa <= 2000)) {
+      throw new SimCommandError('setTyre: pressureKpa must be in [0, 2000]', msg.objectId);
+    }
+    if (msg.puncture !== undefined && msg.puncture !== 'slow' && msg.puncture !== 'fast' && msg.puncture !== 'debead') {
+      throw new SimCommandError('setTyre: puncture must be slow | fast | debead', msg.objectId);
+    }
+    if (msg.treadMm !== undefined && !(Number.isFinite(msg.treadMm) && msg.treadMm >= 0 && msg.treadMm <= 40)) {
+      throw new SimCommandError('setTyre: treadMm must be in [0, 40]', msg.objectId);
+    }
+    for (let w = 0; w < n; w++) {
+      if (msg.wheel !== undefined && w !== msg.wheel) continue;
+      const t = v.tyres[w]!;
+      if (msg.repair === true) repairTyre(t);
+      if (msg.pressureKpa !== undefined) setTyrePressure(t, msg.pressureKpa);
+      if (msg.puncture !== undefined) punctureTyre(t, msg.puncture);
+      if (msg.treadMm !== undefined) setTreadDepth(t, msg.treadMm);
+    }
   }
 
   /** Upright the vehicle in place (damage and drivetrain kept); see recoverVehicle. */
@@ -1056,7 +1101,10 @@ export class SimEngine {
     const kern = this.kernel;
     // The wheel kernels' ground is module state: point it at THIS engine's
     // ground every step (several engines may coexist, e.g. in tests).
-    if (this.vehicles.size > 0) setWheelGround(sampler, this.materials, SIM_DT);
+    if (this.vehicles.size > 0) {
+      setWheelGround(sampler, this.materials, SIM_DT);
+      setTyreEnvironment(this.wetness, this.rain);
+    }
     setActiveKernel(kern);
     kern.beginTick?.();
     if (this.contactsDirty || this.tick >= this.nextRebuild) this.broadphase();
@@ -1355,6 +1403,16 @@ export class SimEngine {
         for (let k = 0; k < TELEMETRY_SLOTS; k++) writer.setTelemetry(i, k, t[k]!);
         const x = writeVehicleTelemetryExt(veh);
         for (let k = 0; k < VEHICLE_EXT_SLOTS; k++) writer.setTelemetryExt(i, k, x[k]!);
+        // R-TYRE: one wheel record per wheel (TPMS, tyre temperatures, grip)
+        const vx = veh as VehicleRuntimeEx;
+        const ty = vx.tyres;
+        if (ty) {
+          const bh = vx.brakeHeat;
+          for (let w = 0; w < veh.wheels.length; w++) {
+            const disc = bh && bh.mass[w]! > 0 ? bh.temp[w]! : tyreEnv.ambient;
+            writer.pushWheel(fillWheelFrame(s, veh.wheels[w]!, ty[w]!, obj.objectId, disc, wheelScratch));
+          }
+        }
       }
     }
     if (this.traffic !== null) this.traffic.writeRecords(writer, this);

@@ -47,6 +47,13 @@ export interface TyreBenchOptions {
   camber?: number;
   /** Ground material. */
   materialId?: number;
+  /** R-TYRE: surface water (engine setSurfaceWetness), 0..1. */
+  wetness?: number;
+  rain?: number;
+  /** R-TYRE: remaining tread depth, mm (engine setTyre treadMm; default new). */
+  treadMm?: number;
+  /** R-TYRE: inflation, kPa gauge cold (engine setTyre pressureKpa; default the def's placard). */
+  pressureKpa?: number;
 }
 
 export interface TyreBench {
@@ -174,9 +181,12 @@ export function createTyreBench(src: WheelDef, opts: TyreBenchOptions): TyreBenc
     capacity: { maxObjects: 2, nodeCapacity: 512, beamCapacity: 2048 },
   });
   eng.setGroundPlane(0, opts.materialId ?? MaterialId.asphalt);
+  if (opts.wetness !== undefined || opts.rain !== undefined) eng.setSurfaceWetness(opts.wetness ?? 0, opts.rain ?? 0);
   // Start with the carriage lifted so the tyre just touches; the load servo sinks it.
   const obj = eng.spawnVehicle(1, def, { pos: [0, 0.01, 0], quat: [0, 0, 0, 1] }, 'manual');
   const veh = eng.getVehicle(1)!;
+  if (opts.treadMm !== undefined) eng.setTyre({ objectId: 1, treadMm: opts.treadMm });
+  if (opts.pressureKpa !== undefined) eng.setTyre({ objectId: 1, pressureKpa: opts.pressureKpa });
   const s = eng.state;
   const nCarriage = def.body.nodes.length;
   const nodes = new Int32Array(nCarriage);

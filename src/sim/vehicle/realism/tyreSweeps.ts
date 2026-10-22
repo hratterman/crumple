@@ -53,6 +53,10 @@ export interface SweepOptions {
   speed?: number;
   camberDeg?: number;
   materialId?: number;
+  wetness?: number;
+  rain?: number;
+  treadMm?: number;
+  pressureKpa?: number;
 }
 
 /**
@@ -61,7 +65,7 @@ export interface SweepOptions {
  * point per 20 ms.
  */
 export function lateralSweep(wheel: WheelDef, o: SweepOptions & { maxDeg?: number; rateDegS?: number }): TyrePoint[] {
-  const b = createTyreBench(wheel, { load: o.load, speed: o.speed ?? 15, camber: (o.camberDeg ?? 0) * DEG, materialId: o.materialId });
+  const b = createTyreBench(wheel, { load: o.load, speed: o.speed ?? 15, camber: (o.camberDeg ?? 0) * DEG, materialId: o.materialId, wetness: o.wetness, rain: o.rain, treadMm: o.treadMm, pressureKpa: o.pressureKpa });
   const max = (o.maxDeg ?? 20) * DEG;
   const rate = (o.rateDegS ?? 4) * DEG;
   const per = Math.round(SIM_HZ * 0.02);
@@ -85,7 +89,7 @@ export function longitudinalSweep(
   wheel: WheelDef,
   o: SweepOptions & { kappaEnd: number; rate?: number; alphaDeg?: number },
 ): TyrePoint[] {
-  const b = createTyreBench(wheel, { load: o.load, speed: o.speed ?? 15, materialId: o.materialId });
+  const b = createTyreBench(wheel, { load: o.load, speed: o.speed ?? 15, materialId: o.materialId, wetness: o.wetness, rain: o.rain, treadMm: o.treadMm, pressureKpa: o.pressureKpa });
   b.alpha = (o.alphaDeg ?? 0) * DEG;
   // let the lateral force build at the fixed slip angle first
   if (b.alpha !== 0) averaged(b, Math.round(0.3 * SIM_HZ));
@@ -116,7 +120,7 @@ export interface RelaxResult {
 
 /** Slip-angle step 0 → stepDeg at `speed`; relaxation length from the 63 % rise distance. */
 export function relaxationStep(wheel: WheelDef, o: SweepOptions & { stepDeg?: number }): RelaxResult {
-  const b = createTyreBench(wheel, { load: o.load, speed: o.speed ?? 15, materialId: o.materialId });
+  const b = createTyreBench(wheel, { load: o.load, speed: o.speed ?? 15, materialId: o.materialId, wetness: o.wetness, rain: o.rain, treadMm: o.treadMm, pressureKpa: o.pressureKpa });
   // Unaveraged per-tick trace (filtered lightly over a ray passage: 12 rays at 15 m/s ≈ 90 Hz).
   const d0 = b.dist;
   const target = (o.stepDeg ?? 2) * DEG;
@@ -137,15 +141,17 @@ export function relaxationStep(wheel: WheelDef, o: SweepOptions & { stepDeg?: nu
   }
   const tail = trace.slice(Math.floor(trace.length * 0.6));
   const steady = tail.reduce((a, p) => a + p.fy, 0) / tail.length;
-  // the box filter delays by half its length: subtract that distance
-  const lag = (nBox / 2 / SIM_HZ) * b.speed;
+  // the box filter delays by half its length, and a ramp input of duration T reaches a first-order lag T/2 later
+  // than a true step: subtract both distances (without the ramp term the "length" grew with speed, 0.15 m at
+  // 5 m/s → 0.43 m at 30 m/s, a time-based artefact of the 10 ms actuator ramp)
+  const lag = ((nBox / 2 + ramp / 2) / SIM_HZ) * b.speed;
   const hit = trace.find((p) => p.fy >= 0.632 * steady);
   return { relaxLength: hit ? hit.dist - lag : Infinity, trace, steadyFy: steady };
 }
 
 /** Free-rolling longitudinal force at α = 0 (rolling resistance), N (negative = drag). */
 export function freeRolling(wheel: WheelDef, o: SweepOptions & { durationS?: number }): TyrePoint {
-  const b = createTyreBench(wheel, { load: o.load, speed: o.speed ?? 15, camber: (o.camberDeg ?? 0) * DEG, materialId: o.materialId });
+  const b = createTyreBench(wheel, { load: o.load, speed: o.speed ?? 15, camber: (o.camberDeg ?? 0) * DEG, materialId: o.materialId, wetness: o.wetness, rain: o.rain, treadMm: o.treadMm, pressureKpa: o.pressureKpa });
   return averaged(b, Math.round((o.durationS ?? 1) * SIM_HZ));
 }
 

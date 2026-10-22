@@ -351,33 +351,60 @@ export const applyGroundContacts: ApplyGroundContacts = (
     let rz = -(mdt * tz + az - an * nz);
     let cone = friction[i]! * matFriction[mat]! * fn;
     if ((f & NODE_FLAG_TREAD) !== 0) {
-      // The tread brush's lateral force on this node shares the circle.
-      const fb = treadF[i]!;
-      const muN = cone;
-      const rem = cone * cone - fb * fb;
-      cone = rem > 0 ? Math.sqrt(rem) : 0;
-      // R-PHYS: the brush takes the tread's lateral friction first; the stick's lateral part (along the
-      // brush axis â) only gets what the brush leaves, |F_lat| ≤ μN − F_b, so brush + stick never exceed μN
-      // sideways. Before, the stick's lateral share came from the quadrature remainder √((μN)² − F_b²)
-      // (flat-track bench: Fy/Fz 1.24 at μ 1.1); with no lateral stick at all a parked truck's heavy tread
-      // nodes fluttered sideways (2.5 m/s).
-      // treadAx = the brush axis scaled by the tyre's μ_y/μ_x (wheels.ts applyTreadBrush)
+      // treadAx = the brush axis â scaled by the tyre's μ_y/μ_x (wheels.ts applyTreadBrush); 0 = the brush did
+      // not see this node in contact this tick (plain friction cone below).
       let lx = state.treadAxX[i]!;
       let ly = state.treadAxY[i]!;
       let lz = state.treadAxZ[i]!;
       const la = Math.sqrt(lx * lx + ly * ly + lz * lz);
       if (la > 0) {
+        // R-TYRE FRICTION ELLIPSE per tread node, (F_lon/μ_x N)² + (F_lat/μ_y N)² ≤ 1, μ_y = la·μ_x, shared in
+        // this order: (1) the brush's lateral force F_b (on the rigid wheel, wheels.ts); (2) the node stick's
+        // LONGITUDINAL part r_o (along the request off the brush axis), capped at the remainder
+        // μ_x N·√(1 − (F_b/μ_y N)²) — sliding along its request; (3) the stick's LATERAL part r_l, capped at what
+        // is left, μ_y N·√(1 − (F_lon/μ_x N)²) − F_b. The lateral stick only steadies the heavy tread nodes (with
+        // none a parked truck's fluttered sideways at 2.5 m/s, R-PHYS); ranking it last keeps its jitter from
+        // eating a braking tyre's longitudinal grip. WHY the ellipse: the earlier circle √((μ_x N)² − F_b²) let a
+        // tyre corner at its full μ_y while braking at 0.6 μ_x (bench, sedan α 5°, κ −0.1: (Fx/μ_x)² + (Fy/μ_y)² =
+        // 1.27): trail braking and ABS in a bend had grip no tyre has. treadFl = the longitudinal friction
+        // applied, NEGATIVE when it was capped (the node slid): the brush reads the patch's sliding share.
         lx /= la;
         ly /= la;
         lz /= la;
+        const fb = treadF[i]!;
+        const L = la * cone;
+        const rl = rx * lx + ry * ly + rz * lz;
+        let ox = rx - rl * lx;
+        let oy = ry - rl * ly;
+        let oz = rz - rl * lz;
+        const yb = L > 0 ? fb / L : 1;
+        const remO = 1 - yb * yb;
+        const oCap = remO > 0 ? cone * Math.sqrt(remO) : 0;
+        let ol = Math.sqrt(ox * ox + oy * oy + oz * oz);
+        let slid = false;
+        if (ol > oCap) {
+          const sc = oCap / ol;
+          ox *= sc;
+          oy *= sc;
+          oz *= sc;
+          ol = oCap;
+          slid = true;
+        }
+        const xo = cone > 0 ? ol / cone : 1;
+        const remL = 1 - xo * xo;
+        let latCap = (remL > 0 ? L * Math.sqrt(remL) : 0) - fb;
+        if (latCap < 0) latCap = 0;
+        const rlc = rl > latCap ? latCap : rl < -latCap ? -latCap : rl;
+        // slid with nothing left (the brush took the whole ellipse): still report the slide (−0 would read as
+        // adhesion, the brush kept its full cap and a locked wheel could never spin up again: pickup rear axle)
+        state.treadFl[i] = slid ? (ol > 1e-9 ? -ol : -1e-9) : ol;
+        rx = rlc * lx + ox;
+        ry = rlc * ly + oy;
+        rz = rlc * lz + oz;
+        cone = Infinity; // already inside the ellipse
+      } else {
+        state.treadFl[i] = 0;
       }
-      const rl = rx * lx + ry * ly + rz * lz;
-      const latCap = la * muN - fb > 0 ? la * muN - fb : 0;
-      const rlc = rl > latCap ? latCap : rl < -latCap ? -latCap : rl;
-      const dl = rlc - rl;
-      rx += dl * lx;
-      ry += dl * ly;
-      rz += dl * lz;
     }
     const r2 = rx * rx + ry * ry + rz * rz;
     if (r2 > 0) {

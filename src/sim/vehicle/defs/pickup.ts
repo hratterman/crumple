@@ -80,6 +80,9 @@ export const PICKUP_TIRE = {
   tireNodeRadius: 0.05,
   tireContactSpring: 7e4,
   treadBrushStiffness: 1.05e5,
+  // R-TYRE: LT load range E at 3.0 bar (an unladen crew-cab's placard), all-terrain road compound, 11 mm new
+  tyrePressure: 300,
+  tyreTreadDepth: 11,
   treadBrushDamping: 45,
   rimHoopTension: 1,
   treadHoopTension: 0.5,
@@ -95,7 +98,11 @@ export const PICKUP_TIRE = {
   tireMass: 22,
   // R-PHYS: 1.0 → 1.1 μ_x with μ_y = 0.85 μ_x (an all-season LT tyre): ABS ≈ 0.95 g, skidpad ≈ 0.8 g
   friction: 1.13,
-  tyreLateralMu: 0.85,
+  // R-TYRE: 0.85 → 0.8. The patch-level combined slip (wheels.ts) replaced the 12 % slip-ratio deadzone that
+  // took side force off the driven rear axle's few-% drive slip in a steady circle: R40 0.84 → 0.92 g at 0.85
+  // (fleet band 0.75–0.92; full-size pickups on LT all-terrains 0.72–0.80 g). Bench μ_y 0.87 (MF LT ref 0.90),
+  // μ_x unchanged (100–0 ≤ 42 m).
+  tyreLateralMu: 0.8,
   // R-PHYS tyre model (tyre.ts): LT tyre
   tyreLoadSensitivity: 0.07,
   tyreSlideRatio: 0.82,

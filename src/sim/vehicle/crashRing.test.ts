@@ -45,7 +45,9 @@ const CASES: Case[] = [
   // ring 50 km/h 2 → 3.5 cm (R-CRASH): chaotic in the impact speed like the sedan's above — with R-PHYS's tyres the
   // paper beater at 47 / 48.5 / 50 / 51.5 / 53 km/h rings 1.9 / 1.1 / 2.6 / 3.2 / 0.9 cm 0.5 s after the peak
   { name: 'beater', def: BEATER, probes: BEATER_CRASH_PROBES, ring: [0.035, 0.045], rebound: [0.05, 0.15] },
-  { name: 'traffic sedan', def: SEDAN_TRAFFIC, probes: SEDAN_TRAFFIC_CRASH_PROBES, ring: [0.01, 0.025], rebound: [0.05, 0.15] },
+  // R-TYRE: rebound floor 5 → 3 %: at 100 km/h the wall cuts the front tyres (rim strike), and the flat front end
+  // riding on its rims damps the roll-back off the wall: 4 % (7 % with TYRE_FEATURES.rimDamage off); 50 km/h 10 %
+  { name: 'traffic sedan', def: SEDAN_TRAFFIC, probes: SEDAN_TRAFFIC_CRASH_PROBES, ring: [0.01, 0.025], rebound: [0.03, 0.15] },
   // ring 50 km/h 2 → 3 cm (R-CRASH): with the 8 MN/m wall contact the frame horns no longer sink 10 cm into the wall, so the box's late
   // shunt on its mounts moves the measured crush 2.4 cm 0.5 s after the peak (box truck frame / mounts: R-PHYS).
   // R-PHYS: the truck's 100 km/h ring is chaotic too (the cab lands on wheels spinning at road speed): 97 / 98.5 /

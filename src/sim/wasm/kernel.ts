@@ -204,7 +204,7 @@ function moduleFor(kind: 'wasm' | 'simd'): WebAssembly.Module {
 }
 
 /** Number of u32 entries in kernel.c's pointer table (enum order below). */
-const STATE_PTRS = 38;
+const STATE_PTRS = 39;
 
 function createWasmKernel(kind: 'wasm' | 'simd', nodeCapacity: number, beamCapacity: number): WasmSimKernel {
   const auxBytes = 96 * nodeCapacity + (256 << 10);
@@ -250,6 +250,7 @@ function createWasmKernel(kind: 'wasm' | 'simd', nodeCapacity: number, beamCapac
     state.flags,
     state.unloadGain, state.unloadTrig, state.crushHold, state.hystOff,
     state.radius, state.friction, state.contactK, state.treadAxX, state.treadAxY, state.treadAxZ, state.treadF,
+    state.treadFl,
   ];
   if (ptrs.length !== STATE_PTRS) throw new Error('kernel pointer table mismatch');
   for (let i = 0; i < ptrs.length; i++) table[i] = ptrs[i]!.byteOffset;

@@ -102,6 +102,10 @@ export const BOXTRUCK_TIRE = {
   tireContactSpring: 1.7e5,
   treadBrushStiffness: 8e4,
   treadBrushDamping: 90,
+  // R-TYRE: 7.6 bar (110 psi), truck compound, 13 mm new (regional drive / steer tread)
+  tyrePressure: 760,
+  tyreCompound: 'truck',
+  tyreTreadDepth: 13,
   rimHoopTension: 1,
   treadHoopTension: 0.5,
   rollingResistance: 0.007,

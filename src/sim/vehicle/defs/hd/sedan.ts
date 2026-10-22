@@ -1,7 +1,7 @@
 /**
  * SEDAN high-density variants (R-RIG; docs/CONTRACTS.md "R-RIG"): the
  * standard SEDAN as the backbone (ids, hardpoints, suspension, drivetrain,
- * shell zones unchanged) with every exterior panel rebuilt as a sheet-metal
+ * shell zones unchanged; the wheels as R-TYRE's high-resolution tyre) with every exterior panel rebuilt as a sheet-metal
  * skin sampled from the render body (skins/sedan.<tier>.ts) at the tier's
  * pitch, fastened by its real seam (spot-weld / hem / bolts / clips), and the
  * mass redistributed so total and CG match the standard car.
@@ -13,6 +13,7 @@
 import type { BoxMemberSpec } from '../../../rig/gen/member';
 import type { SkinPanelData, SkinSet, SkinSpec } from '../../../rig/gen/types';
 import type { CrashProbes } from '../../crash';
+import { hiResWheels, HIRES_ROLL_DELTA_205_55R16 } from '../../tyreHiRes';
 import { SEDAN } from '../sedan';
 import { hdVariants, stationDonorWeight, stationMembers, type HdCarConfig } from './build';
 import { SKINS as HIGH } from './skins/sedan.high';
@@ -79,7 +80,8 @@ export const sedanMassDonorWeight = stationDonorWeight(9);
 /** The sedan's HD build recipe (build.ts). */
 export const SEDAN_HD_CONFIG: HdCarConfig = {
   car: 'sedan',
-  base: SEDAN,
+  // R-TYRE: the high-resolution tyre (16 rays, carcass compliance: tyreHiRes.ts) on both HD tiers
+  base: { ...SEDAN, wheels: hiResWheels(SEDAN.wheels, { rollDelta: HIRES_ROLL_DELTA_205_55R16 }) },
   probes: SEDAN_PROBES,
   skins: SKINS,
   skinSpec: sedanSkinSpec,

@@ -48,7 +48,7 @@ static float *unloadGain, *unloadTrig;
 static int32_t *crushHold;
 static f64 *hystOff;
 /* Ground contact (collision/ground.ts) per-node inputs. */
-static f64 *radiusArr, *frictionArr, *contactKArr, *treadAxX, *treadAxY, *treadAxZ, *treadF;
+static f64 *radiusArr, *frictionArr, *contactKArr, *treadAxX, *treadAxY, *treadAxZ, *treadF, *treadFl;
 
 /* Pointer table layout (u32 byte offsets), shared with src/sim/wasm/kernel.ts STATE_PTRS. */
 enum {
@@ -58,6 +58,7 @@ enum {
   P_FLAGS,
   P_UNLOADGAIN, P_UNLOADTRIG, P_CRUSHHOLD, P_HYSTOFF,
   P_RADIUS, P_FRICTION, P_CONTACTK, P_TREADAXX, P_TREADAXY, P_TREADAXZ, P_TREADF,
+  P_TREADFL,
   P_COUNT
 };
 
@@ -104,6 +105,7 @@ EXPORT(bind_state) void bind_state(void) {
   treadAxY = (f64 *)ptrTable[P_TREADAXY];
   treadAxZ = (f64 *)ptrTable[P_TREADAXZ];
   treadF = (f64 *)ptrTable[P_TREADF];
+  treadFl = (f64 *)ptrTable[P_TREADFL];
 }
 
 /* ------------------------------------------------------------ parameters (from beams.ts) */
@@ -1260,24 +1262,46 @@ EXPORT(ground) int ground(int first, int count, f64 dt, f64 gx, f64 gy, f64 gz, 
     f64 rz = -(mdt * tz + az - an * nz);
     f64 cone = frictionArr[i] * matF[mat] * fn;
     if ((f & NODE_FLAG_TREAD) != 0) {
-      const f64 fb = treadF[i];
-      const f64 muN = cone;
-      const f64 rem = cone * cone - fb * fb;
-      cone = rem > 0 ? __builtin_sqrt(rem) : 0;
+      /* R-TYRE friction ellipse (ground.ts tread branch, op for op): brush F_b first, then the stick's longitudinal
+       * part capped at the remainder, then its lateral part; treadFl < 0 = slid. */
       f64 lx = treadAxX[i], ly = treadAxY[i], lz = treadAxZ[i];
       const f64 la = __builtin_sqrt(lx * lx + ly * ly + lz * lz);
       if (la > 0) {
         lx /= la;
         ly /= la;
         lz /= la;
+        const f64 fb = treadF[i];
+        const f64 L = la * cone;
+        const f64 rl = rx * lx + ry * ly + rz * lz;
+        f64 ox = rx - rl * lx;
+        f64 oy = ry - rl * ly;
+        f64 oz = rz - rl * lz;
+        const f64 yb = L > 0 ? fb / L : 1;
+        const f64 remO = 1 - yb * yb;
+        const f64 oCap = remO > 0 ? cone * __builtin_sqrt(remO) : 0;
+        f64 ol = __builtin_sqrt(ox * ox + oy * oy + oz * oz);
+        int slid = 0;
+        if (ol > oCap) {
+          const f64 sc = oCap / ol;
+          ox *= sc;
+          oy *= sc;
+          oz *= sc;
+          ol = oCap;
+          slid = 1;
+        }
+        const f64 xo = cone > 0 ? ol / cone : 1;
+        const f64 remL = 1 - xo * xo;
+        f64 latCap = (remL > 0 ? L * __builtin_sqrt(remL) : 0) - fb;
+        if (latCap < 0) latCap = 0;
+        const f64 rlc = rl > latCap ? latCap : rl < -latCap ? -latCap : rl;
+        treadFl[i] = slid ? (ol > 1e-9 ? -ol : -1e-9) : ol;
+        rx = rlc * lx + ox;
+        ry = rlc * ly + oy;
+        rz = rlc * lz + oz;
+        cone = __builtin_inf();
+      } else {
+        treadFl[i] = 0;
       }
-      const f64 rl = rx * lx + ry * ly + rz * lz;
-      const f64 latCap = la * muN - fb > 0 ? la * muN - fb : 0;
-      const f64 rlc = rl > latCap ? latCap : rl < -latCap ? -latCap : rl;
-      const f64 dl = rlc - rl;
-      rx += dl * lx;
-      ry += dl * ly;
-      rz += dl * lz;
     }
     const f64 r2 = rx * rx + ry * ry + rz * rz;
     if (r2 > 0) {

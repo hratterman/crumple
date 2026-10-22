@@ -7,8 +7,10 @@
  * nodes ascending, wheels in declaration order).
  *
  * R-CORE KERNEL MIRROR: estimateWheelOmega, applyAxleTorque,
- * applyUprightReaction, applyTreadBrush (+ applyRimTorque) and
- * applyHoopTension are mirrored operation for operation in
+ * applyUprightReaction and applyHoopTension are mirrored operation for
+ * operation (applyTreadBrush + applyRimTorque: R-TYRE's patch-level brush runs
+ * as TS on every kernel, its dispatch line removed; kernel.c wheel_brush is the
+ * older R-PHYS brush) in
  * src/sim/wasm/kernel.c (wheel_*), bit-identical (kernelParity.test.ts). Anyone
  * editing these functions edits kernel.c in the same change and runs
  * tools/build-wasm.sh; WHEEL_KERNEL_PARAMS passes the constants.
@@ -44,6 +46,15 @@ let groundDt = 1 / 2000;
  * Registers the ground the wheel kernels query. Call at init and on every
  * `ground` command (null clears it). `dt` = the fixed sim step.
  */
+/** The ground the wheel kernels query (tyre.ts reads the surface through it). */
+export function wheelGroundSampler(): HeightSampler | null {
+  return groundSampler;
+}
+/** The material table of that ground (tyre.ts divides its absolute μ by the patch material's multiplier). */
+export function wheelGroundMaterials(): MaterialTable {
+  return groundMaterials;
+}
+
 export function setWheelGround(
   sampler: HeightSampler | null,
   materials: MaterialTable = DEFAULT_MATERIALS,
@@ -543,10 +554,39 @@ export const applyWheelTorques: ApplyWheelTorques = (state, w, driveTorque, brak
  * ground tangent plane, q_j = the ground point under the node:
  *   u   = v_c·â   (rigid-wheel lateral slip speed; spin adds nothing along s)
  *   δ_j += u·dt   (reset to 0 when the node leaves the ground)
- *   F_j = −k·δ_j − c·u,  |F_j| ≤ share·μ·N_j (δ_j clipped at the cap:
- *         sliding), share = (|u| + V0)/(|(u, u_x)| + V0), u_x = sliding
- *         speed of a locked/spinning wheel (slip ratio beyond 0.12 × v):
- *         combined slip, V0 = 0.5 m/s
+ *   F_j = −k·δ_j − c·u,  |F_j| ≤ share·μ_y·N_j (δ_j clipped at the cap:
+ *         sliding). COMBINED SLIP (R-TYRE) — the node's friction ellipse
+ *         (F_lon/μ_x N)² + (F_lat/μ_y N)² ≤ 1 is shared with the node-level
+ *         longitudinal stick (ground.ts): share = max(√(1 − ρ²)·(1 − λ), d_y),
+ *         ρ = the patch's longitudinal friction utilisation Σ|F_lon|/Σμ_x N and
+ *         λ its sliding fraction (load share of nodes whose stick slid) from
+ *         the last ground pass (state.treadFl, negative = slid), low-passed
+ *         40 ms; d_y = (μ_y|u| + V0)/(|(μ_y u, μ_x u_x)| + V0) the lateral part
+ *         of the sliding direction (anisotropic Coulomb: a sliding node's force
+ *         opposes its slip velocity on the ellipse), u_x = the contact nodes'
+ *         mean longitudinal sliding speed (load-weighted, 40 ms), V0 = 0.5 m/s. A patch in
+ *         adhesion keeps what the longitudinal force leaves of the ellipse
+ *         (drive slip at speed costs no side force until the tyre nears its
+ *         limit); a sliding one splits along its slip (locked / spinning
+ *         wheels slide out).
+ * CARCASS (R-TYRE, wheels with CompiledWheel.tyre.lateralStiffness C_y > 0):
+ * the brush's bristles sit on a tread base that the carcass lets move
+ * sideways by e = ΣF_j/C_y relative to the rim (brush-on-string model,
+ * Pacejka 2012 §3.4 / §7: massless base, so e follows the force at once).
+ * Each bristle deflects by d_j + e (d_j = the hub's lateral travel since the
+ * node touched down) and a node touching down anchors under the displaced
+ * base (d_j starts at −ē: unloaded), ē = e low-passed over one node passage
+ * (spacing / speed): e jumps each time a loaded node leaves the patch, and
+ * entries correlate with exits at a phase set by the patch length, so
+ * anchoring under the instantaneous e made the steady C_α depend on how
+ * many nodes fit the patch (bench: C_α(Fz) non-monotonic, −30…+40 %).
+ * Steady cornering is unchanged; a change
+ * of slip builds up over the RELAXATION LENGTH σ_α ≈ C_α/C_y, a distance as on
+ * real tyres, where the rigid-carcass brush built its force within one patch
+ * length plus a time lag (bench: 0.12 m at 5 m/s, 0.28 m at 30 m/s; passenger
+ * radials 0.3–0.6 m). (An integrated carcass ODE was tried: each node leaving
+ * the patch dropped ΣF, the base snapped back and every remaining bristle
+ * lost that deflection — C_α fell to a third.)
  * The lateral contact forces F_j·â at the q_j are applied as a wrench on the
  * RIGID wheel they were measured on (see the wrench split at the end). The node-level ground stick keeps the
  * longitudinal direction (drops the â component, cone √((μN)² − F_j²)):
@@ -572,7 +612,21 @@ export const applyWheelTorques: ApplyWheelTorques = (state, w, driveTorque, brak
 const TREAD_NODE_DAMP = 0.1;
 /** Minimum attach-node height above the wheel centre (m) for the ball-joint load path. */
 const ATTACH_MIN_HEIGHT = 0.05;
-/** Slip ratio below which the brush keeps its full lateral share. */
+/** Per-tick low-pass of the patch statistics, dt/(τ + dt) with τ = 40 ms at dt = 1/2000 (see applyTreadBrush). WHY 40 ms: at 10 ms the brush cap followed the ABS cycle so closely that it pumped the pickup's solid rear axle into braking hop (rear wheels airborne and locked at 1 s into a 100–0 stop). */
+const PATCH_ALPHA = 1 / 81;
+/** Brush scratch per tread node (pre-pass → main pass): lateral slip speed, μN. Grown on demand (spawn sizes). */
+let brushU = new Float64Array(64);
+let brushMuN = new Float64Array(64);
+/** Makes the brush scratch hold `n` tread nodes (called at spawn, never per tick). */
+export function reserveBrushScratch(n: number): void {
+  if (brushU.length < n) {
+    brushU = new Float64Array(n);
+    brushMuN = new Float64Array(n);
+  }
+}
+/** 2π (the node passage time of the carcass base filter, applyTreadBrush). */
+const TWO_PI_DIV = 6.283185307179586;
+/** kernel.c wheel_brush's slip-ratio deadzone (its R-PHYS brush; not dispatched since R-TYRE's patch-level share). */
 const BRUSH_SLIP_DEADZONE = 0.12;
 /** Combined-slip blend speed, m/s (see applyTreadBrush). */
 const BRUSH_SHARE_V0 = 0.5;
@@ -649,16 +703,15 @@ function hoopRing(state: SimState, start: number, n: number, g: number): void {
 export function applyTreadBrush(state: SimState, w: WheelRuntime, dt: number): void {
   const k = w.wheel.brushK;
   if (!(k > 0)) return;
-  // R-CORE: kernel.c wheel_brush mirrors the rest (incl. applyRimTorque), on the ground samples of this
-  // pre-step's wheel_omega.
-  const wk = activeKernelFor(state)?.wheels;
-  if (wk !== undefined && wk.treadBrush(w, groundSampler, dt)) return;
+  // R-TYRE: no kernel dispatch — kernel.c wheel_brush mirrors the R-PHYS brush (slip-ratio deadzone, no carcass,
+  // no patch statistics); this one runs as TS on every kernel (bit-identical; CONTRACTS "R-CORE" rule for the
+  // wheel loops) until R-CORE ports it.
   const sampler = groundSampler;
   const tLoad = w.treadLoad;
   const tNrm = w.treadNormal;
   const brush = w.treadBrush;
   const n = w.ringCount;
-  const { posX, posY, posZ, velX, velY, velZ, frcX, frcY, frcZ, invMass, friction, treadAxX, treadAxY, treadAxZ, treadF } =
+  const { posX, posY, posZ, velX, velY, velZ, frcX, frcY, frcZ, invMass, friction, treadAxX, treadAxY, treadAxZ, treadF, treadFl } =
     state;
   const t0 = w.tireStart;
   if (sampler === null || !axleFrame(state, w)) {
@@ -666,7 +719,6 @@ export function applyTreadBrush(state: SimState, w: WheelRuntime, dt: number): v
     for (let j = 0; j < n; j++) treadF[t0 + j] = 0;
     return;
   }
-  const matFriction = groundMaterials.friction;
   const cx = frame[0]!;
   const cy = frame[1]!;
   const cz = frame[2]!;
@@ -680,23 +732,91 @@ export function applyTreadBrush(state: SimState, w: WheelRuntime, dt: number): v
   const vcz = (velZ[hi]! + velZ[ho]!) * 0.5;
   const c = w.wheel.brushC;
   const latMu = w.latMu ?? 1;
+  const matFriction = groundMaterials.friction;
   const invDt = 1 / dt;
-  // Longitudinal sliding speed for the combined-slip share: only slip
-  // beyond BRUSH_SLIP_DEADZONE counts (a locked or spinning wheel). Using
-  // the raw slip VELOCITY scaled with road speed: at 185 km/h a normal
-  // 1.5 % drive slip (and the free wheels' −6 % rolling-radius bias) took
-  // 60 % of the rear's lateral grip under power and the car weaved into a
-  // spin.
+  // Longitudinal sliding speed of the patch: the load-weighted mean ground velocity of the contact nodes along
+  // the rolling direction, low-passed (last tick's). Stuck nodes read 0, a locked wheel's slide at v. WHY not the
+  // rigid wheel's (ω·r − v_x): its rolling-radius estimate is biased by a few % under load, so a tyre sliding
+  // purely sideways looked partly longitudinal and lost ≈ 12 % of its side force (box truck J-turn).
   const fwx = -sz;
   const fwz = sx;
   const fl = Math.sqrt(fwx * fwx + fwz * fwz);
-  let uxLong = 0;
-  if (fl > 1e-6) {
-    let vf = (vcx * fwx + vcz * fwz) / fl;
-    if (vf < 0) vf = -vf;
-    const sr = w.slipRatio < 0 ? -w.slipRatio : w.slipRatio;
-    if (sr > BRUSH_SLIP_DEADZONE) uxLong = (sr - BRUSH_SLIP_DEADZONE) * (vf > 1 ? vf : 1);
+  const fhx = fl > 1e-6 ? fwx / fl : 0;
+  const fhz = fl > 1e-6 ? fwz / fl : 0;
+  const uxLong = w.patchUx ?? 0;
+  let pUx = 0;
+  // Combined slip at the patch level (see the doc): what the patch's longitudinal friction leaves of the
+  // ellipse, faded out as the patch slides. Per-node versions of this coupled each node's lateral cap to its own
+  // stick/slip state and rang (bench, sedan α 5°, κ −0.4: 20 ms Fx windows 1.8–4.5 kN).
+  const lonU = w.patchLon ?? 0;
+  const slideU = w.patchSlide ?? 0;
+  const keepAdh = lonU < 1 ? Math.sqrt(1 - lonU * lonU) * (1 - slideU) : 0;
+  let pLon = 0;
+  let pMu = 0;
+  let pSlide = 0;
+  let pN = 0;
+  // Pre-pass over the contact nodes: advance each node's hub travel d_j (a node touching down starts at −e of the
+  // last tick: unloaded under the displaced base), its lateral slip speed u_j and its force cap (combined slip, see
+  // the doc: the ellipse left by the patch's longitudinal friction, or the lateral part of the sliding direction,
+  // whichever is larger), kept in brushU / treadBrush[3j + 1].
+  const cy0 = w.carcassK ?? 0;
+  const ePrev = cy0 > 0 ? (w.carcassYbar ?? 0) : 0;
+  let nCont = 0;
+  for (let j = 0; j < n; j++) {
+    const j3 = 3 * j;
+    const i = t0 + j;
+    const fn = tLoad[j]!;
+    if (!(fn > 0)) continue;
+    const nx = tNrm[j3]!;
+    const ny = tNrm[j3 + 1]!;
+    const nz = tNrm[j3 + 2]!;
+    const sn = sx * nx + sy * ny + sz * nz;
+    const ax = sx - sn * nx;
+    const ay = sy - sn * ny;
+    const az = sz - sn * nz;
+    const al = Math.sqrt(ax * ax + ay * ay + az * az);
+    if (!(al > 1e-6)) continue;
+    const u = (vcx * ax + vcy * ay + vcz * az) / al;
+    let d0 = brush[j3]!;
+    if (brush[j3 + 2] === 0) {
+      d0 = -ePrev;
+      brush[j3 + 2] = 1;
+    }
+    brush[j3] = d0 + u * dt;
+    brushU[j] = u;
+    const muN = friction[i]! * matFriction[sampler.materialAt(posX[i]!, posZ[i]!)]! * fn;
+    brushMuN[j] = muN;
+    const ua = (u < 0 ? -u : u) * latMu;
+    let share = (ua + BRUSH_SHARE_V0) / (Math.sqrt(ua * ua + uxLong * uxLong) + BRUSH_SHARE_V0);
+    if (keepAdh > share) share = keepAdh;
+    brush[j3 + 1] = share * latMu * muN;
+    nCont++;
   }
+  // CARCASS (R-TYRE; see the doc): the massless tread base e solved implicitly with the capped (sliding) nodes
+  // held at their caps — a short active-set iteration. Explicitly, e of the last tick iterates with gain −k·n/C_y
+  // ≈ −6 and diverges; with every node taken as linear, the sliding edge nodes' uncapped deflection inflated e and
+  // unloaded the rest (C_α −30 %).
+  let eC = 0;
+  if (cy0 > 0 && nCont > 0) {
+    for (let it = 0; it < 4; it++) {
+      let num = 0;
+      let den = cy0;
+      for (let j = 0; j < n; j++) {
+        if (!(tLoad[j]! > 0) || brush[3 * j + 2] === 0) continue;
+        const dj = brush[3 * j]!;
+        const uj = brushU[j]!;
+        const cap = brush[3 * j + 1]!;
+        const g = -k * (dj + eC) - c * uj;
+        if (it > 0 && (g > cap || g < -cap)) num += g > 0 ? cap : -cap;
+        else {
+          num += -k * dj - c * uj;
+          den += k;
+        }
+      }
+      eC = num / den;
+    }
+  }
+  let Fb = 0;
   // Contact wrench about the wheel centre.
   let Fx = 0;
   let Fy = 0;
@@ -709,10 +829,12 @@ export function applyTreadBrush(state: SimState, w: WheelRuntime, dt: number): v
     const fn = tLoad[j]!;
     if (!(fn > 0)) {
       brush[3 * j] = 0;
+      brush[3 * j + 2] = 0;
       treadAxX[i] = 0;
       treadAxY[i] = 0;
       treadAxZ[i] = 0;
       treadF[i] = 0;
+      treadFl[i] = 0;
       continue;
     }
     const j3 = 3 * j;
@@ -727,28 +849,35 @@ export function applyTreadBrush(state: SimState, w: WheelRuntime, dt: number): v
     const al = Math.sqrt(ax * ax + ay * ay + az * az);
     if (!(al > 1e-6)) {
       brush[j3] = 0;
+      brush[j3 + 2] = 0;
       treadF[i] = 0;
       continue;
     }
     ax /= al;
     ay /= al;
     az /= al;
-    const u = vcx * ax + vcy * ay + vcz * az;
-    let d = brush[j3]! + u * dt;
-    let f = -k * d - c * u;
-    // Combined slip: the brush gets the lateral share of the slip velocity,
-    // (|u_y| + V0)/(|u| + V0) — ≈ 1 when cornering or rolling, small on a
-    // locked or spinning wheel (the stick takes the longitudinal rest).
-    const ua = u < 0 ? -u : u;
-    const share = (ua + BRUSH_SHARE_V0) / (Math.sqrt(u * u + uxLong * uxLong) + BRUSH_SHARE_V0);
-    const cap = share * latMu * friction[i]! * matFriction[sampler.materialAt(posX[i]!, posZ[i]!)]! * fn;
+    const u = brushU[j]!;
+    // d advanced by the pre-pass; the bristle deflects by d + e
+    let d = brush[j3]!;
+    let f = -k * (d + eC) - c * u;
+    const muN = brushMuN[j]!;
+    const cap = brush[j3 + 1]!;
+    // patch statistics for the next tick (the ground pass's result for this node)
+    const tfl = treadFl[i]!;
+    pLon += tfl < 0 ? -tfl : tfl;
+    pMu += muN;
+    if (tfl < 0) pSlide += fn;
+    pN += fn;
+    pUx += fn * (velX[i]! * fhx + velZ[i]! * fhz);
     if (f > cap || f < -cap) {
       f = f > 0 ? cap : -cap;
+      // sliding: the bristle deflection (d + e) sits at the cap
       const dMax = cap / k;
-      if (d > dMax) d = dMax;
-      else if (d < -dMax) d = -dMax;
+      if (d + eC > dMax) d = dMax - eC;
+      else if (d + eC < -dMax) d = -dMax - eC;
     }
     brush[j3] = d;
+    Fb += f;
     // the axis carries μ_y/μ_x in its length (ground.ts caps the node stick's lateral share with it)
     treadAxX[i] = ax * latMu;
     treadAxY[i] = ay * latMu;
@@ -778,6 +907,24 @@ export function applyTreadBrush(state: SimState, w: WheelRuntime, dt: number): v
     frcY[i] = frcY[i]! - cn * wl * ay;
     frcZ[i] = frcZ[i]! - cn * wl * az;
   }
+  // the carcass deflection that carries the brush force applied this tick (caps included)
+  if (cy0 > 0) {
+    const e = pN > 0 ? Fb / cy0 : 0;
+    w.carcassY = e;
+    // ē: low-passed over one node passage (spacing / speed, 2–50 ms; see the CARCASS doc)
+    let vs = vcx * fhx + vcz * fhz;
+    if (vs < 0) vs = -vs;
+    let tau = (w.wheel.tireRingRadius * TWO_PI_DIV) / (w.wheel.rays * (vs > 0.1 ? vs : 0.1));
+    tau = tau < 0.002 ? 0.002 : tau > 0.05 ? 0.05 : tau;
+    const eb = w.carcassYbar ?? 0;
+    w.carcassYbar = eb + (e - eb) * (dt / (tau + dt));
+  }
+  w.patchFy = Fb;
+  w.patchFx = pLon;
+  w.patchLon = lonU + ((pMu > 0 ? pLon / pMu : 0) - lonU) * PATCH_ALPHA;
+  w.patchSlide = slideU + ((pN > 0 ? pSlide / pN : 0) - slideU) * PATCH_ALPHA;
+  const ux = pN > 0 ? pUx / pN : 0;
+  w.patchUx = uxLong + ((ux < 0 ? -ux : ux) - uxLong) * PATCH_ALPHA;
   // Net force: half on each hub. Moment about the centre: the spin part
   // (≈ 0 for lateral forces) to the rim ring; the overturning part (about
   // forward f = s × n) as a lateral force pair between the upright top

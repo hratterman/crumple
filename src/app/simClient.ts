@@ -10,6 +10,7 @@
  * until the next snapshot message is processed, i.e. for the rest of the
  * current task/frame. Do not hold them across frames.
  */
+import type { WheelFrame } from '../protocol/wheels';
 import type { Quat, Vec3 } from '../core/math';
 import {
   createBeamBreakEvent,
@@ -376,6 +377,20 @@ export class SimClient {
     return this.cur ? this.cur.workerLoad : 0;
   }
 
+  /**
+   * R-TYRE: wheel record of (objectId, wheel index) in the latest snapshot
+   * (tyre pressure / temperatures / tread / grip / TPMS flags; protocol
+   * wheels.ts) into `out`; false when absent. Allocation-free.
+   */
+  readWheel(objectId: number, wheel: number, out: WheelFrame): boolean {
+    const cur = this.cur;
+    if (!cur) return false;
+    const i = cur.findWheel(objectId, wheel);
+    if (i < 0) return false;
+    cur.readWheel(i, out);
+    return true;
+  }
+
   /** Traffic records in the latest snapshot. */
   get trafficCount(): number {
     return this.cur ? this.cur.trafficCount : 0;
@@ -483,6 +498,22 @@ export class SimClient {
     if (assists.abs !== undefined) msg.abs = assists.abs;
     if (assists.esc !== undefined) msg.esc = assists.esc;
     if (assists.clutchAssist !== undefined) msg.clutchAssist = assists.clutchAssist;
+    this.post(msg);
+  }
+
+  /** R-TYRE: surface water the tyres see (SetSurfaceWetnessMsg; logged). */
+  setSurfaceWetness(wetness: number, rain: number): void {
+    this.post({ type: 'setSurfaceWetness', wetness, rain });
+  }
+
+  /** R-TYRE: tyre service — inflate / air down, puncture, repair, worn tread (SetTyreMsg; logged). */
+  setTyre(objectId: number, op: { wheel?: number; pressureKpa?: number; puncture?: 'slow' | 'fast' | 'debead'; repair?: boolean; treadMm?: number }): void {
+    const msg: MainToWorker = { type: 'setTyre', objectId };
+    if (op.wheel !== undefined) msg.wheel = op.wheel;
+    if (op.pressureKpa !== undefined) msg.pressureKpa = op.pressureKpa;
+    if (op.puncture !== undefined) msg.puncture = op.puncture;
+    if (op.repair !== undefined) msg.repair = op.repair;
+    if (op.treadMm !== undefined) msg.treadMm = op.treadMm;
     this.post(msg);
   }
 
