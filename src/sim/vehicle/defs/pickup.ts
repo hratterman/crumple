@@ -36,7 +36,7 @@
  * leaf springs' front eyes) and a Panhard rod; coil-over "leaf" springs
  * from the brackets to the frame spring towers.
  */
-import { addClosureNodes, buildClosureSet, dormantClosureShells, planClosures, stationDoorSpec, type ClosureSpec } from '../closures';
+import { addClosureNodes, buildClosureSet, dormantClosureShells, planClosures, rotateAbout as rotateClosure, searchOpenStop, stationDoorSpec, type ClosureSpec } from '../closures';
 import { SHELL_GROUPS, SHELL_RELEASE_CELL, SHELL_RELEASE_FRAME, shellLayout } from '../shellDefs';
 import type { RigBeamDef, RigNodeDef } from '../../rig/types';
 import { wheelNodeId, type DrivetrainDef, type VehicleDef, type WheelDef } from '../types';
@@ -482,6 +482,8 @@ const TAILGATE = {
   hingeBreak: 3.5e4,
   latchBreak: 9e3,
   restBreak: 2e4,
+  /** R-CRASH: the support cables hold an unlatched gate open at this angle (level). */
+  openDeg: 90,
 } as const;
 
 // ====================================================================== drivetrain
@@ -603,6 +605,8 @@ export interface PickupDesign {
   /** Tailgate hinge + latch beams. */
   tailgateHinges: [string, string][];
   tailgateLatches: [string, string][];
+  /** R-CRASH: the tailgate's support cables (open stops at TAILGATE.openDeg), [gate node, body node]. */
+  tailgateCables: [string, string][];
   /** Front bumper straps (the tear-off beams; the render detaches the bar on them). */
   bumperStraps: [string, string][];
 }
@@ -1365,6 +1369,7 @@ function buildPickup(): { def: VehicleDef; design: PickupDesign } {
   // ---- tailgate beams: two-layer 2 × 3 box grid; hinges at the bed sill (bottom row), latches at the post tops.
   const tailgateHinges: [string, string][] = [];
   const tailgateLatches: [string, string][] = [];
+  const tailgateCables: [string, string][] = [];
   {
     const tb: SB[] = [];
     const cols = ['L', 'C', 'R'] as const;
@@ -1390,6 +1395,23 @@ function buildPickup(): { def: VehicleDef; design: PickupDesign } {
       tb.push({ a: tg(1, s, 'i'), b: sid('b3', 'rl', s), w: 1.5, kind: 'latch' });
       tb.push({ a: tg(1, s, 'o'), b: sid('b3', 'rl', s), w: 1.0, kind: 'latch' });
       tailgateLatches.push([tg(1, s, 'i'), sid('b3', 'rl', s)], [tg(1, s, 'o'), sid('b3', 'rl', s)]);
+    }
+    // R-CRASH: the support cables — an unlatched tailgate drops open and hangs level on them. Each is an open
+    // stop (closures.ts searchOpenStop): a compression-only support from a top corner to a body node, slack
+    // from closed to 90° and stopping the gate there.
+    const axis: [V3, V3] = [pos.get(sid('b3', 'bo', 'L'))!, pos.get(sid('b3', 'bo', 'R'))!];
+    const mid = [0, 1, 2].map((k) => (axis[0][k]! + axis[1][k]!) / 2);
+    const top = pos.get(tg(1, 'C', 'i'))!;
+    const openSign: 1 | -1 = rotateClosure(top, axis[0], axis[1], 10)[2] > top[2] ? 1 : -1;
+    for (const s of ['L', 'R'] as const) {
+      const sx = s === 'R' ? 1 : -1;
+      const cands = structure.filter((id) => {
+        const q = pos.get(id)!;
+        return q[0] * sx > 0.3 && Math.hypot(q[0] - mid[0]!, q[1] - mid[1]!, q[2] - mid[2]!) < 1.2;
+      });
+      const os = searchOpenStop(`tg${s}`, [tg(1, s, 'i'), tg(1, s, 'o')], (id) => pos.get(id)!, cands, (id) => pos.get(id)!, axis, openSign, TAILGATE.openDeg);
+      tb.push({ a: os.cell, b: os.to, w: 0.5, kind: 'rest' });
+      tailgateCables.push([os.cell, os.to]);
     }
     emitSub(tb, TAILGATE);
   }
@@ -1553,16 +1575,22 @@ function buildPickup(): { def: VehicleDef; design: PickupDesign } {
       {
         ...shellLayout({
           front: ['f0_*', 'f1_*', 'f2_*', 'f3_*', 's0_*', 's1_*', 's2_*', 'bf_*', 'hood_*', 'FL_*', 'FR_*'],
-          rear: ['b0_*', 'b1_*', 'b2_*', 'b3_*', 'br_*', 'tg_*', 'hitch*', 'f8_*', 'f9_*', 'f10_*', 'f11_*', 'RL_*', 'RR_*'],
+          rear: ['b0_*', 'b1_*', 'b2_*', 'b3_*', 'br_*', 'hitch*', 'f8_*', 'f9_*', 'f10_*', 'f11_*', 'RL_*', 'RR_*'],
           firewall: ['c0_*'],
           cell: ['c1_*', 'c2_*', 'c3_*', 'c4_*'],
           cellWhole: true,
           // frame rails under the cab: rigid while driving, bend (plastically) in a big crash
-          extra: [{ ids: ['f4_*', 'f5_*', 'f6_*', 'f7_*'], release: SHELL_RELEASE_FRAME, yield: true }, ...closures.zones],
+          extra: [
+            { ids: ['f4_*', 'f5_*', 'f6_*', 'f7_*'], release: SHELL_RELEASE_FRAME, yield: true },
+            ...closures.zones,
+            // the tailgate: latched like the doors (its two post latches), drops onto its cables once they let go
+            { ids: ['tg_*'], release: SHELL_RELEASE_CELL, whole: true, yield: true, latch: tailgateLatches },
+          ],
         }),
         groups: [...SHELL_GROUPS, 'door'],
       },
       ...dormantClosureShells(closureSpecs, SHELL_RELEASE_CELL),
+      { ids: ['tg_*'], groups: ['tailgate'], dormantLatch: 'tg_*', zones: [{ ids: ['tg_*'], release: SHELL_RELEASE_CELL, yield: true }] },
     ],
   };
   const design: PickupDesign = {
@@ -1585,6 +1613,7 @@ function buildPickup(): { def: VehicleDef; design: PickupDesign } {
     bedMounts,
     tailgateHinges,
     tailgateLatches,
+    tailgateCables,
     bumperStraps,
   };
   return { def, design };

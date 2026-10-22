@@ -119,38 +119,54 @@ function findOpenStop(
   bodyPos: (id: string) => V3,
   openSign: 1 | -1,
 ): { cell: string; to: string; deg: number } {
-  const a = bodyPos(spec.hingeAxis[0]);
-  const b = bodyPos(spec.hingeAxis[1]);
+  const cells = spec.stopRows.flatMap((r) => (ids[r] ?? []).filter((c): c is string => c !== null));
+  return searchOpenStop(spec.id, cells, P, spec.stopCandidates, bodyPos, [bodyPos(spec.hingeAxis[0]), bodyPos(spec.hingeAxis[1])], openSign, spec.maxOpenDeg);
+}
+
+/**
+ * The open-stop search of `findOpenStop` for any hinged panel (a closure, the pickup's tailgate): over
+ * `cells` × `candidates`, the pair whose distance grows as the panel opens about `axis` (`openSign`) and
+ * returns to its closed value closest to `maxOpenDeg` (within 12°), with ≥ 2 cm of slack at its widest. A
+ * compression-only support between them is slack from closed to that angle and stops the panel there.
+ */
+export function searchOpenStop(
+  id: string,
+  cells: readonly string[],
+  P: (id: string) => V3,
+  candidates: readonly string[],
+  bodyPos: (id: string) => V3,
+  axis: readonly [V3, V3],
+  openSign: 1 | -1,
+  maxOpenDeg: number,
+): { cell: string; to: string; deg: number } {
+  const [a, b] = axis;
   let best: { cell: string; to: string; deg: number; score: number } | null = null;
-  const seen: string[] = [];
-  for (const r of spec.stopRows) {
-    for (const c of ids[r] ?? []) {
-      if (!c) continue;
-      const p0 = P(c);
-      for (const q of spec.stopCandidates) {
-        const Q = bodyPos(q);
-        const d0 = dist(p0, Q);
-        let widest = 0;
-        let deg = -1;
-        let grew = false;
-        for (let t = 0.5; t <= 150; t += 0.5) {
-          const d = dist(rotateAbout(p0, a, b, openSign * t), Q);
-          if (t === 0.5) grew = d > d0;
-          if (!grew) break;
-          widest = Math.max(widest, d - d0);
-          if (d <= d0) {
-            deg = t;
-            break;
-          }
+  const tried: string[] = [];
+  for (const c of cells) {
+    const p0 = P(c);
+    for (const q of candidates) {
+      const Q = bodyPos(q);
+      const d0 = dist(p0, Q);
+      let widest = 0;
+      let deg = -1;
+      let grew = false;
+      for (let t = 0.5; t <= 150; t += 0.5) {
+        const d = dist(rotateAbout(p0, a, b, openSign * t), Q);
+        if (t === 0.5) grew = d > d0;
+        if (!grew) break;
+        widest = Math.max(widest, d - d0);
+        if (d <= d0) {
+          deg = t;
+          break;
         }
-        if (deg > 0) seen.push(`${c}→${q} ${deg}° w${widest.toFixed(3)}`);
-        if (deg < 0 || widest < 0.02) continue;
-        const score = Math.abs(deg - spec.maxOpenDeg) - widest;
-        if (Math.abs(deg - spec.maxOpenDeg) <= 12 && (!best || score < best.score)) best = { cell: c, to: q, deg, score };
       }
+      if (deg > 0) tried.push(`${c}→${q} ${deg}° w${widest.toFixed(3)}`);
+      if (deg < 0 || widest < 0.02) continue;
+      const score = Math.abs(deg - maxOpenDeg) - widest;
+      if (Math.abs(deg - maxOpenDeg) <= 12 && (!best || score < best.score)) best = { cell: c, to: q, deg, score };
     }
   }
-  if (!best) throw new Error(`closure ${spec.id}: no open stop near ${spec.maxOpenDeg}° among the candidates (${seen.slice(0, 30).join(', ')})`);
+  if (!best) throw new Error(`closure ${id}: no open stop near ${maxOpenDeg}° among the candidates (${tried.slice(0, 30).join(', ')})`);
   return best;
 }
 

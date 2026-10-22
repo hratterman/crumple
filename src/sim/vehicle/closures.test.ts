@@ -10,7 +10,7 @@ import type { SimObject, SimState } from '../types';
 import { compileVehicle } from './builder';
 import { runCrash } from './crash';
 import { COUPE, COUPE_CRASH_PROBES } from './defs/coupe';
-import { PICKUP, PICKUP_CRASH_PROBES } from './defs/pickup';
+import { PICKUP, PICKUP_CRASH_PROBES, PICKUP_DESIGN } from './defs/pickup';
 import { SEDAN } from './defs/sedan';
 import { createHandlingSim, stepN } from './handling';
 import type { CompiledVehicle, VehicleDef } from './types';
@@ -164,3 +164,32 @@ for (const c of CASES) {
     }, 900_000);
   });
 }
+
+describe('pickup tailgate', () => {
+  it('an unlatched tailgate drops open and hangs level on its support cables', () => {
+    const sim = createHandlingSim({ def: PICKUP });
+    const s = sim.eng.state;
+    const ids = sim.cv.rig.nodeIds;
+    const n0 = sim.obj.nodeStart;
+    const at = new Map(ids.map((id, i) => [id, i] as const));
+    const P = (id: string): V3 => {
+      const i = n0 + at.get(id)!;
+      return [s.posX[i]!, s.posY[i]!, s.posZ[i]!];
+    };
+    const ang = () => hingeAngle(P, 'tg_1Ci', 'b3_rl_R', 'b3_bo_L', 'b3_bo_R');
+    stepN(sim, 1000);
+    const a0 = ang();
+    expect(PICKUP_DESIGN.tailgateCables).toHaveLength(2);
+    const [la, lb] = PICKUP_DESIGN.tailgateLatches[0]!;
+    for (let b = 0; b < sim.cv.bodyBeamCount; b++) {
+      if (ids[sim.cv.rig.beamA[b]!] === la && ids[sim.cv.rig.beamB[b]!] === lb) s.active[sim.obj.beamStart + b] = 0;
+    }
+    stepN(sim, 6000);
+    const open = Math.abs(ang() - a0);
+    // drops to its cables (≈ 90°, their compliance) and stays there; the gate keeps its shape (its cluster woke)
+    expect(open).toBeGreaterThan(80);
+    expect(open).toBeLessThan(105);
+    const gate = sim.veh.shell!.find((rt) => Array.from(rt.nodes).some((i) => ids[i - n0] === 'tg_1Ci') && rt.shell.dormant !== null)!;
+    expect(Math.min(...Array.from(gate.w))).toBe(1);
+  }, 600_000);
+});
