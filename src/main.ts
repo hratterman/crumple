@@ -49,7 +49,7 @@ import { attachInputDevices } from './input/devices';
 import type { BeamBreakEvent, ImpactEvent, SkidEvent } from './protocol/events';
 import { GAME_CAPACITY, isPropObjectId, SPAWN_SETTLE_S, type ActionState, type Transform } from './protocol/messages';
 import { createWheelFrame, type WheelFrame } from './protocol/wheels';
-import { VehicleTelemetry } from './protocol/telemetry';
+import { VehicleTelemetry, VehicleTelemetryExt } from './protocol/telemetry';
 import { TRAFFIC_FLAG_BRAKE, TRAFFIC_FLAG_HEADLIGHTS, type TrafficAgentFrame } from './protocol/traffic';
 import { DEFAULT_CHASE_OPTIONS, vehiclePoseFromNodes, type ChaseTarget } from './render/cameras/chase';
 import { CameraDirector } from './render/cameras/director';
@@ -499,6 +499,10 @@ let paused = false;
 let slowMo = false;
 /** Traction control (X); P6: every spawn starts with the settings' default. */
 let tractionControl = settings.tractionControl;
+/** R-PHYS: ABS / ESC settings, sent on every spawn (a spawn starts with both on) and on change. */
+function sendBrakeAssists(): void {
+  client.setAssists(VEHICLE_ID, { abs: settings.abs, esc: settings.esc });
+}
 function applyTimescale(): void {
   client.setTimescale(paused ? 0 : slowMo ? SLOW_MO_SCALE : 1);
 }
@@ -822,6 +826,7 @@ function setSetting(patch: Partial<GameSettings>): void {
   if (patch.units !== undefined && player) hud?.setSpec(hudSpecFor(player.assets));
   if ((patch.chase !== undefined || patch.fov !== undefined) && player) applyChaseFraming(player.assets);
   if (patch.tractionControl !== undefined && patch.tractionControl !== tractionControl) setTractionControl(patch.tractionControl);
+  if (patch.abs !== undefined || patch.esc !== undefined) sendBrakeAssists();
   if (patch.traffic !== undefined) {
     if (trafficStarted) traffic?.setQuality(trafficPreset(ctx.quality));
     else startTraffic();
@@ -918,6 +923,7 @@ async function swapVehicle(choice: VehicleChoice, spawnAt: number | null): Promi
   replaySession?.quietCrashCam();
   tractionControl = settings.tractionControl;
   if (!tractionControl) client.setAssists(VEHICLE_ID, { tractionControl: false });
+  sendBrakeAssists();
   fx?.addVehicle(VEHICLE_ID, assets.compiled);
   applyDebugView();
   lastSent.gearSelect = NaN;
@@ -1733,6 +1739,7 @@ async function boot(): Promise<void> {
   client.spawnVehicle(VEHICLE_ID, bootAssets.sim, lastSpawn, transmission, bootAssets.entry.id, SPAWN_SETTLE_S);
   holdParked();
   if (!tractionControl) client.setAssists(VEHICLE_ID, { tractionControl: false });
+  sendBrakeAssists();
   spawnCube();
   // P6 traffic: ?traffic=0 (perf comparisons) or the 'off' setting disables it; the stub resolves false until T2 lands.
   startTraffic();
@@ -1900,7 +1907,7 @@ async function boot(): Promise<void> {
     },
   });
 
-  const hudStatus = { paused: false, slowMo: false, camera: 'chase', transmission, beamView: true, view: debugView as string, tractionControl };
+  const hudStatus = { paused: false, slowMo: false, camera: 'chase', transmission, beamView: true, view: debugView as string, tractionControl, absOff: false, escOff: false, assistBits: 0 };
   const bootTime = performance.now();
   const worldFrame: WorldFrame = {
     dtS: 0,
@@ -2109,6 +2116,10 @@ async function boot(): Promise<void> {
     hudStatus.beamView = beamView.visible && beamView.mode === 'beams';
     hudStatus.view = debugView;
     hudStatus.tractionControl = tractionControl;
+    // R-PHYS: ABS / ESC switched off on a car that has them; assists intervening (lamps)
+    hudStatus.absOff = !settings.abs && player?.assets.compiled.brakes.abs === true;
+    hudStatus.escOff = settings.abs && !settings.esc && player?.assets.compiled.brakes.esc === true;
+    hudStatus.assistBits = client.telemetryExt(VEHICLE_ID)?.[VehicleTelemetryExt.assistBits] ?? 0;
     hudView.update(client.telemetry(VEHICLE_ID), hudStatus, dt);
     prof.lap('hud');
     // P8: audio follows the presented frame (live or replay), after the camera is final

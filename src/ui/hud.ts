@@ -27,10 +27,17 @@ export interface HudStatus {
   view?: string;
   /** Traction control engaged (badge TC / TC OFF); omitted = no badge. */
   tractionControl?: boolean;
+  /** R-PHYS: ABS / ESC fitted but switched off (alert badges ABS OFF / ESC OFF). */
+  absOff?: boolean;
+  escOff?: boolean;
+  /** R-PHYS: ext telemetry assistBits (protocol/telemetry.ts EXT_ASSIST_*): ABS / ESC / TC intervening light a lamp badge, as on the dashboard. */
+  assistBits?: number;
 }
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const HINT_MS = 8000;
+/** R-PHYS: assist lamps, in EXT_ASSIST_ABS_ACTIVE / ESC_ACTIVE / TC_ACTIVE bit order (1, 2, 4). */
+const LAMP_NAMES = ['ABS', 'ESC', 'TC'];
 const SPEEDO_MAX_DEFAULT = 240;
 const MS_TO_KMH = 3.6;
 const KMH_PER_MPH = 1.609344;
@@ -268,7 +275,9 @@ export class Hud {
 
     // Cheap change key first: the badge list is only rebuilt (and formatted) when a field changed.
     const tc = status.tractionControl === undefined ? '' : status.tractionControl ? 'TC' : 'TC OFF';
-    const key = `${status.paused ? 1 : 0}${status.slowMo ? 1 : 0}${status.beamView ? 1 : 0}|${status.camera}|${status.view ?? ''}|${tc}`;
+    // assist lamps (ABS, ESC, TC) while the assist intervenes: they flicker with it, as an ESC lamp flashes
+    const ab = (status.assistBits ?? 0) & 7;
+    const key = `${status.paused ? 1 : 0}${status.slowMo ? 1 : 0}${status.beamView ? 1 : 0}|${status.camera}|${status.view ?? ''}|${tc}|${status.absOff ? 1 : 0}${status.escOff ? 1 : 0}|${ab}`;
     if (key !== this.last.badges) {
       this.last.badges = key;
       const parts: string[] = [];
@@ -277,10 +286,13 @@ export class Hud {
       parts.push(`CAM ${status.camera.toUpperCase()}`);
       parts.push(status.view ? status.view.toUpperCase() : status.beamView ? 'BEAMS' : 'NODES');
       if (tc) parts.push(tc);
+      if (status.absOff) parts.push('ABS OFF');
+      if (status.escOff) parts.push('ESC OFF');
       this.badges.replaceChildren(
         ...parts.map((p, i) =>
-          div(`hud-badge${(i === 0 && (status.paused || status.slowMo)) || p === 'TC OFF' ? ' hud-badge--alert' : ''}`, undefined, p),
+          div(`hud-badge${(i === 0 && (status.paused || status.slowMo)) || p.endsWith(' OFF') ? ' hud-badge--alert' : ''}`, undefined, p),
         ),
+        ...LAMP_NAMES.filter((_, k) => ab & (1 << k)).map((p) => div('hud-badge hud-badge--lamp', undefined, p)),
       );
     }
   }

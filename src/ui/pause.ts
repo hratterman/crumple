@@ -500,6 +500,18 @@ export class PauseMenu {
         set: (v) => set({ tractionControl: v as boolean }),
       },
       {
+        // R-PHYS: ESC brakes through the ABS modulator, so ABS off takes ESC with it (as on a real car)
+        key: 'brakeAids',
+        label: 'Brake assists',
+        options: [
+          { value: 2, label: 'ABS + ESC' },
+          { value: 1, label: 'ABS' },
+          { value: 0, label: 'Off' },
+        ],
+        get: () => (o.settings().esc ? 2 : o.settings().abs ? 1 : 0),
+        set: (v) => set({ abs: (v as number) > 0, esc: v === 2 }),
+      },
+      {
         key: 'chase',
         label: 'Chase camera',
         options: [

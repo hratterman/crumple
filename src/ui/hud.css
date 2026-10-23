@@ -269,3 +269,9 @@
     top: 48px;
   }
 }
+/* R-PHYS: an assist intervening (dashboard lamp) */
+.hud-badge--lamp {
+  color: #111;
+  background: #f2b233;
+  text-shadow: none;
+}
