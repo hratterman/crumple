@@ -162,4 +162,9 @@ export type ApplyColliderContacts = (
   gx: number,
   gy: number,
   gz: number,
+  /**
+   * R-CORE (additive): the object's box [x0, x1, y0, y1, z0, z1, rMax] exactly as the broadphase loop would
+   * compute it (the kernel's ground pass of this tick, positions unchanged since); skips that loop.
+   */
+  objBox?: Float64Array | null,
 ) => void;

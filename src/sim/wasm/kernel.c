@@ -362,7 +362,54 @@ EXPORT(beams) int beams(int first, int count, int dbg, int armed) {
 /* integrateNodes over [first, first + count). */
 EXPORT(integrate) void integrate(int first, int count, f64 dt, f64 gx, f64 gy, f64 gz) {
   const int end = first + count;
-  for (int i = first; i < end; i++) {
+  int i = first;
+#ifdef CRUMPLE_SIMD
+  /* Element-wise: two nodes per f64x2, the same ops per lane; a pair with a pinned node runs scalar. */
+  {
+    const v128_t vdt = wasm_f64x2_splat(dt), vgx = wasm_f64x2_splat(gx), vgy = wasm_f64x2_splat(gy), vgz = wasm_f64x2_splat(gz);
+    const v128_t zero = wasm_f64x2_splat(0);
+    for (; i + 1 < end; i += 2) {
+      const v128_t im = wasm_v128_load(invMass + i);
+      if (wasm_f64x2_extract_lane(im, 0) == 0 || wasm_f64x2_extract_lane(im, 1) == 0) {
+        for (int q = i; q < i + 2; q++) {
+          const f64 iq = invMass[q];
+          if (iq == 0) {
+            velX[q] = 0;
+            velY[q] = 0;
+            velZ[q] = 0;
+          } else {
+            const f64 vx = velX[q] + (frcX[q] * iq + gx) * dt;
+            const f64 vy = velY[q] + (frcY[q] * iq + gy) * dt;
+            const f64 vz = velZ[q] + (frcZ[q] * iq + gz) * dt;
+            velX[q] = vx;
+            velY[q] = vy;
+            velZ[q] = vz;
+            posX[q] = posX[q] + vx * dt;
+            posY[q] = posY[q] + vy * dt;
+            posZ[q] = posZ[q] + vz * dt;
+          }
+          frcX[q] = 0;
+          frcY[q] = 0;
+          frcZ[q] = 0;
+        }
+        continue;
+      }
+      const v128_t vx = wasm_f64x2_add(wasm_v128_load(velX + i), wasm_f64x2_mul(wasm_f64x2_add(wasm_f64x2_mul(wasm_v128_load(frcX + i), im), vgx), vdt));
+      const v128_t vy = wasm_f64x2_add(wasm_v128_load(velY + i), wasm_f64x2_mul(wasm_f64x2_add(wasm_f64x2_mul(wasm_v128_load(frcY + i), im), vgy), vdt));
+      const v128_t vz = wasm_f64x2_add(wasm_v128_load(velZ + i), wasm_f64x2_mul(wasm_f64x2_add(wasm_f64x2_mul(wasm_v128_load(frcZ + i), im), vgz), vdt));
+      wasm_v128_store(velX + i, vx);
+      wasm_v128_store(velY + i, vy);
+      wasm_v128_store(velZ + i, vz);
+      wasm_v128_store(posX + i, wasm_f64x2_add(wasm_v128_load(posX + i), wasm_f64x2_mul(vx, vdt)));
+      wasm_v128_store(posY + i, wasm_f64x2_add(wasm_v128_load(posY + i), wasm_f64x2_mul(vy, vdt)));
+      wasm_v128_store(posZ + i, wasm_f64x2_add(wasm_v128_load(posZ + i), wasm_f64x2_mul(vz, vdt)));
+      wasm_v128_store(frcX + i, zero);
+      wasm_v128_store(frcY + i, zero);
+      wasm_v128_store(frcZ + i, zero);
+    }
+  }
+#endif
+  for (; i < end; i++) {
     const f64 im = invMass[i];
     if (im == 0) {
       velX[i] = 0;
@@ -810,6 +857,8 @@ enum {
   G_MATF, G_COOLDOWN, G_EVENTS, G_EV_CAP,
   /* per-node sample cache of this tick (wheel_sample → ground): stamp per node, ref = its sample entry */
   G_CSTAMP, G_CREF, G_STAMP,
+  /* object box of the last ground() call (applyColliderContacts' broadphase box): x0 x1 y0 y1 z0 z1 rMax, range, stamp */
+  G_BOX, G_BOX_END = G_BOX + 7, G_BOX_FIRST = G_BOX_END, G_BOX_COUNT, G_BOX_STAMP,
   /* outputs */
   G_EV_COUNT, G_MISS_GRID, G_MISS_TILE,
   G_HEADER
@@ -935,13 +984,126 @@ static inline void m_cell(const Hf *H, f64 x, f64 z, int *pc, int *pr) {
   *pr = v == v ? (int)v : 0;
 }
 
+#define HB_MARGIN 1e-4
+#define HB_MAX_CELLS 4096
+
+/* Max terrain sample over the cells heightAt can use for any (x, z) in the box of nodes [first, end). */
+/*
+ * The object's box exactly as colliders.ts applyColliderContacts computes it (min / max by `<` / `>` from
+ * ±inf, NaN coordinates never enter, rMax from 0) → G_BOX..; also the height bound's xz box.
+ */
+static void object_box(int first, int end) {
+  f64 x0 = __builtin_inf(), y0 = __builtin_inf(), z0 = __builtin_inf();
+  f64 x1 = -__builtin_inf(), y1 = -__builtin_inf(), z1 = -__builtin_inf();
+  f64 rMax = 0;
+  for (int i = first; i < end; i++) {
+    const f64 x = posX[i], y = posY[i], z = posZ[i];
+    if (x < x0) x0 = x;
+    if (x > x1) x1 = x;
+    if (y < y0) y0 = y;
+    if (y > y1) y1 = y;
+    if (z < z0) z0 = z;
+    if (z > z1) z1 = z;
+    const f64 r = radiusArr[i];
+    if (r > rMax) rMax = r;
+  }
+  GH[G_BOX] = x0;
+  GH[G_BOX + 1] = x1;
+  GH[G_BOX + 2] = y0;
+  GH[G_BOX + 3] = y1;
+  GH[G_BOX + 4] = z0;
+  GH[G_BOX + 5] = z1;
+  GH[G_BOX + 6] = rMax;
+  GH[G_BOX_FIRST] = first;
+  GH[G_BOX_COUNT] = end - first;
+  GH[G_BOX_STAMP] = GH[G_STAMP];
+}
+
+/*
+ * Height bound as a plane: h(x, z) ≤ hb0 + hbx·x + hbz·z everywhere in the object's xz box. The plane
+ * through the box's corner-cell samples is fitted (least squares over the cell corners, centred), then
+ * lifted by the largest sample residual + HB_MARGIN: bilinear interpolation reproduces a plane exactly and is
+ * a convex combination of its four corners, so h − plane ≤ max corner residual (+ rounding, far below the
+ * margin). Returns 0 when unusable (tile absent, huge box, NaN).
+ */
+static int height_bound(const Hf *H, f64 *hb) {
+  const f64 x0 = GH[G_BOX], x1 = GH[G_BOX + 1], z0 = GH[G_BOX + 4], z1 = GH[G_BOX + 5];
+  if (!(x1 >= x0) || !(z1 >= z0)) return 0;
+  int c0, r0, c1, r1;
+  f64 t0, t1;
+  h_cell(H, x0, z0, &c0, &r0, &t0, &t1);
+  h_cell(H, x1, z1, &c1, &r1, &t0, &t1);
+  if ((c1 - c0 + 1) * (r1 - r0 + 1) > HB_MAX_CELLS) return 0;
+  /* samples (c, r) for c in [c0, c1 + 1], r in [r0, r1 + 1], read through each cell's tile */
+  const f64 cm = 0.5 * (c0 + c1 + 1), rm = 0.5 * (r0 + r1 + 1);
+  f64 sh = 0, shc = 0, shr = 0, scc = 0, srr = 0;
+  int n = 0;
+  for (int r = r0; r <= r1 + 1; r++) {
+    for (int c = c0; c <= c1 + 1; c++) {
+      const int cc = c > c1 ? c1 : c, rr = r > r1 ? r1 : r;
+      int miss = -1;
+      const float *T = (const float *)tile_at(H->ht, H->htx, cc, rr, &miss);
+      if (T == 0) return 0;
+      const f64 h = T[(rr & (TILE - 1)) * TILE_S + (cc & (TILE - 1)) + (r - rr) * TILE_S + (c - cc)];
+      if (!(h == h)) return 0;
+      const f64 dc = c - cm, dr = r - rm;
+      sh += h;
+      shc += h * dc;
+      shr += h * dr;
+      scc += dc * dc;
+      srr += dr * dr;
+      n++;
+    }
+  }
+  /* plane in cell units: h ≈ a + bc·(c − cm) + br·(r − rm) (the grid is symmetric about the centre) */
+  const f64 a = sh / n, bc = scc > 0 ? shc / scc : 0, br = srr > 0 ? shr / srr : 0;
+  f64 res = -__builtin_inf();
+  for (int r = r0; r <= r1 + 1; r++) {
+    for (int c = c0; c <= c1 + 1; c++) {
+      const int cc = c > c1 ? c1 : c, rr = r > r1 ? r1 : r;
+      int miss = -1;
+      const float *T = (const float *)tile_at(H->ht, H->htx, cc, rr, &miss);
+      const f64 h = T[(rr & (TILE - 1)) * TILE_S + (cc & (TILE - 1)) + (r - rr) * TILE_S + (c - cc)];
+      const f64 d = h - (a + bc * (c - cm) + br * (r - rm));
+      if (d > res) res = d;
+    }
+  }
+  /* world: c = (x − ox)·invS (clamped: outside the grid the clamped surface is the edge's, which the
+     samples cover since c0 / c1 are clamped too, but the plane must then not slope past the edge — use
+     the flat bound when the box leaves the grid) */
+  const f64 invS = H->invS;
+  const f64 ux0 = (x0 - H->ox) * invS, ux1 = (x1 - H->ox) * invS, vz0 = (z0 - H->oz) * invS, vz1 = (z1 - H->oz) * invS;
+  const int inside = ux0 >= 0 && ux1 <= H->maxU && vz0 >= 0 && vz1 <= H->maxV;
+  const f64 abs1 = (a < 0 ? -a : a) + 1;
+  if (!inside) {
+    f64 hmax = -__builtin_inf();
+    for (int r = r0; r <= r1 + 1; r++)
+      for (int c = c0; c <= c1 + 1; c++) {
+        const int cc = c > c1 ? c1 : c, rr = r > r1 ? r1 : r;
+        int miss = -1;
+        const float *T = (const float *)tile_at(H->ht, H->htx, cc, rr, &miss);
+        const f64 h = T[(rr & (TILE - 1)) * TILE_S + (cc & (TILE - 1)) + (r - rr) * TILE_S + (c - cc)];
+        if (h > hmax) hmax = h;
+      }
+    hb[0] = hmax + HB_MARGIN + 1e-9 * abs1;
+    hb[1] = 0;
+    hb[2] = 0;
+    return 1;
+  }
+  /* h ≤ a + bc·(u − cm) + br·(v − rm) + res, u = (x − ox)·invS, v = (z − oz)·invS */
+  hb[1] = bc * invS;
+  hb[2] = br * invS;
+  hb[0] = a - bc * (H->ox * invS + cm) - br * (H->oz * invS + rm) + res + HB_MARGIN + 1e-9 * abs1 * (1 + (bc < 0 ? -bc : bc) * (c1 - c0 + 2) + (br < 0 ? -br : br) * (r1 - r0 + 2));
+  return 1;
+}
+
 /*
  * applyGroundContacts over nodes [first, first + count). Returns the index of
  * the first node NOT processed (first + count when done): a missing tile
  * (G_MISS_GRID 1 heights / 2 normals / 3 material, G_MISS_TILE its index) or
  * a full event buffer (G_MISS_GRID 0).
  */
-EXPORT(ground) int ground(int first, int count, f64 dt, f64 gx, f64 gy, f64 gz) {
+EXPORT(ground) int ground(int first, int count, f64 dt, f64 gx, f64 gy, f64 gz, int wantBox) {
   const int end = first + count;
   const int kind = (int)GH[G_KIND];
   const f64 *matF = (const f64 *)(uint32_t)GH[G_MATF];
@@ -962,6 +1124,14 @@ EXPORT(ground) int ground(int first, int count, f64 dt, f64 gx, f64 gy, f64 gz) 
   const uint32_t *cRef = (const uint32_t *)(uint32_t)GH[G_CREF];
   const uint32_t stamp = (uint32_t)GH[G_STAMP];
   GH[G_MISS_GRID] = 0;
+  /*
+   * Height bound: the highest terrain sample under the object's xz box. A node with y − 4r above it
+   * (+ HB_MARGIN, far beyond any rounding of the exact test) is skipped by the exact test too, so it takes
+   * the skip path without sampling. +inf (no shortcut) when a tile is absent or the box is huge.
+   */
+  f64 hb[3] = {__builtin_inf(), 0, 0};
+  if (wantBox || kind == G_HEIGHTFIELD) object_box(first, end);
+  if (kind == G_HEIGHTFIELD && end > first && !height_bound(&H, hb)) hb[0] = __builtin_inf();
   for (int i = first; i < end; i++) {
     const uint8_t f = nodeFlags[i];
     if ((f & NODE_FLAG_COLLIDABLE) == 0) {
@@ -994,6 +1164,12 @@ EXPORT(ground) int ground(int first, int count, f64 dt, f64 gx, f64 gy, f64 gz) 
       mat = planeMat;
     } else {
       /* Every tile this node may read is checked before anything is written. */
+      if (y - slopeSkip * r > hb[0] + hb[1] * x + hb[2] * z) {
+        const uint8_t cd0 = cooldown[i];
+        if (cd0 > 0) cooldown[i] = cd0 - 1;
+        nodeFlags[i] = f & ~NODE_FLAG_IN_CONTACT;
+        continue;
+      }
       if (cStamp[i] == stamp) {
         /* sampled by this tick's wheel pre-step (same position): its h / normal / material */
         const f64 *cs = (const f64 *)cRef[i];
@@ -1477,14 +1653,13 @@ static int wheel_sample(f64 *W) {
 }
 
 /* groundNormalForce of tyre node j from the cache (nrm out when in contact). */
-static inline f64 wheel_gnf(const f64 *s, int i, f64 dt) {
+static inline f64 wheel_gnf(const f64 *s, int i, f64 invDt) {
   if (s[0] != 2) return 0;
   const f64 r = radiusArr[i];
   const f64 nx = s[2], ny = s[3], nz = s[4];
   const f64 depth = (s[1] - posY[i]) * ny + r;
   if (!(depth > 0)) return 0;
   const f64 m = 1 / invMass[i];
-  const f64 invDt = 1 / dt;
   const f64 kcm = KC_STAB * invDt * invDt * m;
   const f64 soft = contactKArr[i];
   f64 kc, c;
@@ -1571,10 +1746,11 @@ EXPORT(wheel_omega) int wheel_omega(f64 *W, int ground, f64 dt) {
   int contacts = 0;
   if (ground) {
     const f64 *S = (const f64 *)(uint32_t)W[W_SAMP];
+    const f64 invDt = 1 / dt; /* groundNormalForce's 1 / dt, the same value once */
     for (int j = 0; j < n; j++) {
       const int i = ts + j;
       const f64 *s = S + WS * j;
-      const f64 fn = wheel_gnf(s, i, dt);
+      const f64 fn = wheel_gnf(s, i, invDt);
       if (!(fn > 0)) {
         tLoad[j] = 0;
         continue;
