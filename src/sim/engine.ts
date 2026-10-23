@@ -1068,7 +1068,8 @@ export class SimEngine {
       if (veh) vehiclePreStep(s, veh, obj.actions, SIM_DT);
       const hb = obj.hydroBeams;
       if (hb.length > 0) {
-        const steer = obj.actions[Action.steer]!;
+        // R-PHYS steering system (vehicle/steering.ts): the rack position the pre-step computed, else the action
+        const steer = veh && veh.steerOut !== undefined ? veh.steerOut : obj.actions[Action.steer]!;
         const base = obj.hydroBase;
         const travel = obj.hydroTravel;
         for (let h = 0; h < hb.length; h++) restLen[hb[h]!] = base[h]! * (1 + travel[h]! * steer);

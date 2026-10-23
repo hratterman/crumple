@@ -1482,7 +1482,8 @@ function buildPickup(): { def: VehicleDef; design: PickupDesign } {
     aero: { dragCoeffArea: 1.45, liftCoeffArea: 0.1, liftFront: 0.07, liftRear: 0.03 },
     // R-PHYS: asymmetric digressive dampers (dampers.ts: rebound 2.6 : 1 bump, knee 0.1 m/s)
     dampers: { front: true, rear: true },
-    steering: { maxWheelAngleDeg: round((PICKUP_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
+    // R-PHYS steering system (steering.ts): hydraulic rack, 18:1 (3.4 turns)
+    steering: { maxWheelAngleDeg: round((PICKUP_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2), system: { ratio: 18, torsionBarNmPerDeg: 2, assistGain0: 20, assistGainHigh: 3, assistSpeed: 9, assistMaxNm: 130, inertia: 0.07 } },
     frame: { origin: sid('c2', 'tn'), front: sid('s0', 'rs'), top: sid('c2', 'rf') },
     // Feel pass: rigid shell cluster (shell.ts) — crumple zones released whole on impact, firewall, safety cell.
     // R-CRASH crush unloading: gentle on the crumple members, off for the held cab / frame (the stiff

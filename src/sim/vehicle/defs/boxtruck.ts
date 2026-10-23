@@ -1886,7 +1886,8 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
     // of its light axle nodes) jittered the parked truck (0.19–0.21 m/s node speed vs 0.15) even with
     // { bump: 0.5, rebound: 1 }, and a softer bump changed the 50 km/h box-side dent (12.9 vs ≥ 15 cm).
 
-    steering: { maxWheelAngleDeg: round((BOXTRUCK_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
+    // R-PHYS steering system (steering.ts): hydraulic recirculating ball, 20:1 (5.5 turns)
+    steering: { maxWheelAngleDeg: round((BOXTRUCK_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2), system: { ratio: 20, torsionBarNmPerDeg: 2.5, assistGain0: 45, assistGainHigh: 6, assistSpeed: 8, assistMaxNm: 450, inertia: 0.1 } },
     frame: { origin: 'f7_x', front: 'f3_x', top: sid('c3', 'rf') },
     // Feel pass: rigid shell clusters (shell.ts). Body-on-frame: the cab and the box are each a rigid
     // body on their breakable mounts; the ladder frame (+ its front horns) stays a beam lattice so it still

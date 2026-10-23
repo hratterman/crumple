@@ -1405,7 +1405,8 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
     aero: { dragCoeffArea: 0.65, liftCoeffArea: 0.08, liftFront: 0.06, liftRear: 0.02 },
     // R-PHYS: asymmetric digressive dampers (dampers.ts: rebound 2.6 : 1 bump, knee 0.1 m/s)
     dampers: { front: true, rear: true },
-    steering: { maxWheelAngleDeg: round((SEDAN_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
+    // R-PHYS steering system (steering.ts): column EPS, 15:1 (2.6 turns lock to lock), speed-sensitive
+    steering: { maxWheelAngleDeg: round((SEDAN_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2), system: { ratio: 15, torsionBarNmPerDeg: 2, assistGain0: 20, assistGainHigh: 0.6, assistSpeed: 6, assistMaxNm: 80, inertia: 0.04 } },
     frame: { origin: sid(7, 'tn'), front: sid(2, 'rs'), top: sid(7, 'rf') },
     // Feel pass: rigid shell cluster (shell.ts) — crumple zones released whole on impact, firewall, safety cell.
     shell: shellLayout({

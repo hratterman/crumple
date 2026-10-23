@@ -1347,7 +1347,8 @@ function buildCoupe(): { def: VehicleDef; design: CoupeDesign } {
     // dampers): a marginal pillar case for R-CRASH (CONTRACTS "R-PHYS ↔ R-CRASH"). Sports valving to fit then:
     // { bump: 0.65, rebound: 1.2 } (rebound 1.8 : 1).
 
-    steering: { maxWheelAngleDeg: round((COUPE_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
+    // R-PHYS steering system (steering.ts): quick rack EPS, 13.5:1 (2.2 turns), heavier at speed
+    steering: { maxWheelAngleDeg: round((COUPE_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2), system: { ratio: 13.5, torsionBarNmPerDeg: 2.5, assistGain0: 16, assistGainHigh: 0.4, assistSpeed: 7, assistMaxNm: 80, inertia: 0.04 } },
     frame: { origin: sid(7, 'tn'), front: sid(2, 'rs'), top: sid(7, 'rf') },
     // Feel pass: rigid shell cluster (shell.ts) — crumple zones released whole on impact, firewall, safety cell.
     shell: shellLayout({

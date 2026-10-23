@@ -376,6 +376,30 @@ export interface VehicleFrameDef {
 export interface SteeringDef {
   /** Road-wheel angle at |steer| = 1, degrees (HUD/AI/camera estimate; physics = hydros). */
   maxWheelAngleDeg: number;
+  /**
+   * R-PHYS (additive, optional): the steering system between the hands and the rack (steering.ts):
+   * the `steer` action becomes the STEERING-WHEEL angle and the rack follows it through the torsion bar,
+   * the speed-sensitive assist and the tie-rod loads (fields absent = STEERING_DEFAULTS). Absent = the action
+   * drives the hydros directly (pre-R-PHYS; minimal test rigs).
+   */
+  system?: SteeringSystemDef;
+}
+
+/** R-PHYS: steering system parameters (steering.ts); every field optional over STEERING_DEFAULTS. */
+export interface SteeringSystemDef {
+  /** Overall ratio, steering-wheel angle / mean road-wheel angle. */
+  ratio?: number;
+  /** Torsion bar (torque sensor / valve) rate, N·m per degree. */
+  torsionBarNmPerDeg?: number;
+  /** Assist gain (rack torque = (1 + g)·driver torque) at standstill and at high speed. */
+  assistGain0?: number;
+  assistGainHigh?: number;
+  /** Speed where the assist gain is halfway between the two, m/s (g = g∞ + (g0 − g∞)/(1 + (v/v_a)²)). */
+  assistSpeed?: number;
+  /** Maximum assist torque at the pinion, N·m (pump / motor capacity). */
+  assistMaxNm?: number;
+  /** Pinion-side inertia (rack, pinion, assist motor reflected), kg·m². */
+  inertia?: number;
 }
 
 /**
@@ -725,6 +749,11 @@ export interface VehicleRuntime {
   telemetry: Float32Array;
   /** Feel pass (additive): rigid shell cluster runtimes (absent / empty = none). */
   shell?: ShellRuntime[];
+  /**
+   * R-PHYS (additive): rack position (−1..1) the steering system (steering.ts) computed this tick; when
+   * set, the engine's hydro pass drives the steering hydros from it instead of the `steer` action.
+   */
+  steerOut?: number;
 }
 
 /**
