@@ -178,6 +178,8 @@ export function polar3(a: Float64Array, out: Float64Array): boolean {
 }
 
 const A = new Float64Array(9);
+/** Odd-lane covariance accumulator (interleaved sums). */
+const A1 = new Float64Array(9);
 const R = new Float64Array(9);
 
 /**
@@ -198,8 +200,11 @@ export function applyShell(s: SimState, rt: ShellRuntime, dt: number, gx: number
   const frcX = s.frcX, frcY = s.frcY, frcZ = s.frcZ;
   const invMass = s.invMass;
   // ---- pass 1: weighted centroid, predicted momentum, rest centroid
-  let W = 0;
-  let cx = 0, cy = 0, cz = 0, vx = 0, vy = 0, vz = 0, rx = 0, ry = 0, rz = 0;
+  // INTERLEAVED SUMS (R-CORE wip): node k accumulates into lane k & 1, the two lanes are added once at the
+  // end — the order a two-lane SIMD kernel uses, so the WASM kernel vectorizes these reductions bit-exactly.
+  let W0 = 0, W1 = 0;
+  let cx0 = 0, cy0 = 0, cz0 = 0, vx0 = 0, vy0 = 0, vz0 = 0, rx0 = 0, ry0 = 0, rz0 = 0;
+  let cx1 = 0, cy1 = 0, cz1 = 0, vx1 = 0, vy1 = 0, vz1 = 0, rx1 = 0, ry1 = 0, rz1 = 0;
   for (let k = 0; k < n; k++) {
     const i = nodes[k]!;
     const im = invMass[i]!;
@@ -211,18 +216,29 @@ export function applyShell(s: SimState, rt: ShellRuntime, dt: number, gx: number
     vs[3 * k + 2] = v2;
     const m = w[k]! * mass[k]!;
     if (m === 0 || im === 0) continue;
-    W += m;
-    cx += m * posX[i]!; cy += m * posY[i]!; cz += m * posZ[i]!;
-    vx += m * v0; vy += m * v1; vz += m * v2;
-    rx += m * rest[3 * k]!; ry += m * rest[3 * k + 1]!; rz += m * rest[3 * k + 2]!;
+    if ((k & 1) === 0) {
+      W0 += m;
+      cx0 += m * posX[i]!; cy0 += m * posY[i]!; cz0 += m * posZ[i]!;
+      vx0 += m * v0; vy0 += m * v1; vz0 += m * v2;
+      rx0 += m * rest[3 * k]!; ry0 += m * rest[3 * k + 1]!; rz0 += m * rest[3 * k + 2]!;
+    } else {
+      W1 += m;
+      cx1 += m * posX[i]!; cy1 += m * posY[i]!; cz1 += m * posZ[i]!;
+      vx1 += m * v0; vy1 += m * v1; vz1 += m * v2;
+      rx1 += m * rest[3 * k]!; ry1 += m * rest[3 * k + 1]!; rz1 += m * rest[3 * k + 2]!;
+    }
   }
+  const W = W0 + W1;
+  let cx = cx0 + cx1, cy = cy0 + cy1, cz = cz0 + cz1, vx = vx0 + vx1, vy = vy0 + vy1, vz = vz0 + vz1, rx = rx0 + rx1, ry = ry0 + ry1, rz = rz0 + rz1;
   if (!(W > 0)) return;
   const iW = 1 / W;
   cx *= iW; cy *= iW; cz *= iW; vx *= iW; vy *= iW; vz *= iW; rx *= iW; ry *= iW; rz *= iW;
-  // ---- pass 2: covariance, angular momentum, inertia
+  // ---- pass 2: covariance, angular momentum, inertia (interleaved like pass 1)
   A.fill(0);
-  let lx = 0, ly = 0, lz = 0;
-  let ixx = 0, iyy = 0, izz = 0, ixy = 0, ixz = 0, iyz = 0;
+  A1.fill(0);
+  let lx0 = 0, ly0 = 0, lz0 = 0, lx1 = 0, ly1 = 0, lz1 = 0;
+  let ixx0 = 0, iyy0 = 0, izz0 = 0, ixy0 = 0, ixz0 = 0, iyz0 = 0;
+  let ixx1 = 0, iyy1 = 0, izz1 = 0, ixy1 = 0, ixz1 = 0, iyz1 = 0;
   for (let k = 0; k < n; k++) {
     const m = w[k]! * mass[k]!;
     if (m === 0) continue;
@@ -230,20 +246,36 @@ export function applyShell(s: SimState, rt: ShellRuntime, dt: number, gx: number
     if (invMass[i] === 0) continue;
     const dx = posX[i]! - cx, dy = posY[i]! - cy, dz = posZ[i]! - cz;
     const qx = rest[3 * k]! - rx, qy = rest[3 * k + 1]! - ry, qz = rest[3 * k + 2]! - rz;
-    A[0]! += m * dx * qx; A[1]! += m * dx * qy; A[2]! += m * dx * qz;
-    A[3]! += m * dy * qx; A[4]! += m * dy * qy; A[5]! += m * dy * qz;
-    A[6]! += m * dz * qx; A[7]! += m * dz * qy; A[8]! += m * dz * qz;
     const ux = vs[3 * k]! - vx, uy = vs[3 * k + 1]! - vy, uz = vs[3 * k + 2]! - vz;
-    lx += m * (dy * uz - dz * uy);
-    ly += m * (dz * ux - dx * uz);
-    lz += m * (dx * uy - dy * ux);
-    ixx += m * (dy * dy + dz * dz);
-    iyy += m * (dx * dx + dz * dz);
-    izz += m * (dx * dx + dy * dy);
-    ixy -= m * dx * dy;
-    ixz -= m * dx * dz;
-    iyz -= m * dy * dz;
+    const L = (k & 1) === 0 ? A : A1;
+    L[0]! += m * dx * qx; L[1]! += m * dx * qy; L[2]! += m * dx * qz;
+    L[3]! += m * dy * qx; L[4]! += m * dy * qy; L[5]! += m * dy * qz;
+    L[6]! += m * dz * qx; L[7]! += m * dz * qy; L[8]! += m * dz * qz;
+    if ((k & 1) === 0) {
+      lx0 += m * (dy * uz - dz * uy);
+      ly0 += m * (dz * ux - dx * uz);
+      lz0 += m * (dx * uy - dy * ux);
+      ixx0 += m * (dy * dy + dz * dz);
+      iyy0 += m * (dx * dx + dz * dz);
+      izz0 += m * (dx * dx + dy * dy);
+      ixy0 -= m * dx * dy;
+      ixz0 -= m * dx * dz;
+      iyz0 -= m * dy * dz;
+    } else {
+      lx1 += m * (dy * uz - dz * uy);
+      ly1 += m * (dz * ux - dx * uz);
+      lz1 += m * (dx * uy - dy * ux);
+      ixx1 += m * (dy * dy + dz * dz);
+      iyy1 += m * (dx * dx + dz * dz);
+      izz1 += m * (dx * dx + dy * dy);
+      ixy1 -= m * dx * dy;
+      ixz1 -= m * dx * dz;
+      iyz1 -= m * dy * dz;
+    }
   }
+  for (let j = 0; j < 9; j++) A[j] = A[j]! + A1[j]!;
+  const lx = lx0 + lx1, ly = ly0 + ly1, lz = lz0 + lz1;
+  const ixx = ixx0 + ixx1, iyy = iyy0 + iyy1, izz = izz0 + izz1, ixy = ixy0 + ixy1, ixz = ixz0 + ixz1, iyz = iyz0 + iyz1;
   if (!polar3(A, R)) return;
   rt.R.set(R);
   // ω = I⁻¹ L (symmetric 3×3 inverse by cofactors)

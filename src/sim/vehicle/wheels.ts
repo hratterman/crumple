@@ -245,8 +245,9 @@ export const estimateWheelOmega: EstimateWheelOmega = (state, w) => {
 
   // ---- ω (rim and tyre rings are contiguous: rimStart .. rimStart + 2·ringCount)
   const n = w.ringCount;
-  let lSum = 0;
-  let iSum = 0;
+  // interleaved sums (R-CORE wip): node i into lane (i − r0) & 1, lanes added at the end
+  let lSum0 = 0, lSum1 = 0;
+  let iSum0 = 0, iSum1 = 0;
   const r0 = w.rimStart;
   const r1 = r0 + 2 * n;
   for (let i = r0; i < r1; i++) {
@@ -263,9 +264,16 @@ export const estimateWheelOmega: EstimateWheelOmega = (state, w) => {
     const ty = sz * px - sx * pz;
     const tz = sx * py - sy * px;
     const m = 1 / im;
-    lSum += m * ((velX[i]! - vcx) * tx + (velY[i]! - vcy) * ty + (velZ[i]! - vcz) * tz);
-    iSum += m * (px * px + py * py + pz * pz);
+    if (((i - r0) & 1) === 0) {
+      lSum0 += m * ((velX[i]! - vcx) * tx + (velY[i]! - vcy) * ty + (velZ[i]! - vcz) * tz);
+      iSum0 += m * (px * px + py * py + pz * pz);
+    } else {
+      lSum1 += m * ((velX[i]! - vcx) * tx + (velY[i]! - vcy) * ty + (velZ[i]! - vcz) * tz);
+      iSum1 += m * (px * px + py * py + pz * pz);
+    }
   }
+  const lSum = lSum0 + lSum1;
+  const iSum = iSum0 + iSum1;
   const omega = iSum > 0 ? lSum / iSum : 0;
   w.omega = omega;
 

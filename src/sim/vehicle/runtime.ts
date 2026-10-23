@@ -329,14 +329,25 @@ export function applyAero(state: SimState, vehicle: VehicleRuntime): void {
     py = momentumOut[1]!;
     pz = momentumOut[2]!;
   } else {
+    // interleaved sums (R-CORE wip): node i into lane (i − start) & 1, lanes added at the end
+    let px1 = 0, py1 = 0, pz1 = 0;
     for (let i = start; i < end; i++) {
       const im = invMass[i]!;
       if (im === 0) continue;
       const m = 1 / im;
-      px += m * velX[i]!;
-      py += m * velY[i]!;
-      pz += m * velZ[i]!;
+      if (((i - start) & 1) === 0) {
+        px += m * velX[i]!;
+        py += m * velY[i]!;
+        pz += m * velZ[i]!;
+      } else {
+        px1 += m * velX[i]!;
+        py1 += m * velY[i]!;
+        pz1 += m * velZ[i]!;
+      }
     }
+    px = px + px1;
+    py = py + py1;
+    pz = pz + pz1;
   }
   const vx = px / M;
   const vy = py / M;
@@ -492,23 +503,32 @@ export function applyDriveReaction(state: SimState, vehicle: VehicleRuntime): vo
     bk.driveReaction(start, end, ux, uy, uz, tl);
     return;
   }
-  let m = 0;
-  let cx = 0;
-  let cy = 0;
-  let cz = 0;
+  // interleaved sums (R-CORE wip): node i into lane (i − start) & 1, lanes added at the end
+  let m0 = 0, cx0 = 0, cy0 = 0, cz0 = 0, m1 = 0, cx1 = 0, cy1 = 0, cz1 = 0;
   for (let i = start; i < end; i++) {
     const im = invMass[i]!;
     if (im === 0) continue;
-    m += 1 / im;
-    cx += posX[i]! / im;
-    cy += posY[i]! / im;
-    cz += posZ[i]! / im;
+    if (((i - start) & 1) === 0) {
+      m0 += 1 / im;
+      cx0 += posX[i]! / im;
+      cy0 += posY[i]! / im;
+      cz0 += posZ[i]! / im;
+    } else {
+      m1 += 1 / im;
+      cx1 += posX[i]! / im;
+      cy1 += posY[i]! / im;
+      cz1 += posZ[i]! / im;
+    }
   }
+  const m = m0 + m1;
+  let cx = cx0 + cx1;
+  let cy = cy0 + cy1;
+  let cz = cz0 + cz1;
   if (!(m > 0)) return;
   cx /= m;
   cy /= m;
   cz /= m;
-  let I = 0;
+  let I0 = 0, I1 = 0;
   for (let i = start; i < end; i++) {
     const im = invMass[i]!;
     if (im === 0) continue;
@@ -519,8 +539,10 @@ export function applyDriveReaction(state: SimState, vehicle: VehicleRuntime): vo
     const px = rx - a * ux;
     const py = ry - a * uy;
     const pz = rz - a * uz;
-    I += (px * px + py * py + pz * pz) / im;
+    if (((i - start) & 1) === 0) I0 += (px * px + py * py + pz * pz) / im;
+    else I1 += (px * px + py * py + pz * pz) / im;
   }
+  const I = I0 + I1;
   if (!(I > 1e-9)) return;
   const g = tl / I;
   for (let i = start; i < end; i++) {

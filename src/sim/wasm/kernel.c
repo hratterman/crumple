@@ -32,6 +32,16 @@
 
 #define EXPORT(name) __attribute__((export_name(#name)))
 
+/* Freestanding: clang lowers aggregate zero-initializers to memset. */
+__attribute__((no_builtin("memset"))) void *memset(void *d, int c, unsigned long n) {
+  unsigned char *p = (unsigned char *)d;
+  unsigned long i = 0;
+  if (c == 0 && ((unsigned long)p & 7) == 0)
+    for (; i + 8 <= n; i += 8) *(unsigned long long *)(p + i) = 0;
+  for (; i < n; i++) p[i] = (unsigned char)c;
+  return d;
+}
+
 typedef double f64;
 
 /* ------------------------------------------------------------ bound state */
@@ -613,12 +623,17 @@ EXPORT(shell) int shell(f64 *H, f64 dt, f64 gx, f64 gy, f64 gz) {
   uint8_t *tripped = (uint8_t *)(uint32_t)H[SH_TRIPPED];
   f64 *Rout = (f64 *)(uint32_t)H[SH_R];
 
-  f64 W = 0;
-  f64 cx = 0, cy = 0, cz = 0, vx = 0, vy = 0, vz = 0, rx = 0, ry = 0, rz = 0;
+  /*
+   * INTERLEAVED SUMS (shell.ts): node k accumulates into lane k & 1; the lanes are added once at the end.
+   * Scalar build: two accumulator sets; SIMD build: f64x2 accumulators (lane 0 = even k), a skipped node
+   * adds +0.0 (a partial sum that starts at +0 never becomes −0, so that is exact).
+   */
+  f64 acc1[2][10] = {{0}};
   int k = 0;
 #ifdef CRUMPLE_SIMD
   {
-    const v128_t vdt = SPL(dt), vgx = SPL(gx), vgy = SPL(gy), vgz = SPL(gz);
+    const v128_t vdt = SPL(dt), vgx = SPL(gx), vgy = SPL(gy), vgz = SPL(gz), z0 = SPL(0.0);
+    v128_t aW = z0, acx = z0, acy = z0, acz = z0, avx = z0, avy = z0, avz = z0, arx = z0, ary = z0, arz = z0;
     for (; k + 1 < n; k += 2) {
       const int32_t i0 = nodes[k], i1 = nodes[k + 1];
       const v128_t im = V2(invMass[i0], invMass[i1]);
@@ -628,21 +643,19 @@ EXPORT(shell) int shell(f64 *H, f64 dt, f64 gx, f64 gy, f64 gz) {
       vs[3 * k] = L0(v0); vs[3 * k + 1] = L0(v1); vs[3 * k + 2] = L0(v2);
       vs[3 * k + 3] = L1(v0); vs[3 * k + 4] = L1(v1); vs[3 * k + 5] = L1(v2);
       const v128_t m = MUL(wasm_v128_load(w + k), wasm_v128_load(mass + k));
-      const v128_t mpx = MUL(m, V2(posX[i0], posX[i1])), mpy = MUL(m, V2(posY[i0], posY[i1])), mpz = MUL(m, V2(posZ[i0], posZ[i1]));
-      const v128_t mvx = MUL(m, v0), mvy = MUL(m, v1), mvz = MUL(m, v2);
-      const v128_t mrx = MUL(m, V2(rest[3 * k], rest[3 * k + 3])), mry = MUL(m, V2(rest[3 * k + 1], rest[3 * k + 4])), mrz = MUL(m, V2(rest[3 * k + 2], rest[3 * k + 5]));
-      if (!(L0(m) == 0 || L0(im) == 0)) {
-        W += L0(m);
-        cx += L0(mpx); cy += L0(mpy); cz += L0(mpz);
-        vx += L0(mvx); vy += L0(mvy); vz += L0(mvz);
-        rx += L0(mrx); ry += L0(mry); rz += L0(mrz);
-      }
-      if (!(L1(m) == 0 || L1(im) == 0)) {
-        W += L1(m);
-        cx += L1(mpx); cy += L1(mpy); cz += L1(mpz);
-        vx += L1(mvx); vy += L1(mvy); vz += L1(mvz);
-        rx += L1(mrx); ry += L1(mry); rz += L1(mrz);
-      }
+      /* lanes that take part: m ≠ 0 and im ≠ 0 */
+      const v128_t ok = wasm_v128_and(wasm_f64x2_ne(m, z0), wasm_f64x2_ne(im, z0));
+#define MADD(acc, val) acc = ADD(acc, wasm_v128_bitselect(val, z0, ok))
+      MADD(aW, m);
+      MADD(acx, MUL(m, V2(posX[i0], posX[i1]))); MADD(acy, MUL(m, V2(posY[i0], posY[i1]))); MADD(acz, MUL(m, V2(posZ[i0], posZ[i1])));
+      MADD(avx, MUL(m, v0)); MADD(avy, MUL(m, v1)); MADD(avz, MUL(m, v2));
+      MADD(arx, MUL(m, V2(rest[3 * k], rest[3 * k + 3]))); MADD(ary, MUL(m, V2(rest[3 * k + 1], rest[3 * k + 4]))); MADD(arz, MUL(m, V2(rest[3 * k + 2], rest[3 * k + 5])));
+#undef MADD
+    }
+    const v128_t accs[10] = {aW, acx, acy, acz, avx, avy, avz, arx, ary, arz};
+    for (int j = 0; j < 10; j++) {
+      acc1[0][j] = L0(accs[j]);
+      acc1[1][j] = L1(accs[j]);
     }
   }
 #endif
@@ -657,50 +670,55 @@ EXPORT(shell) int shell(f64 *H, f64 dt, f64 gx, f64 gy, f64 gz) {
     vs[3 * k + 2] = v2;
     const f64 m = w[k] * mass[k];
     if (m == 0 || im == 0) continue;
-    W += m;
-    cx += m * posX[i]; cy += m * posY[i]; cz += m * posZ[i];
-    vx += m * v0; vy += m * v1; vz += m * v2;
-    rx += m * rest[3 * k]; ry += m * rest[3 * k + 1]; rz += m * rest[3 * k + 2];
+    f64 *a = acc1[k & 1];
+    a[0] += m;
+    a[1] += m * posX[i]; a[2] += m * posY[i]; a[3] += m * posZ[i];
+    a[4] += m * v0; a[5] += m * v1; a[6] += m * v2;
+    a[7] += m * rest[3 * k]; a[8] += m * rest[3 * k + 1]; a[9] += m * rest[3 * k + 2];
   }
+  const f64 W = acc1[0][0] + acc1[1][0];
+  f64 cx = acc1[0][1] + acc1[1][1], cy = acc1[0][2] + acc1[1][2], cz = acc1[0][3] + acc1[1][3];
+  f64 vx = acc1[0][4] + acc1[1][4], vy = acc1[0][5] + acc1[1][5], vz = acc1[0][6] + acc1[1][6];
+  f64 rx = acc1[0][7] + acc1[1][7], ry = acc1[0][8] + acc1[1][8], rz = acc1[0][9] + acc1[1][9];
   if (!(W > 0)) return 0;
   const f64 iW = 1 / W;
   cx *= iW; cy *= iW; cz *= iW; vx *= iW; vy *= iW; vz *= iW; rx *= iW; ry *= iW; rz *= iW;
-  f64 A[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
-  f64 lx = 0, ly = 0, lz = 0;
-  f64 ixx = 0, iyy = 0, izz = 0, ixy = 0, ixz = 0, iyz = 0;
+  /* pass 2 accumulators per lane: A[9], lx ly lz, ixx iyy izz ixy ixz iyz */
+  f64 acc2[2][18] = {{0}};
   k = 0;
 #ifdef CRUMPLE_SIMD
   {
+    const v128_t z0 = SPL(0.0);
     const v128_t vcx = SPL(cx), vcy = SPL(cy), vcz = SPL(cz), vrx = SPL(rx), vry = SPL(ry), vrz = SPL(rz), vvx = SPL(vx), vvy = SPL(vy), vvz = SPL(vz);
+    v128_t ac[18];
+    for (int j = 0; j < 18; j++) ac[j] = z0;
     for (; k + 1 < n; k += 2) {
       const int32_t i0 = nodes[k], i1 = nodes[k + 1];
       const v128_t m = MUL(wasm_v128_load(w + k), wasm_v128_load(mass + k));
-      const int ok0 = !(L0(m) == 0) && !(invMass[i0] == 0);
-      const int ok1 = !(L1(m) == 0) && !(invMass[i1] == 0);
-      if (!ok0 && !ok1) continue;
+      const v128_t ok = wasm_v128_and(wasm_f64x2_ne(m, z0), wasm_f64x2_ne(V2(invMass[i0], invMass[i1]), z0));
+      if (!wasm_v128_any_true(ok)) continue;
       const v128_t dx = SUB(V2(posX[i0], posX[i1]), vcx), dy = SUB(V2(posY[i0], posY[i1]), vcy), dz = SUB(V2(posZ[i0], posZ[i1]), vcz);
       const v128_t qx = SUB(V2(rest[3 * k], rest[3 * k + 3]), vrx), qy = SUB(V2(rest[3 * k + 1], rest[3 * k + 4]), vry), qz = SUB(V2(rest[3 * k + 2], rest[3 * k + 5]), vrz);
-      const v128_t mdx = MUL(m, dx), mdy = MUL(m, dy), mdz = MUL(m, dz);
-      const v128_t a0 = MUL(mdx, qx), a1 = MUL(mdx, qy), a2 = MUL(mdx, qz);
-      const v128_t a3 = MUL(mdy, qx), a4 = MUL(mdy, qy), a5 = MUL(mdy, qz);
-      const v128_t a6 = MUL(mdz, qx), a7 = MUL(mdz, qy), a8 = MUL(mdz, qz);
       const v128_t ux = SUB(V2(vs[3 * k], vs[3 * k + 3]), vvx), uy = SUB(V2(vs[3 * k + 1], vs[3 * k + 4]), vvy), uz = SUB(V2(vs[3 * k + 2], vs[3 * k + 5]), vvz);
-      const v128_t tlx = MUL(m, SUB(MUL(dy, uz), MUL(dz, uy)));
-      const v128_t tly = MUL(m, SUB(MUL(dz, ux), MUL(dx, uz)));
-      const v128_t tlz = MUL(m, SUB(MUL(dx, uy), MUL(dy, ux)));
-      const v128_t txx = MUL(m, ADD(MUL(dy, dy), MUL(dz, dz)));
-      const v128_t tyy = MUL(m, ADD(MUL(dx, dx), MUL(dz, dz)));
-      const v128_t tzz = MUL(m, ADD(MUL(dx, dx), MUL(dy, dy)));
-      const v128_t txy = MUL(mdx, dy), txz = MUL(mdx, dz), tyz = MUL(mdy, dz);
-#define SHELL_ACC2(L)                                                                                     \
-  A[0] += L(a0); A[1] += L(a1); A[2] += L(a2); A[3] += L(a3); A[4] += L(a4); A[5] += L(a5);           \
-  A[6] += L(a6); A[7] += L(a7); A[8] += L(a8);                                                          \
-  lx += L(tlx); ly += L(tly); lz += L(tlz);                                                             \
-  ixx += L(txx); iyy += L(tyy); izz += L(tzz);                                                          \
-  ixy -= L(txy); ixz -= L(txz); iyz -= L(tyz);
-      if (ok0) { SHELL_ACC2(L0) }
-      if (ok1) { SHELL_ACC2(L1) }
-#undef SHELL_ACC2
+      const v128_t mdx = MUL(m, dx), mdy = MUL(m, dy), mdz = MUL(m, dz);
+#define MADD(j, val) ac[j] = ADD(ac[j], wasm_v128_bitselect(val, z0, ok))
+#define MSUB(j, val) ac[j] = SUB(ac[j], wasm_v128_bitselect(val, z0, ok))
+      MADD(0, MUL(mdx, qx)); MADD(1, MUL(mdx, qy)); MADD(2, MUL(mdx, qz));
+      MADD(3, MUL(mdy, qx)); MADD(4, MUL(mdy, qy)); MADD(5, MUL(mdy, qz));
+      MADD(6, MUL(mdz, qx)); MADD(7, MUL(mdz, qy)); MADD(8, MUL(mdz, qz));
+      MADD(9, MUL(m, SUB(MUL(dy, uz), MUL(dz, uy))));
+      MADD(10, MUL(m, SUB(MUL(dz, ux), MUL(dx, uz))));
+      MADD(11, MUL(m, SUB(MUL(dx, uy), MUL(dy, ux))));
+      MADD(12, MUL(m, ADD(MUL(dy, dy), MUL(dz, dz))));
+      MADD(13, MUL(m, ADD(MUL(dx, dx), MUL(dz, dz))));
+      MADD(14, MUL(m, ADD(MUL(dx, dx), MUL(dy, dy))));
+      MSUB(15, MUL(mdx, dy)); MSUB(16, MUL(mdx, dz)); MSUB(17, MUL(mdy, dz));
+#undef MADD
+#undef MSUB
+    }
+    for (int j = 0; j < 18; j++) {
+      acc2[0][j] = L0(ac[j]);
+      acc2[1][j] = L1(ac[j]);
     }
   }
 #endif
@@ -711,20 +729,26 @@ EXPORT(shell) int shell(f64 *H, f64 dt, f64 gx, f64 gy, f64 gz) {
     if (invMass[i] == 0) continue;
     const f64 dx = posX[i] - cx, dy = posY[i] - cy, dz = posZ[i] - cz;
     const f64 qx = rest[3 * k] - rx, qy = rest[3 * k + 1] - ry, qz = rest[3 * k + 2] - rz;
-    A[0] += m * dx * qx; A[1] += m * dx * qy; A[2] += m * dx * qz;
-    A[3] += m * dy * qx; A[4] += m * dy * qy; A[5] += m * dy * qz;
-    A[6] += m * dz * qx; A[7] += m * dz * qy; A[8] += m * dz * qz;
     const f64 ux = vs[3 * k] - vx, uy = vs[3 * k + 1] - vy, uz = vs[3 * k + 2] - vz;
-    lx += m * (dy * uz - dz * uy);
-    ly += m * (dz * ux - dx * uz);
-    lz += m * (dx * uy - dy * ux);
-    ixx += m * (dy * dy + dz * dz);
-    iyy += m * (dx * dx + dz * dz);
-    izz += m * (dx * dx + dy * dy);
-    ixy -= m * dx * dy;
-    ixz -= m * dx * dz;
-    iyz -= m * dy * dz;
+    f64 *a = acc2[k & 1];
+    a[0] += m * dx * qx; a[1] += m * dx * qy; a[2] += m * dx * qz;
+    a[3] += m * dy * qx; a[4] += m * dy * qy; a[5] += m * dy * qz;
+    a[6] += m * dz * qx; a[7] += m * dz * qy; a[8] += m * dz * qz;
+    a[9] += m * (dy * uz - dz * uy);
+    a[10] += m * (dz * ux - dx * uz);
+    a[11] += m * (dx * uy - dy * ux);
+    a[12] += m * (dy * dy + dz * dz);
+    a[13] += m * (dx * dx + dz * dz);
+    a[14] += m * (dx * dx + dy * dy);
+    a[15] -= m * dx * dy;
+    a[16] -= m * dx * dz;
+    a[17] -= m * dy * dz;
   }
+  f64 A[9];
+  for (int j = 0; j < 9; j++) A[j] = acc2[0][j] + acc2[1][j];
+  const f64 lx = acc2[0][9] + acc2[1][9], ly = acc2[0][10] + acc2[1][10], lz = acc2[0][11] + acc2[1][11];
+  const f64 ixx = acc2[0][12] + acc2[1][12], iyy = acc2[0][13] + acc2[1][13], izz = acc2[0][14] + acc2[1][14];
+  const f64 ixy = acc2[0][15] + acc2[1][15], ixz = acc2[0][16] + acc2[1][16], iyz = acc2[0][17] + acc2[1][17];
   f64 R[9];
   if (!polar3(A, R)) return 0;
   for (int j = 0; j < 9; j++) Rout[j] = R[j];
@@ -1347,39 +1371,38 @@ EXPORT(ground_sample) int ground_sample(f64 x, f64 z, f64 *out) {
  * touches each node once, so SIMD pairs store directly.
  */
 EXPORT(body_momentum) void body_momentum(int start, int end, f64 *out) {
-  f64 px = 0, py = 0, pz = 0;
+  /* interleaved sums: node i into lane (i − start) & 1, lanes added at the end */
+  f64 acc[2][3] = {{0}};
   int i = start;
 #ifdef CRUMPLE_SIMD
-  const v128_t one = wasm_f64x2_splat(1.0);
-  for (; i + 1 < end; i += 2) {
-    const v128_t im = wasm_v128_load(invMass + i);
-    const v128_t m = wasm_f64x2_div(one, im);
-    const v128_t mx = wasm_f64x2_mul(m, wasm_v128_load(velX + i));
-    const v128_t my = wasm_f64x2_mul(m, wasm_v128_load(velY + i));
-    const v128_t mz = wasm_f64x2_mul(m, wasm_v128_load(velZ + i));
-    if (wasm_f64x2_extract_lane(im, 0) != 0) {
-      px += wasm_f64x2_extract_lane(mx, 0);
-      py += wasm_f64x2_extract_lane(my, 0);
-      pz += wasm_f64x2_extract_lane(mz, 0);
+  {
+    const v128_t one = wasm_f64x2_splat(1.0), z0 = wasm_f64x2_splat(0.0);
+    v128_t ax = z0, ay = z0, az = z0;
+    for (; i + 1 < end; i += 2) {
+      const v128_t im = wasm_v128_load(invMass + i);
+      const v128_t ok = wasm_f64x2_ne(im, z0);
+      const v128_t m = wasm_f64x2_div(one, im);
+      ax = wasm_f64x2_add(ax, wasm_v128_bitselect(wasm_f64x2_mul(m, wasm_v128_load(velX + i)), z0, ok));
+      ay = wasm_f64x2_add(ay, wasm_v128_bitselect(wasm_f64x2_mul(m, wasm_v128_load(velY + i)), z0, ok));
+      az = wasm_f64x2_add(az, wasm_v128_bitselect(wasm_f64x2_mul(m, wasm_v128_load(velZ + i)), z0, ok));
     }
-    if (wasm_f64x2_extract_lane(im, 1) != 0) {
-      px += wasm_f64x2_extract_lane(mx, 1);
-      py += wasm_f64x2_extract_lane(my, 1);
-      pz += wasm_f64x2_extract_lane(mz, 1);
-    }
+    acc[0][0] = wasm_f64x2_extract_lane(ax, 0); acc[1][0] = wasm_f64x2_extract_lane(ax, 1);
+    acc[0][1] = wasm_f64x2_extract_lane(ay, 0); acc[1][1] = wasm_f64x2_extract_lane(ay, 1);
+    acc[0][2] = wasm_f64x2_extract_lane(az, 0); acc[1][2] = wasm_f64x2_extract_lane(az, 1);
   }
 #endif
   for (; i < end; i++) {
     const f64 im = invMass[i];
     if (im == 0) continue;
     const f64 m = 1 / im;
-    px += m * velX[i];
-    py += m * velY[i];
-    pz += m * velZ[i];
+    f64 *a = acc[(i - start) & 1];
+    a[0] += m * velX[i];
+    a[1] += m * velY[i];
+    a[2] += m * velZ[i];
   }
-  out[0] = px;
-  out[1] = py;
-  out[2] = pz;
+  out[0] = acc[0][0] + acc[1][0];
+  out[1] = acc[0][1] + acc[1][1];
+  out[2] = acc[0][2] + acc[1][2];
 }
 
 EXPORT(body_accel) void body_accel(int start, int end, f64 ax, f64 ay, f64 az) {
@@ -1429,60 +1452,66 @@ static inline void drive_node(int i, f64 g, f64 cx, f64 cy, f64 cz, f64 ux, f64 
 }
 
 EXPORT(drive_reaction) void drive_reaction(int start, int end, f64 ux, f64 uy, f64 uz, f64 tl) {
-  f64 m = 0, cx = 0, cy = 0, cz = 0;
+  /* interleaved sums: node i into lane (i − start) & 1, lanes added at the end */
+  f64 acc[2][4] = {{0}};
   int i = start;
 #ifdef CRUMPLE_SIMD
-  const v128_t one = wasm_f64x2_splat(1.0);
-  for (; i + 1 < end; i += 2) {
-    const v128_t im = wasm_v128_load(invMass + i);
-    const v128_t mi = wasm_f64x2_div(one, im);
-    const v128_t qx = wasm_f64x2_div(wasm_v128_load(posX + i), im);
-    const v128_t qy = wasm_f64x2_div(wasm_v128_load(posY + i), im);
-    const v128_t qz = wasm_f64x2_div(wasm_v128_load(posZ + i), im);
-    if (wasm_f64x2_extract_lane(im, 0) != 0) {
-      m += wasm_f64x2_extract_lane(mi, 0);
-      cx += wasm_f64x2_extract_lane(qx, 0);
-      cy += wasm_f64x2_extract_lane(qy, 0);
-      cz += wasm_f64x2_extract_lane(qz, 0);
+  {
+    const v128_t one = wasm_f64x2_splat(1.0), z0 = wasm_f64x2_splat(0.0);
+    v128_t am = z0, ax = z0, ay = z0, az = z0;
+    for (; i + 1 < end; i += 2) {
+      const v128_t im = wasm_v128_load(invMass + i);
+      const v128_t ok = wasm_f64x2_ne(im, z0);
+      am = wasm_f64x2_add(am, wasm_v128_bitselect(wasm_f64x2_div(one, im), z0, ok));
+      ax = wasm_f64x2_add(ax, wasm_v128_bitselect(wasm_f64x2_div(wasm_v128_load(posX + i), im), z0, ok));
+      ay = wasm_f64x2_add(ay, wasm_v128_bitselect(wasm_f64x2_div(wasm_v128_load(posY + i), im), z0, ok));
+      az = wasm_f64x2_add(az, wasm_v128_bitselect(wasm_f64x2_div(wasm_v128_load(posZ + i), im), z0, ok));
     }
-    if (wasm_f64x2_extract_lane(im, 1) != 0) {
-      m += wasm_f64x2_extract_lane(mi, 1);
-      cx += wasm_f64x2_extract_lane(qx, 1);
-      cy += wasm_f64x2_extract_lane(qy, 1);
-      cz += wasm_f64x2_extract_lane(qz, 1);
-    }
+    acc[0][0] = wasm_f64x2_extract_lane(am, 0); acc[1][0] = wasm_f64x2_extract_lane(am, 1);
+    acc[0][1] = wasm_f64x2_extract_lane(ax, 0); acc[1][1] = wasm_f64x2_extract_lane(ax, 1);
+    acc[0][2] = wasm_f64x2_extract_lane(ay, 0); acc[1][2] = wasm_f64x2_extract_lane(ay, 1);
+    acc[0][3] = wasm_f64x2_extract_lane(az, 0); acc[1][3] = wasm_f64x2_extract_lane(az, 1);
   }
 #endif
   for (; i < end; i++) {
     const f64 im = invMass[i];
     if (im == 0) continue;
-    m += 1 / im;
-    cx += posX[i] / im;
-    cy += posY[i] / im;
-    cz += posZ[i] / im;
+    f64 *a = acc[(i - start) & 1];
+    a[0] += 1 / im;
+    a[1] += posX[i] / im;
+    a[2] += posY[i] / im;
+    a[3] += posZ[i] / im;
   }
+  const f64 m = acc[0][0] + acc[1][0];
+  f64 cx = acc[0][1] + acc[1][1], cy = acc[0][2] + acc[1][2], cz = acc[0][3] + acc[1][3];
   if (!(m > 0)) return;
   cx /= m;
   cy /= m;
   cz /= m;
-  f64 I = 0;
+  f64 Il[2] = {0, 0};
   i = start;
 #ifdef CRUMPLE_SIMD
   const v128_t vcx = wasm_f64x2_splat(cx), vcy = wasm_f64x2_splat(cy), vcz = wasm_f64x2_splat(cz);
   const v128_t vux = wasm_f64x2_splat(ux), vuy = wasm_f64x2_splat(uy), vuz = wasm_f64x2_splat(uz);
-  for (; i + 1 < end; i += 2) {
-    const v128_t im = wasm_v128_load(invMass + i);
-    const v128_t rx = wasm_f64x2_sub(wasm_v128_load(posX + i), vcx);
-    const v128_t ry = wasm_f64x2_sub(wasm_v128_load(posY + i), vcy);
-    const v128_t rz = wasm_f64x2_sub(wasm_v128_load(posZ + i), vcz);
-    const v128_t a = wasm_f64x2_add(wasm_f64x2_add(wasm_f64x2_mul(rx, vux), wasm_f64x2_mul(ry, vuy)), wasm_f64x2_mul(rz, vuz));
-    const v128_t px = wasm_f64x2_sub(rx, wasm_f64x2_mul(a, vux));
-    const v128_t py = wasm_f64x2_sub(ry, wasm_f64x2_mul(a, vuy));
-    const v128_t pz = wasm_f64x2_sub(rz, wasm_f64x2_mul(a, vuz));
-    const v128_t t = wasm_f64x2_div(
-        wasm_f64x2_add(wasm_f64x2_add(wasm_f64x2_mul(px, px), wasm_f64x2_mul(py, py)), wasm_f64x2_mul(pz, pz)), im);
-    if (wasm_f64x2_extract_lane(im, 0) != 0) I += wasm_f64x2_extract_lane(t, 0);
-    if (wasm_f64x2_extract_lane(im, 1) != 0) I += wasm_f64x2_extract_lane(t, 1);
+  {
+    const v128_t z0 = wasm_f64x2_splat(0.0);
+    v128_t aI = z0;
+    for (; i + 1 < end; i += 2) {
+      const v128_t im = wasm_v128_load(invMass + i);
+      const v128_t ok = wasm_f64x2_ne(im, z0);
+      const v128_t rx = wasm_f64x2_sub(wasm_v128_load(posX + i), vcx);
+      const v128_t ry = wasm_f64x2_sub(wasm_v128_load(posY + i), vcy);
+      const v128_t rz = wasm_f64x2_sub(wasm_v128_load(posZ + i), vcz);
+      const v128_t a = wasm_f64x2_add(wasm_f64x2_add(wasm_f64x2_mul(rx, vux), wasm_f64x2_mul(ry, vuy)), wasm_f64x2_mul(rz, vuz));
+      const v128_t px = wasm_f64x2_sub(rx, wasm_f64x2_mul(a, vux));
+      const v128_t py = wasm_f64x2_sub(ry, wasm_f64x2_mul(a, vuy));
+      const v128_t pz = wasm_f64x2_sub(rz, wasm_f64x2_mul(a, vuz));
+      const v128_t t = wasm_f64x2_div(
+          wasm_f64x2_add(wasm_f64x2_add(wasm_f64x2_mul(px, px), wasm_f64x2_mul(py, py)), wasm_f64x2_mul(pz, pz)), im);
+      aI = wasm_f64x2_add(aI, wasm_v128_bitselect(t, z0, ok));
+    }
+    Il[0] = wasm_f64x2_extract_lane(aI, 0);
+    Il[1] = wasm_f64x2_extract_lane(aI, 1);
   }
 #endif
   for (; i < end; i++) {
@@ -1491,8 +1520,9 @@ EXPORT(drive_reaction) void drive_reaction(int start, int end, f64 ux, f64 uy, f
     const f64 rx = posX[i] - cx, ry = posY[i] - cy, rz = posZ[i] - cz;
     const f64 a = rx * ux + ry * uy + rz * uz;
     const f64 px = rx - a * ux, py = ry - a * uy, pz = rz - a * uz;
-    I += (px * px + py * py + pz * pz) / im;
+    Il[(i - start) & 1] += (px * px + py * py + pz * pz) / im;
   }
+  const f64 I = Il[0] + Il[1];
   if (!(I > 1e-9)) return;
   const f64 g = tl / I;
   i = start;
@@ -1693,9 +1723,44 @@ EXPORT(wheel_omega) int wheel_omega(f64 *W, int ground, f64 dt) {
   const f64 vcy = (velY[hi] + velY[ho]) * 0.5;
   const f64 vcz = (velZ[hi] + velZ[ho]) * 0.5;
   const int n = (int)W[W_N];
-  f64 lSum = 0, iSum = 0;
+  /* interleaved sums: node i into lane (i − r0) & 1, lanes added at the end */
+  f64 lS[2] = {0, 0}, iS[2] = {0, 0};
   const int r0 = (int)W[W_RIM], r1 = r0 + 2 * n;
-  for (int i = r0; i < r1; i++) {
+  int i = r0;
+#ifdef CRUMPLE_SIMD
+  {
+    const v128_t z0 = wasm_f64x2_splat(0.0), one = wasm_f64x2_splat(1.0);
+    const v128_t vcx_ = wasm_f64x2_splat(cx), vcy_ = wasm_f64x2_splat(cy), vcz_ = wasm_f64x2_splat(cz);
+    const v128_t vsx = wasm_f64x2_splat(sx), vsy = wasm_f64x2_splat(sy), vsz = wasm_f64x2_splat(sz);
+    const v128_t wvx = wasm_f64x2_splat(vcx), wvy = wasm_f64x2_splat(vcy), wvz = wasm_f64x2_splat(vcz);
+    v128_t aL = z0, aI = z0;
+    for (; i + 1 < r1; i += 2) {
+      const v128_t im = wasm_v128_load(invMass + i);
+      const v128_t ok = wasm_f64x2_ne(im, z0);
+      const v128_t rx = wasm_f64x2_sub(wasm_v128_load(posX + i), vcx_);
+      const v128_t ry = wasm_f64x2_sub(wasm_v128_load(posY + i), vcy_);
+      const v128_t rz = wasm_f64x2_sub(wasm_v128_load(posZ + i), vcz_);
+      const v128_t ax = wasm_f64x2_add(wasm_f64x2_add(wasm_f64x2_mul(rx, vsx), wasm_f64x2_mul(ry, vsy)), wasm_f64x2_mul(rz, vsz));
+      const v128_t px = wasm_f64x2_sub(rx, wasm_f64x2_mul(ax, vsx));
+      const v128_t py = wasm_f64x2_sub(ry, wasm_f64x2_mul(ax, vsy));
+      const v128_t pz = wasm_f64x2_sub(rz, wasm_f64x2_mul(ax, vsz));
+      const v128_t tx = wasm_f64x2_sub(wasm_f64x2_mul(vsy, pz), wasm_f64x2_mul(vsz, py));
+      const v128_t ty = wasm_f64x2_sub(wasm_f64x2_mul(vsz, px), wasm_f64x2_mul(vsx, pz));
+      const v128_t tz = wasm_f64x2_sub(wasm_f64x2_mul(vsx, py), wasm_f64x2_mul(vsy, px));
+      const v128_t m = wasm_f64x2_div(one, im);
+      const v128_t dl = wasm_f64x2_add(wasm_f64x2_add(
+          wasm_f64x2_mul(wasm_f64x2_sub(wasm_v128_load(velX + i), wvx), tx),
+          wasm_f64x2_mul(wasm_f64x2_sub(wasm_v128_load(velY + i), wvy), ty)),
+          wasm_f64x2_mul(wasm_f64x2_sub(wasm_v128_load(velZ + i), wvz), tz));
+      const v128_t p2 = wasm_f64x2_add(wasm_f64x2_add(wasm_f64x2_mul(px, px), wasm_f64x2_mul(py, py)), wasm_f64x2_mul(pz, pz));
+      aL = wasm_f64x2_add(aL, wasm_v128_bitselect(wasm_f64x2_mul(m, dl), z0, ok));
+      aI = wasm_f64x2_add(aI, wasm_v128_bitselect(wasm_f64x2_mul(m, p2), z0, ok));
+    }
+    lS[0] = wasm_f64x2_extract_lane(aL, 0); lS[1] = wasm_f64x2_extract_lane(aL, 1);
+    iS[0] = wasm_f64x2_extract_lane(aI, 0); iS[1] = wasm_f64x2_extract_lane(aI, 1);
+  }
+#endif
+  for (; i < r1; i++) {
     const f64 im = invMass[i];
     if (im == 0) continue;
     const f64 rx = posX[i] - cx, ry = posY[i] - cy, rz = posZ[i] - cz;
@@ -1703,9 +1768,10 @@ EXPORT(wheel_omega) int wheel_omega(f64 *W, int ground, f64 dt) {
     const f64 px = rx - ax * sx, py = ry - ax * sy, pz = rz - ax * sz;
     const f64 tx = sy * pz - sz * py, ty = sz * px - sx * pz, tz = sx * py - sy * px;
     const f64 m = 1 / im;
-    lSum += m * ((velX[i] - vcx) * tx + (velY[i] - vcy) * ty + (velZ[i] - vcz) * tz);
-    iSum += m * (px * px + py * py + pz * pz);
+    lS[(i - r0) & 1] += m * ((velX[i] - vcx) * tx + (velY[i] - vcy) * ty + (velZ[i] - vcz) * tz);
+    iS[(i - r0) & 1] += m * (px * px + py * py + pz * pz);
   }
+  const f64 lSum = lS[0] + lS[1], iSum = iS[0] + iS[1];
   const f64 omega = iSum > 0 ? lSum / iSum : 0;
   W[W_OMEGA] = omega;
   f64 *tLoad = (f64 *)(uint32_t)W[W_TLOAD];
