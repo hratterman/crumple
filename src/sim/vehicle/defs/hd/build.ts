@@ -24,8 +24,10 @@ export interface HdCarConfig {
   /** Mass-donor weights (default `shellDonorWeight(base)`). */
   donorWeight?: (id: string) => number;
   members?: (tier: HdTier) => BoxMemberSpec[];
-  /** refine.ts RefineOptions.matchInertia / wholeZoneSheetRelease. */
+  /** refine.ts RefineOptions.matchInertia / wholeZoneSheetRelease / suspension. */
   matchInertia?: boolean;
+  suspension?: boolean;
+  localSkinMass?: boolean;
   wholeZoneSheetRelease?: RefineOptions['wholeZoneSheetRelease'];
   /** Sheets that can tear off whole in a crash (render panel ids): exempt from the crash harness's span check. */
   detachable?: readonly string[];
@@ -88,8 +90,9 @@ export function shellDonorWeight(base: VehicleDef): (id: string) => number {
 
 /**
  * Mass-donor weights of a station-lattice car (sedan / coupe / beater id scheme `s{i}_{tag}_{side}`): mostly the
- * floor, tunnel, roof rails and the rear zone give the sheets' mass; the front crumple zone (stations ≤ 4: tuned
- * crush) 0.12, the cell's side frames (sills, door mids, belt line, hinge pillars, quarter / cowl, stations 5 to
+ * floor, tunnel, roof rails and the rear zone give the sheets' mass; the bumper beam and crash-can tips (stations
+ * 0–1) none (lighter, their mounts tore less at 100 km/h: 0.48 vs the standard's 0.56), the front crumple zone
+ * (stations 2–4: tuned crush) 0.12, the cell's side frames (sills, door mids, belt line, hinge pillars, quarter / cowl, stations 5 to
  * `lastCellStation`: the pole / door-wave targets and the cell's yield bond) 0.3, the hood 0.6. Unlike
  * `shellDonorWeight`'s |x| rule, the hinge pillar is protected even where it sits inboard (the coupe's pole case
  * pulled a light `s5_hp` through the pole).
@@ -100,6 +103,7 @@ export function stationDonorWeight(lastCellStation: number): (id: string) => num
     if (id.startsWith('hood_')) return 0.6;
     if (!st) return 1;
     const i = Number(st[1]);
+    if (i <= 1) return 0; // bumper beam + crash-can tips: their mass is the bumper's inertia (100 km/h mount tear)
     if (i <= 4) return 0.12;
     if (i <= lastCellStation && ['sl', 'dm', 'bt', 'hp', 'qm', 'cw'].includes(st[2]!)) return 0.3;
     return 1;
@@ -146,6 +150,8 @@ export function buildHd(cfg: HdCarConfig, tier: HdTier, overrides: Partial<Refin
     members: cfg.members?.(tier) ?? [],
     massDonorWeight: cfg.donorWeight ?? shellDonorWeight(cfg.base),
     ...(cfg.matchInertia ? { matchInertia: true } : {}),
+    ...(cfg.suspension ? { suspension: true } : {}),
+    ...(cfg.localSkinMass ? { localSkinMass: true } : {}),
     ...(cfg.wholeZoneSheetRelease ? { wholeZoneSheetRelease: cfg.wholeZoneSheetRelease } : {}),
     ...overrides,
   });

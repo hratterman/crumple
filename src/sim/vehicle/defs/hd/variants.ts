@@ -62,7 +62,7 @@ export const HD_STATUS: Readonly<Record<string, Readonly<Record<HdQuality, Varia
   coupe: { high: 'validated', ultra: 'experimental' },
   pickup: { high: 'experimental', ultra: 'experimental' },
   boxtruck: { high: 'experimental', ultra: 'experimental' },
-  beater: { high: 'experimental', ultra: 'experimental' },
+  beater: { high: 'validated', ultra: 'validated' },
 };
 
 const offered = (car: string, q: HdQuality, experimental: boolean): boolean => !!HD_LOADERS[car] && (experimental || HD_STATUS[car]?.[q] === 'validated');

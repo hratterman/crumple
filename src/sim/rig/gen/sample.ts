@@ -451,3 +451,62 @@ export function hashSkins(panels: readonly SkinPanelData[]): number {
   }
   return h >>> 0;
 }
+
+/**
+ * The part of a sampled sheet at or above `yMin` (rig-local y): nodes below are dropped with every triangle /
+ * quad that uses them, the nodes that lost a neighbour become edge nodes, and the area shrinks with the
+ * triangle area kept. For a fascia lip that hangs below the structure it is bolted to (the beater's dives
+ * 16 cm in a 1 g stop and the lip met the road): the render lip binds to the sheet's lowest row instead.
+ */
+export function clipSkinPanel(data: SkinPanelData, yMin: number): SkinPanelData {
+  const n = data.pos.length / 3;
+  const keep = Array.from({ length: n }, (_, i) => data.pos[3 * i + 1]! >= yMin);
+  if (keep.every(Boolean)) return data;
+  const map = new Int32Array(n).fill(-1);
+  let m = 0;
+  for (let i = 0; i < n; i++) if (keep[i]) map[i] = m++;
+  const lost = new Uint8Array(n);
+  const triArea = (t: readonly number[], k: number): number => {
+    const p = (q: number): number[] => [data.pos[3 * t[k + q]!]!, data.pos[3 * t[k + q]! + 1]!, data.pos[3 * t[k + q]! + 2]!];
+    const [a, b, c] = [p(0), p(1), p(2)];
+    const u = [b[0]! - a[0]!, b[1]! - a[1]!, b[2]! - a[2]!];
+    const v = [c[0]! - a[0]!, c[1]! - a[1]!, c[2]! - a[2]!];
+    return 0.5 * Math.hypot(u[1]! * v[2]! - u[2]! * v[1]!, u[2]! * v[0]! - u[0]! * v[2]!, u[0]! * v[1]! - u[1]! * v[0]!);
+  };
+  let aAll = 0;
+  let aKept = 0;
+  const tris: number[] = [];
+  for (let t = 0; t < data.tris.length; t += 3) {
+    const vs = [data.tris[t]!, data.tris[t + 1]!, data.tris[t + 2]!];
+    const ar = triArea(data.tris, t);
+    aAll += ar;
+    if (vs.every((v) => keep[v])) {
+      tris.push(...vs.map((v) => map[v]!));
+      aKept += ar;
+    } else for (const v of vs) lost[v] = 1;
+  }
+  const quads: number[] = [];
+  for (let q = 0; q < data.quads.length; q += 4) {
+    const vs = [data.quads[q]!, data.quads[q + 1]!, data.quads[q + 2]!, data.quads[q + 3]!];
+    if (vs.every((v) => keep[v])) quads.push(...vs.map((v) => map[v]!));
+    else for (const v of vs) lost[v] = 1;
+  }
+  const edge = new Set<number>();
+  for (const e of data.edge) if (keep[e]) edge.add(map[e]!);
+  for (let i = 0; i < n; i++) if (keep[i] && lost[i]) edge.add(map[i]!);
+  const pick = (arr: readonly number[], w: number): number[] => {
+    const out: number[] = [];
+    for (let i = 0; i < n; i++) if (keep[i]) for (let k = 0; k < w; k++) out.push(arr[w * i + k]!);
+    return out;
+  };
+  return {
+    ...data,
+    pos: pick(data.pos, 3),
+    nrm: pick(data.nrm, 3),
+    ij: pick(data.ij, 2),
+    tris,
+    quads,
+    edge: [...edge].sort((a, b) => a - b),
+    area: Math.round(data.area * (aAll > 0 ? aKept / aAll : 1) * 1e4) / 1e4,
+  };
+}

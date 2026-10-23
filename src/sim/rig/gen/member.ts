@@ -46,6 +46,8 @@ export interface BoxMemberSpec {
   beadSpan?: readonly [number, number];
   /** Also build the mirror member (ids with _R ↔ _L swapped, inward x negated). */
   mirror?: boolean;
+  /** Node-id prefix (default 'm': `m_<id>_<row>_<corner>`; suspension members use 'q'). */
+  prefix?: string;
 }
 
 export type MemberBeamKind = 'long' | 'ring' | 'ringDiag' | 'shear' | 'tie';
@@ -167,7 +169,7 @@ export function buildMember(spec: BoxMemberSpec, posOf: (id: string) => readonly
   const height = len(sub(rows[0]![1]!, rows[0]![0]!));
   const g = grade(spec.grade);
   const perimeter = 2 * (width + height);
-  const ids = rows.map((_, j) => [0, 1, 2, 3].map((q) => `m_${spec.id}_${j}_${q}`));
+  const ids = rows.map((_, j) => [0, 1, 2, 3].map((q) => `${spec.prefix ?? 'm'}_${spec.id}_${j}_${q}`));
   const nodes: BuiltMember['nodes'] = [];
   rows.forEach((row, j) => {
     const before = j > 0 ? len(sub(rows[j]![0]!, rows[j - 1]![0]!)) : 0;

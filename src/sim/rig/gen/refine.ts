@@ -32,6 +32,8 @@ import { computeStabilityReport, RIG_DT } from '../builder';
 import type { RigBeamDef, RigNodeDef, RigTriangleDef } from '../types';
 import { buildMember, MEMBER_TEAR_RATIO, MEMBER_YIELD_STRAIN, mirrorMember, type BoxMemberSpec } from './member';
 import { sheetYieldStrain } from './materials';
+import { clipSkinPanel } from './sample';
+import { suspensionMembers } from './suspension';
 import { buildSkin, SEAM_TEAR_RATIO, SEAM_YIELD_STRAIN, SKIN_TEAR_RATIO, SKIN_ZETA } from './skin';
 import type { CollisionTriangle, RigGenReport, SeamKind, SkinPanelData, SkinSet, SkinSpec } from './types';
 
@@ -96,6 +98,19 @@ export interface RefineOptions {
    * (Leaving such parts out of the clusters entirely was tried: free 0.8 mm sheets ring at 10 Hz while driving.)
    */
   wholeZoneSheetRelease?: Partial<ShellRelease>;
+  /**
+   * Suspension members (`suspension.ts`): every link between the subframe and the upright (lower / upper arms,
+   * tie rod, toe link) and every subframe cross member gets a real-steel tube or box section around R-PHYS's
+   * link (its hardpoints are the link's end nodes), tied to both ends and to a second node at each end (no free
+   * spin), carried by the tuned link beams (K&C unchanged; their walls fold / bend in a crash).
+   */
+  suspension?: boolean;
+  /**
+   * Each sheet takes its mass from the shell nodes it is seamed / stood off to (bounded by their floors), the
+   * global field only the rest. For body-on-frame vehicles: the cab, the bed / box and the frame each keep their
+   * own mass (with the global field the box truck's sheets moved mass between box and cab: 80–0 m 46.0 → 48.0).
+   */
+  localSkinMass?: boolean;
 }
 
 export interface RefinedVehicle {
@@ -120,7 +135,7 @@ interface PartBeam {
   soft: number;
 }
 interface Part {
-  kind: 'skin' | 'member';
+  kind: 'skin' | 'member' | 'suspension';
   name: string;
   prefix: string;
   ids: string[];
@@ -157,10 +172,23 @@ export function refineVehicle(base: VehicleDef, opts: RefineOptions): RefinedVeh
   const beams: RigBeamDef[] = base.body.beams.map((b) => ({ ...b }));
   const index = new Map<string, number>();
   nodes.forEach((n, i) => index.set(n.id, i));
+  // every node of the compiled standard rig (wheel hubs included: suspension links end on them)
+  const cIndex = new Map<string, number>();
+  baseCv.rig.nodeIds.forEach((id, i) => cIndex.set(id, i));
+  const cSumK = new Float64Array(baseCv.rig.nodeCount);
+  const cSumD = new Float64Array(baseCv.rig.nodeCount);
+  for (let b = 0; b < baseCv.rig.beamCount; b++)
+    for (const i of [baseCv.rig.beamA[b]!, baseCv.rig.beamB[b]!]) {
+      cSumK[i] = cSumK[i]! + baseCv.rig.beamK[b]!;
+      cSumD[i] = cSumD[i]! + baseCv.rig.beamD[b]!;
+    }
+  const cGroup = (i: number): string => baseCv.rig.groups[baseCv.rig.nodeGroup[i]!] ?? '';
   const posOf = (id: string): readonly number[] => {
     const i = index.get(id);
-    if (i === undefined) throw new Error(`refine ${opts.name}: unknown backbone node ${id}`);
-    return nodes[i]!.pos;
+    if (i !== undefined) return nodes[i]!.pos;
+    const c = cIndex.get(id);
+    if (c === undefined) throw new Error(`refine ${opts.name}: unknown backbone node ${id}`);
+    return [baseCv.rig.nodePos[3 * c]!, baseCv.rig.nodePos[3 * c + 1]!, baseCv.rig.nodePos[3 * c + 2]!];
   };
   // "shell" = a body / hood / tailgate node that a standard shell cluster holds: a body-group node the def leaves
   // out of every cluster (the box truck's ladder frame lattice, an anti-roll-bar anchor) is structure the shell
@@ -176,10 +204,11 @@ export function refineVehicle(base: VehicleDef, opts: RefineOptions): RefinedVeh
   const parts: Part[] = [];
   /** Non-shell frame nodes a panel had to be seamed to (a battery box on the ladder frame): they keep seam room. */
   const frameAttach = new Set<string>();
-  for (const panel of opts.skins.panels) {
-    const spec = opts.skinSpec(panel);
+  for (const sampled of opts.skins.panels) {
+    const spec = opts.skinSpec(sampled);
     if (!spec) continue;
-    const listed = spec.attach ? nodes.filter((n) => spec.attach!.some((p) => globMatch(n.id, p))).map((n) => n.id) : panel.attach.filter((id) => index.has(id));
+    const panel = spec.clipBelowY !== undefined ? clipSkinPanel(sampled, spec.clipBelowY) : sampled;
+    const listed = (spec.attach ? nodes.filter((n) => spec.attach!.some((p) => globMatch(n.id, p))).map((n) => n.id) : panel.attach.filter((id) => index.has(id)));
     const inShell = listed.filter(shellGroup);
     if (listed.length === 0) throw new Error(`refine ${opts.name}: panel ${panel.id} has no attach nodes on the backbone`);
     const build = (ids: readonly string[]): ReturnType<typeof buildSkin> => buildSkin(panel, spec, new Map(ids.map((id) => [id, posOf(id)])));
@@ -201,6 +230,9 @@ export function refineVehicle(base: VehicleDef, opts: RefineOptions): RefinedVeh
       seam: s.seam,
       tris: s.tris,
       yieldStrain: (spec.yieldStrain ?? sheetYieldStrain(s.grade)) * Math.max(1, SKIN_REF_PITCH / opts.skins.pitch),
+      // localSkinMass: the sheet's mass comes out of the shell nodes it is fastened to (each sub-body keeps its own
+      // mass); what their floors cannot give, the global field takes
+      ...(opts.localSkinMass ? { donors: [...new Set(s.beams.filter((b) => b.kind === 'seam' || b.kind === 'standoff').map((b) => (b.a.startsWith(s.prefix + '_') ? b.b : b.a)))].filter((id) => shellGroup(id)) } : {}),
     });
   }
   for (const m0 of opts.members ?? []) {
@@ -219,6 +251,37 @@ export function refineVehicle(base: VehicleDef, opts: RefineOptions): RefinedVeh
         donors: m.chain,
         yieldStrain: MEMBER_YIELD_STRAIN,
       });
+    }
+  }
+
+  const nearestShell = (pts: readonly (readonly number[])[], k: number): string[] => {
+    const c = [0, 1, 2].map((q) => pts.reduce((a, p) => a + p[q]!, 0) / pts.length);
+    return nodes
+      .filter((n) => shellGroup(n.id) && n.mass > 0)
+      .map((n) => ({ id: n.id, d: Math.hypot(n.pos[0] - c[0]!, n.pos[1] - c[1]!, n.pos[2] - c[2]!) }))
+      .sort((x, y) => x.d - y.d || (x.id < y.id ? -1 : 1))
+      .slice(0, k)
+      .map((x) => x.id);
+  };
+  if (opts.suspension) {
+    for (const m of suspensionMembers(base, baseCv, posOf)) {
+      parts.push({
+        kind: 'suspension',
+        name: m.id,
+        prefix: `q_${m.id}`,
+        ids: m.nodes.map((n) => n.id),
+        pos: m.nodes.map((n) => n.pos),
+        mass: m.nodes.map((n) => n.mass),
+        beams: m.beams.map((b) => ({ a: b.a, b: b.b, w: b.w, soft: b.soft, kind: b.kind === 'tie' ? 'tie' : 'membrane' })),
+        seam: 'weld',
+        tris: m.tris,
+        // the standard lumped the arms / subframe into the body near the axles (R-PHYS's mass solve): the link's
+        // subframe end nodes (within their headroom) and the 8 nearest shell body nodes give it back
+        donors: [...m.chain.filter((id) => index.has(id) && nodes[index.get(id)!]!.group === 'subframe'), ...nearestShell(m.nodes.map((n) => n.pos), 8)],
+        yieldStrain: MEMBER_YIELD_STRAIN,
+      });
+      // the link's end nodes are outside the shell clusters: they keep seam headroom for the ties
+      for (const b of m.beams) if (b.kind === 'tie') for (const id of [b.a, b.b]) if (index.has(id) && !shellGroup(id)) frameAttach.add(id);
     }
   }
 
@@ -299,7 +362,11 @@ export function refineVehicle(base: VehicleDef, opts: RefineOptions): RefinedVeh
     const pm = p.mass.reduce((a, b) => a + b, 0);
     const chain = p.donors.map((id) => index.get(id)!);
     const cm = chain.reduce((a, i) => a + nodes[i]!.mass, 0);
-    for (const i of chain) m0[i] = m0[i]! - (pm * nodes[i]!.mass) / cm;
+    // a chain node outside the shell clusters gives no more than its own Σk / Σd leave spare (floorOf); what it
+    // cannot give, the global field takes
+    if (p.kind === 'suspension') for (const i of chain) m0[i] = Math.max(Math.max(floorOf[i]!, 0.7) * nodes[i]!.mass, m0[i]! - (pm * nodes[i]!.mass) / cm);
+    else if (p.kind === 'skin') for (const i of chain) m0[i] = Math.max(Math.max(floorOf[i]!, 0.7) * nodes[i]!.mass, m0[i]! - (pm * nodes[i]!.mass) / cm);
+    else for (const i of chain) m0[i] = m0[i]! - (pm * nodes[i]!.mass) / cm;
   }
   const bar = [0, 0, 0];
   let mE = 0;
@@ -391,19 +458,32 @@ export function refineVehicle(base: VehicleDef, opts: RefineOptions): RefinedVeh
   const Wf = new Map<string, number>();
   for (const p of parts) for (const b of p.beams) if (b.kind !== 'membrane') for (const id of [b.a, b.b]) if (!genMass.has(id)) Wf.set(id, (Wf.get(id) ?? 0) + b.w);
   const frameBudget = (id: string): number => {
-    const i = index.get(id)!;
+    const i = index.get(id);
+    if (i === undefined) {
+      // a wheel node (suspension links end on the hubs): its compiled mass and group
+      const c = cIndex.get(id)!;
+      return baseCv.rig.nodeMass[c]! * (vehicleOmegaDtLimit(cGroup(c)) * LIMIT_MARGIN / RIG_DT) ** 2;
+    }
     return sOf[i]! * nodes[i]!.mass * (vehicleOmegaDtLimit(nodes[i]!.group) * LIMIT_MARGIN / RIG_DT) ** 2;
   };
-  // a frame node outside the shell clusters (no scalable beams) only lends its spare headroom to seams
-  const frameShare = (id: string): number =>
-    shellGroup(id) ? SEAM_FRAME_SHARE * frameBudget(id) : Math.min(SEAM_FRAME_SHARE * frameBudget(id), Math.max(0, frameBudget(id) - (Kbase.get(id) ?? 0)));
+  // a frame node outside the shell clusters (no scalable beams) only lends its spare headroom to seams (a wheel
+  // node's Σk includes its rim / spoke / tyre beams: the compiled rig's)
+  const frameShare = (id: string): number => {
+    if (!index.has(id)) return Math.min(SEAM_FRAME_SHARE * frameBudget(id), Math.max(0, frameBudget(id) - cSumK[cIndex.get(id)!]!));
+    return shellGroup(id) ? SEAM_FRAME_SHARE * frameBudget(id) : Math.min(SEAM_FRAME_SHARE * frameBudget(id), Math.max(0, frameBudget(id) - (Kbase.get(id) ?? 0)));
+  };
   const shareOf = (id: string): number => (genMass.has(id) ? (perKg * genMass.get(id)!) / W.get(id)! : frameShare(id) / Wf.get(id)!);
   const frameK = new Map<string, number>();
   const genBeams: RigBeamDef[] = [];
   const skinNodes: Record<string, string[]> = {};
   const memberNodes: Record<string, string[]> = {};
   const seams: Record<string, [string, string][]> = {};
-  const mOf = (id: string): number => genMass.get(id) ?? nodes[index.get(id)!]!.mass * sOf[index.get(id)!]!;
+  const mOf = (id: string): number => {
+    const g = genMass.get(id);
+    if (g !== undefined) return g;
+    const i = index.get(id);
+    return i === undefined ? baseCv.rig.nodeMass[cIndex.get(id)!]! : nodes[i]!.mass * sOf[i]!;
+  };
   let seamCount = 0;
   for (const p of parts) {
     if (p.kind === 'skin') {
@@ -514,9 +594,10 @@ export function refineVehicle(base: VehicleDef, opts: RefineOptions): RefinedVeh
     for (const b of genBeams) for (const id of [b.a, b.b]) genD.set(id, (genD.get(id) ?? 0) + (b.d ?? 0));
     const scale = (id: string): number => {
       const gm = genMass.get(id);
-      const m = gm ?? nodes[index.get(id)!]!.mass;
+      const ext = gm === undefined && !index.has(id) ? cIndex.get(id)! : -1;
+      const m = gm ?? (ext >= 0 ? baseCv.rig.nodeMass[ext]! : nodes[index.get(id)!]!.mass);
       const limit = gm !== undefined ? GEN_DAMP_DT : 0.95;
-      const total = sumD.get(id)!;
+      const total = ext >= 0 ? cSumD[ext]! + genD.get(id)! : sumD.get(id)!;
       if ((total * RIG_DT) / m <= limit) return 1;
       const own = genD.get(id)!;
       return Math.max(0, (limit * m) / RIG_DT - (total - own)) / own;
@@ -548,9 +629,13 @@ export function refineVehicle(base: VehicleDef, opts: RefineOptions): RefinedVeh
  * impact would otherwise keep resetting the backbone cluster's quiet timer, or re-trip a whole-release crumple
  * zone). Each part's zone copies its frame nodes' zone thresholds (yield / release), never `whole`.
  */
-/** Outer-skin collision triangles (RigTriangleDef: CCW seen from outside, one-sided). */
+/**
+ * Outer-skin collision triangles (RigTriangleDef: CCW seen from outside, one-sided). `selfCollide: false`: under the
+ * ultra solver preset (R-CORE self-collision) a crumpling 0.7 mm sheet's own triangles shot its light nodes out at
+ * 40–57 m/s in every 50 / 100 km/h frontal (sedan / coupe / beater ultra); other objects still hit them.
+ */
 function collisionOf(parts: readonly Part[]): RigTriangleDef[] {
-  return parts.filter((p) => p.kind === 'skin').flatMap((p) => p.tris.map(([a, b, c]) => ({ a, b, c })));
+  return parts.filter((p) => p.kind === 'skin').flatMap((p) => p.tris.map(([a, b, c]) => ({ a, b, c, selfCollide: false })));
 }
 
 function assignShell(shell: VehicleDef['shell'], parts: readonly Part[], wholeRelease?: Partial<ShellRelease>): VehicleDef['shell'] {
@@ -560,6 +645,7 @@ function assignShell(shell: VehicleDef['shell'], parts: readonly Part[], wholeRe
   /** per base cluster: zone key → part globs */
   const per = base.map(() => new Map<number, string[]>());
   for (const s of parts) {
+    if (s.kind === 'suspension') continue; // carried by the links (not a shell part)
     const own = new Set(s.ids);
     const frame = new Set<string>();
     for (const b of s.beams) if (b.kind !== 'membrane') frame.add(own.has(b.a) ? b.b : b.a);

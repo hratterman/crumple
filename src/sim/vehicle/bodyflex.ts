@@ -72,9 +72,10 @@ export function bodyProbe(cv: CompiledVehicle, partsFrom?: CompiledVehicle, clus
   }
   // nodes the def keeps out of every cluster on purpose (shell `exclude`) are not body structure
   const excl = new Uint8Array(rig.nodeCount);
-  for (let i = 0; i < cv.bodyNodeCount; i++) if (groupOf(i) === 'body' && !used[i]) excl[i] = 1;
+  // (with `partsFrom`, only ITS body nodes: R-RIG measures an HD rig on the standard car's own structure)
+  for (let i = 0; i < src.bodyNodeCount; i++) if (groupOf(i) === 'body' && !used[i]) excl[i] = 1;
   const rest: number[] = [];
-  for (let i = 0; i < cv.bodyNodeCount; i++) if (excl[i] && !/^arb/.test(rig.nodeIds[i]!)) rest.push(i);
+  for (let i = 0; i < src.bodyNodeCount; i++) if (excl[i] && !/^arb/.test(rig.nodeIds[i]!)) rest.push(i);
   if ((rest.length >= 12 && !clustersOnly) || parts.length === 0) {
     const a = shell.length;
     shell.push(...rest);

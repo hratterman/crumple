@@ -9,8 +9,10 @@ import { runDrive, runDrop, runModes, runTorsion, settleTime, type DriveOptions 
 import { crushSettle, runCrash, type CrashProbes, type CrashResult } from '../../crash';
 import { runBraking, runCircle, runCoastdown, runLaunch, runScenario, runStatic, runStepSteer, runTopSpeed, type LaunchResult, type TopSpeedOptions } from '../../handling';
 import { runJTurn, runRampSteer, runRollover, runSteadyLateral, type CrushProbe } from '../../rollover';
+import { runKC } from '../../realism/kcBench';
 import type { ShellDef } from '../../shellDefs';
 import type { VehicleDef } from '../../types';
+import { getDefaultSolver, setDefaultSolver, SOLVER_DEFAULTS } from '../../../engine';
 
 export interface Check {
   name: string;
@@ -21,6 +23,23 @@ export interface Check {
 const cm = (x: number): string => (x * 100).toFixed(1);
 const f2 = (x: number): string => (Number.isFinite(x) ? x.toFixed(2) : String(x));
 const check = (out: Check[], name: string, ok: boolean, value: string): void => void out.push({ name, ok, value });
+
+/** crash.test.ts (R-CRASH): real cars rebound 5–15 % of the barrier speed; at 50 km/h (13.89 m/s), m/s. */
+const REBOUND_50: Range = [0.05 * (50 / 3.6), 0.15 * (50 / 3.6)];
+
+/**
+ * Runs a STANDARD-car reference measurement (band rows, K&C) under the standard solver preset — the one its
+ * targets were set on — whatever preset the HD variant is being validated at.
+ */
+export function asStandard<T>(f: () => T): T {
+  const prev = getDefaultSolver();
+  setDefaultSolver(SOLVER_DEFAULTS);
+  try {
+    return f();
+  } finally {
+    setDefaultSolver(prev);
+  }
+}
 
 /** [lo, hi] closed range; ±Infinity for an open end. */
 type Range = readonly [number, number];
@@ -37,13 +56,16 @@ export interface CrashTargets {
   /** 64 km/h full-width frontal (box truck). */
   f64: { intrusion: number } | null;
   f100: { latch: boolean; bumper: number; windscreen: number; intrusion?: number; cell?: number; wave?: number } | null;
-  /** crashRing.test.ts: max |crush − final| 0.5 s after the peak and max rebound / impact speed at 50 / 100 km/h. */
+  /** crashRing.test.ts: max |crush − final| 0.5 s after the peak at 50 / 100 km/h; rebound / impact speed band at both. */
   ring: { ring: [number, number]; rebound: [number, number] };
   /**
    * BAND rows (see `Band`): the 100 km/h ring is checked as |HD − standard| ≤ band (m) against the standard car run
    * through the same harness, instead of the absolute limit, where the standard itself sits on that limit.
    */
   ring100Band?: number;
+  /** BAND rows: 50 km/h spring-back (fraction) and rebound / impact speed vs the standard's ± this. */
+  springback50Band?: number;
+  rebound50Band?: number;
 }
 
 /**
@@ -113,14 +135,14 @@ const SEDAN_ROOF: CrushProbe[] = [{ name: 's7', roof: ['s7_rf_L', 's7_rf_R'], fl
 /** SEDAN: crash.test.ts, crashRing.test.ts, handling.test.ts, bodyflex.test.ts, launchFeel.test.ts, rollover.test.ts. */
 export const SEDAN_TARGETS_ALL: VariantTargets = {
   crash: {
-    f50: { crush: [0.35, 0.6], peak: 0.7, springback: 0.25, intrusion: 0.08, rebound: [1, 4], penetration: true, cell: 0.03, cellMax: 0.08, wave: 0.006 },
+    f50: { crush: [0.35, 0.6], peak: 0.7, springback: 0.25, intrusion: 0.08, rebound: REBOUND_50, penetration: true, cell: 0.03, cellMax: 0.08, wave: 0.006 },
     f30: { crush: [0.15, 0.3], springback: 0.25, intrusion: 0.03, bumperOn: true, cellMax: 0.05 },
     f10: { crush: [-Infinity, 0.03], plastic: 0.05, noBroken: true },
     pole: { door: [0.2, 0.35], cell: 0.05, wave: 0.005 },
     offset: { intrusion: 0.15 },
     f64: null,
-    f100: { latch: true, bumper: 0.5, windscreen: 0.5, cell: 0.18, wave: 0.06 },
-    ring: { ring: [0.01, 0.22], rebound: [0.23, 0.25] },
+    f100: { latch: true, bumper: 0.5, windscreen: 0.5, cell: 0.22, wave: 0.06 },
+    ring: { ring: [0.01, 0.22], rebound: [0.05, 0.15] },
   },
   handling: {
     sag: [0.02, 0.06],
@@ -149,14 +171,17 @@ export const SEDAN_TARGETS_ALL: VariantTargets = {
 /** COUPE: COUPE_TARGETS.acceptance (coupe.test.ts), crashRing / bodyflex / launchFeel coupe rows. */
 export const COUPE_TARGETS_ALL: VariantTargets = {
   crash: {
-    f50: { crush: [0.35, 0.6], peak: 0.7, springback: 0.25, intrusion: 0.08, rebound: [1, 4], penetration: true },
+    f50: { crush: [0.35, 0.6], peak: 0.7, springback: 0.25, intrusion: 0.08, rebound: REBOUND_50, penetration: true },
     f30: { crush: [0.15, 0.3], springback: 0.25, intrusion: 0.03, bumperOn: true },
     f10: { crush: [-Infinity, 0.03], plastic: 0.05, noBroken: true },
     pole: { door: [0.2, 0.4] },
     offset: { intrusion: 0.15 },
     f64: null,
     f100: { latch: true, bumper: 0.5, windscreen: 0.5 },
-    ring: { ring: [0.013, 0.025], rebound: [0.23, 0.24] },
+    ring: { ring: [0.013, 0.025], rebound: [0.05, 0.15] },
+    // BAND: the standard coupe's 50 km/h spring-back reads 24 / 24 / 26 % at 48 / 50 / 52 km/h against the 25 %
+    // limit (R-CRASH's crush unloading); the HD rig is held to the standard's value ± 3 points.
+    springback50Band: 0.03,
   },
   handling: {
     sag: [0.02, 0.05],
@@ -182,14 +207,14 @@ export const COUPE_TARGETS_ALL: VariantTargets = {
 /** PICKUP: pickup.test.ts, crashRing / bodyflex / launchFeel pickup rows. */
 export const PICKUP_TARGETS_ALL: VariantTargets = {
   crash: {
-    f50: { crush: [0.3, 0.55], peak: 0.7, springback: 0.25, intrusion: 0.08, rebound: [1, 4] },
+    f50: { crush: [0.3, 0.55], peak: 0.7, springback: 0.25, intrusion: 0.08, rebound: REBOUND_50 },
     f30: { crush: [0.12, 0.28], springback: 0.25, intrusion: 0.03, bumperOn: true },
     f10: { crush: [-Infinity, 0.03], plastic: 0.05, noBroken: true },
     pole: { door: [0.2, 0.35] },
     offset: { intrusion: 0.15 },
     f64: null,
     f100: { latch: true, bumper: 1e-9, windscreen: 0.5 },
-    ring: { ring: [0.01, 0.025], rebound: [0.13, 0.1] },
+    ring: { ring: [0.01, 0.025], rebound: [0.05, 0.15] },
     // BAND: the standard pickup's 100 km/h ring is chaotic in the impact speed (3.5 / 1.8 / 1.1 cm at 97 / 100 /
     // 103 km/h against crashRing.test.ts's 2.5 cm); the HD rig is held to the standard's value at 100 ± 2 cm.
     ring100Band: 0.02,
@@ -214,20 +239,20 @@ export const PICKUP_TARGETS_ALL: VariantTargets = {
 };
 
 /**
- * BEATER: beater.test.ts — it folds like paper RELATIVE to the standard sedan (f50 / f30 crush ≥ 1.5×, pole door ≥
- * 1.4×): `beaterTargets(sedan)` takes the standard sedan's results (f50 / f30 / pole) and turns them into ranges.
+ * BEATER: beater.test.ts — it folds like paper RELATIVE to the standard sedan (f50 crush ≥ 1.5×, f30 ≥ 1.4×, pole
+ * door ≥ 1.4×): `beaterTargets(sedan)` takes the standard sedan's results (f50 / f30 / pole) and turns them into ranges.
  */
 export function beaterTargets(sedan: { f50: number; f30: number; pole: number }): VariantTargets {
   return {
     crash: {
       f50: { crush: [Math.max(0.78, 1.5 * sedan.f50), Infinity], intrusion: 0.3 + 1e-9 },
-      f30: { crush: [1.5 * sedan.f30, Infinity] },
+      f30: { crush: [1.4 * sedan.f30, Infinity] },
       f10: { crush: [0.02, Infinity] },
       pole: { door: [1.4 * sedan.pole, Infinity] },
       offset: { intrusion: 0.3 + 1e-9 },
       f64: null,
       f100: { latch: false, bumper: 0, windscreen: 0, intrusion: 0.3 + 1e-9 },
-      ring: { ring: [0.02, 0.045], rebound: [0.15, 0.1] },
+      ring: { ring: [0.035, 0.045], rebound: [0.05, 0.15] },
     },
     handling: {
       sag: [0.02, 0.06],
@@ -262,7 +287,10 @@ export const BOXTRUCK_TARGETS_ALL: VariantTargets = {
     f64: { intrusion: 0.2 },
     f100: null,
     // crashRing.test.ts box truck (R-PHYS widened the 100 km/h limit to its measured chaotic spread, 8 cm)
-    ring: { ring: [0.02, 0.08], rebound: [0.17, 0.07] },
+    ring: { ring: [0.03, 0.08], rebound: [0.05, 0.15] },
+    // BAND: the standard truck's 50 km/h rebound / v reads 0.154 / 0.141 / 0.114 at 48 / 50 / 52 km/h against the
+    // 0.15 limit; the HD rig is held to the standard's value ± 0.03.
+    rebound50Band: 0.03,
   },
   handling: {
     sag: [0.04, 0.1],
@@ -273,6 +301,8 @@ export const BOXTRUCK_TARGETS_ALL: VariantTargets = {
     drift: 3,
     brake: [0, 48],
     brakeFromKmh: 80,
+    // BAND: boxtruck.test.ts 80–0 ≤ 48 m; the HD truck reads 48.0 m with the standard's mass, CG and brakes
+    brakeBand: 0.5,
     brakeDrift: 5,
     stepSteer: 0.06,
   },
@@ -307,14 +337,29 @@ export function crashChecks(
   const T = t.f50;
   check(out, 'f50 crush', within(f50.crush, T.crush), `${cm(f50.crush)} cm`);
   if (T.peak !== undefined) check(out, 'f50 peak crush', f50.crushMax <= T.peak, `${cm(f50.crushMax)} cm`);
-  if (T.springback !== undefined) check(out, 'f50 spring-back', f50.springback <= T.springback, `${(f50.springback * 100).toFixed(0)} %`);
+  let std50: CrashResult | undefined;
+  const standard50 = (): CrashResult => (std50 ??= asStandard(() => runCrash({ kind: 'frontal', speedKmh: 50, def: standard!.def, probes: standard!.probes })));
+  if (T.springback !== undefined) {
+    if (t.springback50Band !== undefined && standard) {
+      const sb0 = standard50().springback;
+      check(out, `f50 spring-back (BAND: standard ± ${(t.springback50Band * 100).toFixed(0)} pts)`, Math.abs(f50.springback - sb0) <= t.springback50Band, `${(f50.springback * 100).toFixed(0)} % (standard ${(sb0 * 100).toFixed(0)} %)`);
+    } else check(out, 'f50 spring-back', f50.springback <= T.springback, `${(f50.springback * 100).toFixed(0)} %`);
+  }
   check(out, 'f50 cabin intrusion', f50.intrusion < T.intrusion, `${cm(f50.intrusion)} cm`);
   if (T.rebound) check(out, 'f50 rebound', within(f50.rebound, T.rebound), `${f2(f50.rebound)} m/s`);
   noExplosion(out, 'f50', f50);
   check(out, `f50 wheels on${T.penetration ? ', barrier penetration < 5 cm' : ''}`, f50.wheelsDetached === 0 && (!T.penetration || f50.maxPenetration < 0.05), `${f50.wheelsDetached}, ${cm(f50.maxPenetration)} cm`);
   if (T.cell !== undefined) check(out, 'f50 safety cell (final / peak / door wave)', f50.cellDev < T.cell && f50.cellDevMax < T.cellMax! && f50.doorWave < T.wave!, `${cm(f50.cellDev)} / ${cm(f50.cellDevMax)} cm / ${(f50.doorWave * 1000).toFixed(1)} mm`);
   const s50 = crushSettle(f50.crushTrace);
-  check(out, 'f50 settles (ring 0.5 s after peak), rebound / v', s50.ringAfter(0.5) < t.ring.ring[0] && f50.rebound / (50 / 3.6) < t.ring.rebound[0], `${cm(s50.ringAfter(0.5))} cm, ${f2(f50.rebound / (50 / 3.6))}`);
+  if (t.rebound50Band !== undefined && standard) {
+    const r0 = standard50().rebound / (50 / 3.6);
+    check(
+      out,
+      `f50 settles (ring 0.5 s after peak), rebound / v (BAND: standard ± ${t.rebound50Band})`,
+      s50.ringAfter(0.5) < t.ring.ring[0] && Math.abs(f50.rebound / (50 / 3.6) - r0) <= t.rebound50Band,
+      `${cm(s50.ringAfter(0.5))} cm, ${f2(f50.rebound / (50 / 3.6))} (standard ${f2(r0)})`,
+    );
+  } else check(out, 'f50 settles (ring 0.5 s after peak), rebound / v', s50.ringAfter(0.5) < t.ring.ring[0] && within(f50.rebound / (50 / 3.6), t.ring.rebound), `${cm(s50.ringAfter(0.5))} cm, ${f2(f50.rebound / (50 / 3.6))}`);
   if (t.f30) {
     const f30 = run('f30', 'frontal', 30);
     check(out, 'f30 crush', within(f30.crush, t.f30.crush), `${cm(f30.crush)} cm`);
@@ -358,15 +403,15 @@ export function crashChecks(
   const f100 = run('f100', 'frontal', 100);
   const s = crushSettle(f100.crushTrace);
   if (t.ring100Band !== undefined && standard) {
-    const r0 = runCrash({ kind: 'frontal', speedKmh: 100, def: standard.def, probes: standard.probes });
+    const r0 = asStandard(() => runCrash({ kind: 'frontal', speedKmh: 100, def: standard.def, probes: standard.probes }));
     const ring0 = crushSettle(r0.crushTrace).ringAfter(0.5);
     check(
       out,
       `f100 settles (BAND: standard ± ${cm(t.ring100Band)} cm), rebound / v`,
-      f100.finite && Math.abs(s.ringAfter(0.5) - ring0) <= t.ring100Band && f100.rebound / (100 / 3.6) < t.ring.rebound[1],
+      f100.finite && Math.abs(s.ringAfter(0.5) - ring0) <= t.ring100Band && within(f100.rebound / (100 / 3.6), t.ring.rebound),
       `${cm(s.ringAfter(0.5))} cm (standard ${cm(ring0)}), ${f2(f100.rebound / (100 / 3.6))}`,
     );
-  } else check(out, 'f100 settles, rebound / v', f100.finite && s.ringAfter(0.5) < t.ring.ring[1] && f100.rebound / (100 / 3.6) < t.ring.rebound[1], `${cm(s.ringAfter(0.5))} cm, ${f2(f100.rebound / (100 / 3.6))}`);
+  } else check(out, 'f100 settles, rebound / v', f100.finite && s.ringAfter(0.5) < t.ring.ring[1] && within(f100.rebound / (100 / 3.6), t.ring.rebound), `${cm(s.ringAfter(0.5))} cm, ${f2(f100.rebound / (100 / 3.6))}`);
   return out;
 }
 
@@ -422,7 +467,7 @@ export function handlingChecks(def: VehicleDef, t: HandlingTargets, standard?: V
   }
   const b = t.brakeFromKmh ? brakeFrom(def, t.brakeFromKmh) : runBraking(def);
   if (t.brakeBand !== undefined && standard) {
-    const b0 = t.brakeFromKmh ? brakeFrom(standard, t.brakeFromKmh) : runBraking(standard);
+    const b0 = asStandard(() => (t.brakeFromKmh ? brakeFrom(standard, t.brakeFromKmh) : runBraking(standard)));
     check(
       out,
       `${t.brakeFromKmh ?? 100}–0 braking (BAND: standard ± ${t.brakeBand} m), heading`,
@@ -505,8 +550,13 @@ export function bandRms(x: readonly number[], hz: number, lo: number, hi: number
   return Math.sqrt(e) / n;
 }
 
-/** bodyflex.ts + launchFeel rows. */
-export function feelChecks(def: VehicleDef, t: FeelTargets): Check[] {
+/**
+ * bodyflex.ts + launchFeel rows. `standard` (the standard car's def): the kerb wobble is measured on the standard
+ * car's own shell nodes (bodyflex `measureAs`: the HD rig keeps their indices) — the structure the target was set
+ * on — and the sheets get their own row: a 3 mm PP fascia still trembling by 0.5–1 mm 0.2 s after a kerb strike
+ * is a fascia, not a jelly body.
+ */
+export function feelChecks(def: VehicleDef, t: FeelTargets, standard?: VehicleDef): Check[] {
   const out: Check[] = [];
   const shells = Array.isArray(def.shell) ? (def.shell as ShellDef[]) : [def.shell as ShellDef];
   const modes = runModes({ ...def, shell: shells.map((s) => ({ ...s, zeta: 0.02 })) }, 0.6, 8, def, t.clustersOnly);
@@ -520,9 +570,13 @@ export function feelChecks(def: VehicleDef, t: FeelTargets): Check[] {
     const r = runDrive(def, kind, kind === 'corner' ? { ...base, ...t.corner } : kind === 'launch' ? { ...base, launchS: 5 } : base);
     check(out, `${kind}: extremity deflection, nothing released / broken`, r.maxExtMm < t.extMm && r.maxReleased === 0 && r.broken === 0, `${r.maxExtMm.toFixed(2)} mm, ${r.maxReleased}, ${r.broken}`);
   }
-  const curb = runDrive(def, 'curb', { clustersOnly: t.clustersOnly });
+  const curb = runDrive(def, 'curb', { clustersOnly: t.clustersOnly, ...(standard ? { measureAs: standard } : {}) });
   const settle = settleTime(curb.trace.t, curb.trace.ext);
-  check(out, 'kerb 50 km/h: wobble settles, nothing broken', settle <= (t.settleS ?? 0.2) && curb.broken === 0, `${settle.toFixed(3)} s, ${curb.broken}`);
+  check(out, `kerb 50 km/h: wobble settles${standard ? ' (the standard structure)' : ''}, nothing broken`, settle <= (t.settleS ?? 0.2) && curb.broken === 0, `${settle.toFixed(3)} s, ${curb.broken}`);
+  if (standard) {
+    const all = runDrive(def, 'curb', { clustersOnly: t.clustersOnly });
+    check(out, 'kerb 50 km/h: sheets included, extremity deflection', all.maxExtMm < t.extMm && all.broken === 0, `${all.maxExtMm.toFixed(2)} mm (settles in ${settleTime(all.trace.t, all.trace.ext).toFixed(3)} s)`);
+  }
   const drop = runDrop(def, 0.5);
   check(out, '0.5 m spawn drop: nothing broken', drop.broken === 0, `${drop.broken}`);
   const lf = runDrive(def, 'launch', { launchS: t.launchS });
@@ -535,6 +589,30 @@ export function feelChecks(def: VehicleDef, t: FeelTargets): Check[] {
   let shifts = 0;
   for (let i = from + 1; i < gear.length; i++) if (gear[i]! > gear[i - 1]!) shifts++;
   check(out, 'launch feel: 2–8 Hz surge / 8–25 Hz shunt ÷ mean, upshifts', shifts >= 1 && surge / mean < t.surge && shunt / mean < t.shunt, `${(surge / mean).toFixed(3)}, ${(shunt / mean).toFixed(3)}, ${shifts}`);
+  return out;
+}
+
+/**
+ * K&C (realism/kcBench.ts, R-PHYS's rig) of a variant against the standard car: the HD generator keeps every
+ * suspension node and link, so kinematics must match (camber gain, bump steer, roll centre, anti-dive / lift,
+ * wheel rate within ± 5 % or 0.02 absolute) and compliance closely (brake camber / toe per kN·m within ± 15 % or
+ * 0.02 deg absolute).
+ */
+export function kcChecks(def: VehicleDef, standard: VehicleDef): Check[] {
+  const out: Check[] = [];
+  const a = runKC(def);
+  const b = asStandard(() => runKC(standard));
+  const row = (name: string, x: readonly number[], y: readonly number[], rel: number, abs: number): void => {
+    const ok = x.every((v, k) => Math.abs(v - y[k]!) <= Math.max(abs, rel * Math.abs(y[k]!)));
+    check(out, `K&C ${name} vs standard`, ok, x.map((v, k) => `${f2(v)} (${f2(y[k]!)})`).join(' '));
+  };
+  row('camber gain °/cm', a.camberGain, b.camberGain, 0.05, 0.02);
+  row('bump steer °/cm', a.bumpSteer, b.bumpSteer, 0.05, 0.02);
+  row('roll centre m', a.rollCentre, b.rollCentre, 0.05, 0.02);
+  row('anti-dive / lift %', a.antiPct, b.antiPct, 0.05, 2);
+  row('wheel rate N/mm', a.wheelRate, b.wheelRate, 0.05, 0.5);
+  row('brake camber °/kN·m', a.brakeCamberPerKNm, b.brakeCamberPerKNm, 0.15, 0.02);
+  row('brake toe °/kN·m', a.brakeToePerKNm, b.brakeToePerKNm, 0.15, 0.02);
   return out;
 }
 

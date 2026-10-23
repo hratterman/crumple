@@ -100,6 +100,8 @@ export interface SkinSpec {
   attach?: readonly string[];
   /** Membrane yield strain at the reference pitch, default materials.ts sheetYieldStrain(grade) (a tired, rusty sheet sets earlier). */
   yieldStrain?: number;
+  /** Drop the sheet below this rig-local y (sample.ts clipSkinPanel: a fascia lip hanging below its mounts). */
+  clipBelowY?: number;
 }
 
 export type ShellZoneName = 'front' | 'rear' | 'cell' | 'firewall' | 'none';
