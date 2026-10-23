@@ -33,11 +33,17 @@ export interface SimKernel {
   /** applyShell (vehicle/shell.ts) for one cluster runtime. */
   shell(rt: ShellRuntime, dt: number, gx: number, gy: number, gz: number): void;
   /** applyGroundContacts (collision/ground.ts) over nodes [first, first + count) of one object. */
-  ground(first: number, count: number, sampler: HeightSampler, materials: MaterialTable, dt: number, objectId: number, events: EventSink, gx: number, gy: number, gz: number): void;
+  ground(first: number, count: number, sampler: HeightSampler, materials: MaterialTable, dt: number, objectId: number, events: EventSink, gx: number, gy: number, gz: number, wantBox?: boolean): void;
   /** Vehicle body passes (absent on the JS kernel: the TS runs). */
   readonly body?: BodyKernel;
   /** Wheel node loops (absent on the JS kernel). */
   readonly wheels?: WheelKernel;
+  /**
+   * The box [x0, x1, y0, y1, z0, z1, rMax] of nodes [first, first + count) as applyColliderContacts would
+   * compute it, when this tick's ground pass of exactly that range computed it (positions unchanged since);
+   * else null.
+   */
+  objectBox?(first: number, count: number): Float64Array | null;
   /** Start of an engine step (per-tick caches). */
   beginTick?(): void;
   /** The vehicle is gone (despawn): a WASM kernel frees its wheel blocks. */

@@ -10,6 +10,7 @@ import { BOXTRUCK } from '../../src/sim/vehicle/defs/boxtruck';
 import { placePlayer, trafficWorld } from '../../src/sim/traffic/testkit';
 import type { VehicleDef } from '../../src/sim/vehicle/types';
 import { vehicleVariantSync } from '../../src/sim/vehicle/defs/hd/index';
+import { setMotion } from '../../src/sim/vehicle/handling';
 
 export interface Scene {
   name: string;
@@ -55,7 +56,34 @@ export function sedanHdScene(tier: 'high' | 'ultra'): Scene {
   return planeCar(`HD sedan ${tier} (plane, launching)`, vehicleVariantSync('sedan', tier).def, 0.6);
 }
 
+/** A sedan at 15 m/s ploughing through a 6 × 10 grid of awake props (cones, barrels, tyres, boxes) on a plane. */
+export function propsScene(): Scene {
+  const eng = new SimEngine({ gravity: [0, -9.81, 0], debugStrains: false, capacity: { maxObjects: 128, nodeCapacity: 8192, beamCapacity: 32768 } });
+  eng.setGroundPlane(0, MaterialId.asphalt);
+  eng.spawnVehicle(1, SEDAN, { pos: [0, 0, 6], quat: [0, 0, 0, 1] }, 'auto');
+  const keys = ['cone', 'barrel', 'tire', 'boxCardboard', 'boxWood', 'barrel'] as const;
+  let id = 100;
+  for (let r = 0; r < 10; r++) {
+    for (let c = 0; c < 6; c++) {
+      const key = keys[(r * 6 + c) % keys.length]!;
+      eng.spawnProp(id++, key, { pos: [-2.5 + c * 1.0, 0.6, -2 - r * 1.2], quat: [0, 0, 0, 1] }, false);
+    }
+  }
+  for (let i = 0; i < 1000; i++) eng.step();
+  const car = eng.arena.get(1)!;
+  const veh = eng.getVehicle(1)!;
+  setMotion({ eng, obj: car, veh, cv: veh.vehicle, objectId: 1 }, 15);
+  car.actions[0] = 0.5;
+  car.actions[5] = 1;
+  for (let i = 0; i < 400; i++) eng.step();
+  eng.events.clear();
+  let beams = 0;
+  for (const o of eng.objects) if ((o.flags & 1) === 0) beams += o.beamCount;
+  return { name: `props (sedan through 60 awake props)`, eng, beams };
+}
+
 export const SCENES: Record<string, () => Scene> = {
+  props: propsScene,
   sedan: sedanScene,
   truck: truckScene,
   traffic: () => trafficScene(3),

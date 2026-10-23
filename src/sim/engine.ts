@@ -1112,10 +1112,10 @@ export class SimEngine {
         }
       }
       if (sampler !== null) {
-        kern.ground(obj.nodeStart, obj.nodeCount, sampler, this.materials, SIM_DT, obj.objectId, sink, gx, gy, gz);
+        kern.ground(obj.nodeStart, obj.nodeCount, sampler, this.materials, SIM_DT, obj.objectId, sink, gx, gy, gz, cw !== null);
       }
       if (cw !== null) {
-        applyColliderContacts(s, obj.nodeStart, obj.nodeCount, cw, this.materials, SIM_DT, obj.objectId, sink, gx, gy, gz);
+        applyColliderContacts(s, obj.nodeStart, obj.nodeCount, cw, this.materials, SIM_DT, obj.objectId, sink, gx, gy, gz, kern.objectBox?.(obj.nodeStart, obj.nodeCount));
       }
       // Feel pass: the rigid shell cluster sees every force of the tick (last pass before integration).
       const vsh = vslots[o]?.shell;

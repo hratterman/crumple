@@ -453,7 +453,7 @@ function sphereDistance(px: number, py: number, pz: number, vx: number, vy: numb
 }
 
 // ------------------------------------------------------------------ kernel
-export const applyColliderContacts: ApplyColliderContacts = (state, first, count, world, materials, dt, objectId, events, gx, gy, gz) => {
+export const applyColliderContacts: ApplyColliderContacts = (state, first, count, world, materials, dt, objectId, events, gx, gy, gz, objBox) => {
   const C = world.colliders;
   if (C.count === 0 || count === 0) return;
   const { posX, posY, posZ, velX, velY, velZ, frcX, frcY, frcZ, invMass, radius, friction, flags } = state;
@@ -467,7 +467,15 @@ export const applyColliderContacts: ApplyColliderContacts = (state, first, count
   let y1 = -Infinity;
   let z1 = -Infinity;
   let rMax = 0;
-  for (let i = first; i < end; i++) {
+  if (objBox) {
+    x0 = objBox[0]!;
+    x1 = objBox[1]!;
+    y0 = objBox[2]!;
+    y1 = objBox[3]!;
+    z0 = objBox[4]!;
+    z1 = objBox[5]!;
+    rMax = objBox[6]!;
+  } else for (let i = first; i < end; i++) {
     const x = posX[i]!;
     const y = posY[i]!;
     const z = posZ[i]!;

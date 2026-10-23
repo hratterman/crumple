@@ -60,7 +60,7 @@ interface KernelExports {
   shell(header: number, dt: number, gx: number, gy: number, gz: number): number;
   set_ground_params(kcMax: number, kcStab: number, zeta: number, softZeta: number, slopeSkip: number, impactMin: number, skidSlip: number, skidLoad: number, skidCooldown: number): void;
   set_ground(header: number): void;
-  ground(first: number, count: number, dt: number, gx: number, gy: number, gz: number): number;
+  ground(first: number, count: number, dt: number, gx: number, gy: number, gz: number, wantBox: number): number;
   ground_sample(x: number, z: number, out: number): number;
   body_momentum(start: number, end: number, out: number): void;
   body_accel(start: number, end: number, ax: number, ay: number, az: number): void;
@@ -89,8 +89,9 @@ const G = {
   HTILES: 15, HTX: 16, NTILES: 17, NTX: 18, MTILES: 19, MTX: 20,
   MATF: 21, COOLDOWN: 22, EVENTS: 23, EV_CAP: 24,
   CSTAMP: 25, CREF: 26, STAMP: 27,
-  EV_COUNT: 28, MISS_GRID: 29, MISS_TILE: 30,
-  HEADER: 31,
+  BOX: 28, BOX_FIRST: 35, BOX_COUNT: 36, BOX_STAMP: 37,
+  EV_COUNT: 38, MISS_GRID: 39, MISS_TILE: 40,
+  HEADER: 41,
 } as const;
 /** Ground events buffered per kernel call (9 f64 each). */
 const GROUND_EV_CAP = 256;
@@ -500,6 +501,7 @@ function createWasmKernel(kind: 'wasm' | 'simd', nodeCapacity: number, beamCapac
       return true;
     },
   };
+  const boxView = gH.subarray(G.BOX, G.BOX + 7);
   const kernel: WasmSimKernel = {
     kind,
     body,
@@ -549,7 +551,7 @@ function createWasmKernel(kind: 'wasm' | 'simd', nodeCapacity: number, beamCapac
       rt.maxDev = Math.sqrt(H[SH.MAX_DEV2]!);
       shellRecaptureCheck(state, rt, dt, H[SH.NEW_RELEASE] !== 0, H[SH.MAX_REL2]!, H[SH.SUM_REL2]!, H[SH.NREL]!, H[SH.CX]!, H[SH.CY]!, H[SH.CZ]!);
     },
-    ground(first: number, count: number, sampler: HeightSampler, materials: MaterialTable, dt: number, objectId: number, events: EventSink, gx: number, gy: number, gz: number): void {
+    ground(first: number, count: number, sampler: HeightSampler, materials: MaterialTable, dt: number, objectId: number, events: EventSink, gx: number, gy: number, gz: number, wantBox?: boolean): void {
       if (sampler !== gSampler) {
         gSampler = sampler;
         gMirrored = terrain.install(sampler);
@@ -567,7 +569,8 @@ function createWasmKernel(kind: 'wasm' | 'simd', nodeCapacity: number, beamCapac
       const end = first + count;
       let i = first;
       for (;;) {
-        const stop = wGround(i, end - i, dt, gx, gy, gz);
+        // (a resumed pass computes the box of its remaining range: objectBox then misses, colliders scan)
+        const stop = wGround(i, end - i, dt, gx, gy, gz, wantBox ? 1 : 0);
         const ne = gH[G.EV_COUNT]!;
         for (let e = 0; e < ne; e++) {
           const o = 9 * e;
@@ -579,6 +582,9 @@ function createWasmKernel(kind: 'wasm' | 'simd', nodeCapacity: number, beamCapac
         if (grid !== 0) terrain.load(grid, gH[G.MISS_TILE]!);
         i = stop;
       }
+    },
+    objectBox(first: number, count: number): Float64Array | null {
+      return gH[G.BOX_FIRST] === first && gH[G.BOX_COUNT] === count && gH[G.BOX_STAMP] === gH[G.STAMP] ? boxView : null;
     },
     groundSample(sampler: HeightSampler, x: number, z: number): Float64Array | null {
       if (sampler !== gSampler) {
