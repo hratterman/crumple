@@ -54,6 +54,11 @@ export interface CarrierRuntime {
   d01: Float64Array;
   d11: Float64Array;
   inv: Float64Array;
+  /** Penalty stiffness cap, N/m, and the penetration (× the node radius) the spring stops growing at. */
+  kMax: number;
+  penCap: number;
+  /** Barycentric margin of the triangles (a face's edges reach this fraction beyond its nodes). */
+  margin: number;
   /** findTri result scratch. */
   hitS: number;
   hitU: number;
@@ -79,6 +84,9 @@ export function createCarrierRuntime(obj: SimObject, tri: Int32Array, doors: Uin
     d01: new Float64Array(n),
     d11: new Float64Array(n),
     inv: new Float64Array(n),
+    kMax: CARRIER_K_MAX,
+    penCap: 0.6,
+    margin: BARY_MARGIN,
     hitS: 0,
     hitU: 0,
     hitV: 0,
@@ -93,7 +101,42 @@ export function applyCarrier(state: SimState, c: CarrierRuntime, dt: number, tic
   const base = c.obj.nodeStart;
   const tri = c.tri;
   const nt = tri.length / 3;
-  // Triangle frames for this tick.
+  updateTriFrames(state, c);
+  const lift = c.lift;
+  const invDt = 1 / dt;
+  const cargo = c.cargo;
+  for (let q = 0; q < cargo.length; q++) {
+    const o = cargo[q]!;
+    if ((o.flags & SIM_OBJECT_FLAG_SLEEPING) !== 0) continue;
+    const end = o.nodeStart + o.nodeCount;
+    for (let i = o.nodeStart; i < end; i++) {
+      const imp = invMass[i]!;
+      if (imp === 0 || (flags[i]! & NODE_FLAG_OBJ_CONTACT) === 0) continue;
+      const px = posX[i]!;
+      const py = posY[i]!;
+      const pz = posZ[i]!;
+      const r = objRadius[i]!;
+      // Deepest triangle containing the projection, then the deepest one facing another way (a corner node
+      // presses on the deck AND a wall at once: one surface per tick lets it leak through the other).
+      const t1 = findTri(state, c, base, 0, nt, lift, px, py, pz, r, -1);
+      if (t1 < 0) continue;
+      const s1 = c.hitS;
+      const u1 = c.hitU;
+      const v1 = c.hitV;
+      const w1 = c.hitW;
+      const t2 = findTri(state, c, base, 0, nt, lift, px, py, pz, r, t1);
+      if (pushTri(state, c, i, t1, s1, u1, v1, w1, r, dt, invDt, gx, gy, gz)) c.touch[q] = tick;
+      if (t2 >= 0 && pushTri(state, c, i, t2, c.hitS, c.hitU, c.hitV, c.hitW, r, dt, invDt, gx, gy, gz)) c.touch[q] = tick;
+    }
+  }
+}
+
+/** This tick's triangle frames (normal, edge dots) of a carrier / surface. */
+export function updateTriFrames(state: SimState, c: CarrierRuntime): void {
+  const { posX, posY, posZ } = state;
+  const base = c.obj.nodeStart;
+  const tri = c.tri;
+  const nt = tri.length / 3;
   for (let t = 0; t < nt; t++) {
     const a = base + tri[3 * t]!;
     const b = base + tri[3 * t + 1]!;
@@ -127,33 +170,6 @@ export function applyCarrier(state: SimState, c: CarrierRuntime, dt: number, tic
     c.d11[t] = d11;
     c.inv[t] = den > 1e-12 ? 1 / den : 0;
   }
-  const lift = c.lift;
-  const invDt = 1 / dt;
-  const cargo = c.cargo;
-  for (let q = 0; q < cargo.length; q++) {
-    const o = cargo[q]!;
-    if ((o.flags & SIM_OBJECT_FLAG_SLEEPING) !== 0) continue;
-    const end = o.nodeStart + o.nodeCount;
-    for (let i = o.nodeStart; i < end; i++) {
-      const imp = invMass[i]!;
-      if (imp === 0 || (flags[i]! & NODE_FLAG_OBJ_CONTACT) === 0) continue;
-      const px = posX[i]!;
-      const py = posY[i]!;
-      const pz = posZ[i]!;
-      const r = objRadius[i]!;
-      // Deepest triangle containing the projection, then the deepest one facing another way (a corner node
-      // presses on the deck AND a wall at once: one surface per tick lets it leak through the other).
-      const t1 = findTri(state, c, base, nt, lift, px, py, pz, r, -1);
-      if (t1 < 0) continue;
-      const s1 = c.hitS;
-      const u1 = c.hitU;
-      const v1 = c.hitV;
-      const w1 = c.hitW;
-      const t2 = findTri(state, c, base, nt, lift, px, py, pz, r, t1);
-      if (pushTri(state, c, i, t1, s1, u1, v1, w1, r, dt, invDt, gx, gy, gz)) c.touch[q] = tick;
-      if (t2 >= 0 && pushTri(state, c, i, t2, c.hitS, c.hitU, c.hitV, c.hitW, r, dt, invDt, gx, gy, gz)) c.touch[q] = tick;
-    }
-  }
 }
 
 /**
@@ -161,7 +177,7 @@ export function applyCarrier(state: SimState, c: CarrierRuntime, dt: number, tic
  * penetrates (−SLAB < s < r). With `not` ≥ 0: only triangles whose normal is ≥ 60° off triangle `not`'s.
  * Result in c.hitS / hitU / hitV / hitW; returns the triangle or −1.
  */
-function findTri(state: SimState, c: CarrierRuntime, base: number, nt: number, lift: number, px: number, py: number, pz: number, r: number, not: number): number {
+export function findTri(state: SimState, c: CarrierRuntime, base: number, t0: number, t1: number, lift: number, px: number, py: number, pz: number, r: number, not: number): number {
   const { posX, posY, posZ } = state;
   const tri = c.tri;
   let best = -1;
@@ -169,7 +185,7 @@ function findTri(state: SimState, c: CarrierRuntime, base: number, nt: number, l
   let bu = 0;
   let bv = 0;
   let bw = 0;
-  for (let t = 0; t < nt; t++) {
+  for (let t = t0; t < t1; t++) {
     if (c.off[t] !== 0 || c.inv[t] === 0) continue;
     if (not >= 0 && c.nx[t]! * c.nx[not]! + c.ny[t]! * c.ny[not]! + c.nz[t]! * c.nz[not]! > 0.5) continue;
     const a = base + tri[3 * t]!;
@@ -192,7 +208,8 @@ function findTri(state: SimState, c: CarrierRuntime, base: number, nt: number, l
     const v = (c.d11[t]! * d20 - c.d01[t]! * d21) * inv;
     const w = (c.d00[t]! * d21 - c.d01[t]! * d20) * inv;
     const u = 1 - v - w;
-    if (u < -BARY_MARGIN || v < -BARY_MARGIN || w < -BARY_MARGIN) continue;
+    const mg = c.margin;
+    if (u < -mg || v < -mg || w < -mg) continue;
     best = t;
     bestS = s;
     bu = u < 0 ? 0 : u;
@@ -209,7 +226,7 @@ function findTri(state: SimState, c: CarrierRuntime, base: number, nt: number, l
 }
 
 /** Contact force between cargo node i and triangle `best` (the law in the header); false when not pressing. */
-function pushTri(state: SimState, c: CarrierRuntime, i: number, best: number, bestS: number, bu: number, bv: number, bw: number, r: number, dt: number, invDt: number, gx: number, gy: number, gz: number): boolean {
+export function pushTri(state: SimState, c: CarrierRuntime, i: number, best: number, bestS: number, bu: number, bv: number, bw: number, r: number, dt: number, invDt: number, gx: number, gy: number, gz: number): boolean {
   const { velX, velY, velZ, frcX, frcY, frcZ, invMass, friction } = state;
   const base = c.obj.nodeStart;
   const tri = c.tri;
@@ -224,7 +241,7 @@ function pushTri(state: SimState, c: CarrierRuntime, i: number, best: number, be
   const imr = imp + imc;
   const mr = 1 / imr;
   let k = (0.2 * mr) / (dt * dt);
-  if (k > CARRIER_K_MAX) k = CARRIER_K_MAX;
+  if (k > c.kMax) k = c.kMax;
   const cdamp = 2 * 0.65 * Math.sqrt(k * mr);
   const nx = c.nx[best]!;
   const ny = c.ny[best]!;
@@ -237,7 +254,7 @@ function pushTri(state: SimState, c: CarrierRuntime, i: number, best: number, be
   const rz = velZ[i]! - vcz;
   const vn = rx * nx + ry * ny + rz * nz;
   let pen = r - bestS;
-  const cap = 0.6 * r;
+  const cap = c.penCap * r;
   if (pen > cap) pen = cap;
   let fn = k * pen - cdamp * vn;
   if (fn <= 0) return false;

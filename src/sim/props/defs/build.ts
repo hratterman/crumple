@@ -33,6 +33,8 @@ export interface PropNodeSpec {
   r?: number;
   friction?: number;
   group?: string;
+  /** false = no node-vs-node contact (a face handled as triangles: the guardrail's rail). */
+  objContact?: boolean;
 }
 
 export interface PropBeamSpec {
@@ -141,6 +143,7 @@ export function buildPropRig(nodes: PropNodeSpec[], beams: PropBeamSpec[], o: Pr
       objRadius: r,
     };
     if (n.group !== undefined) node.group = n.group;
+    if (n.objContact === false) node.objContact = false;
     if (pinned) {
       node.collidable = false;
       node.objContact = false;

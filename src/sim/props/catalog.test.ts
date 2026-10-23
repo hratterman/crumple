@@ -18,7 +18,6 @@ const NOMINAL_MASS: Record<PropKey, [number, number]> = {
   boxWood: [24, 26],
   signPost: [14, 19],
   stopSign: [14, 19],
-  guardrail: [98, 110],
   mailbox: [10, 12],
   lightPole: [110, 140],
   concreteBlock: [990, 1010],
@@ -29,7 +28,12 @@ const NOMINAL_MASS: Record<PropKey, [number, number]> = {
   hayBale: [300, 340],
   pallet: [24, 26],
   fencePanel: [45, 60],
+  guardrail: [90, 130],
+  guardrailEnd: [90, 130],
 };
+
+/** Props whose contact is a triangle face, not node spheres (no node has object contact). */
+const FACE_CONTACT: readonly PropKey[] = ['guardrail', 'guardrailEnd'];
 
 const PREFIXES: Record<PropKey, RegExp> = {
   cone: /^(base_\d|shell_\d_\d|tip)$/,
@@ -39,7 +43,6 @@ const PREFIXES: Record<PropKey, RegExp> = {
   boxWood: /^[cf]_\d$/,
   signPost: /^(anchor_\d|post_(\d_\d|s\d)|sign_(\d|c))$/,
   stopSign: /^(anchor_\d|post_(\d_\d|s\d)|sign_(\d|c))$/,
-  guardrail: /^(anchor_\d|p\d_(\d_\d|c|t)|rail_\d+_\d)$/,
   mailbox: /^(anchor_\d|post_(\d_\d|s\d)|box_\d)$/,
   lightPole: /^(anchor_\d|pole_(\d_\d|s\d)|arm_\d_\d|lamp_\d)$/,
   concreteBlock: /^[cf]_\d$/,
@@ -49,6 +52,8 @@ const PREFIXES: Record<PropKey, RegExp> = {
   hayBale: /^(r\d_\d|ax_\d|core)$/,
   pallet: /^[bt]\d\d$/,
   fencePanel: /^(anchor_\d|p\d_(\d_\d|c)|rail\d\d_\d|pk\d_[bt])$/,
+  guardrail: /^(r[tb]\d+|rv\d+|p\d_\d|k\d[tb]|h\d[tb]|a\d_\d)$/,
+  guardrailEnd: /^(r[tb]\d+|rv\d+|p\d_\d|k\d[tb]|h\d[tb]|a\d_\d|ea\d[tb])$/,
 };
 
 /** Spawns one prop (awake) on a flat plane and steps `seconds`; returns the engine. */
@@ -134,8 +139,12 @@ describe('prop catalog', () => {
           expect(c.nodeFlags[i]! & RIG_NODE_FLAG_OBJ_CONTACT, `${key} anchor objContact`).toBe(0);
           continue;
         }
-        expect(c.nodeFlags[i]! & RIG_NODE_FLAG_OBJ_CONTACT, key).not.toBe(0);
-        expect(c.nodeObjRadius[i]!, key).toBeGreaterThanOrEqual(PROP_MIN_OBJ_RADIUS);
+        // The guardrail is contacted through its rail FACE (props/railContact.ts), not node spheres.
+        if (FACE_CONTACT.includes(key)) expect(c.nodeFlags[i]! & RIG_NODE_FLAG_OBJ_CONTACT, key).toBe(0);
+        else {
+          expect(c.nodeFlags[i]! & RIG_NODE_FLAG_OBJ_CONTACT, key).not.toBe(0);
+          expect(c.nodeObjRadius[i]!, key).toBeGreaterThanOrEqual(PROP_MIN_OBJ_RADIUS);
+        }
         const y = c.nodePos[3 * i + 1]!;
         minBase = Math.min(minBase, y - c.nodeRadius[i]!);
         const r = Math.max(c.nodeRadius[i]!, c.nodeObjRadius[i]!);
@@ -169,7 +178,8 @@ describe('prop catalog', () => {
     let minY = Infinity;
     for (let i = 0; i < c.nodeCount; i++) {
       maxDev = Math.max(maxDev, Math.hypot(s.posX[i]! - c.nodePos[3 * i]!, s.posY[i]! - c.nodePos[3 * i + 1]!, s.posZ[i]! - c.nodePos[3 * i + 2]!));
-      minY = Math.min(minY, s.posY[i]! - s.radius[i]!);
+      // (pinned anchors are non-collidable: a post's soil anchors sit below ground by design)
+      if (c.nodeInvMass[i] !== 0) minY = Math.min(minY, s.posY[i]! - s.radius[i]!);
     }
     // Settled shape within a few cm of the rest pose (elastic sag + contact penetration).
     expect(maxDev, key).toBeLessThan(key === 'lightPole' ? 0.08 : 0.025);
