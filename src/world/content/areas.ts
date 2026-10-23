@@ -20,6 +20,7 @@ import { MaterialId } from '../../protocol/messages';
 import { createRoadProjection, projectToRoad } from '../roads';
 import type { ColliderDef, PropPlacement, RoadProfile, TerrainData, Vec2, WorldLayout } from '../types';
 import type { BuildingInstance, BuildingStyle, CableInstance, ContentExclusion, DecalInstance, ItemInstance, StripInstance, StructureInstance, WorldLight } from './types';
+import { heightAt as terrainHeight } from './structures';
 import { box, cylinder, hash01, mm, pieces, roadBox, roadFrame, yawQuatDir, type Quat } from './util';
 
 export interface AreaOut {
@@ -398,24 +399,77 @@ function raceway(c: Ctx): void {
 // ------------------------------------------------------------------ interchange
 
 /**
- * Soft guardrail sections (prop `guardrail`, 4.1 m, rail toward traffic) along [s0, s1] at offset d;
- * returns the arc actually covered (sections are laid from s0 every GR_PITCH m: the proxy AABBs of
- * neighbouring sections must not overlap at any heading, so ≈ 0.5 m gaps between rails).
+ * A W-beam guardrail RUN (R-PHYS2 props `guardrail` / `guardrailEnd`, sim/props/defs/guardrail.ts) along
+ * [s0, s1] at offset d, rail toward traffic; returns the arc actually covered. The 3.81 m panels are
+ * laid as CHORDS of the offset line (3D: each panel's two end columns sit on the line, so neighbours
+ * share their ends and the sim lap-splices them into one tension member), tilted with the road's grade
+ * (`slope`), standing on the terrain at d (the highest ground under the rail and its posts); the two end panels are `guardrailEnd` (the run's ends cable-anchored).
  */
-const GR_PITCH = 4.6;
+export const GR_PANEL = 3.81;
+/** Height of the rail's centre (its valley row) above a panel's base, m. */
+export const GR_RAIL_Y = 0.63;
 function softRail(c: Ctx, p: RoadProfile, s0: number, s1: number, d: number, tag: string): number {
-  const n = Math.floor((s1 - s0) / GR_PITCH);
-  for (let k = 0; k < n; k++) {
-    const s = s0 + GR_PITCH / 2 + k * GR_PITCH;
+  const side = d >= 0 ? 1 : -1;
+  // A panel end on the offset line at the highest ground under the rail and the post line behind it
+  // (0.36–0.51 m back): no post starts buried (a buried node pops out at several m/s).
+  const at = (s: number): readonly [number, number, number] => {
     const f = roadFrame(p, s);
-    const side = d >= 0 ? 1 : -1;
-    // front (−Z, the rail) faces the carriageway: facing = −side · right
-    const fx = -side * f.rx;
-    const fz = -side * f.rz;
-    const l = Math.sqrt(fx * fx + fz * fz);
-    c.o.props.push({ id: `w:${tag}:${k}`, prop: 'guardrail', pos: [mm(f.x + f.rx * d), null, mm(f.z + f.rz * d)], facing: [mm(fx / l), mm(fz / l)] });
+    const x = f.x + f.rx * d;
+    const z = f.z + f.rz * d;
+    let y = -Infinity;
+    for (const b of [0, 0.36, 0.51]) y = Math.max(y, terrainHeight(c.t, x + side * f.rx * b, z + side * f.rz * b));
+    return [x, y, z];
+  };
+  const ends: { s: number; P: readonly [number, number, number] }[] = [{ s: s0, P: at(s0) }];
+  const dist = (a: readonly number[], b: readonly number[]): number => Math.hypot(b[0]! - a[0]!, b[1]! - a[1]!, b[2]! - a[2]!);
+  for (;;) {
+    const a = ends[ends.length - 1]!;
+    if (dist(a.P, at(s1)) < GR_PANEL) break;
+    // Bisection for the arc point exactly one panel (3D chord) further on.
+    let lo = a.s;
+    let hi = s1;
+    for (let it = 0; it < 48; it++) {
+      const m = (lo + hi) / 2;
+      if (dist(a.P, at(m)) < GR_PANEL) lo = m;
+      else hi = m;
+    }
+    const sb = (lo + hi) / 2;
+    ends.push({ s: sb, P: at(sb) });
   }
-  return s0 + n * GR_PITCH;
+  const n = ends.length - 1;
+  for (let k = 0; k < n; k++) {
+    const A = ends[k]!.P;
+    const B = ends[k + 1]!.P;
+    const dx = B[0] - A[0];
+    const dz = B[2] - A[2];
+    const h = Math.hypot(dx, dz);
+    const tx = dx / h;
+    const tz = dz / h;
+    // front (−Z, the rail) faces the carriageway (−side · right), perpendicular to the chord
+    const f = roadFrame(p, (ends[k]!.s + ends[k + 1]!.s) / 2);
+    let fx = -tz;
+    let fz = tx;
+    if (fx * -side * f.rx + fz * -side * f.rz < 0) {
+      fx = -fx;
+      fz = -fz;
+    }
+    // local +X = (−fz, fx): the slope raises it
+    const toB = -fz * tx + fx * tz > 0;
+    const slope = Math.round((((toB ? B[1] - A[1] : A[1] - B[1]) / h) || 0) * 1e4) / 1e4;
+    // The tilt pivots about the RAIL (GR_RAIL_Y up), not the base: neighbours with different grades then
+    // still meet at the splice (a base pivot shifts the rail ends by 0.6 m × Δθ, past the splice reach).
+    const cosT = 1 / Math.sqrt(1 + slope * slope);
+    const sinT = slope * cosT;
+    const ox = GR_RAIL_Y * sinT;
+    c.o.props.push({
+      id: `w:${tag}:${k}`,
+      prop: k === 0 || k === n - 1 ? 'guardrailEnd' : 'guardrail',
+      pos: [mm((A[0] + B[0]) / 2 - fz * ox), mm((A[1] + B[1]) / 2 + GR_RAIL_Y * (1 - cosT)), mm((A[2] + B[2]) / 2 + fx * ox)],
+      facing: [mm(fx), mm(fz)],
+      slope,
+    });
+  }
+  return ends[n]!.s;
 }
 
 function interchange(c: Ctx): void {
@@ -448,8 +502,9 @@ function interchange(c: Ctx): void {
     const proj = (x: number, z: number): number => projectToRoad(rr, x, z, PROJ).s;
     const d = rr.width / 2 + rr.shoulder + 0.5;
     for (const side of [-1, 1] as const) {
-      softRail(c, rr, proj(150, 553), proj(150, 573), side * d, `ix:rrN${side > 0 ? 'R' : 'L'}`);
-      softRail(c, rr, proj(150, 627), proj(150, 652), side * d, `ix:rrS${side > 0 ? 'R' : 'L'}`);
+      // (to z 570.5 / from z 629.5: clear of the overpass deck's ends at z 572 / 628 — a run's end columns sit on s0 / s1)
+      softRail(c, rr, proj(150, 553), proj(150, 570.5), side * d, `ix:rrN${side > 0 ? 'R' : 'L'}`);
+      softRail(c, rr, proj(150, 629.5), proj(150, 652), side * d, `ix:rrS${side > 0 ? 'R' : 'L'}`);
     }
   }
   // Overhead gantry signs on the highway ~400 m before each exit (both directions).

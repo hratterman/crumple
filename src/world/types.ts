@@ -320,6 +320,11 @@ export interface PropPlacement {
   /** Base point; y null = terrain height at (x, z) (per row copy). */
   pos: RoadPoint;
   facing?: Vec2;
+  /**
+   * Tilt along the prop's local +X (rise per metre, |slope| ≤ 0.3; default 0): spliced guardrail
+   * panels follow the road's grade so neighbouring ends meet (R-PHYS2, sim/props/placement.ts).
+   */
+  slope?: number;
   /** Identical props stacked vertically (tires, boxes); default 1. */
   stack?: number;
   /** A straight row of copies: copy k sits at pos + k·step (plan metres). */

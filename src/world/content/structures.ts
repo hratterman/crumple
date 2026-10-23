@@ -31,7 +31,8 @@ export interface StructureOut {
   render: StructureInstance[];
 }
 
-function heightAt(t: TerrainData, x: number, z: number): number {
+/** Bilinear terrain height (the sim sampler's heightAt). */
+export function heightAt(t: TerrainData, x: number, z: number): number {
   let fx = (x - t.originX) / t.spacing;
   let fz = (z - t.originZ) / t.spacing;
   fx = fx < 0 ? 0 : fx > t.cols - 1 ? t.cols - 1 : fx;

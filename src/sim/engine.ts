@@ -48,7 +48,7 @@ import { SimArena } from './state';
 import { NODE_FLAG_OBJ_CONTACT, SIM_OBJECT_FLAG_SLEEPING, type EventSink, type HeightSampler, type MaterialTable, type SimObject, type SimState } from './types';
 import { compilePropRig, getPropDef, isPropKey } from './props/catalog';
 import { applyPropDamping, createFluidState, FLUID_TICKS, PROP_BUDGET_SLEEP_SPEED, PROP_INTERNAL_DAMPING, PROP_UNMOVED_HOLD_FRACTION, PROP_WAKE_SPEED, propAnchored, resetFluidState, stepPropFluid, type PropRuntime } from './props/runtime';
-import { PROP_AWAKE_BEAM_BUDGET, type PropInstance, type PropKey } from './props/types';
+import { PROP_AWAKE_BEAM_BUDGET, type PropDef, type PropInstance, type PropKey } from './props/types';
 import { compileVehicle, TRAFFIC_BEAM_BUDGET, validateVehicle } from './vehicle/builder';
 import { isTrafficObjectId, TRAFFIC_AI_TICKS, type TrafficBubble, type TrafficDensity, type TrafficVariantSpec } from '../protocol/traffic';
 import { buildRouteNetwork } from '../world/routes';
@@ -78,9 +78,11 @@ import { createWheelFrame } from '../protocol/wheels';
 const wheelScratch = createWheelFrame();
 import { createVehicleWater, drainVehicleWater, stepVehicleWater } from './water/vehicleWater';
 import { COUPLING_ARM_S, TowingSystem } from './trailer/runtime';
+import { JointKind, type JointSpec } from './trailer/joints';
 import { buildTrailer, TOW_HITCH_NODES, type TrailerKind } from './trailer/defs';
 import { facingQuat } from './props/placement';
 import { joinProps, PROP_JOINS } from './props/joins';
+import { applyRailContacts, createRailSurface, type RailSurface } from './props/railContact';
 import { createVehicleDebris, updateDebris, wakeAllIslands, type VehicleDebris } from './debris/islands';
 import type { DrivetrainStateEx } from './vehicle/drivetrain';
 
@@ -392,6 +394,11 @@ export class SimEngine {
   /** R-PHYS2: debris island sleep per vehicle (objectId → state); list + frame origins rebuilt by syncVehicles. */
   private readonly debris = new Map<number, VehicleDebris>();
   private debrisList: VehicleDebris[] = [];
+  /** R-PHYS2: guardrail rail faces (objectId → surface; list in arena order) and the vehicles' slots. */
+  private readonly railById = new Map<number, RailSurface>();
+  private railList: RailSurface[] = [];
+  private railVehicles: SimObject[] = [];
+  private railVehicleSlots: number[] = [];
   private debrisOrigins: number[] = [];
   private debrisSlots: number[] = [];
   /** R-PHYS2: persistent ruts (heightfield ground; planes only after enableSoftGround()). */
@@ -760,6 +767,17 @@ export class SimEngine {
     }
     this.vehicleSlots = slots;
     this.propSlots = pslots;
+    this.railList = [];
+    this.railVehicles = [];
+    this.railVehicleSlots = [];
+    for (let o = 0; o < objs.length; o++) {
+      const rs = this.railById.get(objs[o]!.objectId);
+      if (rs) this.railList.push(rs);
+      if (slots[o]) {
+        this.railVehicles.push(objs[o]!);
+        this.railVehicleSlots.push(o);
+      }
+    }
     this.floodSlots = fslots;
     this.triSlots = tslots;
     this.debrisList = [];
@@ -1060,6 +1078,9 @@ export class SimEngine {
       sleepRmax: 0,
       fluid: createFluidState(def, rig),
     });
+    this.addPropLinks(obj, def, rig);
+    const rail = key === 'guardrail' || key === 'guardrailEnd' ? createRailSurface(obj, rig) : null;
+    if (rail) this.railById.set(objectId, rail);
     this.syncVehicles();
     this.setAsleep(obj, asleep);
     return obj;
@@ -1162,7 +1183,43 @@ export class SimEngine {
       const rt = this.props.get(o.objectId);
       if (rt && PROP_JOINS[rt.key] !== undefined) list.push({ obj: o, key: rt.key, rig: compilePropRig(rt.key) });
     }
-    if (list.length > 1) joinProps(this.towing.joints, this.state, list);
+    if (list.length > 1) joinProps(this.towing.joints, this.state, list, this.onPropJoin);
+  }
+
+  /** Spliced guardrail panels never collide with each other (their end columns coincide). */
+  private readonly onPropJoin = (a: SimObject, b: SimObject, exclusive: boolean, endA: number, endB: number): void => {
+    // A spliced end is no longer a terminal: its anchor cable goes.
+    const ta = `panchor:${a.objectId}:${endA}`;
+    const tb = `panchor:${b.objectId}:${endB}`;
+    this.towing.joints.remove((j) => j.tag === ta || j.tag === tb);
+    if (!exclusive) return;
+    this.contacts.excludedPairs.add(pairKey(a.objectId, b.objectId));
+    this.contactsDirty = true;
+  };
+
+  /** R-PHYS2: a prop's implicit members (PropDef.links: guardrail rail tension, anchor cables). */
+  private addPropLinks(obj: SimObject, def: PropDef, rig: CompiledRig): void {
+    const links = def.links;
+    if (!links) return;
+    // A dense stiff network: solve the joints with PROP_LINK_ITERATIONS Gauss-Seidel sweeps from now on.
+    if (this.towing.joints.iterations < PROP_LINK_ITERATIONS) this.towing.joints.iterations = PROP_LINK_ITERATIONS;
+    for (const l of links) {
+      const a = rig.nodeIds.indexOf(l.a);
+      const b = rig.nodeIds.indexOf(l.b);
+      if (a < 0 || b < 0) throw new Error(`prop ${def.key}: link ${l.a}–${l.b} names a missing node`);
+      const dx = rig.nodePos[3 * b]! - rig.nodePos[3 * a]!;
+      const dy = rig.nodePos[3 * b + 1]! - rig.nodePos[3 * a + 1]!;
+      const dz = rig.nodePos[3 * b + 2]! - rig.nodePos[3 * a + 2]!;
+      const tag = l.end === undefined ? `plink:${obj.objectId}` : `panchor:${obj.objectId}:${l.end}`;
+      const ball = l.kind === 'ball';
+      const kind = ball ? JointKind.ball : l.kind === 'rope' ? JointKind.rope : JointKind.link;
+      const spec: JointSpec = { kind, tag, objA: obj, nodeA: a, objB: obj, nodeB: b, k: l.k, c: l.c, rest: ball ? 0 : Math.sqrt(dx * dx + dy * dy + dz * dz), play: l.play ?? 0, breakF: l.breakF };
+      if (l.kind === 'strut') spec.strut = true;
+      if (l.yieldF !== undefined) spec.yieldF = l.yieldF;
+      if (l.ruptureStrain !== undefined) spec.ruptureStrain = l.ruptureStrain;
+      if (l.chain) spec.chain = true;
+      this.towing.joints.add(spec);
+    }
   }
 
   /**
@@ -1235,6 +1292,7 @@ export class SimEngine {
     this.vehicles.delete(objectId);
     this.triById.delete(objectId);
     this.debris.delete(objectId);
+    this.railById.delete(objectId);
     this.props.delete(objectId);
     this.floods.delete(objectId);
     const epoch = this.repairEpochs.get(objectId);
@@ -1502,7 +1560,9 @@ export class SimEngine {
     // (R-CORE: object triangles, self-collision, static meshes; canonical order).
     if (this.contacts.pairCount > 0) this.contacts.apply(s, SIM_DT, sink);
     if (this.tris.pairCount > 0) this.tris.apply(s, SIM_DT, sink, gx, gy, gz, this.solver.ccd);
-    // R-PHYS2: cross-object joints (hitches, chains, straps), then carrier surfaces (cargo on decks / beds).
+    // R-PHYS2: guardrail rail faces vs vehicle nodes (props/railContact.ts), then cross-object joints
+    // (hitches, chains, straps, the rails' implicit members), then carrier surfaces (cargo on decks / beds).
+    if (this.railList.length > 0 && this.railVehicles.length > 0) applyRailContacts(s, this.railList, this.railVehicles, this.contacts.oBox, this.railVehicleSlots, SIM_DT, gx, gy, gz, this.wakeObject);
     if (tow !== null) tow.apply(s, SIM_DT, this.tick, sink, gx, gy, gz);
     // Phase 3, per awake object ascending: water → ground → static colliders → integrate.
     const water = this.water;
@@ -1936,6 +1996,9 @@ function quatMul(a: readonly number[], b: readonly number[]): [number, number, n
   const [bx, by, bz, bw] = b as [number, number, number, number];
   return [aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx, aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz];
 }
+
+/** Joint Gauss-Seidel sweeps once a prop with implicit members (a guardrail) exists (trailer/joints.ts). */
+export const PROP_LINK_ITERATIONS = 2;
 
 /**
  * R-PHYS2 → R-PHYS: water in the cylinders (VehicleRuntime.water.hydrolocked) bends the rods — the engine

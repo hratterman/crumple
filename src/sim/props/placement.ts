@@ -20,6 +20,13 @@ const OVERLAP_EPS = 1e-3;
 /** Facing vectors must be unit to this tolerance. */
 const UNIT_EPS = 1e-3;
 
+/**
+ * Lap-spliced keys (props/joins.ts SPLICE group 'guardrail'): a run of W-beam
+ * panels laid along a curve shares its end columns, so neighbouring proxies
+ * overlap by construction — their proxies are not checked against each other.
+ */
+export const SPLICED_PROP_KEYS: ReadonlySet<string> = new Set(['guardrail', 'guardrailEnd']);
+
 const fail = (msg: string): never => {
   throw new WorldLayoutError(`props: ${msg}`);
 };
@@ -34,8 +41,27 @@ export function facingQuat(fx: number, fz: number): [number, number, number, num
   return [0, s, 0, c];
 }
 
-/** World AABB of a prop's proxy under a yaw-only transform. */
+/**
+ * facingQuat followed (in the prop frame) by a tilt about local Z that raises
+ * local +X by `slope` (rise per metre run): a guardrail panel following the
+ * road's grade. slope 0 → facingQuat exactly.
+ */
+export function facingSlopeQuat(fx: number, fz: number, slope: number): [number, number, number, number] {
+  const q = facingQuat(fx, fz);
+  if (slope === 0) return q;
+  // Half-angle of θ = atan(slope): cos θ = 1/√(1+m²); sin(θ/2), cos(θ/2) from it.
+  const cosT = 1 / Math.sqrt(1 + slope * slope);
+  const hz = (slope > 0 ? 1 : -1) * Math.sqrt((1 - cosT) / 2);
+  const hw = Math.sqrt((1 + cosT) / 2);
+  // q ⊗ (0, 0, hz, hw) with q = (0, y, 0, w).
+  const y = q[1];
+  const w = q[3];
+  return [y * hz, y * hw, w * hz, w * hw];
+}
+
+/** World AABB of a prop's proxy under its transform (yaw-only fast path; a tilted one bounds the 8 corners). */
 export function proxyAabb(def: PropDef, pos: readonly number[], quat: readonly number[]): [number, number, number, number, number, number] {
+  if (quat[0] !== 0 || quat[2] !== 0) return tiltedAabb(def, pos, quat);
   const s = quat[1]!;
   const c = quat[3]!;
   // Yaw rotation from (0, s, 0, c): x' = cos·x + sin·z, z' = −sin·x + cos·z.
@@ -49,6 +75,28 @@ export function proxyAabb(def: PropDef, pos: readonly number[], quat: readonly n
   const pz = pos[2]! - sin * cx + cos * cz;
   const py = pos[1]! + cy;
   return [px - wx, py - hy, pz - wz, px + wx, py + hy, pz + wz];
+}
+
+function tiltedAabb(def: PropDef, pos: readonly number[], q: readonly number[]): [number, number, number, number, number, number] {
+  const [qx, qy, qz, qw] = q as [number, number, number, number];
+  const [cx, cy, cz] = def.proxy.center;
+  const [hx, hy, hz] = def.proxy.halfExtents;
+  const b: [number, number, number, number, number, number] = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
+  for (let k = 0; k < 8; k++) {
+    const vx = cx + (k & 1 ? hx : -hx);
+    const vy = cy + (k & 2 ? hy : -hy);
+    const vz = cz + (k & 4 ? hz : -hz);
+    // v' = v + 2w(u×v) + 2u×(u×v), u = (qx, qy, qz).
+    const tx = 2 * (qy * vz - qz * vy);
+    const ty = 2 * (qz * vx - qx * vz);
+    const tz = 2 * (qx * vy - qy * vx);
+    const p = [pos[0]! + vx + qw * tx + (qy * tz - qz * ty), pos[1]! + vy + qw * ty + (qz * tx - qx * tz), pos[2]! + vz + qw * tz + (qx * ty - qy * tx)];
+    for (let a = 0; a < 3; a++) {
+      if (p[a]! < b[a]!) b[a] = p[a]!;
+      if (p[a]! > b[a + 3]!) b[a + 3] = p[a]!;
+    }
+  }
+  return b;
 }
 
 /** Highest ground under a prop's footprint at (x, z): the point itself and the 4 corners of its rotated proxy AABB. */
@@ -99,7 +147,9 @@ export const resolvePropInstances: ResolvePropInstances = (placements, heightAt)
     const count = p.row?.count ?? 1;
     if (!Number.isInteger(count) || count < 1) fail(`${where}.row.count must be an integer >= 1`);
     const [sx, sz] = p.row ? vec2(p.row.step, `${where}.row.step`) : [0, 0];
-    const quat = facingQuat(fx, fz);
+    const slope = p.slope ?? 0;
+    if (!Number.isFinite(slope) || Math.abs(slope) > 0.3) fail(`${where}.slope must be finite, |slope| <= 0.3`);
+    const quat = facingSlopeQuat(fx, fz, slope);
     const single = count === 1 && stack === 1;
     for (let r = 0; r < count; r++) {
       const x = x0 + r * sx;
@@ -127,8 +177,10 @@ export const resolvePropInstances: ResolvePropInstances = (placements, heightAt)
   // Proxies must not overlap (touching within OVERLAP_EPS is fine: stacks, rows at exact pitch).
   for (let i = 0; i < out.length; i++) {
     const a = out[i]!.aabb;
+    const si = SPLICED_PROP_KEYS.has(out[i]!.prop);
     for (let j = i + 1; j < out.length; j++) {
       const b = out[j]!.aabb;
+      if (si && SPLICED_PROP_KEYS.has(out[j]!.prop)) continue;
       if (
         a[0] < b[3] - OVERLAP_EPS &&
         b[0] < a[3] - OVERLAP_EPS &&

@@ -32,7 +32,6 @@ import type { RigDef } from '../rig/types';
  *  signPost      2.6 m steel post + 0.6 m sign plate, BREAKABLE ground anchor
  *  lightPole     8 m street light (pole + arm + lamp head), BREAKABLE ground anchor
  *  mailbox       1 m timber post + 0.5 m steel box (layout v6, R-WORLD), BREAKABLE ground anchor
- *  guardrail     4.1 m galvanised W-beam on three driven posts (layout v6, R-WORLD), BREAKABLE anchors, the rail yields
  *  stopSign      the signPost rig with a 0.75 m octagonal STOP plate (layout v6, R-WORLD), BREAKABLE anchor
  *  concreteBlock 1.2 × 0.6 × 0.6 m precast block, 1000 kg (heavy, near-rigid)
  * R-PHYS2 (additive, defs/barrel.ts + defs/barriers.ts):
@@ -42,6 +41,8 @@ import type { RigDef } from '../rig/types';
  *  hayBale       round bale 1.5 m Ø × 1.2 m, 320 kg: soft, heavily damped, absorbs a hit
  *  pallet        48 × 40" wooden pallet, 25 kg, stacks (cargo)
  *  fencePanel    2.4 m wooden picket fence section on two set posts (BREAKABLE anchors): splinters apart
+ *  guardrail     3.81 m W-beam panel on two steel posts in soil (spliced runs; implicit rail tension links)
+ *  guardrailEnd  the same with the run's end cable-anchored
  */
 export type PropKey =
   | 'cone'
@@ -52,7 +53,6 @@ export type PropKey =
   | 'signPost'
   | 'lightPole'
   | 'stopSign'
-  | 'guardrail'
   | 'mailbox'
   | 'concreteBlock'
   | 'barrelFull'
@@ -60,7 +60,9 @@ export type PropKey =
   | 'jerseyBarrier'
   | 'hayBale'
   | 'pallet'
-  | 'fencePanel';
+  | 'fencePanel'
+  | 'guardrail'
+  | 'guardrailEnd';
 export const PROP_KEYS: readonly PropKey[] = [
   'cone',
   'barrel',
@@ -70,7 +72,6 @@ export const PROP_KEYS: readonly PropKey[] = [
   'signPost',
   'lightPole',
   'stopSign',
-  'guardrail',
   'mailbox',
   'concreteBlock',
   'barrelFull',
@@ -79,6 +80,8 @@ export const PROP_KEYS: readonly PropKey[] = [
   'hayBale',
   'pallet',
   'fencePanel',
+  'guardrail',
+  'guardrailEnd',
 ];
 
 /** FX / audio surface class of an object (sparks only from metal/concrete; chips, dust, flakes otherwise). */
@@ -175,6 +178,32 @@ export interface PropDef {
   frame: { origin: string; front: string; top: string };
   /** R-PHYS2 (additive): liquid contents that drain once the prop is torn (props/runtime.ts). */
   fluid?: PropFluid;
+  /**
+   * R-PHYS2 (additive): IMPLICIT members inside the prop (engine JointSet links, both ends on this prop):
+   * stiffness beyond the explicit beam budget (a guardrail's rail in tension, its anchor cable).
+   * Rest = the rig's rest distance; `yieldF` = plastic flow; repaired with the prop.
+   */
+  links?: readonly PropLink[];
+}
+
+/** One implicit in-prop member (PropDef.links). */
+export interface PropLink {
+  a: string;
+  b: string;
+  /** N/m, N·s/m. */
+  k: number;
+  c: number;
+  breakF: number;
+  yieldF?: number;
+  /** Plastic strain at rupture (linear hardening yieldF → breakF), see trailer/joints.ts. */
+  ruptureStrain?: number;
+  /** 'ball' = a zero-length 3-D anchor (with `play`); 'rope' = tension only (a bolt); 'strut' = compression only (a bearing face). Default link. */
+  kind?: 'link' | 'ball' | 'rope' | 'strut';
+  play?: number;
+  /** An axial chain member (trailer/joints.ts JointSpec.chain: a rail row solved exactly along its length). */
+  chain?: boolean;
+  /** Dropped once that end (PROP_JOINS ends[end]) is joined to a neighbour (a terminal's anchor cable). */
+  end?: 0 | 1;
 }
 
 /**
@@ -217,7 +246,6 @@ export const PROP_RIG_BUDGET: Readonly<Record<PropKey, { nodes: number; beams: n
   signPost: { nodes: 24, beams: 90 },
   lightPole: { nodes: 36, beams: 140 },
   stopSign: { nodes: 24, beams: 90 },
-  guardrail: { nodes: 86, beams: 480 },
   mailbox: { nodes: 24, beams: 110 },
   concreteBlock: { nodes: 14, beams: 60 },
   barrelFull: { nodes: 40, beams: 180 },
@@ -226,6 +254,8 @@ export const PROP_RIG_BUDGET: Readonly<Record<PropKey, { nodes: number; beams: n
   hayBale: { nodes: 24, beams: 100 },
   pallet: { nodes: 20, beams: 100 },
   fencePanel: { nodes: 64, beams: 260 },
+  guardrail: { nodes: 80, beams: 320 },
+  guardrailEnd: { nodes: 80, beams: 320 },
 };
 /** Design budget for simultaneously awake prop beams (2 kHz). Not enforced in P5 (P6 governor). */
 export const PROP_AWAKE_BEAM_BUDGET = 2500;

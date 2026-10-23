@@ -468,56 +468,6 @@ function mailboxVisual(): PropVisual {
   return { prop: 'mailbox', panels };
 }
 
-// ============================================================ guardrail (layout v6)
-function guardrailVisual(): PropVisual {
-  const panels: PropPanelDef[] = [];
-  // W-beam: profile (y, z) toward traffic (−Z); stations every 0.25 m so the skin bends with the rail nodes.
-  const prof: [number, number][] = [
-    [0.44, -0.17],
-    [0.5, -0.245],
-    [0.555, -0.205],
-    [0.605, -0.15],
-    [0.655, -0.205],
-    [0.71, -0.245],
-    [0.77, -0.17],
-  ];
-  const rail = new MeshBuilder();
-  const xs: number[] = [];
-  for (let i = 0; i <= 16; i++) xs.push(-2 + i * 0.25);
-  xs[0] = -2.05;
-  xs[16] = 2.05;
-  for (const face of [-1, 1] as const) {
-    const base = rail.vertexCount;
-    const off = face < 0 ? 0 : 0.004;
-    for (const x of xs) {
-      prof.forEach(([y, z], j) => {
-        const a = prof[Math.max(0, j - 1)]!;
-        const b = prof[Math.min(prof.length - 1, j + 1)]!;
-        const dy = b[0] - a[0];
-        const dz = b[1] - a[1];
-        const l = Math.hypot(dy, dz) || 1;
-        rail.vert([x, y, z + off], [0, (face * -dz) / l, (face * dy) / l], x, y);
-      });
-    }
-    const n = prof.length;
-    for (let i = 0; i + 1 < xs.length; i++) {
-      for (let j = 0; j + 1 < n; j++) {
-        const a = base + i * n + j;
-        if (face < 0) rail.quad(a, a + 1, a + n + 1, a + n);
-        else rail.quad(a, a + n, a + n + 1, a + 1);
-      }
-    }
-  }
-  panels.push(panel('rail', 'galvanized', rail, ['rail_*']));
-  [-1.9, 0, 1.9].forEach((px, k) => {
-    const post = new MeshBuilder();
-    roundedBox(post, [px, 0.36, 0], [0.075, 0.42, 0.05], { radius: 0.006, step: st(0.2) });
-    roundedBox(post, [px, 0.6, -0.11], [0.05, 0.15, 0.06], { radius: 0.004, step: st(0.1) });
-    panels.push(panel(`post${k}`, 'galvanized', post, [`p${k}_*`]));
-  });
-  return { prop: 'guardrail', panels };
-}
-
 // ============================================================ light pole
 function lightPoleVisual(rig: CompiledRig): PropVisual {
   const panels: PropPanelDef[] = [];
@@ -724,6 +674,34 @@ function fenceVisual(): PropVisual {
   return { prop: 'fencePanel', panels };
 }
 
+/** W-beam guardrail panel (sim: props/defs/guardrail.ts): the rail's W section at the contact surface, steel posts on blockouts. */
+function guardrailVisual(key: 'guardrail' | 'guardrailEnd'): PropVisual {
+  const panels: PropPanelDef[] = [];
+  // W section (z, y): the two peaks on the 0.1 m contact surface (z −0.1), the valley 83 mm back, 2.7 mm sheet.
+  const front: [number, number][] = [
+    [-0.055, 0.476],
+    [-0.1, 0.51],
+    [-0.1, 0.575],
+    [-0.017, 0.631],
+    [-0.1, 0.687],
+    [-0.1, 0.752],
+    [-0.055, 0.787],
+  ];
+  const sec: [number, number][] = [...front, ...front.slice().reverse().map(([z, y]) => [z + 0.0027, y] as [number, number])];
+  const rail = new MeshBuilder();
+  prismX(rail, sec, -1.905, 1.905, st(0.25));
+  panels.push(panel('rail', 'galvanized', rail, ['rt*', 'rb*', 'rv*']));
+  [-0.9525, 0.9525].forEach((x, i) => {
+    const post = new MeshBuilder();
+    roundedBox(post, [x, 0.36, 0.435], [0.05, 0.36, 0.075], { radius: 0.004, step: st(0.25) });
+    panels.push(panel(`post${i}`, 'galvanized', post, [`p${i}_*`]));
+    const block = new MeshBuilder();
+    roundedBox(block, [x, 0.63, 0.21], [0.075, 0.1, 0.15], { radius: 0.004, step: st(0.2) });
+    panels.push(panel(`block${i}`, 'wood', block, [`k${i}*`, `p${i}_3`, `p${i}_4`, `p${i}_5`]));
+  });
+  return { prop: key, panels };
+}
+
 // ============================================================ registry
 /** LOD1 detail factor (segment counts × this, grid steps ÷ this). */
 export const PROP_LOD1_DETAIL = 0.45;
@@ -749,8 +727,6 @@ function build(key: PropKey, rig: CompiledRig): PropVisual {
       return lightPoleVisual(rig);
     case 'stopSign':
       return stopSignVisual(rig);
-    case 'guardrail':
-      return guardrailVisual();
     case 'mailbox':
       return mailboxVisual();
     case 'barrelFull':
@@ -765,6 +741,9 @@ function build(key: PropKey, rig: CompiledRig): PropVisual {
       return palletVisual();
     case 'fencePanel':
       return fenceVisual();
+    case 'guardrail':
+    case 'guardrailEnd':
+      return guardrailVisual(key);
   }
 }
 
