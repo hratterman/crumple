@@ -18,7 +18,6 @@ import { blit, camera, createCanvas, drawLine, drawText, drawTriangle, encodePng
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
-const imp = async (p) => (await runnerImport(resolve(ROOT, 'src', p))).module;
 
 const CAR = process.env.CAR ?? 'sedan';
 const TIERS = (process.env.TIERS ?? 'standard,high').split(',');
@@ -33,13 +32,11 @@ const VIEW = process.env.VIEW ?? 'body';
 const CLOSE = process.env.CLOSE ? process.env.CLOSE.split('|').map((p) => p.split(',').map(Number)) : null;
 mkdirSync(OUT, { recursive: true });
 
-const crash = await imp('sim/vehicle/crash.ts');
-const builder = await imp('sim/vehicle/builder.ts');
-const hdSim = await imp('sim/vehicle/defs/hd/index.ts');
-const hdVis = await imp('render/vehicle/defs/hd/index.ts');
-const loft = await imp('render/vehicle/loft.ts');
-const binder = await imp('render/vehicle/binder.ts');
-const lods = await imp('render/vehicle/lods.ts');
+// one module graph (rig-modules.ts): the solver preset set here is the one the harness's engines use
+const M = (await runnerImport(resolve(HERE, 'rig-modules.ts'))).module;
+const { crash, builder, hdSim, hdVis, loft, binder, lods } = M;
+const engineMod = M.engine;
+const { SOLVER_PRESETS } = M.messages;
 
 const MAT = {
   paint: [176, 32, 38], trim: [38, 40, 44], chrome: [190, 194, 200], glass: [60, 74, 92], rubber: [24, 24, 26], lightHead: [220, 224, 230],
@@ -64,6 +61,8 @@ function parseCase(c) {
 
 /** Runs one crash; returns frames (object-local node positions) at TIMES_MS after contact + the collider description. */
 function run(v, c) {
+  // as played: the tier's solver preset (R-CORE SOLVER_PRESETS)
+  engineMod.setDefaultSolver(SOLVER_PRESETS[v.tier] ?? SOLVER_PRESETS.standard);
   const want = TIMES_MS.map((ms) => Math.round((ms / 1000) * 2000));
   const frames = new Map();
   let collider = null;
