@@ -1480,7 +1480,8 @@ function buildBeater(): { def: VehicleDef; design: BeaterDesign } {
     aero: { dragCoeffArea: 0.68, liftCoeffArea: 0.1, liftFront: 0.06, liftRear: 0.04 },
     // R-PHYS: asymmetric digressive dampers (dampers.ts: rebound 2.6 : 1 bump, knee 0.1 m/s)
     dampers: { front: true, rear: true },
-    steering: { maxWheelAngleDeg: round((BEATER_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
+    // R-PHYS steering system (steering.ts): engine-driven hydraulic assist, 16.5:1 (3 turns): barely speed-sensitive, light and numb at speed
+    steering: { maxWheelAngleDeg: round((BEATER_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2), system: { ratio: 16.5, torsionBarNmPerDeg: 1.8, assistGain0: 9, assistGainHigh: 7, assistSpeed: 10, assistMaxNm: 70, inertia: 0.06 } },
     frame: { origin: sid(7, 'tn'), front: sid(2, 'rs'), top: sid(7, 'rf') },
     // Feel pass: rigid shell cluster (shellDefs.ts). The beater folds like paper: rigid while driving, but
     // any real impact (a 1 cm dent or 2 m/s at a node) hands the WHOLE body back to its tired beams, so it

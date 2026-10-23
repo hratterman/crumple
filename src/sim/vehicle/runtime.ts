@@ -62,6 +62,7 @@ import { DERATE_START_C, LOW_OIL, createEngineSystems, detectEngineDamage, engin
 import { applyDampers, createVehicleDampers, rebaseDampers, type DamperState } from './dampers';
 import { createBrakeSystem, resetBrakeSystem, stepBrakes, type BrakeSystemState } from './brakes';
 import { createTyreState, resetTyreState, stepTyre, type TyreState } from './tyre';
+import { createSteering, rebaseSteering, resetSteering, stepSteering, type SteeringState } from './steering';
 
 /** Air density, kg/m³ (AeroDef contract). */
 export const AIR_DENSITY = 1.225;
@@ -105,6 +106,8 @@ export interface VehicleRuntimeEx extends VehicleRuntime {
   /** R-PHYS: rig-local engine / gearbox nodes (group 'engine'; engine rock) and whether the engine is transverse. */
   engineNodes: Int32Array;
   engineTransverse: boolean;
+  /** R-PHYS: steering system (steering.ts); null = the action drives the hydros. */
+  steeringSys: SteeringState | null;
   /** R-PHYS: ext telemetry block (VEHICLE_EXT_SLOTS f32, telemetry.ts VehicleTelemetryExt), filled by writeVehicleTelemetryExt. */
   telemetryExt: Float32Array;
 }
@@ -242,6 +245,7 @@ export function createVehicleRuntime(
     dampers: null,
     engineSys: undefined as unknown as EngineSystemsState,
     telemetryExt: new Float32Array(VEHICLE_EXT_SLOTS),
+    steeringSys: vehicle.steering.system ? createSteering(vehicle.steering.system, vehicle.steering.maxWheelAngleDeg, rig) : null,
     engineNodes: vehicle.drivetrain.engine?.rock === false ? new Int32Array(0) : engineNodesOf(vehicle),
     engineTransverse: (vehicle.drivetrain.engine?.layout ?? (vehicle.drivetrain.drivenWheels.length > 0 && vehicle.wheels[vehicle.drivetrain.drivenWheels[0]!]!.axle === 'front' ? 'transverse' : 'longitudinal')) === 'transverse',
     brakeHeat: createBrakeHeat(
@@ -285,6 +289,8 @@ export const rebaseVehicle: RebaseVehicle = (vehicle, nodeStart, beamStart) => {
   if (dm) rebaseDampers(dm, beamStart);
   const ty = (vehicle as VehicleRuntimeEx).tyres;
   if (ty) for (const t of ty) t.beamBase = beamStart;
+  const ss = (vehicle as VehicleRuntimeEx).steeringSys;
+  if (ss) rebaseSteering(ss, beamStart);
   for (const w of vehicle.wheels) {
     const cw = w.wheel;
     w.hubI = nodeStart + cw.hubI;
@@ -327,6 +333,11 @@ export function resetVehicleRuntime(vehicle: VehicleRuntime): void {
   if (bh) resetBrakeHeat(bh);
   const es = (vehicle as VehicleRuntimeEx).engineSys;
   if (es) resetEngineSystems(es);
+  const ss = (vehicle as VehicleRuntimeEx).steeringSys;
+  if (ss) {
+    resetSteering(ss);
+    vehicle.steerOut = 0;
+  }
   vehicle.telemetry.fill(0);
   const sh = (vehicle as VehicleRuntimeEx).shell;
   if (sh) for (const c of sh) resetShell(c);
@@ -570,6 +581,15 @@ export function vehiclePreStep(state: SimState, vehicle: VehicleRuntime, actions
   if (dm) applyDampers(state, dm);
   applyParkingClamp(state, vehicle, actions, dt);
   applyAero(state, vehicle);
+  const ss = (vehicle as VehicleRuntimeEx).steeringSys;
+  if (ss) {
+    let v = 0;
+    for (let w = 0; w < wheels.length; w++) {
+      const u = wheels[w]!.omega * wheels[w]!.rollRadius;
+      v += u < 0 ? -u : u;
+    }
+    vehicle.steerOut = stepSteering(state, ss, actions[Action.steer]!, wheels.length > 0 ? v / wheels.length : 0, dt);
+  }
 }
 
 /**

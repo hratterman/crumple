@@ -7,6 +7,7 @@
 import { G, createHandlingSim, kinematics, runBraking, runCircle, runScenario, runStepSteer, setMotion, stepN, type HandlingSample } from '../handling';
 import type { VehicleRuntimeEx } from '../runtime';
 import type { VehicleDef } from '../types';
+import { STEERING_DEFAULTS } from '../steering';
 
 const RAD = 180 / Math.PI;
 
@@ -263,18 +264,51 @@ export interface StepMetrics {
   samples: HandlingSample[];
 }
 
-/** Step steer at `kmh` (ISO 7401: 80 km/h) with steer scaled to land near `targetG` lateral. */
+/** ISO 7401 step input: the steering wheel turned at this rate, °/s (the standard asks 200–500 °/s). */
+export const ISO_STEER_RATE_DEG_S = 500;
+
+/**
+ * ISO 7401 step steer at `kmh` (80 km/h): the steering wheel turned to `steer` at ISO_STEER_RATE_DEG_S
+ * (steering-wheel degrees through the def's steering ratio) from t = 0.5 s, speed held; times are
+ * measured from the 50 % point of the steering input, as the standard defines them.
+ */
 export function runStepMetrics(def: VehicleDef, steer: number, kmh = 80): StepMetrics {
-  const r = runStepSteer(def, steer, kmh);
-  const s = r.samples;
-  const t50 = 0.5; // instantaneous step at 0.5 s (hydro lag included in the response)
+  const v0 = kmh / 3.6;
+  const ratio = def.steering.system?.ratio ?? STEERING_DEFAULTS.ratio;
+  const rate = ISO_STEER_RATE_DEG_S / (def.steering.maxWheelAngleDeg * ratio);
+  const rise = Math.abs(steer) / rate;
+  const { samples: s } = runScenario({
+    def,
+    initialSpeed: v0,
+    durationS: 4.5,
+    sampleHz: 100,
+    controlHz: 1000,
+    control: (ctx) => {
+      const x = ctx.last;
+      const ev = x === null ? 0 : v0 - x.speed;
+      const u = Math.min(1, Math.max(0, (ctx.t - 0.5) / rise));
+      return { gearSelect: 1, throttle: Math.min(1, Math.max(0, 0.25 + 0.3 * ev)), steer: steer * u };
+    },
+  });
+  const tail = s.filter((x) => x.t >= 3.5);
+  const yawSteady = tail.reduce((a, x) => a + x.yawRate, 0) / tail.length;
+  let pk = 0;
+  let spun = false;
+  for (const x of s) {
+    if (Math.abs(x.yawRate) > Math.abs(pk)) pk = x.yawRate;
+    if (Math.abs(x.sideslip) > (20 * Math.PI) / 180) spun = true;
+  }
+  const r = { yawSteady, overshoot: yawSteady !== 0 ? pk / yawSteady : Infinity, spun, latG: tail.reduce((a, x) => a + x.speed * x.yawRate, 0) / tail.length / G };
+  const t50 = 0.5 + rise / 2;
   const ss = r.yawSteady;
   let t90 = Infinity;
   let tPeak = t50;
   let peak = 0;
   // ISO 7401 peak response time: the FIRST yaw-rate maximum after the step (a local maximum over
-  // ± 100 ms); a later, slower drift of the steady state (roll / compliance settling) is not the response
-  // peak. Falls back to the global maximum when the response rises monotonically.
+  // ± 100 ms) that reaches the steady state (≥ 98 %: a hesitation below it on the way up — the coupe's
+  // plateau at 95 % while its rack and roll settle — is not the response peak); a later, slower drift of
+  // the steady state (roll / compliance settling) is not the response peak. Falls back to the global
+  // maximum when the response rises monotonically.
   let first = -1;
   for (let i = 0; i < s.length; i++) {
     const x = s[i]!;
@@ -285,7 +319,7 @@ export function runStepMetrics(def: VehicleDef, steer: number, kmh = 80): StepMe
       peak = a;
       tPeak = x.t - t50;
     }
-    if (first < 0 && t90 !== Infinity) {
+    if (first < 0 && t90 !== Infinity && a >= 0.98 * Math.abs(ss)) {
       let held = true;
       for (let j = i + 1; j < s.length && s[j]!.t <= x.t + 0.1; j++) if (Math.abs(s[j]!.yawRate) >= a) held = false;
       let rising = true;
