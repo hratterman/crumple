@@ -23,6 +23,9 @@ export interface GameSettings {
   traffic: TrafficSetting;
   /** Traction control engaged on every spawn / swap (X still toggles it while driving). */
   tractionControl: boolean;
+  /** R-PHYS: anti-lock brakes / stability control engaged on every spawn / swap (vehicles that have them). */
+  abs: boolean;
+  esc: boolean;
   chase: ChaseFraming;
   /** Chase camera base field of view, degrees. */
   fov: number;
@@ -56,6 +59,8 @@ export const DEFAULT_SETTINGS: Readonly<GameSettings> = {
   units: 'kmh',
   traffic: 'normal',
   tractionControl: true,
+  abs: true,
+  esc: true,
   chase: 'normal',
   fov: 60,
   volume: 0.8,
@@ -115,6 +120,9 @@ export function sanitizeSettings(raw: unknown): GameSettings {
     units: pick(SPEED_UNITS, o.units, d.units),
     traffic: pick(TRAFFIC_SETTINGS, o.traffic, d.traffic),
     tractionControl: typeof o.tractionControl === 'boolean' ? o.tractionControl : d.tractionControl,
+    abs: typeof o.abs === 'boolean' ? o.abs : d.abs,
+    // ESC brakes through the ABS modulator: no ESC without ABS
+    esc: (typeof o.esc === 'boolean' ? o.esc : d.esc) && o.abs !== false,
     chase: pick(CHASE_FRAMINGS, o.chase, d.chase),
     fov: pick(FOV_CHOICES, o.fov, d.fov),
     volume: vol,

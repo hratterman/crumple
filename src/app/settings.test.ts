@@ -12,6 +12,8 @@ describe('settings', () => {
       units: 'mph',
       traffic: 'heavy',
       tractionControl: false,
+      abs: true,
+      esc: true,
       chase: 'far',
       fov: 70,
       volume: 0.4,
@@ -30,6 +32,9 @@ describe('settings', () => {
     expect(sanitizeSettings({ timeOfDay: 'noon', timeSpeed: 7, weather: 'hail' })).toMatchObject({ timeOfDay: DEFAULT_SETTINGS.timeOfDay, timeSpeed: 0, weather: 'clear' });
     expect(sanitizeSettings({ engineVolume: 0.3, effectsVolume: 2, ambienceVolume: 'x', muted: true })).toMatchObject({ engineVolume: 0.3, effectsVolume: 1, ambienceVolume: 0.8, muted: true });
     expect(sanitizeSettings({ crashCam: false }).crashCam).toBe(false);
+    expect(sanitizeSettings({ abs: false, esc: false })).toMatchObject({ abs: false, esc: false });
+    expect(sanitizeSettings({ abs: 0, esc: 'off' })).toMatchObject({ abs: true, esc: true });
+    expect(sanitizeSettings({ abs: false, esc: true })).toMatchObject({ abs: false, esc: false });
     expect(sanitizeSettings({ crashCam: 'no' }).crashCam).toBe(true);
     const bad = sanitizeSettings({ units: 'knots', traffic: 7, tractionControl: 'yes', chase: null, fov: 61, volume: 9 });
     expect(bad).toEqual({ ...DEFAULT_SETTINGS, volume: 1 });

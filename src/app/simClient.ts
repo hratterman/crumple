@@ -37,7 +37,7 @@ import {
 import { createTrafficAgentFrame, TRAFFIC_FLAG_AWAKE, TRAFFIC_FLAG_TELEPORTED, type TrafficAgentFrame, type TrafficDensity } from '../protocol/traffic';
 import { NODE_STRIDE } from '../protocol/layout';
 import { SnapshotReader } from '../protocol/codec';
-import { readVehicleTelemetry, readVehicleTelemetryExt, type VehicleTelemetryExtFrame, type VehicleTelemetryFrame } from '../protocol/telemetry';
+import { readVehicleTelemetry, type VehicleTelemetryFrame } from '../protocol/telemetry';
 import { compileRig } from '../sim/rig/builder';
 import type { RigDef } from '../sim/rig/types';
 import { buildVehicleRig } from '../sim/vehicle/builder';
@@ -834,13 +834,6 @@ export class SimClient {
     if (!cur) return null;
     const i = cur.findObject(objectId);
     return i < 0 ? null : cur.objectTelemetryExt(i);
-  }
-
-  /** R-PHYS: decodes the latest ext telemetry of `objectId` into `out`; false (out.present = false) when absent. */
-  readTelemetryExt(objectId: number, out: VehicleTelemetryExtFrame): boolean {
-    const t = this.telemetryExt(objectId);
-    readVehicleTelemetryExt(t, out);
-    return t !== null;
   }
 
   /** Latest strains for `objectId` (object-local beam order), or null (absent / no debugStrains). */
