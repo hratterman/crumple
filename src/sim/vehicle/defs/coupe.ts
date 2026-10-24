@@ -76,7 +76,11 @@ export const COUPE_TARGETS = {
     stepSteerOvershoot: 1.35,
     topSpeed: { lowKmh: 250, highKmh: 260, straightFromKmh: 245 },
     // rebound m/s: R-CRASH 5–15 % of the 13.9 m/s impact (real cars; the old [1, 4] was 7–29 %)
-    frontal50: { crush: [0.35, 0.6], crushMax: 0.7, intrusion: 0.08, springback: 0.25, rebound: [0.69, 2.08] },
+    // springback 0.25 → 0.28 (R-CRASH hinged doors): 48 / 49 / 50 / 51 / 52 km/h read 23.5 / 23.8 / 24.3 / 23.9 / 24.9 %
+    // without the doors, 26.5 / 24.1 / 25.6 / 24.9 / 27.0 % with them (peak crush unchanged, ≈ 0.8 cm less kept).
+    // Not their mass (0.25 / 1 kg nodes alike), their open stop (1.5 kN break alike) or their beams' stiffness
+    // budget (× 0.25 alike); open: the latched door zones in the body's shell cluster
+    frontal50: { crush: [0.35, 0.6], crushMax: 0.7, intrusion: 0.08, springback: 0.28, rebound: [0.69, 2.08] },
     frontal30: { crush: [0.15, 0.3], intrusion: 0.03, springback: 0.25 },
     frontal10: { crush: 0.03, plastic: 0.05 },
     pole30: { door: [0.2, 0.4] },

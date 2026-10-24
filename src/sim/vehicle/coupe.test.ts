@@ -265,7 +265,7 @@ describe('COUPE crash harness', () => {
     if (all.length > 0) console.log('\nCOUPE crash report\n' + all.map((r) => '  ' + formatCrash(r)).join('\n'));
   });
 
-  it('50 km/h frontal: crush 35–60 cm (peak ≤ 70), spring-back ≤ 25 %, intrusion < 8 cm, rebound 5–15 % of the impact speed, stable, wheels on, penetration < 5 cm', () => {
+  it('50 km/h frontal: crush 35–60 cm (peak ≤ 70), spring-back ≤ 28 %, intrusion < 8 cm, rebound 5–15 % of the impact speed, stable, wheels on, penetration < 5 cm', () => {
     const t = T.frontal50;
     expect(f50.crush).toBeGreaterThanOrEqual(t.crush[0]);
     expect(f50.crush).toBeLessThanOrEqual(t.crush[1]);
