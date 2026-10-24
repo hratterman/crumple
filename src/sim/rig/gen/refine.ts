@@ -299,7 +299,10 @@ export function refineVehicle(base: VehicleDef, opts: RefineOptions): RefinedVeh
   });
   // donors never touch the suspension / engine / axle (their anchors keep R-PHYS's compliance) or shock / hydro beams
   const shellLink = (b: RigBeamDef): boolean => (b.type === 'normal' || b.type === 'support' || b.type === 'bounded') && shellGroup(b.a) && shellGroup(b.b);
-  const bodyGroup = (id: string): boolean => SHELL_BODY_GROUPS.includes(nodes[index.get(id) ?? -1]?.group ?? '');
+  // R-CRASH hinged closures (door / trunk sub-rigs) hang on body nodes by hinge / latch / stop beams: those links
+  // are not suspension / engine anchors, so a body node carrying one stays a donor (else the coupe's dense
+  // variant loses its door-ring donors and the bounded mass solve fails)
+  const bodyGroup = (id: string): boolean => [...SHELL_BODY_GROUPS, 'door', 'trunk'].includes(nodes[index.get(id) ?? -1]?.group ?? '');
   const bodyLink = (b: RigBeamDef): boolean => (b.type === 'normal' || b.type === 'support' || b.type === 'bounded') && bodyGroup(b.a) && bodyGroup(b.b);
   // Σk / Σd per backbone node as the standard car has them
   const Kbase = new Map<string, number>();
