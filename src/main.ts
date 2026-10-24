@@ -70,7 +70,7 @@ import { createFarLand, FARLAND_OUTER_M } from './render/terrain/farland';
 import type { ChallengeHost } from './app/challenges';
 import type { FxSystem } from './render/fx/types';
 import type { PropRenderer } from './render/props/types';
-import { createStudio, type Studio } from './render/showroom/studio';
+import type { Studio } from './render/showroom/studio';
 import { bindPanels } from './render/vehicle/binder';
 import { createFlexSkin } from './render/vehicle/flexskin';
 import { bodyVisibleIn, VEHICLE_DEBUG_VIEWS, type VehicleDebugView } from './render/vehicle/index';
@@ -94,7 +94,7 @@ import { softCube } from './sim/rig/testrigs';
 import type { TransmissionMode } from './sim/vehicle/types';
 import { Hud, type HudVehicleSpec } from './ui/hud';
 import { LoadingScreen } from './ui/loading';
-import { PauseMenu, type QualityLevelName } from './ui/pause';
+import type { PauseMenu, QualityLevelName } from './ui/pause';
 import { Showroom, type ShowroomStage } from './ui/showroom/showroom';
 import { createReplaySession, type ReplaySession } from './ui/replay/session';
 import type { PerfOverlay, PerfOverlayData } from './ui/perfOverlay';
@@ -933,6 +933,11 @@ async function swapVehicle(choice: VehicleChoice, spawnAt: number | null): Promi
 
 // ---- menus
 let pauseMenu: PauseMenu | null = null;
+/**
+ * The pause menu loads lazily (its own chunk, CSS included: keeps the app chunk under the 500 kB
+ * budget); resolves once it is built. An Escape before then opens it once it has loaded.
+ */
+let pauseMenuP: Promise<void> | null = null;
 let showroom: Showroom | null = null;
 let studio: Studio | null = null;
 /** Where the showroom returns on Back. */
@@ -986,7 +991,11 @@ function challengesClosed(reason: 'start' | 'back'): void {
 }
 
 function openPause(): void {
-  if (mode !== 'drive' || !pauseMenu) return;
+  if (mode !== 'drive') return;
+  if (!pauseMenu) {
+    void pauseMenuP?.then(openPause);
+    return;
+  }
   enterMenuMode('pause');
   pauseMenu.open();
 }
@@ -1063,56 +1072,58 @@ const stage: ShowroomStage = {
 
 function createMenus(): void {
   const spawns = () => (terrain ? terrain.spawns.map((s) => ({ id: s.id, name: s.name })) : []);
-  pauseMenu = new PauseMenu(document.body, {
-    spawns,
-    spawnIndex: () => spawnIndex,
-    vehicle: () => {
-      const e = player ? player.assets.entry : getVehicleEntry(DEFAULT_VEHICLE_ID);
-      return { name: e.stats.name, className: e.stats.class, paint: player ? player.palette.name : e.palettes[0]!.name };
-    },
-    settings: () => settings,
-    quality: () => (quality ? quality.preset.level : ctx.quality.level) as QualityLevelName,
-    onResume: resume,
-    onChooseVehicle: () => openShowroom('pause'),
-    onSpawn: (i) => {
-      resume();
-      challenges?.quit();
-      teleport(i);
-    },
-    onRestart: () => {
-      resume();
-      if (challenges?.active) return challenges.restart(); // P8: restart the running challenge
-      teleport(spawnIndex);
-      if (layoutPropCount > 0) client.resetProps();
-      fx?.clear();
-    },
-    onSettings: setSetting,
-    onQuality: (level) => {
-      if (!quality || quality.preset.level === level) return;
-      quality.setLevel(level);
-      redrawPaused = true;
-    },
-    // P7 (R2): replay + photo mode from the menu.
-    onReplay: () => {
-      resume();
-      void replaySession?.enterReplay();
-    },
-    onPhoto: () => {
-      resume();
-      void replaySession?.enterPhoto();
-    },
-    replayInfo: () => ({ seconds: replay.duration, crashes: replay.markers().length }),
-    // P8: stunt challenges
-    onChallenges: () => openChallenges('pause'),
-    challengeActive: () => (challenges?.active ? challenges.activeName : null),
-    onChallengeRestart: () => {
-      resume();
-      challenges?.restart();
-    },
-    onChallengeQuit: () => {
-      resume();
-      challenges?.quit();
-    },
+  pauseMenuP = import('./ui/pause').then(({ PauseMenu }) => {
+    pauseMenu = new PauseMenu(document.body, {
+      spawns,
+      spawnIndex: () => spawnIndex,
+      vehicle: () => {
+        const e = player ? player.assets.entry : getVehicleEntry(DEFAULT_VEHICLE_ID);
+        return { name: e.stats.name, className: e.stats.class, paint: player ? player.palette.name : e.palettes[0]!.name };
+      },
+      settings: () => settings,
+      quality: () => (quality ? quality.preset.level : ctx.quality.level) as QualityLevelName,
+      onResume: resume,
+      onChooseVehicle: () => openShowroom('pause'),
+      onSpawn: (i) => {
+        resume();
+        challenges?.quit();
+        teleport(i);
+      },
+      onRestart: () => {
+        resume();
+        if (challenges?.active) return challenges.restart(); // P8: restart the running challenge
+        teleport(spawnIndex);
+        if (layoutPropCount > 0) client.resetProps();
+        fx?.clear();
+      },
+      onSettings: setSetting,
+      onQuality: (level) => {
+        if (!quality || quality.preset.level === level) return;
+        quality.setLevel(level);
+        redrawPaused = true;
+      },
+      // P7 (R2): replay + photo mode from the menu.
+      onReplay: () => {
+        resume();
+        void replaySession?.enterReplay();
+      },
+      onPhoto: () => {
+        resume();
+        void replaySession?.enterPhoto();
+      },
+      replayInfo: () => ({ seconds: replay.duration, crashes: replay.markers().length }),
+      // P8: stunt challenges
+      onChallenges: () => openChallenges('pause'),
+      challengeActive: () => (challenges?.active ? challenges.activeName : null),
+      onChallengeRestart: () => {
+        resume();
+        challenges?.restart();
+      },
+      onChallengeQuit: () => {
+        resume();
+        challenges?.quit();
+      },
+    });
   });
   showroom = new Showroom(document.body, {
     entries: PLAYER_VEHICLE_IDS.map((id) => getVehicleEntry(id)),
@@ -1122,7 +1133,7 @@ function createMenus(): void {
       // ?sq=<level> renders the studio at another preset than the world (screenshots under software GL).
       const sq = params.get('sq');
       const studioQuality = isQualityLevel(sq) ? QUALITY_PRESETS[sq] : ctx.quality;
-      studio ??= createStudio(renderer, { quality: studioQuality, width: ctx.width, height: ctx.height, patchMaterial });
+      if (!studio) studio = (await import('./render/showroom/studio')).createStudio(renderer, { quality: studioQuality, width: ctx.width, height: ctx.height, patchMaterial });
       Object.assign(crumple.debug, { studio });
       return stage;
     },
