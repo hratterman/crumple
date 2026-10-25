@@ -191,6 +191,14 @@ interface Station {
  * sedan's P4 engine, so the rails get the stiffness budget a frontal needs).
  */
 const ENGINE_RAIL = 36;
+/**
+ * R-PHYS: rear frame f8–f10 (spring hangers, the rear link and Panhard pivots, hitch, spare, tank straps):
+ * 16 → 64 kg per rail node (towers 18 → 72, f10 14 → 56; the mass solve keeps 2.1 t and the axle split).
+ * The rear pivots' anchor beams take their stiffness from these nodes' ω·dt budget: at 16 kg the whole
+ * body rotated 0.4° on its rear suspension mounts under 3 kN·m (torsion 7.0 kN·m/deg, the frame itself
+ * twisting < 0.01°); at 64 kg it is 16.3 kN·m/deg (`bodyflex.test`), engine rock back on.
+ */
+const REAR_RAIL = 64;
 const FRAME: readonly Station[] = [
   { id: 'f0', part: 'frame', z: -2.72, closed: true, bulkhead: true, cls: 'horn', mass: { lo: 20, hi: 20 }, ring: [['lo', 0.46, 0.45], ['hi', 0.46, 0.72]] },
   { id: 'f1', part: 'frame', z: -2.4, closed: true, bulkhead: true, cls: 'horn', mass: { lo: 28, hi: 28 }, ring: [['lo', 0.46, 0.45], ['hi', 0.46, 0.72]] },
@@ -203,12 +211,12 @@ const FRAME: readonly Station[] = [
   { id: 'f5', part: 'frame', z: -0.95, closed: true, bulkhead: true, cls: 'frame', mass: { lo: 34, hi: 34 }, ring: [['lo', 0.52, 0.4], ['hi', 0.52, 0.75]] },
   { id: 'f6', part: 'frame', z: -0.15, closed: true, bulkhead: true, cls: 'frame', mass: { lo: 32, hi: 32 }, ring: [['lo', 0.53, 0.4], ['hi', 0.53, 0.75]] },
   { id: 'f7', part: 'frame', z: 0.65, closed: true, bulkhead: true, cls: 'frame', mass: { lo: 30, hi: 30 }, ring: [['lo', 0.53, 0.4], ['hi', 0.53, 0.75]] },
-  { id: 'f8', part: 'frame', z: 1.22, closed: true, bulkhead: true, cls: 'frame', mass: { lo: 16, hi: 16 }, ring: [['lo', 0.53, 0.46], ['hi', 0.53, 0.79]] },
+  { id: 'f8', part: 'frame', z: 1.22, closed: true, bulkhead: true, cls: 'frame', mass: { lo: REAR_RAIL, hi: REAR_RAIL }, ring: [['lo', 0.53, 0.46], ['hi', 0.53, 0.79]] },
   {
-    id: 'f9', part: 'frame', z: Z_R, closed: true, bulkhead: true, cls: 'frame', mass: { lo: 16, hi: 16, tw: 18 },
+    id: 'f9', part: 'frame', z: Z_R, closed: true, bulkhead: true, cls: 'frame', mass: { lo: REAR_RAIL, hi: REAR_RAIL, tw: 72 },
     ring: [['lo', 0.53, 0.6], ['hi', 0.53, 0.86]], extra: [['tw', 0.66, 1.04]],
   },
-  { id: 'f10', part: 'frame', z: 2.5, closed: true, bulkhead: false, cls: 'frame', mass: { lo: 14, hi: 14 }, ring: [['lo', 0.53, 0.6], ['hi', 0.53, 0.86]] },
+  { id: 'f10', part: 'frame', z: 2.5, closed: true, bulkhead: false, cls: 'frame', mass: { lo: 56, hi: 56 }, ring: [['lo', 0.53, 0.6], ['hi', 0.53, 0.86]] },
   { id: 'f11', part: 'frame', z: 3.0, closed: true, bulkhead: true, cls: 'frame', mass: { lo: 16, hi: 16 }, ring: [['lo', 0.52, 0.58], ['hi', 0.52, 0.84]] },
 ];
 
@@ -464,8 +472,7 @@ const DRIVETRAIN: DrivetrainDef = {
   // R-PHYS: halfshaft / CV strength ≈ 2.2 × the peak 1st-gear wheel torque per side (550 × 3.4 × 4.1 / 2 = 3830)
   halfshaftBreakTorque: 8400,
   // R-PHYS engine systems (engineSystems.ts): fuel, cooling, oil, stall / starter
-  engine: { displacementL: 5.0, fuel: 'petrol', tankL: 98 , rock: false },
-  // R-PHYS: no engine rock yet: its body-on-frame ladder (7 kN·m/deg torsion) twisted under the propshaft torque and cost 1 s of 0–100 (frame stiffness: open)
+  engine: { displacementL: 5.0, fuel: 'petrol', tankL: 98 },
   torqueCurve: [
     [0, 280],
     [700, 360],
