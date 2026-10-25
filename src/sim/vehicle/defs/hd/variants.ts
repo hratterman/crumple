@@ -58,11 +58,11 @@ type Loader = (q: HdQuality) => Promise<VehicleVariant | null>;
  */
 export type VariantStatus = 'validated' | 'experimental';
 export const HD_STATUS: Readonly<Record<string, Readonly<Record<HdQuality, VariantStatus>>>> = {
-  sedan: { high: 'validated', ultra: 'validated' },
+  sedan: { high: 'experimental', ultra: 'experimental' },
   coupe: { high: 'validated', ultra: 'experimental' },
   pickup: { high: 'experimental', ultra: 'experimental' },
   boxtruck: { high: 'experimental', ultra: 'experimental' },
-  beater: { high: 'validated', ultra: 'validated' },
+  beater: { high: 'validated', ultra: 'experimental' },
 };
 
 const offered = (car: string, q: HdQuality, experimental: boolean): boolean => !!HD_LOADERS[car] && (experimental || HD_STATUS[car]?.[q] === 'validated');

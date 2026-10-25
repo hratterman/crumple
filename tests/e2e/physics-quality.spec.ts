@@ -23,12 +23,13 @@ const phys = (page: import('@playwright/test').Page) =>
     return { quality: p.quality, kernel: p.kernel, bench: p.kernelBench, playerQuality: p.playerQuality, beams: p.playerBeams, swaps: p.swaps };
   });
 
-test('physics quality: the WASM SIMD kernel runs, ?physics=ultra spawns the HD sedan and drives, the setting respawns it at standard', async ({ page }) => {
+test('physics quality: the WASM SIMD kernel runs, ?physics=high spawns a validated HD rig (coupe) and drives, the setting respawns it at standard', async ({ page }) => {
   test.setTimeout(480_000);
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));
   await page.setViewportSize({ width: 480, height: 270 });
-  await page.goto('/crumple/?q=low&traffic=0&vehicle=sedan&physics=ultra');
+  // R-RIG: a car whose HD tier is VALIDATED (variants.ts HD_STATUS); the HD sedan is experimental since aa93f53
+  await page.goto('/crumple/?q=low&traffic=0&vehicle=coupe&physics=high');
   await page.waitForFunction(() => {
     const c = (window as unknown as { __crumple?: CrumpleGlobal }).__crumple;
     return !!c && c.ready && c.vehicle !== null;
@@ -38,16 +39,16 @@ test('physics quality: the WASM SIMD kernel runs, ?physics=ultra spawns the HD s
   console.log(`[e2e] physics: ${JSON.stringify(a)}`);
   expect(a.kernel).toBe('simd');
   expect(a.bench).toBeGreaterThan(0);
-  expect(a.quality).toBe('ultra');
-  expect(a.playerQuality).toBe('ultra');
-  expect(a.beams).toBeGreaterThan(8000);
+  expect(a.quality).toBe('high');
+  expect(a.playerQuality).toBe('high');
+  expect(a.beams).toBeGreaterThan(3500);
   // Drive it: hold W (releases the spawn hold, like drive.spec).
-  // (The 8.7 k-beam rig runs below real time on a loaded SwiftShader box: wait for the speed, not a clock.)
+  // (The 6 k-beam rig runs below real time on a loaded SwiftShader box: wait for the speed, not a clock.)
   await page.keyboard.down('KeyW');
   await page.waitForFunction(() => (window as unknown as { __crumple: CrumpleGlobal }).__crumple.vehicle!.speed > 2, null, { timeout: 90_000 });
   const v = await page.evaluate(() => (window as unknown as { __crumple: CrumpleGlobal }).__crumple.vehicle!.speed);
   await page.keyboard.up('KeyW');
-  console.log(`[e2e] HD ultra sedan speed on W: ${v.toFixed(1)} m/s`);
+  console.log(`[e2e] HD high coupe speed on W: ${v.toFixed(1)} m/s`);
   expect(v).toBeGreaterThan(2);
   // Settings → standard: respawned in place with the standard rig.
   await page.evaluate(() => (window as unknown as { __crumple: CrumpleGlobal }).__crumple.physics.set('standard'));

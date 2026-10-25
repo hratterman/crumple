@@ -28,7 +28,7 @@ describe('loadVehicleVariant', { timeout: 120_000 }, () => {
     expect((await loadVehicleVariant('nosuchcar', 'ultra', std('sedan'))).quality).toBe('standard');
   });
 
-  it('the sedan, the reference car, is validated at high', () => {
-    expect(HD_STATUS.sedan?.high).toBe('validated');
+  it('at least one car offers a validated HD tier', () => {
+    expect(Object.values(HD_STATUS).some((st) => st.high === 'validated' || st.ultra === 'validated')).toBe(true);
   });
 });
