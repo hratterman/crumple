@@ -1397,7 +1397,7 @@ function buildCoupe(): { def: VehicleDef; design: CoupeDesign } {
     for (const w of wheels) for (const id of w.attach) sumD.set(id, (sumD.get(id) ?? 0) + 2 * (w.attachDamp ?? 0));
     // the scalable share (auto / hood / closure beams): when the uniform factor still leaves a node over the
     // validator's limit (its fixed suspension dampers alone near it: a shock tower once the R-CRASH closures
-    // took 42 kg out of the structure solve), the scalable beams take the whole cut
+    // took their mass out of the structure solve), the scalable beams take the whole cut
     const scalableD = new Map<string, number>();
     for (const b of [...autoBeams, ...hoodBeams, ...closures.beams]) for (const id of [b.a, b.b]) scalableD.set(id, (scalableD.get(id) ?? 0) + (b.d ?? 0));
     const scale = (id: string): number => {
