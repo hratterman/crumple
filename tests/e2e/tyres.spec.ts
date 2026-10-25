@@ -26,7 +26,7 @@ const FLAG_TPMS = 1 << 4;
 const tyres = (page: Page): Promise<Wheel[]> => page.evaluate(() => (window as unknown as { __crumple: CrumpleTyreGlobal }).__crumple.tyres);
 
 test('tyres: wheel telemetry, a cut deflates the tyre (FLAT + TPMS), repair re-inflates it', async ({ page }) => {
-  test.setTimeout(180_000);
+  test.setTimeout(360_000);
   const errors: string[] = [];
   page.on('pageerror', (err) => errors.push(err.stack ?? String(err)));
   page.on('console', (msg) => {
@@ -40,7 +40,7 @@ test('tyres: wheel telemetry, a cut deflates the tyre (FLAT + TPMS), repair re-i
       return !!c && c.ready && c.vehicle !== null && c.tyres.length === 4;
     },
     null,
-    { timeout: 110_000 },
+    { timeout: 240_000 }, // layout v6: the 2560 m world takes minutes to generate on a loaded box
   );
   await page.waitForTimeout(1500);
   const t0 = await tyres(page);
