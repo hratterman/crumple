@@ -346,6 +346,8 @@ export interface RolloverOptions {
   invertedDropM?: number;
   durationS?: number;
   probes: Readonly<Record<string, readonly CrushProbe[]>>;
+  /** R-CRASH diagnostics: called with the live sim at every recorded sample. */
+  onSample?: (sim: HandlingSim) => void;
 }
 
 export interface RolloverResult {
@@ -467,6 +469,7 @@ export function runRollover(def: VehicleDef, opts: RolloverOptions): RolloverRes
     opts.durationS ?? 4,
     () => ({ gearSelect: 0, throttle: 0, brake: 0, steer: 0 }),
     (smp) => {
+      opts.onSample?.(sim);
       for (const g of groups) for (const q of g.list) crushMax[g.g] = Math.max(crushMax[g.g]!, q.rest - height(q, s.posX, s.posY, s.posZ, 0));
       return !Number.isFinite(smp.rollDeg);
     },

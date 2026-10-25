@@ -104,6 +104,12 @@ export interface ShellZone {
    * under crash loads and dents (permanently) only where a load exceeds that.
    */
   yield?: boolean;
+  /**
+   * R-CRASH LATCHED zone (a door / trunk lid held in the body cluster while latched): beam endpoint pairs
+   * (node ids) of its latch. Once any of them is broken the zone releases whole and its nodes stay out of
+   * the cluster (no recapture) until a repair: the closure then swings on its own hinge beams.
+   */
+  latch?: readonly (readonly [string, string])[];
 }
 
 /**
@@ -176,6 +182,9 @@ export interface CompiledShell {
   yields: Uint8Array;
   /** Per tier: [lo, hi, vLo, vHi]. */
   release: Float64Array;
+  /** R-CRASH: per tier, CSR into `latchBeams` (rig-local beam indices of the zone's latch; ShellZone.latch). */
+  latchStart: Int32Array;
+  latchBeams: Int32Array;
 }
 
 /** Compiles VehicleDef.shell: clusters in order, a node claimed by an earlier cluster is skipped by later ones. */
@@ -249,6 +258,24 @@ function compileShell(rig: CompiledRig, bodyNodeCount: number, def: ShellDef | u
     }),
   );
   const tiers = [{ ...SHELL_RELEASE_CRUMPLE, ...def?.release }, ...zones.map((z) => ({ ...SHELL_RELEASE_CELL, ...z.release }))];
+  // latch beams per tier (tier 0 has none)
+  const beamOf = new Map<string, number>();
+  for (let b = 0; b < rig.beamCount; b++) {
+    const a = rig.nodeIds[rig.beamA[b]!]!;
+    const c = rig.nodeIds[rig.beamB[b]!]!;
+    beamOf.set(`${a}|${c}`, b);
+    beamOf.set(`${c}|${a}`, b);
+  }
+  const latchStart = [0, 0];
+  const latchBeams: number[] = [];
+  for (const z of zones) {
+    for (const [a, c] of z.latch ?? []) {
+      const b = beamOf.get(`${a}|${c}`);
+      if (b === undefined) throw new Error(`shell: latch beam ${a}–${c} not in the rig`);
+      latchBeams.push(b);
+    }
+    latchStart.push(latchBeams.length);
+  }
   return {
     nodes: Int32Array.from(nodes),
     rest,
@@ -261,6 +288,8 @@ function compileShell(rig: CompiledRig, bodyNodeCount: number, def: ShellDef | u
     release: Float64Array.from(tiers.flatMap((r) => [r.lo, r.hi, r.vLo, r.vHi])),
     whole: Uint8Array.from([def?.whole ? 1 : 0, ...zones.map((z) => (z.whole ? 1 : 0))]),
     yields: Uint8Array.from([0, ...zones.map((z) => (z.yield ? 1 : 0))]),
+    latchStart: Int32Array.from(latchStart),
+    latchBeams: Int32Array.from(latchBeams),
   };
 }
 

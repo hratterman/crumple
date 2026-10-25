@@ -529,6 +529,32 @@ const GLASS_BEAMS = {
 const pairs = (p: readonly (readonly string[])[]): BeamSelector => ({ pairs: p.map((q) => [q[0]!, q[1]!] as const) });
 const sideBind = (ids: readonly string[], s: 'L' | 'R'): string[] => ids.map((id) => id.replace(/\$/g, s));
 
+/**
+ * R-CRASH hinged closures: the doors and the trunk lid are their own sub-rigs in the sim (dFR_*, dRR_*,
+ * dFL_*, dRL_*, tk_*; src/sim/vehicle/closures.ts), so every panel that belongs to a door / the lid
+ * (skin, seals, handles, door cards, door glass, window sash, mirrors) binds to the closure's nodes and
+ * swings with it. Rigs without closures (the traffic sedan) bind the same panels to the body structure
+ * the closure sits in: SEDAN_CLOSURE_FALLBACK (panel id → the cage bind / glass beams it had before).
+ */
+export const SEDAN_CLOSURE_FALLBACK = new Map<string, { bind: readonly string[]; glass?: BeamSelector }>();
+const DOOR_CAGE = {
+  F: ['s5_hp_$', 's5_sl_$', 's5_cw_$', 's6_sl_$', 's6_dm_$', 's6_bt_$', 's7_sl_$', 's7_dm_$', 's7_bt_$'],
+  R: ['s7_sl_$', 's7_dm_$', 's7_bt_$', 's8_sl_$', 's8_dm_$', 's8_bt_$', 's9_sl_$', 's9_qm_$', 's9_dk_$'],
+} as const;
+/** A door closure's skin grid (rows 0–3; not its inner-panel nodes `_i*`, which sit 14 cm inboard). */
+const doorNodes = (d: 'F' | 'R', s: 'L' | 'R'): string[] => [0, 1, 2, 3].map((r) => `d${d}${s}_${r}*`);
+/** The window frame part of a door closure: its belt row and the frame top (rows 2–3). */
+const doorUpper = (d: 'F' | 'R', s: 'L' | 'R'): string[] => [`d${d}${s}_2*`, `d${d}${s}_3*`];
+/**
+ * Door-glass strain beams: the door frame's quad diagonals (closures.ts skin: a bent door frame cracks its
+ * glass) plus the door ring's cage diagonals (a racked aperture — a rollover's twist — cracks it too).
+ */
+const DOOR_GLASS = {
+  F: (s: 'L' | 'R'): string[][] => [[`dF${s}_20`, `dF${s}_31`], [`dF${s}_21`, `dF${s}_32`], [`dF${s}_22`, `dF${s}_31`], ...GLASS_BEAMS.sideFront(s).map((q) => [...q])],
+  R: (s: 'L' | 'R'): string[][] => [[`dR${s}_20`, `dR${s}_31`], [`dR${s}_21`, `dR${s}_30`], [`dR${s}_22`, `dR${s}_31`], ...GLASS_BEAMS.sideRear(s).map((q) => [...q])],
+};
+const TRUNK_CAGE = ['s10_ld*', 's11_ld*', 's12_ld*'];
+
 /** Panels a LOD2 sedan leaves out (seals, handles, exhaust, small cabin parts behind the glass). */
 const LOD2_DROP = /Seal[LR]?$|^handle|^exhaust|^steering$|^console$|^parcelShelf$|^mirrorGlass|^reflectors$|^plateFrame$/;
 
@@ -760,7 +786,10 @@ export function buildSedanVisual(opts: SedanBuildOptions = { lod: 0 }): VehicleV
     });
     add('cowl', 'trim', 'trim', m.mesh, ['s5_cw*', 's5_fw_*', 's4_fd_*', 's5_hp_*'], { damageWeight: 0.6 });
   }
-  const trunkBind = ['s10_ld*', 's11_ld*', 's12_ld*'];
+  const trunkBind = ['tk_0*', 'tk_1*', 'tk_2*'];
+  const closure = (id: string, bind: readonly string[], glass?: BeamSelector): void => void SEDAN_CLOSURE_FALLBACK.set(id, { bind, glass });
+  closure('trunk', TRUNK_CAGE);
+  closure('trunkSeal', TRUNK_CAGE);
   {
     const m = cutC(S1, [uAbove(S1, u1(K.hood)), planLine(TRUNK_FRONT, 'rear'), vBelow(S1, 1)], { where: (p) => p[2] > 1.35 && p[1] > 0.85 });
     add('trunk', 'trunk', 'paint', m.mesh, trunkBind);
@@ -772,13 +801,17 @@ export function buildSedanVisual(opts: SedanBuildOptions = { lod: 0 }): VehicleV
       const m = cut(S1, [uBelow(S1, u1(K.hood)), vAbove(S1, 0), vline(FENDER_LINE, 'front'), archF()], { where: (p) => p[2] < -0.75 });
       add(`fender${s}`, 'fender', 'paint', perSide(m.mesh, s), sideBind(['s1_fd_$', 's1_rh_$', 's1_rl_$', 's2_fd_$', 's2_rh_$', 's2_rl_$', 's3_fd_$', 's3_tw_$', 's3_rh_$', 's3_rl_$', 's4_fd_$', 's4_rh_$', 's4_rl_$', 's5_hp_$', 's5_cw_$', 's5_sl_$'], s));
     }
-    const doorF = sideBind(['s5_hp_$', 's5_sl_$', 's5_cw_$', 's6_sl_$', 's6_dm_$', 's6_bt_$', 's7_sl_$', 's7_dm_$', 's7_bt_$'], s);
+    const doorF = doorNodes('F', s);
+    closure(`door${s}F`, sideBind(DOOR_CAGE.F, s));
+    closure(`door${s}FSeal`, sideBind(DOOR_CAGE.F, s));
     {
       const m = cut(S1, [uAbove(S1, u1(K.skirt)), uBelow(S1, u1(K.top) - 0.0005, 'hem'), vline(FENDER_LINE, 'rear'), vline(B_LINE, 'front')], { where: (p) => p[2] > -0.95 && p[2] < 0.25 && p[1] < 1.05 });
       add(`door${s}F`, 'door', 'paint', perSide(m.mesh, s), doorF);
       add(`door${s}FSeal`, 'trim', 'rubber', perSide(m.seal, s), doorF, { damageWeight: 0, castShadow: false });
     }
-    const doorR = sideBind(['s7_sl_$', 's7_dm_$', 's7_bt_$', 's8_sl_$', 's8_dm_$', 's8_bt_$', 's9_sl_$', 's9_qm_$', 's9_dk_$'], s);
+    const doorR = doorNodes('R', s);
+    closure(`door${s}R`, sideBind(DOOR_CAGE.R, s));
+    closure(`door${s}RSeal`, sideBind(DOOR_CAGE.R, s));
     {
       const m = cut(S1, [uAbove(S1, u1(K.skirt)), uBelow(S1, u1(K.top) - 0.0005, 'hem'), vline(B_LINE, 'rear'), vline(REAR_DOOR_LINE, 'front'), archR()], { where: (p) => p[2] > 0 && p[2] < 1.15 && p[1] < 1.05 });
       add(`door${s}R`, 'door', 'paint', perSide(m.mesh, s), doorR);
@@ -840,9 +873,11 @@ export function buildSedanVisual(opts: SedanBuildOptions = { lod: 0 }): VehicleV
   for (const s of SIDES) {
     const dlo: Cut[] = [uAboveBy(S4, 0, 0.003, 'seam'), uBelowBy(S4, dloTop, 0.006, 'seam')];
     const fg = cut(S4, [...dlo, zBelow(B_FRONT + 0.03, 'seam'), zAbove(SAIL_Z - 0.02, 'seam')], { offset: -0.012, border: 'seam', where: (p) => p[2] < 0.2 });
-    add(`glass${s}F`, 'glass', 'glass', perSide(fg.mesh, s), sideBind(['s5_cw_$', 's5_hp_$', 's6_bt_$', 's6_rf_$', 's7_bt_$', 's7_rf_$'], s), { ...glassOpts, glass: glassSpec(false, pairs(GLASS_BEAMS.sideFront(s))) });
+    closure(`glass${s}F`, sideBind(['s5_cw_$', 's5_hp_$', 's6_bt_$', 's6_rf_$', 's7_bt_$', 's7_rf_$'], s), pairs(GLASS_BEAMS.sideFront(s)));
+    add(`glass${s}F`, 'glass', 'glass', perSide(fg.mesh, s), doorUpper('F', s), { ...glassOpts, glass: glassSpec(false, pairs(DOOR_GLASS.F(s))) });
     const rg = cut(S4, [...dlo, zAbove(B_REAR - 0.03, 'seam'), zBelow(Q_FRONT + 0.03, 'seam')], { offset: -0.012, border: 'seam', where: (p) => p[2] > 0.1 && p[2] < 1.1 });
-    add(`glass${s}R`, 'glass', 'glass', perSide(rg.mesh, s), sideBind(['s7_bt_$', 's7_rf_$', 's8_bt_$', 's8_rf_$', 's9_dk_$', 's9_qm_$'], s), { ...glassOpts, glass: glassSpec(false, pairs(GLASS_BEAMS.sideRear(s))) });
+    closure(`glass${s}R`, sideBind(['s7_bt_$', 's7_rf_$', 's8_bt_$', 's8_rf_$', 's9_dk_$', 's9_qm_$'], s), pairs(GLASS_BEAMS.sideRear(s)));
+    add(`glass${s}R`, 'glass', 'glass', perSide(rg.mesh, s), doorUpper('R', s), { ...glassOpts, glass: glassSpec(false, pairs(DOOR_GLASS.R(s))) });
     // Fixed quarter window behind the rear door.
     const qg = cut(S4, [...dlo, zAbove(Q_REAR - 0.03, 'seam'), zBelow(DLO_TAIL - 0.035, 'seam')], { offset: -0.012, border: 'seam', where: (p) => p[2] > 0.9 && p[2] < 1.35 });
     add(`glass${s}Q`, 'glass', 'glass', perSide(qg.mesh, s), sideBind(['s8_bt_$', 's8_rf_$', 's9_dk_$', 's9_qm_$', 's10_qt_$', 's10_ld_$'], s), {
@@ -851,22 +886,42 @@ export function buildSedanVisual(opts: SedanBuildOptions = { lod: 0 }): VehicleV
     });
     // Black DLO sash band + B-pillar + quarter-window divider.
     const vTail = vAtZ(S4, dloTop, DLO_TAIL - 0.005);
-    const band = stripMesh(S4, {
-      u0: (v) => uAtMetric(S4, v, S4.metricU(dloTop, v) - 0.004),
-      u1: (v) => uAtMetric(S4, v, S4.metricU(dloTop, v) + BAND + 0.001),
-      v0: 0,
-      v1: vTail,
-      segV: Math.round(70 / rs),
-      offset: 0.0006,
-    });
+    // the sash band in four pieces: over the front door, the B-pillar, the rear door, the fixed quarter
+    // window (the door pieces are the doors' window frames: they swing with their doors)
+    const bandPart = (z0: number | null, z1: number | null): PanelMesh => {
+      const v0 = z0 === null ? 0 : vAtZ(S4, dloTop, z0);
+      const v1 = z1 === null ? vTail : vAtZ(S4, dloTop, z1);
+      return stripMesh(S4, {
+        u0: (v) => uAtMetric(S4, v, S4.metricU(dloTop, v) - 0.004),
+        u1: (v) => uAtMetric(S4, v, S4.metricU(dloTop, v) + BAND + 0.001),
+        v0,
+        v1,
+        segV: Math.max(3, Math.round(((70 / rs) * (v1 - v0)) / vTail)),
+        offset: 0.0006,
+      });
+    };
+    const bandF = bandPart(null, B_FRONT + 0.01);
+    const bandB = bandPart(B_FRONT + 0.01, B_REAR - 0.01);
+    const bandR = bandPart(B_REAR - 0.01, Q_REAR);
+    const bandQ = bandPart(Q_REAR, null);
     // the B-pillar / quarter divider are narrow cuts: a coarse LOD sheet zigzags their edges, so they keep a finer one
     const S4n = opts.lod === 0 ? S4 : createSheet(loftSurface(m4Loft), { resolution: 0.09 * Math.sqrt(rs), maxAngleDeg: 13 * Math.sqrt(rs) });
     const bp = cut(S4n, [uAbove(S4n, 0.002, 'seam'), uBelow(S4n, dloTop, 'seam'), zAbove(B_FRONT, 'hem'), zBelow(B_REAR, 'hem')], { offset: 0.0005, border: 'seam', where: (p) => p[2] > 0 && p[2] < 0.3 });
     const sail = cut(S4, [uAbove(S4, 0.002, 'seam'), uBelow(S4, dloTop, 'seam'), zBelow(SAIL_Z, 'hem'), vAbove(S4, 0, 'seam')], { offset: 0.0005, border: 'seam', where: (p) => p[2] < -0.55 });
     const qd = cut(S4n, [uAbove(S4n, 0.002, 'seam'), uBelow(S4n, dloTop, 'seam'), zAbove(Q_FRONT, 'hem'), zBelow(Q_REAR, 'hem')], { offset: 0.0005, border: 'seam', where: (p) => p[2] > 0.9 && p[2] < 1.15 });
-    add(`dloTrim${s}`, 'trim', 'trim', perSide(mergeMeshes([band, bp.mesh, sail.mesh, qd.mesh]), s), sideBind(['s5_cw_$', 's6_rf_$', 's6_bt_$', 's7_rf_$', 's7_bt_$', 's8_rf_$', 's8_bt_$', 's9_dk_$', 's9_qm_$', 's10_qt_$'], s), { damageWeight: 0.5 });
-    const seal = stripMesh(S4, { u0: () => 0, u1: (v) => uAtMetric(S4, v, 0.008), v0: vAtZ(S4, 0, -0.86), v1: vAtZ(S4, 0, 0.99), segV: Math.round(60 / rs), offset: 0.0015 });
-    add(`beltSeal${s}`, 'trim', 'rubber', perSide(seal, s), sideBind(['s5_cw_$', 's5_hp_$', 's6_bt_$', 's6_dm_$', 's6_rf_$', 's7_bt_$', 's7_dm_$', 's7_rf_$', 's8_bt_$', 's8_dm_$', 's8_rf_$', 's9_dk_$', 's9_qm_$'], s), { damageWeight: 0 });
+    const dloCage = sideBind(['s5_cw_$', 's6_rf_$', 's6_bt_$', 's7_rf_$', 's7_bt_$', 's8_rf_$', 's8_bt_$', 's9_dk_$', 's9_qm_$', 's10_qt_$'], s);
+    add(`dloTrim${s}`, 'trim', 'trim', perSide(mergeMeshes([bandB, bp.mesh, bandQ]), s), sideBind(['s6_rf_$', 's6_bt_$', 's7_rf_$', 's7_bt_$', 's8_rf_$', 's8_bt_$', 's9_dk_$', 's9_qm_$', 's10_qt_$'], s), { damageWeight: 0.5 });
+    closure(`sash${s}F`, dloCage);
+    add(`sash${s}F`, 'trim', 'trim', perSide(mergeMeshes([bandF, sail.mesh]), s), doorUpper('F', s), { damageWeight: 0.5 });
+    closure(`sash${s}R`, dloCage);
+    add(`sash${s}R`, 'trim', 'trim', perSide(mergeMeshes([bandR, qd.mesh]), s), doorUpper('R', s), { damageWeight: 0.5 });
+    // belt weatherstrips: one per door (on the door's belt row)
+    const beltCage = sideBind(['s5_cw_$', 's5_hp_$', 's6_bt_$', 's6_dm_$', 's6_rf_$', 's7_bt_$', 's7_dm_$', 's7_rf_$', 's8_bt_$', 's8_dm_$', 's8_rf_$', 's9_dk_$', 's9_qm_$'], s);
+    const belt = (z0: number, z1: number, n: number): PanelMesh => stripMesh(S4, { u0: () => 0, u1: (v) => uAtMetric(S4, v, 0.008), v0: vAtZ(S4, 0, z0), v1: vAtZ(S4, 0, z1), segV: Math.max(3, Math.round(n / rs)), offset: 0.0015 });
+    closure(`belt${s}FSeal`, beltCage);
+    add(`belt${s}FSeal`, 'trim', 'rubber', perSide(belt(-0.86, B_FRONT + 0.06, 32), s), [`dF${s}_1*`, ...doorUpper('F', s)], { damageWeight: 0 });
+    closure(`belt${s}RSeal`, beltCage);
+    add(`belt${s}RSeal`, 'trim', 'rubber', perSide(belt(B_REAR - 0.06, 0.99, 28), s), [`dR${s}_1*`, ...doorUpper('R', s)], { damageWeight: 0 });
   }
 
   // ---------------------------------------------------------------- ribbon helpers
@@ -1289,8 +1344,8 @@ export function buildSedanVisual(opts: SedanBuildOptions = { lod: 0 }): VehicleV
     }
     return out;
   };
-  const doorFBind = (s: 'L' | 'R') => sideBind(['s5_hp_$', 's5_sl_$', 's5_cw_$', 's6_sl_$', 's6_dm_$', 's6_bt_$', 's7_sl_$', 's7_dm_$', 's7_bt_$'], s);
-  const doorRBind = (s: 'L' | 'R') => sideBind(['s7_sl_$', 's7_dm_$', 's7_bt_$', 's8_sl_$', 's8_dm_$', 's8_bt_$', 's9_sl_$', 's9_qm_$', 's9_dk_$'], s);
+  const doorFBind = (s: 'L' | 'R') => doorNodes('F', s);
+  const doorRBind = (s: 'L' | 'R') => doorNodes('R', s);
   {
     // Mirrors: body-colour housing on a stalk from the sail, black base, mirror glass on the rear face.
     const st: [number, number, number, number, number][] = [
@@ -1319,7 +1374,9 @@ export function buildSedanVisual(opts: SedanBuildOptions = { lod: 0 }): VehicleV
     const glassM = roundedBoxMesh([0.983, 1.025, -0.726 + 0.072], [0.068, 0.046, 0.003], 0.002, { segs: 1 });
     const baseM = roundedBoxMesh([0.84, 0.985, -0.735], [0.02, 0.03, 0.065], 0.012, { segs: SS });
     for (const s of SIDES) {
-      const bind = sideBind(['s5_cw_$', 's5_hp_$', 's6_bt_$', 's6_dm_$'], s);
+      // door-mounted mirrors: on the front door's front-top corner (they swing with the door)
+      const bind = [`dF${s}_10`, `dF${s}_20`, `dF${s}_21`, `dF${s}_31`];
+      for (const id of [`mirror${s}`, `mirrorGlass${s}`, `mirrorBase${s}`]) closure(id, sideBind(['s5_cw_$', 's5_hp_$', 's6_bt_$', 's6_dm_$'], s));
       const det = { attach: 'boundary', minBrokenFraction: 0.34, mode: 'hide' } as const;
       add(`mirror${s}`, 'mirror', 'paint', perSide(housing, s), bind, { detach: det, damageWeight: 0.8 });
       add(`mirrorGlass${s}`, 'mirror', 'mirror', perSide(glassM, s), bind, { detach: det, damageWeight: 0 });
@@ -1335,6 +1392,8 @@ export function buildSedanVisual(opts: SedanBuildOptions = { lod: 0 }): VehicleV
     const hf = handle(-0.06);
     const hr = handle(0.86);
     for (const s of SIDES) {
+      closure(`handle${s}F`, sideBind(DOOR_CAGE.F, s));
+      closure(`handle${s}R`, sideBind(DOOR_CAGE.R, s));
       add(`handle${s}F`, 'trim', 'chrome', perSide(hf, s), doorFBind(s), { damageWeight: 0.5 });
       add(`handle${s}R`, 'trim', 'chrome', perSide(hr, s), doorRBind(s), { damageWeight: 0.5 });
     }
@@ -1471,6 +1530,8 @@ export function buildSedanVisual(opts: SedanBuildOptions = { lod: 0 }): VehicleV
           roundedBoxMesh([0.815, 0.66, (z0 + z1) / 2], [0.022, 0.3, (z1 - z0) / 2], 0.018, { segs: SS, flat: opts.lod === 0 ? [1, 4, 6] : [1, 2, 3] }),
           roundedBoxMesh([0.775, 0.66, (z0 + z1) / 2 + 0.04], [0.035, 0.022, (z1 - z0) / 2 - 0.1], 0.015, { segs: SS }),
         ]);
+      closure(`doorCard${s}F`, sideBind(DOOR_CAGE.F, s));
+      closure(`doorCard${s}R`, sideBind(DOOR_CAGE.R, s));
       add(`doorCard${s}F`, 'interior', 'interiorTrim', perSide(card(-0.8, 0.09), s), doorFBind(s), { damageWeight: 0 });
       add(`doorCard${s}R`, 'interior', 'interiorTrim', perSide(card(0.16, 0.98), s), doorRBind(s), { damageWeight: 0 });
     }

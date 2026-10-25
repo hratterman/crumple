@@ -69,6 +69,8 @@ export interface ShellRuntime {
   gone: Uint8Array;
   /** Per tier: a WHOLE tier has tripped (all its nodes released). */
   tripped: Uint8Array;
+  /** R-CRASH per tier: its latch has broken (ShellZone.latch): released for good until repair. */
+  latchOff: Uint8Array;
   calmTicks: number;
   /** Ticks since a node last newly released (post-impact set, RECAPTURE_IMPACT_S). */
   quietTicks: number;
@@ -95,6 +97,7 @@ export function createShellRuntime(shell: CompiledShell, rig: CompiledRig): Shel
     released: 0,
     gone: new Uint8Array(n),
     tripped: new Uint8Array(shell.whole.length),
+    latchOff: new Uint8Array(shell.whole.length),
     calmTicks: 0,
     quietTicks: 0,
     maxDev: 0,
@@ -125,6 +128,7 @@ export function resetShell(rt: ShellRuntime): void {
   rt.w.fill(1);
   rt.gone.fill(0);
   rt.tripped.fill(0);
+  rt.latchOff.fill(0);
   rt.released = 0;
   rt.calmTicks = 0;
   rt.quietTicks = 0;
@@ -188,6 +192,24 @@ export function applyShell(s: SimState, rt: ShellRuntime, dt: number, gx: number
   const nodes = rt.nodes;
   const n = nodes.length;
   const w = rt.w;
+  // R-CRASH latched zones: a broken latch beam trips the zone for good (shellDefs ShellZone.latch)
+  {
+    const ls = rt.shell.latchStart;
+    const lb = rt.shell.latchBeams;
+    const active = s.active;
+    for (let t = 1; t + 1 < ls.length; t++) {
+      if (rt.latchOff[t] !== 0) continue;
+      for (let j = ls[t]!; j < ls[t + 1]!; j++) {
+        if (active[rt.beamOffset + lb[j]!] === 0) {
+          rt.latchOff[t] = 1;
+          rt.tripped[t] = 1;
+          // the latch has popped: every latch beam of the zone lets go with it (a racking sensor broke)
+          for (let q = ls[t]!; q < ls[t + 1]!; q++) active[rt.beamOffset + lb[q]!] = 0;
+          break;
+        }
+      }
+    }
+  }
   const mass = rt.mass;
   const rest = rt.rest;
   const vs = rt.vs;
@@ -392,8 +414,9 @@ function recapture(s: SimState, rt: ShellRuntime, cx: number, cy: number, cz: nu
         break;
       }
     }
-    rt.w[k] = intact ? 1 : 0;
-    rt.gone[k] = intact ? 0 : 1;
+    const keep = intact && rt.latchOff[sh.tier[k]!] === 0;
+    rt.w[k] = keep ? 1 : 0;
+    rt.gone[k] = keep ? 0 : 1;
   }
   rt.tripped.fill(0);
   rt.released = 0;

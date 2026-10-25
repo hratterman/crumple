@@ -25,7 +25,8 @@
  * crash rails / trunk < engine bay < safety cell (cage), so crashes crumple
  * the ends first.
  */
-import { shellLayout } from '../shellDefs';
+import { buildClosure, rotateAbout as rotateClosure, type ClosureSpec, type V3 as CV3 } from '../closures';
+import { SHELL_GROUPS, SHELL_RELEASE_CELL, shellLayout, type ShellZone } from '../shellDefs';
 import type { RigBeamDef, RigNodeDef } from '../../rig/types';
 import { wheelNodeId, type DrivetrainDef, type VehicleDef, type WheelDef } from '../types';
 import { WHEEL_TUNING_205_55R16 } from '../wheelrig';
@@ -519,6 +520,34 @@ const HOOD = {
 /** Trunk-lid centre rest stiffness per rest, N/m (2 rests ≈ 13 % of s11_ld's ω·dt budget). */
 const TRUNK_REST_K = 1e5;
 
+// ====================================================================== hinged closures (R-CRASH)
+/**
+ * DOORS and the TRUNK LID are physical hinged sub-rigs (closures.ts): a skin grid swinging on a real hinge
+ * axis on the hinge pillar / rear deck, latched at the shut edge, resting on compression-only stops, held
+ * by a preloaded check strap / gas strut once unlatched. Each is its own rigid shell cluster (stiff steel
+ * while driving; dents plastically, released by an impact like the cell). The cage nodes behind the doors
+ * (s6 / s8 dm, bt, sl) stay the body's door-ring structure; the door skins are drawn on the closures.
+ * Front door: hinge axis s5_sl → s5_hp (A / hinge pillar), latch s7_dm + s7_fl (B-pillar), strap to the
+ * firewall. Rear door: hinge s7_sl → s7_dm (B-pillar), latch s9_qm + s9_fl (C-pillar). Trunk: hinge axis
+ * s9_dk_L → s9_dk_R (rear-glass base), latch s12_tf + s12_ld, gas strut to the trunk floor.
+ */
+/** 1 kg nodes: an 11 kg door skin (the cage carries the rest of a door's mass; 2 kg took 100 kg out of the tuned structure mass solve and the 50 km/h crush went 54 → 70 cm). */
+const DOOR_NODE_MASS = 1;
+const TRUNK_NODE_MASS = 1.4;
+const CLOSURE = {
+  skin: { zeta: 0.5, yieldStrain: 0.03, minDeform: 2.5e3, breakRatio: 8 },
+  /** Hinges bend from 12 kN and tear off at 30 kN; latches pop at 6 kN (a hard side / rear hit or the door ring racking). */
+  hingeDeform: 1.2e4,
+  hingeBreak: 3e4,
+  latchBreak: 6e3,
+  stopBreak: 1.5e4,
+} as const;
+/** Door rows (heights) and the window-frame top per column (null: none). Right side; mirrored. */
+const DOOR_ROWS = [0.27, 0.62, 0.97] as const;
+/** A door / trunk unlatches when its opening distorts this much (aperture diagonal strain). */
+const DOOR_RACK_STRAIN = 0.05;
+const DOOR_X = [0.865, 0.885, 0.865] as const;
+
 // ====================================================================== drivetrain
 /**
  * 3.0 L I6: 350 N·m held from 3500 to 6500 rpm, ≈ 238 kW at 6500–6800 rpm
@@ -733,6 +762,120 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
     }
     hoodIds.push(row);
   });
+
+  // ---- hinged closures (R-CRASH): nodes now (fixed masses, outside the structure solve), beams after the solve
+  const closureSpecs: { spec: ClosureSpec; openSign: 1 | -1 }[] = [];
+  {
+    const door = (side: Side, rear: boolean): ClosureSpec => {
+      const sx = sideSign(side);
+      const zs = rear ? [0.22, 0.62, 1.02] : [-0.74, -0.32, 0.1];
+      const top: ([number, number] | null)[] = rear ? [[0.65, 1.42], [0.62, 1.38], null] : [null, [0.63, 1.36], [0.65, 1.38]];
+      const grid: (CV3 | null)[][] = DOOR_ROWS.map((y, r) => zs.map((z) => [sx * DOOR_X[r]!, y, z] as CV3));
+      grid.push(top.map((t, c) => (t ? ([sx * t[0], t[1], zs[c]!] as CV3) : null)));
+      const st = rear ? 7 : 5;
+      const shut = rear ? 9 : 7;
+      return {
+        id: `d${rear ? 'R' : 'F'}${side}`,
+        group: 'door',
+        grid,
+        nodeMass: DOOR_NODE_MASS,
+        hingeAxis: [sid(st, 'sl', side), sid(st, rear ? 'dm' : 'hp', side)],
+        hinged: [[0, 0], [1, 0], [2, 0]],
+        latches: [
+          { cell: [1, 2], to: sid(shut, rear ? 'qm' : 'dm', side) },
+          { cell: [1, 2], to: sid(shut, 'fl', side) },
+        ],
+        stops: [
+          { cell: [0, 2], to: sid(shut, 'fl', side) },
+          { cell: [2, 2], to: sid(shut, 'tn') },
+        ],
+        strap: { cell: [1, 1], to: rear ? sid(7, 'tn') : sid(5, 'fw', side) },
+        // a light detent: an unlatched door pops ajar and then swings with the car's motion
+        strapForce: 150,
+        stopCandidates: [],
+        stopRows: [1, 2],
+        // inner panel: lower door and belt reinforcement, 14 cm inboard of the skin
+        inner: [
+          [sx * (DOOR_X[0]! - 0.14), 0.45, zs[1]!],
+          [sx * (DOOR_X[2]! - 0.14), 0.97, (zs[1]! + zs[2]!) / 2],
+        ],
+        innerReach: 0.75,
+        // aperture diagonals: hinge pillar ↔ latch pillar, low and high
+        // (not the CABIN_SPANS diagonals, which are structure)
+        rack: rear
+          ? [[sid(7, 'dm', side), sid(9, 'sl', side)], [sid(7, 'sl', side), sid(9, 'qm', side)]]
+          : [[sid(5, 'cw', side), sid(7, 'sl', side)], [sid(5, 'sl', side), sid(7, 'dm', side)]],
+        rackStrain: DOOR_RACK_STRAIN,
+        holdOpenDeg: 35,
+        maxOpenDeg: 68,
+        budgetPerKg: BUDGET_PER_KG,
+        ...CLOSURE,
+      };
+    };
+    for (const side of ['R', 'L'] as const) for (const rear of [false, true]) closureSpecs.push({ spec: door(side, rear), openSign: 1 });
+    const trunkGrid: CV3[][] = [-0.58, 0, 0.58].map((x) => [
+      [x, x === 0 ? 1.02 : 1.0, 1.4],
+      [x, x === 0 ? 1.0 : 0.99, 1.8],
+      [x, x === 0 ? 0.97 : 0.96, 2.1],
+    ] as CV3[]);
+    closureSpecs.push({
+      spec: {
+        id: 'tk',
+        group: 'trunk',
+        grid: trunkGrid,
+        nodeMass: TRUNK_NODE_MASS,
+        hingeAxis: [sid(9, 'dk', 'L'), sid(9, 'dk', 'R')],
+        hinged: [[0, 0], [1, 0], [2, 0]],
+        latches: [
+          { cell: [1, 2], to: sid(12, 'tf') },
+          { cell: [1, 2], to: sid(12, 'ld') },
+        ],
+        stops: [
+          { cell: [0, 2], to: sid(12, 'rh', 'L') },
+          { cell: [2, 2], to: sid(12, 'rh', 'R') },
+          { cell: [0, 1], to: sid(11, 'rh', 'L') },
+          { cell: [2, 1], to: sid(11, 'rh', 'R') },
+          { cell: [1, 1], to: sid(11, 'tf') },
+        ],
+        strap: { cell: [1, 1], to: sid(10, 'tf') },
+        // gas struts: an unlatched lid rises to (nearly) fully open
+        strapForce: 1400,
+        stopCandidates: [],
+        stopRows: [1],
+        inner: [[0, 0.86, 1.75]],
+        innerReach: 0.9,
+        rack: [
+          [sid(9, 'dk', 'L'), sid(12, 'ld', 'R')],
+          [sid(9, 'dk', 'R'), sid(12, 'ld', 'L')],
+        ],
+        rackStrain: DOOR_RACK_STRAIN,
+        holdOpenDeg: 68,
+        maxOpenDeg: 75,
+        budgetPerKg: BUDGET_PER_KG,
+        ...CLOSURE,
+      },
+      openSign: 1,
+    });
+    // opening sense: the one that moves the shut edge outward (doors: |x| grows) / upward (trunk: y grows)
+    // open-stop candidates: structure nodes within 1.1 m of the hinge axis (closures.ts findOpenStop)
+    const structIds = [...pos.keys()].filter((id) => /^s\d+_/.test(id));
+    for (const c of closureSpecs) {
+      const g = c.spec.grid;
+      const ha = pos.get(c.spec.hingeAxis[0])!;
+      const hb = pos.get(c.spec.hingeAxis[1])!;
+      const mid = [0, 1, 2].map((k) => (ha[k]! + hb[k]!) / 2);
+      c.spec = { ...c.spec, stopCandidates: structIds.filter((id) => Math.hypot(...[0, 1, 2].map((k) => pos.get(id)![k]! - mid[k]!)) < 1.1) };
+      const shutCell = c.spec.latches[0]!.cell;
+      const p = g[shutCell[0]]![shutCell[1]]!;
+      const a = pos.get(c.spec.hingeAxis[0])!;
+      const b = pos.get(c.spec.hingeAxis[1])!;
+      const q = rotateClosure(p, a, b, 10);
+      const outward = c.spec.group === 'trunk' ? q[1] > p[1] : Math.abs(q[0]) > Math.abs(p[0]);
+      c.openSign = outward ? 1 : -1;
+      g.forEach((row, r) => row.forEach((pt, k) => pt && addNode(`${c.spec.id}_${r}${k}`, pt, c.spec.nodeMass, c.spec.group, true, false)));
+      c.spec.inner.forEach((pt, k) => addNode(`${c.spec.id}_i${k}`, pt, c.spec.nodeMass, c.spec.group, true, false));
+    }
+  }
 
   // ---- wheels
   const unsprungWheelOf = (front: boolean): number => hubMass(front) + WHEEL_TUNING_205_55R16.rimMass + WHEEL_TUNING_205_55R16.tireMass;
@@ -1226,6 +1369,19 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
     }
   }
 
+  // ---- hinged closure beams (R-CRASH), counted as fixed k at their body nodes like the hood's
+  const closureBeams: RigBeamDef[] = [];
+  const closureLatches = new Map<string, [string, string][]>();
+  for (const c of closureSpecs) {
+    const built = buildClosure(c.spec, (id) => pos.get(id)! as CV3, (id) => massOf.get(id)!, c.openSign);
+    closureLatches.set(c.spec.id, built.latchPairs);
+    for (const b of built.beams) {
+      if (seen.has(key(b.a, b.b))) throw new Error(`sedan: duplicate closure beam ${b.a}–${b.b}`);
+      seen.add(key(b.a, b.b));
+      closureBeams.push(b);
+    }
+  }
+
   // ---- auto stiffness: split each node's budget by class weight
   /*
    * Node budget B_i = (0.33/dt)²·m_i − Σ(fixed k at i, incl. generated wheel
@@ -1235,7 +1391,7 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
    */
   const fixedK = new Map<string, number>();
   const addK = (id: string, k: number): void => void fixedK.set(id, (fixedK.get(id) ?? 0) + k);
-  for (const b of [...fixed, ...hoodBeams]) {
+  for (const b of [...fixed, ...hoodBeams, ...closureBeams]) {
     addK(b.a, b.k!);
     addK(b.b, b.k!);
   }
@@ -1345,7 +1501,7 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
    */
   {
     const sumD = new Map<string, number>();
-    for (const b of [...autoBeams, ...fixed, ...hoodBeams]) {
+    for (const b of [...autoBeams, ...fixed, ...hoodBeams, ...closureBeams]) {
       for (const id of [b.a, b.b]) sumD.set(id, (sumD.get(id) ?? 0) + (b.d ?? 0));
     }
     for (const w of wheels) for (const id of w.attach) sumD.set(id, (sumD.get(id) ?? 0) + 2 * (w.attachDamp ?? 0));
@@ -1355,12 +1511,12 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
       const z = (sumD.get(id)! * DT) / m;
       return z > DAMP_BUDGET ? DAMP_BUDGET / z : 1;
     };
-    for (const b of [...autoBeams, ...hoodBeams]) {
+    for (const b of [...autoBeams, ...hoodBeams, ...closureBeams]) {
       const f = Math.min(scale(b.a), scale(b.b));
       if (f < 1) b.d = sig3(b.d! * f);
     }
   }
-  const beams = [...autoBeams, ...fixed, ...hoodBeams];
+  const beams = [...autoBeams, ...fixed, ...hoodBeams, ...closureBeams];
   const def: VehicleDef = {
     name: 'sedan',
     body: {
@@ -1373,6 +1529,8 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
         subframe: { friction: 0.5, radius: 0.04 },
         knuckle: { friction: 0.5, radius: 0.03 },
         hood: { friction: 0.5, radius: 0.03 },
+        door: { friction: 0.5, radius: 0.03 },
+        trunk: { friction: 0.5, radius: 0.03 },
       },
     },
     wheels,
@@ -1382,12 +1540,24 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
     steering: { maxWheelAngleDeg: round((SEDAN_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2) },
     frame: { origin: sid(7, 'tn'), front: sid(2, 'rs'), top: sid(7, 'rf') },
     // Feel pass: rigid shell cluster (shell.ts) — crumple zones released whole on impact, firewall, safety cell.
-    shell: shellLayout({
-      front: ['s0_*', 's1_*', 's2_*', 's3_*', 's4_*', 'hood_*', 'FL_*', 'FR_*'],
-      rear: ['s10_*', 's11_*', 's12_*', 's13_*', 'RL_*', 'RR_*'],
-      firewall: ['s5_*'],
-      cell: ['s5_hp_*', 's5_sl_*', 's6_*', 's7_*', 's8_*', 's9_*'],
-    }),
+    // R-CRASH: each hinged closure is a LATCHED zone of the body cluster: rigid with the body while latched
+    // (dents like the cell, an impact on it releases it whole), free on its hinges once its latch breaks.
+    shell: {
+      ...shellLayout({
+        front: ['s0_*', 's1_*', 's2_*', 's3_*', 's4_*', 'hood_*', 'FL_*', 'FR_*'],
+        rear: ['s10_*', 's11_*', 's12_*', 's13_*', 'RL_*', 'RR_*'],
+        firewall: ['s5_*'],
+        cell: ['s5_hp_*', 's5_sl_*', 's6_*', 's7_*', 's8_*', 's9_*'],
+        extra: closureSpecs.map((c): ShellZone => ({
+          ids: [`${c.spec.id}_*`],
+          release: SHELL_RELEASE_CELL,
+          whole: true,
+          yield: true,
+          latch: closureLatches.get(c.spec.id)!,
+        })),
+      }),
+      groups: [...SHELL_GROUPS, 'door', 'trunk'],
+    },
   };
   const design: SedanDesign = {
     totalMass,

@@ -16,6 +16,7 @@ import {
   vehicleOmegaDtLimit,
 } from './builder';
 import { SEDAN, SEDAN_DESIGN, SEDAN_TARGETS } from './defs/sedan';
+import type { ShellDef } from './shellDefs';
 import { WHEEL_BEAMS_PER_RAY, WHEEL_DEFAULTS, wheelNodeId, type CompiledVehicle } from './types';
 
 const SIBLINGS = ['../engine.ts', './runtime.ts', './drivetrain.ts', './wheels.ts', '../collision/ground.ts'];
@@ -100,11 +101,14 @@ describe('SEDAN definition', () => {
     // Safety cell between bulkheads, minus the door panels (s6/s8 dm/bt/sl/fl:
     // they dent in a side impact by design) and the window frames.
     const door = /^s[68]_(dm|bt|sl|fl)_/;
+    const shellDef = SEDAN.shell as ShellDef;
+    const latchPairs = new Set((shellDef.zones ?? []).flatMap((z) => (z.latch ?? []).map(([p, q]) => `${p}|${q}`)));
     const cage = deformOf(
       (a, b) =>
         st(a) >= 5 && st(a) <= 9 && st(b) >= 5 && st(b) <= 9 && !/_(bt|rf|cw|dk)/.test(a + b) && !door.test(a) && !door.test(b) &&
         !(/_hp/.test(a + b) && st(a) !== st(b)) && // door-frame diagonals bend in side impacts
-        !/s5_fw_/.test(a + b), // firewall panel dents where the engine hits it
+        !/s5_fw_/.test(a + b) && // firewall panel dents where the engine hits it
+        !latchPairs.has(`${a}|${b}`), // R-CRASH door-aperture racking sensors (elastic, unlatch the doors)
     );
     expect(front.length).toBeGreaterThan(10);
     // The ends yield before any safety-cell member (crashes fold the ends first).
@@ -120,8 +124,10 @@ describe('SEDAN definition', () => {
     const expected: string[] = [];
     for (let r = 0; r < 4; r++) for (const s of ['L', 'C', 'R']) expected.push(`hood_${r}${s}`);
     expect(hood).toEqual(expected);
-    // Appended after every other body node.
-    expect(ids.slice(ids.length - 12)).toEqual(expected);
+    // Appended after every structure node; only the R-CRASH hinged closures (doors d*, trunk lid tk_) follow it.
+    const after = ids.slice(ids.indexOf('hood_0L'));
+    expect(after.slice(0, 12)).toEqual(expected);
+    for (const id of after.slice(12)) expect(id).toMatch(/^(d[FR][LR]|tk)_(\d\d|i\d)$/);
     const zr = [-2.0, -1.64, -1.28, -0.92];
     const yr = [0.72, 0.84, 0.92, 0.96];
     for (const n of body.nodes.filter((x) => x.group === 'hood')) {
@@ -141,9 +147,12 @@ describe('SEDAN definition', () => {
     }
     expect(beam('hood_0C', 's2_rt')!.breakF).toBeLessThan(1e4);
     expect(beam('hood_1C', 's2_rt')!.type).toBe('support');
-    // Hood beams are declared after every other body beam.
+    // Hood beams are declared after every other body beam (then only the hinged closures' beams, R-CRASH).
+    const closure = /^(d[FR][LR]|tk)_(\d\d|i\d)$/;
     const firstHood = body.beams.findIndex((b) => b.a.startsWith('hood_') || b.b.startsWith('hood_'));
-    expect(body.beams.slice(firstHood).every((b) => b.a.startsWith('hood_') || b.b.startsWith('hood_'))).toBe(true);
+    const firstClosure = body.beams.findIndex((b) => closure.test(b.a) || closure.test(b.b));
+    expect(firstClosure).toBeGreaterThan(firstHood);
+    expect(body.beams.slice(firstHood, firstClosure).every((b) => b.a.startsWith('hood_') || b.b.startsWith('hood_'))).toBe(true);
   });
 
   it('keeps canonical merged order (body, then FL FR RL RR as generated)', () => {
