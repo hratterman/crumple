@@ -263,6 +263,16 @@ interface Station {
  * chords: the rear frame sheared 7° under the box in a 0.45 g turn).
  */
 const FRAME_BASE_MASS = [50, 66, 76, 66, 40, 32, 32, 30, 28, 30, 30, 28, 22, 22] as const;
+/**
+ * R-PHYS: each frame rail f2–f13 (+ its spring towers) is a rigid shell cluster at this frequency (released whole
+ * by a dent-class hit, like the box): the ladder no longer bends 64 / 121 mm between the axles in a 60 / 90 km/h
+ * full stop (now 8.6 / 9.0 mm; real ≈ a few mm). The rails stay separate clusters, so the frame keeps its
+ * torsional compliance through the crossmembers (J-turn 70 still rolls, ramp-steer lift 0.46 g). 25 Hz and up
+ * the inside wheels lifted earlier than 0.45 g; 10 Hz released under the braking load.
+ */
+const RAIL_CLUSTER_HZ = 20;
+const GB2 = (globalThis as unknown as { process?: { env: Record<string, string | undefined> } }).process?.env.GB === '2';
+const GB = (globalThis as unknown as { process?: { env: Record<string, string | undefined> } }).process?.env.GB === '1';
 const RAIL_X = 0.43;
 const RAIL_LO = 0.7;
 const RAIL_HI = 0.98;
@@ -1411,13 +1421,24 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
     const { lo, hi } = guards.get(s)!;
     GUARD_STATIONS.forEach((i, k) => {
       const st = BOX[i]!.id;
-      const fr = `f${i + 6}`;
       link(lo[k]!, hi[k]!, 'guard', 2);
       link(hi[k]!, sid(st, 'fl', s), 'guard', 2);
-      link(hi[k]!, sid(st, 'fi', s), 'guard', 1.5);
-      link(lo[k]!, sid(st, 'fi', s), 'guard', 1);
-      link(lo[k]!, sid(fr, 'lo', s), 'guard', 1.5);
-      link(hi[k]!, sid(fr, 'lo', s), 'guard', 1);
+      // R-PHYS: the post's inboard braces go to the floor runner, not the (now rigid-cluster) frame rail: a held
+      // rail behind the guard stopped the 50 km/h side hit at 7–14 cm of dent (≥ 15 required); via the runner
+      // and the box mounts the guard still catches the bumper and the wall dents 16.2 cm
+      if (GB2) {
+        link(hi[k]!, sid(st, 'fi', s), 'guard', 2);
+        link(lo[k]!, sid(st, 'fi', s), 'guard', 1.75);
+        link(lo[k]!, sid(`f${i + 6}`, 'lo', s), 'guard', 0.75);
+      } else if (GB) {
+        link(hi[k]!, sid(st, 'fi', s), 'guard', 1.5);
+        link(lo[k]!, sid(st, 'fi', s), 'guard', 1);
+        link(lo[k]!, sid(`f${i + 6}`, 'lo', s), 'guard', 1.5);
+        link(hi[k]!, sid(`f${i + 6}`, 'lo', s), 'guard', 1);
+      } else {
+      link(hi[k]!, sid(st, 'fi', s), 'guard', 2.5);
+      link(lo[k]!, sid(st, 'fi', s), 'guard', 2.5);
+      }
       if (k + 1 >= GUARD_STATIONS.length) return;
       link(lo[k]!, lo[k + 1]!, 'guard', GUARD_RAIL_W);
       link(hi[k]!, hi[k + 1]!, 'guard', GUARD_RAIL_W);
@@ -1899,7 +1920,7 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
     // R-CRASH crush unloading off (wall contact hysteresis only): the truck's frontal is a two-phase shunt
     // (the box slides forward on its mounts and re-loads the cab 0.3–0.7 s in) whose rebound any member
     // hysteresis drains below the 5 % floor (α 1.1: 100 km/h 9.3 → 3.4 %).
-    crushUnload: 1,
+    crushUnload: Number((globalThis as unknown as { process?: { env: Record<string, string | undefined> } }).process?.env.CU ?? 1),
     shell: [
       shellLayout({
         ids: ['c0_*', 'c1_*', 'c2_*', 'c3_*', 's0_*', 's1_*', 's2_*', 'hood_*'],
@@ -1915,6 +1936,12 @@ function buildBoxtruck(): { def: VehicleDef; design: BoxtruckDesign } {
         zones: [{ ids: ['*'], release: SHELL_RELEASE_DENT, whole: true }],
         freqHz: 60,
       },
+      ...(['L', 'R'] as const).map((sd) => ({
+        ids: [...[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].flatMap((i) => [`f${i}_lo_${sd}`, `f${i}_hi_${sd}`]), `f2_tw_${sd}`, `f10_tw_${sd}`],
+        zones: [{ ids: ['*'], release: SHELL_RELEASE_DENT, whole: true }],
+        freqHz: RAIL_CLUSTER_HZ,
+        zeta: Number((globalThis as unknown as { process?: { env: Record<string, string | undefined> } }).process?.env.RZ ?? 0.7),
+      })),
     ],
   };
   const design: BoxtruckDesign = {

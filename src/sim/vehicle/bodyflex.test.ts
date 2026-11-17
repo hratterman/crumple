@@ -20,6 +20,7 @@ import { COUPE } from './defs/coupe';
 import { PICKUP } from './defs/pickup';
 import { SEDAN } from './defs/sedan';
 import { SEDAN_TRAFFIC } from './defs/sedanTraffic';
+import type { ShellDef } from './shellDefs';
 import type { VehicleDef } from './types';
 
 interface Case {
@@ -35,6 +36,10 @@ interface Case {
   settleS?: number;
   /** Measure the shell clusters only (the box truck's ladder frame is deliberately left a beam lattice). */
   clustersOnly?: boolean;
+  /** Measure the bodies on this def's cluster partition (box truck: cab + box, without its frame-rail clusters). */
+  bodies?: VehicleDef;
+  /** Frame-rail clusters' own extremity limit under the driving loads, mm (box truck). */
+  frameMm?: number;
 }
 
 const CASES: Case[] = [
@@ -45,9 +50,19 @@ const CASES: Case[] = [
   { name: 'pickup', def: PICKUP, torsion: [12e3, 40e3], minModeHz: 20, corner: { latG: 0.7 }, extMm: 3 },
   { name: 'beater', def: BEATER, minModeHz: 20, corner: { latG: 0.7 }, extMm: 3 },
   { name: 'traffic sedan', def: SEDAN_TRAFFIC, minModeHz: 20, corner: { latG: 0.8 }, extMm: 3 },
-  // Box truck: the cab and box clusters are measured (≈ 1 mm); the ladder frame stays a beam lattice and keeps
-  // ringing after a kerb (its forced ~0.5–1 mm reaches the bodies for ≈ 1.7 s) — see PLAN, open item.
-  { name: 'box truck', def: BOXTRUCK, minModeHz: 12, corner: { latG: 0.35 }, extMm: 3, clustersOnly: true, settleS: 2 },
+  // Box truck: the cab and box clusters are measured (≈ 1 mm); the ladder frame's rails are their own 20 Hz clusters
+  // (R-PHYS: < 1 cm of frame bending in a hard stop, was 6–12 cm) with their own 10 mm limit.
+  {
+    name: 'box truck',
+    def: BOXTRUCK,
+    minModeHz: 12,
+    corner: { latG: 0.35 },
+    extMm: 3,
+    clustersOnly: true,
+    settleS: 2,
+    bodies: { ...BOXTRUCK, shell: (BOXTRUCK.shell as readonly ShellDef[]).slice(0, 2) },
+    frameMm: 10,
+  },
 ];
 
 const r1 = (x: number): string => x.toFixed(1);
@@ -72,14 +87,21 @@ describe('body stiffness (rigid shell cluster)', () => {
         checks.push(() => expect(t.stiffness).toBeLessThanOrEqual(c.torsion![1]));
       }
       for (const kind of ['launch', 'brake', 'corner'] as const) {
-        const base: DriveOptions = { clustersOnly: c.clustersOnly };
+        const base: DriveOptions = { clustersOnly: c.clustersOnly, ...(c.bodies ? { measureAs: c.bodies } : {}) };
         const r = runDrive(c.def, kind, kind === 'corner' ? { ...base, ...c.corner } : kind === 'launch' ? { ...base, launchS: 5 } : base);
         lines.push(`${kind}: extremity ${r1(r.maxExtMm)} mm (all ${r1(r.maxAllMm)}), released ${r.maxReleased}, broken ${r.broken}`);
         checks.push(() => expect(r.maxExtMm).toBeLessThan(c.extMm));
         checks.push(() => expect(r.maxReleased).toBe(0));
         checks.push(() => expect(r.broken).toBe(0));
       }
-      const curb = runDrive(c.def, 'curb', { clustersOnly: c.clustersOnly });
+      if (c.frameMm !== undefined) {
+        for (const kind of ['launch', 'brake'] as const) {
+          const r = runDrive(c.def, kind, { clustersOnly: true });
+          lines.push(`${kind}, frame rails included: extremity ${r1(r.maxExtMm)} mm`);
+          checks.push(() => expect(r.maxExtMm).toBeLessThan(c.frameMm!));
+        }
+      }
+      const curb = runDrive(c.def, 'curb', { clustersOnly: c.clustersOnly, ...(c.bodies ? { measureAs: c.bodies } : {}) });
       const settle = settleTime(curb.trace.t, curb.trace.ext);
       lines.push(`kerb 50 km/h: extremity ${r1(curb.maxExtMm)} mm, settles in ${settle.toFixed(3)} s, released ${curb.maxReleased}, broken ${curb.broken}`);
       checks.push(() => expect(settle).toBeLessThanOrEqual(c.settleS ?? 0.2));
