@@ -58,7 +58,7 @@ type Loader = (q: HdQuality) => Promise<VehicleVariant | null>;
  */
 export type VariantStatus = 'validated' | 'experimental';
 export const HD_STATUS: Readonly<Record<string, Readonly<Record<HdQuality, VariantStatus>>>> = {
-  sedan: { high: 'experimental', ultra: 'experimental' },
+  sedan: { high: 'validated', ultra: 'experimental' },
   coupe: { high: 'validated', ultra: 'experimental' },
   pickup: { high: 'experimental', ultra: 'experimental' },
   boxtruck: { high: 'experimental', ultra: 'experimental' },

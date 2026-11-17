@@ -36,6 +36,15 @@ export const HIRES_BRUSH_GAIN = 1.2;
 /** Sidewall / tread-ring gains on top of the per-ray scaling (see hiResWheel). */
 export const HIRES_SIDE_GAIN = 1;
 export const HIRES_RING_GAIN = 1.45;
+/**
+ * R-PHYS: extra damping on the tread-ring beams of the high-resolution tyre. With the ring at
+ * HIRES_RING_GAIN's damping alone the 16-gon tread fell into the standing-wave state above ≈ 205 km/h
+ * (the 12-ray tyre's failure mode before hoop tension, wheels.ts): the free fronts' slip jumped,
+ * body roll grew to ±0.1° at 0.5 Hz and the HD sedan (and the standard sedan on these wheels) drifted
+ * into a 0.1 rad/s yaw at 229 km/h, 10.8° heading (RIG_VALIDATE straight-line row; 12 rays: 0.001 rad/s).
+ * ×1.5 holds it (0.004 rad/s), ×2 leaves margin (0.002 rad/s, 0.10°).
+ */
+export const HIRES_RING_DAMP_GAIN = 2;
 /** Extra rolling loss of the 16-ray 205/55R16 over the 12-ray one, per 10 km/h of tread speed (see the doc). */
 export const HIRES_ROLL_DELTA_205_55R16: readonly number[] = [0, 0, 0, 0, 0, 0, 0, 0.0023, 0.0044, 0.0129, 0.0129, 0.007];
 
@@ -63,6 +72,8 @@ export interface HiResOptions {
   sideGain?: number;
   /** Extra gain on the tread-ring beams, default HIRES_RING_GAIN. */
   ringGain?: number;
+  /** Extra gain on the tread-ring damping only (on top of ringGain), default HIRES_RING_DAMP_GAIN. */
+  ringDampGain?: number;
 }
 
 /** The high-resolution version of a standard wheel (same tyre, finer rig). */
@@ -81,7 +92,7 @@ export function hiResWheel(w: WheelDef, o: HiResOptions = {}): WheelDef {
   if (out.sidewallSpring !== undefined) out.sidewallSpring *= sg;
   if (out.sidewallDamp !== undefined) out.sidewallDamp *= sg;
   if (out.tireRingSpring !== undefined) out.tireRingSpring *= rg;
-  if (out.tireRingDamp !== undefined) out.tireRingDamp *= rg;
+  if (out.tireRingDamp !== undefined) out.tireRingDamp *= rg * (o.ringDampGain ?? HIRES_RING_DAMP_GAIN);
   const k0 = w.treadBrushStiffness ?? 0;
   if (k0 > 0) {
     const cy = o.carcass ?? w.tyreLateralStiffness ?? HIRES_CARCASS_PER_BRUSH * k0;

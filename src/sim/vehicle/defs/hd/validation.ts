@@ -601,7 +601,12 @@ export function feelChecks(def: VehicleDef, t: FeelTargets, standard?: VehicleDe
 export function kcChecks(def: VehicleDef, standard: VehicleDef): Check[] {
   const out: Check[] = [];
   const a = runKC(def);
-  const b = asStandard(() => runKC(standard));
+  // R-PHYS: the reference is the standard rig on the VARIANT's wheels. The K&C rig reads camber off the hub
+  // axis, which the wheel's own spokes / rim carry: R-TYRE's 16-ray high-resolution tyre alone moves the
+  // standard sedan's front camber gain −0.22 → −0.24 °/cm and brake camber −0.14 → −0.21 °/kN·m (12 rays on the
+  // same mapping: −0.22 / −0.13), and the HD sedan on those wheels matches it to 0.001. This row checks the
+  // HD rig (hardpoints, links, bushings), not the tyre choice of its tier.
+  const b = asStandard(() => runKC({ ...standard, wheels: def.wheels }));
   const row = (name: string, x: readonly number[], y: readonly number[], rel: number, abs: number): void => {
     const ok = x.every((v, k) => Math.abs(v - y[k]!) <= Math.max(abs, rel * Math.abs(y[k]!)));
     check(out, `K&C ${name} vs standard`, ok, x.map((v, k) => `${f2(v)} (${f2(y[k]!)})`).join(' '));
