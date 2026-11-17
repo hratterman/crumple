@@ -92,3 +92,42 @@ export function runRampSteer(def: VehicleDef, kmh: number, to: number, rampS: nu
   }
   return out;
 }
+
+/**
+ * Rack force limit (harness): a parked car (service brake on, hands at centre) gets a steering moment on its
+ * front-left wheel — an equal and opposite fore-aft force pair `forceN` across the hub, ramped over 0.1 s and
+ * held to 0.4 s. Returns the largest rack excursion (fraction of lock) and the peak tie-rod force.
+ */
+export function runWheelMoment(def: VehicleDef, forceN: number): { rackMax: number; peakTieRod: number; holdMax: number } {
+  const sim = createHandlingSim({ def });
+  stepN(sim, 3000);
+  const ss = steeringOf(sim.veh as VehicleRuntimeEx);
+  ss.peakForce = 0;
+  const fl = sim.veh.wheels.find((w) => w.wheel.corner === 0)!;
+  const s = sim.eng.state;
+  let rackMax = 0;
+  for (let i = 0; i < 1000; i++) {
+    const f = i < 800 ? forceN * Math.min(1, i / 200) : 0;
+    s.velZ[fl.hubO]! -= f * s.invMass[fl.hubO]! * DT;
+    s.velZ[fl.hubI]! += f * s.invMass[fl.hubI]! * DT;
+    sim.eng.setInput(1, { gearSelect: 0, throttle: 0, brake: 1, steer: 0 });
+    sim.eng.step();
+    const r = Math.abs(ss.th / ss.thLock);
+    if (r > rackMax) rackMax = r;
+  }
+  return { rackMax, peakTieRod: ss.peakForce, holdMax: ss.holdMax };
+}
+
+/** Peak tie-rod force (N) of a full step steer (hands to `steer` at t = 0.5 s) at `kmh`, light throttle. */
+export function stepSteerTieRod(def: VehicleDef, steer: number, kmh: number): number {
+  const sim = createHandlingSim({ def });
+  stepN(sim, 3000);
+  setMotion(sim, kmh / 3.6);
+  const ss = steeringOf(sim.veh as VehicleRuntimeEx);
+  ss.peakForce = 0;
+  for (let i = 0; i < 6000; i++) {
+    sim.eng.setInput(1, { gearSelect: 1, throttle: 0.3, steer: i > 1000 ? steer : 0 });
+    sim.eng.step();
+  }
+  return ss.peakForce;
+}

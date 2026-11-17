@@ -205,6 +205,19 @@ interface Station {
  * sedan's P4 engine, so the rails get the stiffness budget a frontal needs).
  */
 const ENGINE_RAIL = 36;
+/**
+ * R-PHYS: rear frame f8 / f9 (spring hangers, the rear trailing-link and Panhard pivots, hitch, spare, tank
+ * straps): 16 → 44 kg per rail node, towers 18 → 50 kg (the mass solve keeps 2.1 t and the axle split). The
+ * rear link pivots' anchor beams take their stiffness from these nodes' ω·dt budget: at 16 kg they were
+ * 165 kN/m each, so (a) the whole body rotated 0.4° on its rear suspension mounts under 3 kN·m (torsion
+ * 7.0 kN·m/deg, the ladder itself twisting < 0.01°) and (b) the live axle wound up on them under braking —
+ * a 6 Hz brake hop (full ABS stop: rear load ±57 %; locked: rear wheels unloaded 19.6 % of the stop). At
+ * 44 kg: 13.4 kN·m/deg, ABS stop ±32 %, locked 0.17 %. 48 kg racked the cab enough in the 64 km/h frontal to
+ * strain a door 11 % (R-CRASH 10 %); 52+ kg pushed the 50 km/h frontal rebound under R-CRASH's 5 % (4.96 %);
+ * 64 kg starved the bed's top rail of the HD generator's seam budget.
+ */
+const REAR_RAIL = 44;
+const REAR_TOWER = 50;
 const FRAME: readonly Station[] = [
   { id: 'f0', part: 'frame', z: -2.72, closed: true, bulkhead: true, cls: 'horn', mass: { lo: 20, hi: 20 }, ring: [['lo', 0.46, 0.45], ['hi', 0.46, 0.72]] },
   { id: 'f1', part: 'frame', z: -2.4, closed: true, bulkhead: true, cls: 'horn', mass: { lo: 28, hi: 28 }, ring: [['lo', 0.46, 0.45], ['hi', 0.46, 0.72]] },
@@ -217,9 +230,9 @@ const FRAME: readonly Station[] = [
   { id: 'f5', part: 'frame', z: -0.95, closed: true, bulkhead: true, cls: 'frame', mass: { lo: 34, hi: 34 }, ring: [['lo', 0.52, 0.4], ['hi', 0.52, 0.75]] },
   { id: 'f6', part: 'frame', z: -0.15, closed: true, bulkhead: true, cls: 'frame', mass: { lo: 32, hi: 32 }, ring: [['lo', 0.53, 0.4], ['hi', 0.53, 0.75]] },
   { id: 'f7', part: 'frame', z: 0.65, closed: true, bulkhead: true, cls: 'frame', mass: { lo: 30, hi: 30 }, ring: [['lo', 0.53, 0.4], ['hi', 0.53, 0.75]] },
-  { id: 'f8', part: 'frame', z: 1.22, closed: true, bulkhead: true, cls: 'frame', mass: { lo: 16, hi: 16 }, ring: [['lo', 0.53, 0.46], ['hi', 0.53, 0.79]] },
+  { id: 'f8', part: 'frame', z: 1.22, closed: true, bulkhead: true, cls: 'frame', mass: { lo: REAR_RAIL, hi: REAR_RAIL }, ring: [['lo', 0.53, 0.46], ['hi', 0.53, 0.79]] },
   {
-    id: 'f9', part: 'frame', z: Z_R, closed: true, bulkhead: true, cls: 'frame', mass: { lo: 16, hi: 16, tw: 18 },
+    id: 'f9', part: 'frame', z: Z_R, closed: true, bulkhead: true, cls: 'frame', mass: { lo: REAR_RAIL, hi: REAR_RAIL, tw: REAR_TOWER },
     ring: [['lo', 0.53, 0.6], ['hi', 0.53, 0.86]], extra: [['tw', 0.66, 1.04]],
   },
   { id: 'f10', part: 'frame', z: 2.5, closed: true, bulkhead: false, cls: 'frame', mass: { lo: 14, hi: 14 }, ring: [['lo', 0.53, 0.6], ['hi', 0.53, 0.86]] },
@@ -503,8 +516,10 @@ const DRIVETRAIN: DrivetrainDef = {
   // R-PHYS: halfshaft / CV strength ≈ 2.2 × the peak 1st-gear wheel torque per side (550 × 3.4 × 4.1 / 2 = 3830)
   halfshaftBreakTorque: 8400,
   // R-PHYS engine systems (engineSystems.ts): fuel, cooling, oil, stall / starter
-  engine: { displacementL: 5.0, fuel: 'petrol', tankL: 98 , rock: false },
-  // R-PHYS: no engine rock yet: its body-on-frame ladder (7 kN·m/deg torsion) twisted under the propshaft torque and cost 1 s of 0–100 (frame stiffness: open)
+  // R-PHYS: engine rock stays off. With the stiffer rear frame it no longer costs launch time (0–100 6.56 s,
+  // surge 0.082), but from ≈ 100 km/h at full throttle the rock couple drives a ±0.1 rad/s, ≈ 1.7 Hz yaw
+  // weave (lateral ±1.2 m/s²) that wakes ESC (realism/axle.test.ts guards the straight launch): open.
+  engine: { displacementL: 5.0, fuel: 'petrol', tankL: 98, rock: false },
   torqueCurve: [
     [0, 280],
     [700, 360],
@@ -1570,7 +1585,7 @@ function buildPickup(): { def: VehicleDef; design: PickupDesign } {
     // R-PHYS: asymmetric digressive dampers (dampers.ts: rebound 2.6 : 1 bump, knee 0.1 m/s)
     dampers: { front: true, rear: true },
     // R-PHYS steering system (steering.ts): hydraulic rack, 18:1 (3.4 turns)
-    steering: { maxWheelAngleDeg: round((PICKUP_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2), system: { ratio: 18, torsionBarNmPerDeg: 2, assistGain0: 20, assistGainHigh: 3, assistSpeed: 9, assistMaxNm: 130, inertia: 0.07 } },
+    steering: { maxWheelAngleDeg: round((PICKUP_TARGETS.maxWheelAngleRad * 180) / Math.PI, 2), system: { ratio: 18, torsionBarNmPerDeg: 2, assistGain0: 20, assistGainHigh: 3, assistSpeed: 9, assistMaxNm: 130, inertia: 0.07, rackForceMaxN: 18000 } },
     frame: { origin: sid('c2', 'tn'), front: sid('s0', 'rs'), top: sid('c2', 'rf') },
     // Feel pass: rigid shell cluster (shell.ts) — crumple zones released whole on impact, firewall, safety cell.
     // R-CRASH crush unloading: gentle on the crumple members, off for the held cab / frame (the stiff

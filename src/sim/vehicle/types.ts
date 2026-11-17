@@ -417,6 +417,11 @@ export interface SteeringSystemDef {
   assistMaxNm?: number;
   /** Pinion-side inertia (rack, pinion, assist motor reflected), kg·m². */
   inertia?: number;
+  /**
+   * Most a tie rod can push / pull before the rack is back-driven (assist + gear holding force), N. Beyond it a
+   * wheel load (kerb strike, crash) moves the rack instead of the tie rod carrying it. Default 15 kN.
+   */
+  rackForceMaxN?: number;
 }
 
 /**

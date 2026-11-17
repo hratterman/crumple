@@ -38,6 +38,8 @@ export const STEERING_DEFAULTS: SteeringSystemSpec = {
   assistSpeed: 6,
   assistMaxNm: 80,
   inertia: 0.04,
+  // EPS racks deliver ≈ 8–12 kN and back-drive a little above (Harrer & Pfeffer 2017 ch. 6): 15 kN per tie rod
+  rackForceMaxN: 15000,
 };
 
 export function steeringSpec(def: SteeringSystemDef | undefined): SteeringSystemSpec {
@@ -64,6 +66,11 @@ const TB_DAMP = 0.05;
 
 export interface SteeringState {
   spec: SteeringSystemSpec;
+  /** Largest tie-rod force seen since the reset, N (harness / R-CRASH tie-rod damage later); 1 while the rack is back-driven. */
+  peakForce: number;
+  yielding: number;
+  /** Holding torque cap at the pinion, N·m: rackForceMaxN × the tie rods' mean ∂L_rest/∂θ. */
+  holdMax: number;
   /** Lock angle at the pinion / steering wheel, rad (mean road-wheel lock × ratio). */
   thLock: number;
   ktb: number;
@@ -94,6 +101,10 @@ export function createSteering(def: SteeringSystemDef | undefined, maxWheelAngle
     travel[h] = rig.beamHydroTravel[local[h]!]!;
   }
   const ktb = spec.torsionBarNmPerDeg / DEG;
+  const thLock = maxWheelAngleDeg * spec.ratio * DEG;
+  let gSum = 0;
+  for (let h = 0; h < local.length; h++) gSum += Math.abs(base[h]! * travel[h]!) / thLock;
+  const gMean = local.length > 0 ? gSum / local.length : 0;
   return {
     spec,
     thLock: maxWheelAngleDeg * spec.ratio * DEG,
@@ -104,6 +115,9 @@ export function createSteering(def: SteeringSystemDef | undefined, maxWheelAngle
     torque: 0,
     assist: 0,
     load: 0,
+    peakForce: 0,
+    yielding: 0,
+    holdMax: spec.rackForceMaxN * gMean,
     local,
     beams: Int32Array.from(local),
     base,
@@ -122,6 +136,8 @@ export function resetSteering(s: SteeringState): void {
   s.torque = 0;
   s.assist = 0;
   s.load = 0;
+  s.peakForce = 0;
+  s.yielding = 0;
 }
 
 /** One tick: `steer` = the hands' steering-wheel command (−1..1), `speed` m/s. Returns the rack position (−1..1). */
@@ -150,6 +166,8 @@ export function stepSteering(state: SimState, s: SteeringState, steer: number, s
     const vrel = ((velX[ib]! - velX[ia]!) * dx + (velY[ib]! - velY[ia]!) * dy + (velZ[ib]! - velZ[ia]!) * dz) / dist;
     const F = kArr[b]! * (dist - restLen[b]!) + dArr[b]! * vrel;
     tl += (F * s.base[h]! * s.travel[h]!) / L;
+    const aF = F < 0 ? -F : F;
+    if (aF > s.peakForce) s.peakForce = aF;
   }
   s.load = tl;
   // speed-sensitive assist, limited by the assist capacity (one tick lagged)
@@ -166,6 +184,16 @@ export function stepSteering(state: SimState, s: SteeringState, steer: number, s
   // semi-implicit in the assisted torsion bar and the damping
   let om = (s.om + (dt / J) * (K * (sw - s.th) + Ct * omSw + tl)) / (1 + (dt / J) * (C + dt * K));
   let th = s.th + dt * om;
+  // rack force limit: the hands + assist hold the rack with at most rackForceMaxN per tie rod (×∂L/∂θ at the
+  // pinion); past it a wheel load back-drives the rack instead of the tie rod carrying it (kerb strike, crash)
+  const hold = K * (sw - th);
+  const cap = s.holdMax;
+  if (hold > cap || hold < -cap) {
+    // the saturated assist no longer servoes the twist rate: only the bar's and the rack's own damping
+    om = (s.om + (dt / J) * ((hold > 0 ? cap : -cap) + TB_DAMP * omSw + tl)) / (1 + (dt / J) * (TB_DAMP + RACK_DAMP));
+    th = s.th + dt * om;
+    s.yielding = 1;
+  } else s.yielding = 0;
   if (th > L) {
     th = L;
     if (om > 0) om = 0;

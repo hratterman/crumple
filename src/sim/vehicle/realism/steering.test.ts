@@ -27,7 +27,7 @@ import { PICKUP } from '../defs/pickup';
 import { SEDAN } from '../defs/sedan';
 import type { VehicleDef } from '../types';
 import { dumpJson } from './dump';
-import { runParking, runRampSteer, type SteerSample } from './steering';
+import { runParking, runRampSteer, runWheelMoment, stepSteerTieRod, type SteerSample } from './steering';
 
 const peakAbs = (xs: SteerSample[], f: (s: SteerSample) => number): number => xs.reduce((m, s) => Math.max(m, Math.abs(f(s))), 0);
 
@@ -117,5 +117,19 @@ describe('steering system: on centre and at the limit (sedan, 100 km/h)', () => 
       return best.torque;
     };
     expect(at(100, 0.2)).toBeGreaterThan(1.3 * at(40, 0.4));
+  }, 120_000);
+});
+
+describe('steering system: rack force limit (sedan)', () => {
+  it('a full-lock step steer at 80 km/h loads a tie rod < 6 kN (the action-driven hydros of a car without the system: 171 kN) [HP]', () => {
+    expect(stepSteerTieRod(SEDAN, 1, 80)).toBeLessThan(6000);
+    expect(stepSteerTieRod(SEDAN, 0.12, 80)).toBeLessThan(3000);
+  }, 120_000);
+
+  it('the rack holds a steering moment below rackForceMaxN and is back-driven to its stop above it [HP]', () => {
+    const below = runWheelMoment(SEDAN, 10e3);
+    expect(below.rackMax).toBeLessThan(0.1); // the assisted torsion bar's compliance only
+    const above = runWheelMoment(SEDAN, 30e3);
+    expect(above.rackMax).toBeGreaterThan(0.9);
   }, 120_000);
 });

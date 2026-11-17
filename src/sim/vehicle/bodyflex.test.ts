@@ -40,9 +40,9 @@ interface Case {
 const CASES: Case[] = [
   { name: 'sedan', def: SEDAN, torsion: [15e3, 40e3], minModeHz: 20, corner: { latG: 0.9 }, extMm: 3 },
   { name: 'coupe', def: COUPE, torsion: [15e3, 40e3], minModeHz: 20, corner: { latG: 0.9 }, extMm: 3 },
-  // Pickup: 7 kN·m/deg at the spring hangers (was 0.58): the light hanger / pivot nodes' own anchor beams
-  // dominate there (the cluster's pull is mass-proportional); short of the 15–40 car range, see PLAN.
-  { name: 'pickup', def: PICKUP, torsion: [6e3, 40e3], minModeHz: 20, corner: { latG: 0.7 }, extMm: 3 },
+  // Pickup: 13.4 kN·m/deg (was 7.0, 0.58 before the shell): the rear pivots' anchor beams set it, so it
+  // follows the rear frame nodes' mass (defs/pickup.ts REAR_RAIL); body-on-frame trucks sit at ≈ 10–20.
+  { name: 'pickup', def: PICKUP, torsion: [12e3, 40e3], minModeHz: 20, corner: { latG: 0.7 }, extMm: 3 },
   { name: 'beater', def: BEATER, minModeHz: 20, corner: { latG: 0.7 }, extMm: 3 },
   { name: 'traffic sedan', def: SEDAN_TRAFFIC, minModeHz: 20, corner: { latG: 0.8 }, extMm: 3 },
   // Box truck: the cab and box clusters are measured (≈ 1 mm); the ladder frame stays a beam lattice and keeps
