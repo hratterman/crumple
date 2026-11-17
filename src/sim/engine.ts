@@ -33,7 +33,7 @@ import { applyColliderContacts, compileColliders, resetColliderContactState } fr
 import { OBJ_REBUILD_TICKS, OBJ_REBUILD_TICKS_SLOW, OBJ_SLOW_SPEED, ObjectContacts, pairKey } from './collision/objects';
 import { applyWater, boxNearWater, VEHICLE_FLOOD_LOSS, VEHICLE_FLOOD_TIME_S } from './collision/water';
 import { TriangleContacts, type StaticMeshInput, type TriangleSlot } from './collision/triangles';
-import { deriveCollisionTriangles, mergeTriangles, triangleSetOf } from './rig/triangles';
+import { deriveCollisionTriangles, mergeTriangles, selfParticipants, triangleSetOf } from './rig/triangles';
 import { quatToMatrix } from '../world/colliders';
 import { groundNormalForce, markMirroredSampler, PlaneSampler, resetGroundContactState } from './collision/ground';
 import { applyBodyDig, applySoftGround, SoftGround, SoftGroundSampler } from './softground/softground';
@@ -131,7 +131,7 @@ function resolveTriangles(t: LazyTriangles): TriangleSlot | null {
       const derived = deriveCollisionTriangles(rig, { nodeCount: t.bodyNodeCount });
       tris = tris && tris.count > 0 ? mergeTriangles(derived, tris, rig.nodePos) : derived;
     }
-    slot = tris && tris.count > 0 ? { set: triangleSetOf(rig, tris), nodeSelf: rig.nodeSelfCollide ?? null } : null;
+    slot = tris && tris.count > 0 ? { set: triangleSetOf(rig, tris), nodeSelf: selfParticipants(rig, rig.triangles, t.bodyNodeCount) } : null;
     TRI_BY_RIG.set(rig, slot);
     if (t.defKey) TRI_BY_DEF.set(t.defKey, slot);
   }

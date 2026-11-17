@@ -64,14 +64,19 @@ export function emptyTriangles(): CompiledTriangles {
  * surface plus every declared triangle whose vertex set it does not already have (declared winding,
  * flags and material kept). Declared lists alone are not closed (R-RIG's sheets: no underbody, bumpers or
  * glass), so they add to the derivation instead of replacing it.
+ * SELF-COLLISION follows the declaration: a derived triangle that a declared `selfCollide: false` triangle
+ * duplicates or overlaps, and a derived triangle whose three vertices are all `sheetNodes`, is not a
+ * self-collision face (the sheets' light nodes against the backbone launched them at 40–160 m/s in ultra
+ * frontals once the derived surface was added).
  */
 export function mergeTriangles(derived: CompiledTriangles, declared: CompiledTriangles, P?: Float64Array): CompiledTriangles {
+  const sheet = sheetNodes(declared, P ? P.length / 3 : 0);
   const key = (a: number, b: number, c: number): string => {
     const v = [a, b, c].sort((x, y) => x - y);
     return `${v[0]},${v[1]},${v[2]}`;
   };
-  const have = new Set<string>();
-  for (let t = 0; t < derived.count; t++) have.add(key(derived.a[t]!, derived.b[t]!, derived.c[t]!));
+  const have = new Map<string, number>();
+  for (let t = 0; t < derived.count; t++) have.set(key(derived.a[t]!, derived.b[t]!, derived.c[t]!), t);
   // Coplanar overlap through a shared edge (the same quad split along the other diagonal), as in step 3.
   const byEdge = new Map<number, number[]>();
   const ek = (u: number, v: number): number => Math.min(u, v) * 1048576 + Math.max(u, v);
@@ -86,10 +91,11 @@ export function mergeTriangles(derived: CompiledTriangles, declared: CompiledTri
       }
     }
   }
-  const overlaps = (a: number, b: number, c: number): boolean => {
-    if (!P) return false;
+  /** The derived triangle that declared (a, b, c) overlaps (coplanar through a shared edge), or −1. */
+  const overlaps = (a: number, b: number, c: number): number => {
+    if (!P) return -1;
     const cand = candOf(P, a, b, c);
-    if (!Number.isFinite(cand.nx)) return false;
+    if (!Number.isFinite(cand.nx)) return -1;
     const v = [a, b, c];
     for (let e = 0; e < 3; e++) {
       const u = v[e]!, w = v[(e + 1) % 3]!, o3 = v[(e + 2) % 3]!;
@@ -98,15 +104,22 @@ export function mergeTriangles(derived: CompiledTriangles, declared: CompiledTri
         if (!(Math.abs(d.nx * cand.nx + d.ny * cand.ny + d.nz * cand.nz) >= COPLANAR_COS)) continue;
         const da = derived.a[t]!, db = derived.b[t]!, dc = derived.c[t]!;
         const other = da !== u && da !== w ? da : db !== u && db !== w ? db : dc;
-        if (sameSide(P, u, w, o3, other, cand)) return true;
+        if (sameSide(P, u, w, o3, other, cand)) return t;
       }
     }
-    return false;
+    return -1;
   };
+  const dFlags = derived.flags.slice(0, derived.count);
   const extra: number[] = [];
   for (let t = 0; t < declared.count; t++) {
     const a = declared.a[t]!, b = declared.b[t]!, c = declared.c[t]!;
-    if (!have.has(key(a, b, c)) && !overlaps(a, b, c)) extra.push(t);
+    let match = have.get(key(a, b, c)) ?? -1;
+    if (match < 0) match = overlaps(a, b, c);
+    if (match < 0) extra.push(t);
+    else if ((declared.flags[t]! & RIG_TRI_FLAG_SELF) === 0) dFlags[match] = dFlags[match]! & ~RIG_TRI_FLAG_SELF;
+  }
+  for (let t = 0; t < derived.count; t++) {
+    if (sheet[derived.a[t]!] || sheet[derived.b[t]!] || sheet[derived.c[t]!]) dFlags[t] = dFlags[t]! & ~RIG_TRI_FLAG_SELF;
   }
   const n = derived.count + extra.length;
   const out: CompiledTriangles = {
@@ -121,7 +134,7 @@ export function mergeTriangles(derived: CompiledTriangles, declared: CompiledTri
   out.a.set(derived.a.subarray(0, derived.count));
   out.b.set(derived.b.subarray(0, derived.count));
   out.c.set(derived.c.subarray(0, derived.count));
-  out.flags.set(derived.flags.subarray(0, derived.count));
+  out.flags.set(dFlags);
   out.material.set(derived.material.subarray(0, derived.count));
   out.thickness.set(derived.thickness.subarray(0, derived.count));
   for (let k = 0; k < extra.length; k++) {
@@ -133,6 +146,47 @@ export function mergeTriangles(derived: CompiledTriangles, declared: CompiledTri
     out.flags[o] = declared.flags[t]!;
     out.material[o] = declared.material[t]!;
     out.thickness[o] = declared.thickness[t]!;
+  }
+  return out;
+}
+
+/**
+ * SHEET NODES of a declared triangle set: vertices of at least one `selfCollide: false` triangle and of no
+ * self-collision triangle (1 / 0 per rig-local node). They take no part in self-collision unless the def
+ * declares node participation (`RigNodeDef.selfCollide`), see `selfParticipants`.
+ */
+export function sheetNodes(declared: CompiledTriangles, nodeCount: number): Uint8Array {
+  const n = Math.max(nodeCount, 0);
+  const out = new Uint8Array(n);
+  const self = new Uint8Array(n);
+  for (let t = 0; t < declared.count; t++) {
+    const on = (declared.flags[t]! & RIG_TRI_FLAG_SELF) !== 0;
+    for (const v of [declared.a[t]!, declared.b[t]!, declared.c[t]!]) {
+      if (v >= n) continue;
+      if (on) self[v] = 1;
+      else out[v] = 1;
+    }
+  }
+  for (let i = 0; i < n; i++) if (self[i]) out[i] = 0;
+  return out;
+}
+
+/**
+ * Self-collision participants of a rig (TriangleSlot.nodeSelf): within the body nodes [0, bodyNodeCount)
+ * of a vehicle (0 = every node), the declared `RigNodeDef.selfCollide` values when the def has any, else
+ * collidable nodes minus the declared triangles' sheet nodes; null = every collidable node.
+ */
+export function selfParticipants(rig: CompiledRig, declared: CompiledTriangles | undefined, bodyNodeCount = 0): Uint8Array | null {
+  const n = rig.nodeCount;
+  // A vehicle's wheels never self-collide: a spinning tyre / rim ring sweeps past its own suspension arms,
+  // rack and sills (rest-pose exclusions cannot cover a rotating ring) and was kicked by up to 15 m/s per tick.
+  const body = bodyNodeCount > 0 && bodyNodeCount < n ? bodyNodeCount : n;
+  const sheet = declared && declared.count > 0 ? sheetNodes(declared, n) : null;
+  if (!rig.nodeSelfCollide && !sheet && body === n) return null;
+  const out = new Uint8Array(n);
+  for (let i = 0; i < body; i++) {
+    const on = rig.nodeSelfCollide ? rig.nodeSelfCollide[i]! !== 0 : (rig.nodeFlags[i]! & RIG_NODE_FLAG_COLLIDABLE) !== 0 && !(sheet && sheet[i]);
+    out[i] = on ? 1 : 0;
   }
   return out;
 }

@@ -61,6 +61,19 @@ import { CONTACT_MU, CONTACT_ZETA } from './contactMaterials';
 import { cooldownsFor, SKID_COOLDOWN_STEPS, SKID_MIN_LOAD, SKID_MIN_SLIP } from './ground';
 
 export const TRI_KC_MAX = 2e6;
+/**
+ * Self-collision unloading (see apply): unloading stiffness k/e² with e² = TRI_SELF_UNLOAD_E2, capped at
+ * ω·dt = TRI_SELF_UNLOAD_STAB on the pair's reduced mass; within TRI_SELF_UNLOAD_BAND of the deepest point
+ * the loading line holds (no unloading on mm vibration); the episode's depth relaxes over
+ * TRI_SELF_UNLOAD_RELAX_S. The values of objects.ts' car-to-car law (R-CRASH).
+ */
+export const TRI_SELF_UNLOAD_E2 = 0.05;
+const TRI_SELF_UNLOAD_IE2 = 1 / TRI_SELF_UNLOAD_E2;
+export const TRI_SELF_UNLOAD_STAB = 1.0;
+export const TRI_SELF_UNLOAD_BAND = 0.005;
+export const TRI_SELF_UNLOAD_RELAX_S = 0.2;
+/** Self-collision: the penalty spring pushes a pair apart at no more than this relative speed, m/s. */
+export const TRI_SELF_MAX_SEP = 2;
 export const TRI_KC_STABILITY = 0.2;
 /** The penalty spring uses min(−gap, TRI_DEPTH_CAP): a deep pair separates over a few ticks. */
 export const TRI_DEPTH_CAP = 0.08;
@@ -102,6 +115,8 @@ const ST_CONTACT = 8;
 // pair kind bits
 const K_STATIC = 1;
 const K_TWO_SIDED = 2;
+/** Node and triangle of the same object (self-collision). */
+const K_SELF = 4;
 
 export interface TriangleContactStats {
   pairs: number;
@@ -398,6 +413,8 @@ export class TriangleContacts {
   /** Barycentric (u, v) of the last tick in contact (load bookkeeping across rebuilds). */
   pairU: Float64Array;
   pairV: Float64Array;
+  /** Self pairs: deepest penetration of the current contact episode (hysteretic unloading), m. */
+  pairDmax: Float64Array;
   pairCount = 0;
   private keys: Float64Array<ArrayBufferLike>;
   private keyCount = 0;
@@ -405,6 +422,7 @@ export class TriangleContacts {
   private prevState: Uint8Array;
   private prevU: Float64Array;
   private prevV: Float64Array;
+  private prevDmax: Float64Array;
   // ---- per node contact LOAD (previous / current tick): Σ w² over the contacts the node takes part in,
   // w = 1 as the contact point, the barycentric weight as a triangle vertex (penalty normalization).
   private loadPrev: Float64Array;
@@ -443,6 +461,8 @@ export class TriangleContacts {
     this.pairV = new Float64Array(pairCapacity);
     this.prevU = new Float64Array(pairCapacity);
     this.prevV = new Float64Array(pairCapacity);
+    this.pairDmax = new Float64Array(pairCapacity);
+    this.prevDmax = new Float64Array(pairCapacity);
     this.keys = new Float64Array(pairCapacity);
     this.prevKey = new Float64Array(pairCapacity);
     this.prevState = new Uint8Array(pairCapacity);
@@ -527,6 +547,9 @@ export class TriangleContacts {
     tu = this.prevV;
     this.prevV = this.pairV;
     this.pairV = tu;
+    tu = this.prevDmax;
+    this.prevDmax = this.pairDmax;
+    this.pairDmax = tu;
     this.pairCount = 0;
     this.keyCount = 0;
     const span = interval * dt;
@@ -597,6 +620,7 @@ export class TriangleContacts {
         st[i] = this.prevState[j]!;
         this.pairU[i] = this.prevU[j]!;
         this.pairV[i] = this.prevV[j]!;
+        this.pairDmax[i] = this.prevDmax[j]!;
       }
     }
     // Contact loads of the new list's nodes from the carried-over states (exact: last barycentrics).
@@ -766,6 +790,7 @@ export class TriangleContacts {
       this.pairState[m] = 0;
       this.pairU[m] = 0;
       this.pairV[m] = 0;
+      this.pairDmax[m] = 0;
       this.pairIdNode[m] = this.oId[ps]!;
       this.pairMatNode[m] = nodeMat;
       let triMat: number;
@@ -791,7 +816,7 @@ export class TriangleContacts {
         this.pairA[m] = ns + tris.a[t]!;
         this.pairB[m] = ns + tris.b[t]!;
         this.pairC[m] = ns + tris.c[t]!;
-        this.pairKind[m] = (tris.flags[t]! & RIG_TRI_FLAG_TWO_SIDED) !== 0 ? K_TWO_SIDED : 0;
+        this.pairKind[m] = ((tris.flags[t]! & RIG_TRI_FLAG_TWO_SIDED) !== 0 ? K_TWO_SIDED : 0) | (q === ps ? K_SELF : 0);
         this.pairH[m] = tris.thickness[t]!;
         this.pairIdTri[m] = this.oId[q]!;
         triMat = tris.material[t]!;
@@ -835,6 +860,8 @@ export class TriangleContacts {
     const curL = this.loadCur;
     const invDt = 1 / dt;
     const kStab = TRI_KC_STABILITY * invDt * invDt;
+    const kuStab = TRI_SELF_UNLOAD_STAB * invDt * invDt;
+    const relax = dt / TRI_SELF_UNLOAD_RELAX_S;
     for (let i = 0; i < n; i++) {
       curL[this.pairNode[i]!] = 0;
       if ((this.pairKind[i]! & K_STATIC) === 0) {
@@ -964,9 +991,36 @@ export class TriangleContacts {
         const c = 2 * this.pairZeta[i]! * Math.sqrt(k * mr);
         const depth = -gap < TRI_DEPTH_CAP ? -gap : TRI_DEPTH_CAP;
         if (-gap > maxDepth) maxDepth = -gap;
-        fn = k * depth - c * vn;
+        let fs = k * depth;
+        if ((kind & K_SELF) !== 0) {
+          // SELF-COLLISION unloads hysteretically (Walton–Braun, as objects.ts / colliders.ts): metal crushed
+          // into its own structure is plastic. Below the episode's deepest point the force follows a line
+          // k/e² steep (capped at ω·dt = 1 on the reduced mass), so the spring energy stored by a crush is not
+          // handed back to a light node: elastic unloading shot sheet / crash-can nodes out at 40–160 m/s in
+          // ultra frontals (ω·d ≈ 0.45·8 cm per tick).
+          const dm = this.pairDmax[i]!;
+          if (depth >= dm) this.pairDmax[i] = depth;
+          else {
+            let ku = k * TRI_SELF_UNLOAD_IE2;
+            const kum = (kuStab * mr) / s;
+            if (ku > kum) ku = kum;
+            const excess = dm - depth - TRI_SELF_UNLOAD_BAND;
+            if (excess > 0) {
+              const fu = fs - (ku - k) * excess;
+              fs = fu < 0 ? 0 : fu;
+            }
+            this.pairDmax[i] = dm - (dm - depth) * relax;
+          }
+          // Separation-speed cap (deep overlaps of light nodes: nested crash-can / rail sleeves 5–14 cm deep):
+          // the spring may push the pair apart no faster than TRI_SELF_MAX_SEP this tick (its steady separation
+          // speed is ω·d / 2ζ, tens of m/s at those depths); it still holds any closing motion. Normalized by
+          // the contact load like the spring (a node in N self contacts is not kicked N times).
+          const fsCap = (mr * (TRI_SELF_MAX_SEP - vn) * invDt) / s;
+          if (fs > fsCap) fs = fsCap > 0 ? fsCap : 0;
+        }
+        fn = fs - c * vn;
         if (fn < 0) fn = 0;
-      }
+      } else if ((kind & K_SELF) !== 0) this.pairDmax[i] = 0;
       if (ccd) {
         // Predicted relative normal velocity at the end of the tick from the forces accumulated so far.
         let apx = frcX[p]! * imp, apy = frcY[p]! * imp, apz = frcZ[p]! * imp;

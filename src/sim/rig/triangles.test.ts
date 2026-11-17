@@ -4,8 +4,8 @@ import { SEDAN } from '../vehicle/defs/sedan';
 import { BOXTRUCK } from '../vehicle/defs/boxtruck';
 import { SEDAN_TRAFFIC } from '../vehicle/defs/sedanTraffic';
 import { COUPE } from '../vehicle/defs/coupe';
-import { deriveCollisionTriangles, triangleSetOf } from './triangles';
-import { RIG_TRI_FLAG_TWO_SIDED } from './types';
+import { deriveCollisionTriangles, mergeTriangles, sheetNodes, triangleSetOf } from './triangles';
+import { RIG_TRI_FLAG_SELF, RIG_TRI_FLAG_TWO_SIDED, type CompiledTriangles } from './types';
 
 describe('derived collision triangles', () => {
   for (const def of [SEDAN, SEDAN_TRAFFIC, COUPE, BOXTRUCK]) {
@@ -47,4 +47,44 @@ describe('derived collision triangles', () => {
       expect(outward / tris.count).toBeGreaterThan(0.8);
     });
   }
+});
+
+describe('declared triangles merged into the derived surface (R-CORE self-collision)', () => {
+  const tris = (list: [number, number, number, number][]): CompiledTriangles => ({
+    count: list.length,
+    a: Int32Array.from(list.map((t) => t[0])),
+    b: Int32Array.from(list.map((t) => t[1])),
+    c: Int32Array.from(list.map((t) => t[2])),
+    flags: Uint8Array.from(list.map((t) => t[3])),
+    material: new Uint8Array(list.length),
+    thickness: new Float64Array(list.length),
+  });
+  // 6 nodes: 0..3 a backbone quad, 4 / 5 sheet nodes in front of it.
+  const P = Float64Array.from([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0.5, 0.5, 0.3, 1.5, 0.5, 0.3]);
+  const S = RIG_TRI_FLAG_SELF;
+  it('sheet nodes: vertices of selfCollide: false triangles only', () => {
+    const decl = tris([[0, 1, 4, 0], [1, 2, 5, 0], [2, 3, 0, S]]);
+    expect(Array.from(sheetNodes(decl, 6))).toEqual([0, 1, 0, 0, 1, 1]);
+  });
+  it('a derived triangle duplicated by, or touching, a sheet is no self-collision face', () => {
+    const derived = tris([[0, 1, 2, S], [0, 2, 3, S], [2, 1, 5, S], [3, 2, 4, S]]);
+    const decl = tris([[2, 3, 0, 0], [1, 2, 5, 0], [0, 1, 4, 0]]);
+    const m = mergeTriangles(derived, decl, P);
+    // Only non-self declarations: every vertex is a sheet node, so no derived triangle stays a self face;
+    // [0,1,4] (no derived match) is appended with its declared flags.
+    expect(m.count).toBe(5);
+    expect(m.flags[0]! & S).toBe(0);
+    expect(m.flags[1]! & S).toBe(0);
+    expect(m.flags[2]! & S).toBe(0);
+    expect(m.flags[3]! & S).toBe(0);
+    expect(m.flags[4]! & S).toBe(0);
+  });
+  it('self triangles of the declaration keep the backbone in self-collision', () => {
+    const derived = tris([[0, 1, 2, S], [0, 2, 3, S], [1, 2, 5, S]]);
+    const decl = tris([[0, 1, 2, S], [0, 2, 3, S], [1, 2, 5, 0], [5, 2, 4, 0]]);
+    const m = mergeTriangles(derived, decl, P);
+    expect(m.flags[0]! & S).toBe(S);
+    expect(m.flags[1]! & S).toBe(S);
+    expect(m.flags[2]! & S).toBe(0); // declared non-self duplicate, and touches sheet node 5
+  });
 });
