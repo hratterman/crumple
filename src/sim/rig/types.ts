@@ -109,11 +109,19 @@ export interface RigTriangleDef {
   thickness?: number;
   /** Takes part in self-collision of its own object. Default true. */
   selfCollide?: boolean;
+  /**
+   * R-CORE: an inner BULKHEAD (firewall, dash): its own object's nodes collide with it in EVERY solver preset,
+   * the standard one included (a cheap stack-up contact: the engine bay stops against the dash instead of
+   * shearing past it). Implies self-collision (`selfCollide: false` is an error). Default false.
+   */
+  bulkhead?: boolean;
 }
 
 /** Compiled triangle flags (CompiledTriangles.flags). */
 export const RIG_TRI_FLAG_TWO_SIDED = 1 << 0;
 export const RIG_TRI_FLAG_SELF = 1 << 1;
+/** Declared bulkhead (RigTriangleDef.bulkhead): self-collides under every solver preset. */
+export const RIG_TRI_FLAG_BULKHEAD = 1 << 2;
 
 /** R-CORE: compiled collision triangles (declaration order; node indices rig-local). */
 export interface CompiledTriangles {

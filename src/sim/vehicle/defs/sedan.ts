@@ -27,7 +27,7 @@
  */
 import { buildClosure, rotateAbout as rotateClosure, type ClosureSpec, type V3 as CV3 } from '../closures';
 import { SHELL_GROUPS, SHELL_RELEASE_CELL, shellLayout, type ShellDef, type ShellZone } from '../shellDefs';
-import type { RigBeamDef, RigNodeDef } from '../../rig/types';
+import type { RigBeamDef, RigNodeDef, RigTriangleDef } from '../../rig/types';
 import { wheelNodeId, type DrivetrainDef, type VehicleDef, type WheelDef } from '../types';
 import { WHEEL_TUNING_205_55R16 } from '../wheelrig';
 
@@ -263,6 +263,23 @@ const DOOR_MIN_DEFORM = 4e3;
  * elastically and it threw the whole front forward again (springback).
  */
 const FIREWALL_PANEL = /^s5_fw_/;
+/**
+ * R-CORE / R-CRASH: the firewall ring (station 5) as a declared two-sided BULKHEAD (collision triangles its own
+ * nodes hit in every solver preset): the open s4 bay ring and the engine stack against the dash instead of
+ * shearing past it inside one object (56 km/h: s4→s5 shortened 30 cm of a 26 cm gap). A fan over the ring
+ * (sill / floor rail / tunnel / hinge pillar / cowl) and the two panel nodes, mirrored.
+ */
+export function firewallBulkhead(): RigTriangleDef[] {
+  const side = (s: 'R' | 'L'): [string, string, string][] => [
+    ['s5_tn', `s5_fl_${s}`, `s5_fw_${s}`],
+    [`s5_fl_${s}`, `s5_sl_${s}`, `s5_fw_${s}`],
+    [`s5_sl_${s}`, `s5_hp_${s}`, `s5_fw_${s}`],
+    [`s5_hp_${s}`, `s5_cw_${s}`, `s5_fw_${s}`],
+    [`s5_cw_${s}`, 's5_cw', `s5_fw_${s}`],
+  ];
+  const tris: [string, string, string][] = [...side('R'), ...side('L'), ['s5_tn', 's5_fw_R', 's5_cw'], ['s5_tn', 's5_cw', 's5_fw_L']];
+  return tris.map(([a, b, c]) => ({ a, b, c, twoSided: true, bulkhead: true }));
+}
 const DOOR_NODES = /^s[68]_(dm|bt|sl|fl)_/;
 const isDoor = (a: string, b: string): boolean => DOOR_NODES.test(a) || DOOR_NODES.test(b);
 /**
@@ -1581,6 +1598,7 @@ function buildSedan(): { def: VehicleDef; design: SedanDesign } {
       name: 'sedan.body',
       nodes,
       beams,
+      triangles: firewallBulkhead(),
       groupDefaults: {
         body: { friction: 0.5, radius: 0.05 },
         engine: { friction: 0.5, radius: 0.08 },

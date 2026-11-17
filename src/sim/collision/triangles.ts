@@ -54,7 +54,7 @@
  * NUMERICS: hot loop only + − × ÷ sqrt, fixed order, preallocated scratch.
  */
 import type { CompiledTriangles } from '../rig/types';
-import { RIG_TRI_FLAG_SELF, RIG_TRI_FLAG_TWO_SIDED } from '../rig/types';
+import { RIG_TRI_FLAG_BULKHEAD, RIG_TRI_FLAG_SELF, RIG_TRI_FLAG_TWO_SIDED } from '../rig/types';
 import type { TriangleSet } from '../rig/triangles';
 import { NODE_FLAG_OBJ_CONTACT, NODE_FLAG_TREAD, NODE_FLAG_COLLIDABLE, MATERIAL_COUNT, type EventSink, type SimState } from '../types';
 import { CONTACT_MU, CONTACT_ZETA } from './contactMaterials';
@@ -74,6 +74,16 @@ export const TRI_SELF_UNLOAD_BAND = 0.005;
 export const TRI_SELF_UNLOAD_RELAX_S = 0.2;
 /** Self-collision: the penalty spring pushes a pair apart at no more than this relative speed, m/s. */
 export const TRI_SELF_MAX_SEP = 2;
+/**
+ * Punch-through strength of a declared BULKHEAD (RIG_TRI_FLAG_BULKHEAD), N per node contact: a node pressed
+ * harder than this into a firewall / dash panel dents it locally (the contact force plateaus and unloads from
+ * the plateau, plastic) instead of driving the whole bulkhead into the cell. Sedan frontals, firewall over the
+ * s5 ring, swept 5 / 7 / 10 / 15 kN / unlimited: unlimited drives the ring 32–56 cm into the cell at 100 km/h
+ * (limit 22 cm, standard car without the bulkhead 10); above 7 kN the stacked bay springs back > 25 % at
+ * 50 km/h (26–27 %; limit 25 %). 7 kN: 50 km/h spring-back 20 %, 100 km/h cell 9 cm, and the 56 km/h pulse
+ * 22 → 26 g, stop 133 → 108 ms, OLC 18 → 22 g, permanent crush 73 → 52 cm.
+ */
+export const TRI_BULK_FMAX = 7e3;
 export const TRI_KC_STABILITY = 0.2;
 /** The penalty spring uses min(−gap, TRI_DEPTH_CAP): a deep pair separates over a few ticks. */
 export const TRI_DEPTH_CAP = 0.08;
@@ -117,6 +127,8 @@ const K_STATIC = 1;
 const K_TWO_SIDED = 2;
 /** Node and triangle of the same object (self-collision). */
 const K_SELF = 4;
+/** Pair kind: the triangle is a declared bulkhead (RIG_TRI_FLAG_BULKHEAD). */
+const K_BULK = 8;
 
 export interface TriangleContactStats {
   pairs: number;
@@ -337,6 +349,13 @@ export interface TriangleSlot {
   set: TriangleSet;
   /** Rig-local self-collision participants or null (= collidable). */
   nodeSelf: Uint8Array | null;
+  /**
+   * The set has declared BULKHEAD triangles (RIG_TRI_FLAG_BULKHEAD): its own nodes query them even with
+   * self-collision off (only them then). Default false.
+   */
+  bulkhead?: boolean;
+  /** The set is ONLY the bulkheads (standard preset): self queries only, never another object's contact. */
+  bulkOnly?: boolean;
 }
 
 /** Static mesh (world space). */
@@ -567,7 +586,7 @@ export class TriangleContacts {
     const wantTrees = solver.triangleContact || solver.selfCollision;
     for (let o = 0; o < n; o++) {
       const sl = this.slots[o];
-      if (!sl || !wantTrees || valid[o] === 0) continue;
+      if (!sl || !(wantTrees || sl.bulkhead === true) || valid[o] === 0) continue;
       this.buildTree(state, o, sl, (stat[o] !== 0 ? 0 : vmax[o]!) * span + TRI_MARGIN);
     }
     const P = state;
@@ -575,16 +594,18 @@ export class TriangleContacts {
     for (let p = 0; p < n; p++) {
       if (valid[p] === 0 || stat[p] !== 0) continue;
       const vp = vmax[p]! * span + TRI_MARGIN;
-      const hasTris = this.slots[p] !== null;
+      const slp = this.slots[p] ?? null;
+      const hasTris = slp !== null && slp.bulkOnly !== true;
       for (let q = 0; q < n; q++) {
         const slq = this.slots[q];
         if (!slq || valid[q] === 0) continue;
         if (q === p) {
-          if (!solver.selfCollision) continue;
-          this.queryNodes(P, p, q, slq, vp, true);
+          // Self: every SELF triangle with self-collision on, else only the declared bulkheads.
+          if (solver.selfCollision) this.queryNodes(P, p, q, slq, vp, true, false);
+          else if (slq.bulkhead === true) this.queryNodes(P, p, q, slq, vp, true, true);
           continue;
         }
-        if (!solver.triangleContact || !hasTris) continue;
+        if (!solver.triangleContact || !hasTris || slq.bulkOnly === true) continue;
         const ex = this.excludedPairs;
         if (ex !== null && ex.size > 0) {
           const a = this.oId[p]!;
@@ -593,7 +614,7 @@ export class TriangleContacts {
         }
         const pad = vp + (stat[q] !== 0 ? 0 : vmax[q]!) * span + TRI_MARGIN + 0.5;
         if (!boxesNear(box, p, q, pad)) continue;
-        this.queryNodes(P, p, q, slq, vp, false);
+        this.queryNodes(P, p, q, slq, vp, false, false);
       }
       // Static meshes: every awake object.
       if (this.statics.length > 0) {
@@ -683,8 +704,8 @@ export class TriangleContacts {
     tr.bvh.build(tr.boxes, m);
   }
 
-  /** Nodes of slot p against slot q's tree (self: p === q, with exclusions). */
-  private queryNodes(state: SimState, p: number, q: number, slq: TriangleSlot, pad: number, self: boolean): void {
+  /** Nodes of slot p against slot q's tree (self: p === q, with exclusions; bulkOnly: bulkhead triangles only). */
+  private queryNodes(state: SimState, p: number, q: number, slq: TriangleSlot, pad: number, self: boolean, bulkOnly: boolean): void {
     const tr = this.trees[q];
     if (!tr || tr.count === 0) return;
     const { posX, posY, posZ, radius, flags } = state;
@@ -708,6 +729,7 @@ export class TriangleContacts {
         const t = tr.triOf[hits[k]!]!;
         if (self) {
           if ((tris.flags[t]! & RIG_TRI_FLAG_SELF) === 0) continue;
+          if (bulkOnly && (tris.flags[t]! & RIG_TRI_FLAG_BULKHEAD) === 0) continue;
           if (excluded(set, t, li)) continue;
         }
         if (!this.push(i * KEY_SHIFT + triBase + t)) return;
@@ -816,7 +838,7 @@ export class TriangleContacts {
         this.pairA[m] = ns + tris.a[t]!;
         this.pairB[m] = ns + tris.b[t]!;
         this.pairC[m] = ns + tris.c[t]!;
-        this.pairKind[m] = ((tris.flags[t]! & RIG_TRI_FLAG_TWO_SIDED) !== 0 ? K_TWO_SIDED : 0) | (q === ps ? K_SELF : 0);
+        this.pairKind[m] = ((tris.flags[t]! & RIG_TRI_FLAG_TWO_SIDED) !== 0 ? K_TWO_SIDED : 0) | (q === ps ? K_SELF : 0) | ((tris.flags[t]! & RIG_TRI_FLAG_BULKHEAD) !== 0 ? K_BULK : 0);
         this.pairH[m] = tris.thickness[t]!;
         this.pairIdTri[m] = this.oId[q]!;
         triMat = tris.material[t]!;
@@ -992,6 +1014,8 @@ export class TriangleContacts {
         const depth = -gap < TRI_DEPTH_CAP ? -gap : TRI_DEPTH_CAP;
         if (-gap > maxDepth) maxDepth = -gap;
         let fs = k * depth;
+        const bulk = (kind & K_BULK) !== 0;
+        if (bulk && fs > TRI_BULK_FMAX) fs = TRI_BULK_FMAX;
         if ((kind & K_SELF) !== 0) {
           // SELF-COLLISION unloads hysteretically (Walton–Braun, as objects.ts / colliders.ts): metal crushed
           // into its own structure is plastic. Below the episode's deepest point the force follows a line
@@ -1006,8 +1030,9 @@ export class TriangleContacts {
             if (ku > kum) ku = kum;
             const excess = dm - depth - TRI_SELF_UNLOAD_BAND;
             if (excess > 0) {
-              const fu = fs - (ku - k) * excess;
-              fs = fu < 0 ? 0 : fu;
+              // A bulkhead unloads from its (capped) peak force: the cap is a plastic plateau, not a spring.
+              const fu = bulk ? Math.min(k * dm, TRI_BULK_FMAX) - ku * excess : fs - (ku - k) * excess;
+              if (fu < fs) fs = fu < 0 ? 0 : fu;
             }
             this.pairDmax[i] = dm - (dm - depth) * relax;
           }
@@ -1044,6 +1069,7 @@ export class TriangleContacts {
           spec++;
         }
       }
+      if ((kind & K_BULK) !== 0 && fn > TRI_BULK_FMAX) fn = TRI_BULK_FMAX;
       if (!(fn > 0)) {
         this.pairState[i] = st & ~ST_CONTACT;
         continue;

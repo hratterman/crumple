@@ -33,7 +33,8 @@ import { applyColliderContacts, compileColliders, resetColliderContactState } fr
 import { OBJ_REBUILD_TICKS, OBJ_REBUILD_TICKS_SLOW, OBJ_SLOW_SPEED, ObjectContacts, pairKey } from './collision/objects';
 import { applyWater, boxNearWater, VEHICLE_FLOOD_LOSS, VEHICLE_FLOOD_TIME_S } from './collision/water';
 import { TriangleContacts, type StaticMeshInput, type TriangleSlot } from './collision/triangles';
-import { deriveCollisionTriangles, mergeTriangles, selfParticipants, triangleSetOf } from './rig/triangles';
+import { bulkheadsOf, deriveCollisionTriangles, mergeTriangles, selfParticipants, triangleSetOf } from './rig/triangles';
+import { RIG_TRI_FLAG_BULKHEAD } from './rig/types';
 import { quatToMatrix } from '../world/colliders';
 import { groundNormalForce, markMirroredSampler, PlaneSampler, resetGroundContactState } from './collision/ground';
 import { applyBodyDig, applySoftGround, SoftGround, SoftGroundSampler } from './softground/softground';
@@ -113,6 +114,8 @@ interface LazyTriangles {
   /** Cache key across compiles of the same def (VehicleDef object), or null. */
   defKey: object | null;
   slot: TriangleSlot | null | undefined;
+  /** The declared bulkheads alone (self-collision in every preset; cheap: no derivation), resolved lazily. */
+  bulk: TriangleSlot | null | undefined;
 }
 /** Extra reach (m) when deciding whether two objects may meet through their triangles this interval. */
 const TRI_REACH_PAD = 0.5;
@@ -131,11 +134,27 @@ function resolveTriangles(t: LazyTriangles): TriangleSlot | null {
       const derived = deriveCollisionTriangles(rig, { nodeCount: t.bodyNodeCount });
       tris = tris && tris.count > 0 ? mergeTriangles(derived, tris, rig.nodePos) : derived;
     }
-    slot = tris && tris.count > 0 ? { set: triangleSetOf(rig, tris), nodeSelf: selfParticipants(rig, rig.triangles, t.bodyNodeCount) } : null;
+    let bulkhead = false;
+    if (tris) for (let k = 0; k < tris.count && !bulkhead; k++) bulkhead = (tris.flags[k]! & RIG_TRI_FLAG_BULKHEAD) !== 0;
+    slot = tris && tris.count > 0 ? { set: triangleSetOf(rig, tris), nodeSelf: selfParticipants(rig, rig.triangles, t.bodyNodeCount), bulkhead } : null;
     TRI_BY_RIG.set(rig, slot);
     if (t.defKey) TRI_BY_DEF.set(t.defKey, slot);
   }
   t.slot = slot;
+  return slot;
+}
+
+const TRI_BULK_BY_RIG = new WeakMap<CompiledRig, TriangleSlot | null>();
+/** The object's declared bulkheads as a bulk-only slot (R-CORE: firewall stack-up contact, every preset), or null. */
+function resolveBulkheads(t: LazyTriangles): TriangleSlot | null {
+  if (t.bulk !== undefined) return t.bulk;
+  let slot = TRI_BULK_BY_RIG.get(t.rig);
+  if (slot === undefined) {
+    const tris = bulkheadsOf(t.rig.triangles);
+    slot = tris ? { set: triangleSetOf(t.rig, tris), nodeSelf: selfParticipants(t.rig, t.rig.triangles, t.bodyNodeCount), bulkhead: true, bulkOnly: true } : null;
+    TRI_BULK_BY_RIG.set(t.rig, slot);
+  }
+  t.bulk = slot;
   return slot;
 }
 
@@ -590,7 +609,7 @@ export class SimEngine {
       throw new SimCommandError(e instanceof Error ? e.message : String(e), objectId);
     }
     this.rigs.set(objectId, rig);
-    if (rig.triangles && rig.triangles.count > 0) this.triById.set(objectId, { rig, bodyNodeCount: 0, defKey: null, slot: undefined });
+    if (rig.triangles && rig.triangles.count > 0) this.triById.set(objectId, { rig, bodyNodeCount: 0, defKey: null, slot: undefined, bulk: undefined });
     else this.triById.delete(objectId);
     // Ranges from here on shifted; per-node contact bookkeeping restarts.
     resetGroundContactState(this.state, obj.nodeStart, this.state.nodeCount - obj.nodeStart);
@@ -639,7 +658,7 @@ export class SimEngine {
     }
     const obj = this.spawnCompiled(objectId, compiled.rig, transform);
     // Vehicles always have collision triangles: the derived body surface plus any declared ones it lacks.
-    const lazy: LazyTriangles = { rig: compiled.rig, bodyNodeCount: compiled.bodyNodeCount, defKey: defKey ?? null, slot: undefined };
+    const lazy: LazyTriangles = { rig: compiled.rig, bodyNodeCount: compiled.bodyNodeCount, defKey: defKey ?? null, slot: undefined, bulk: undefined };
     this.triById.set(objectId, lazy);
     // With triangle contact on, derive now (a spawn already compiles) rather than at the first approach (an
     // HD rig's surface takes ~0.2–0.6 s once per def).
@@ -1712,7 +1731,8 @@ export class SimEngine {
    * resolves (lazily derives) the triangles that will be needed: with
    * triangleContact, objects with triangles whose boxes come within reach of
    * another such object; with selfCollision, every awake object with
-   * triangles. Returns whether the triangle pass has work.
+   * triangles; without it, every awake object with declared bulkheads (only
+   * those). Returns whether the triangle pass has work.
    */
   private markTriangleSlots(n: number, interval: number): boolean {
     const c = this.contacts;
@@ -1738,11 +1758,10 @@ export class SimEngine {
         }
       }
     }
-    if (sol.selfCollision) {
-      for (let o = 0; o < n; o++) {
-        const t = ts[o];
-        if (t && c.oValid[o] !== 0 && c.oStatic[o] === 0 && resolveTriangles(t)) any = true;
-      }
+    for (let o = 0; o < n; o++) {
+      const t = ts[o];
+      if (!t || c.oValid[o] === 0 || c.oStatic[o] !== 0) continue;
+      if (sol.selfCollision ? resolveTriangles(t) : c.oTriangles[o] !== 0 || resolveBulkheads(t)) any = true;
     }
     return any;
   }
@@ -1756,7 +1775,8 @@ export class SimEngine {
     for (let o = 0; o < n; o++) {
       const obj = objs[o]!;
       const lazy = this.triSlots[o];
-      const slot = lazy && (c.oTriangles[o] !== 0 || (self && c.oStatic[o] === 0)) ? resolveTriangles(lazy) : null;
+      // Full surface when it meets another object's triangles or self-collision is on; else (awake) the bulkheads.
+      const slot = !lazy ? null : c.oTriangles[o] !== 0 || (self && c.oStatic[o] === 0) ? resolveTriangles(lazy) : c.oStatic[o] === 0 && c.oValid[o] !== 0 ? resolveBulkheads(lazy) : null;
       const prop = this.propSlots[o];
       const rig = this.rigs.get(obj.objectId);
       t.setObject(o, obj.nodeStart, obj.nodeCount, obj.beamStart, obj.objectId, prop ? prop.def.material : MaterialId.metal, rig?.nodeMaterial ?? null, slot);

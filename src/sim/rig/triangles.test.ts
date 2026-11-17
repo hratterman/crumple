@@ -4,8 +4,8 @@ import { SEDAN } from '../vehicle/defs/sedan';
 import { BOXTRUCK } from '../vehicle/defs/boxtruck';
 import { SEDAN_TRAFFIC } from '../vehicle/defs/sedanTraffic';
 import { COUPE } from '../vehicle/defs/coupe';
-import { deriveCollisionTriangles, mergeTriangles, sheetNodes, triangleSetOf } from './triangles';
-import { RIG_TRI_FLAG_SELF, RIG_TRI_FLAG_TWO_SIDED, type CompiledTriangles } from './types';
+import { bulkheadsOf, compileTriangleDefs, deriveCollisionTriangles, mergeTriangles, sheetNodes, triangleSetOf } from './triangles';
+import { RIG_TRI_FLAG_BULKHEAD, RIG_TRI_FLAG_SELF, RIG_TRI_FLAG_TWO_SIDED, type CompiledTriangles } from './types';
 
 describe('derived collision triangles', () => {
   for (const def of [SEDAN, SEDAN_TRAFFIC, COUPE, BOXTRUCK]) {
@@ -86,5 +86,33 @@ describe('declared triangles merged into the derived surface (R-CORE self-collis
     expect(m.flags[0]! & S).toBe(S);
     expect(m.flags[1]! & S).toBe(S);
     expect(m.flags[2]! & S).toBe(0); // declared non-self duplicate, and touches sheet node 5
+  });
+});
+
+describe('declared bulkheads (R-CORE: self-collision in every solver preset)', () => {
+  it('compile: a bulkhead is a self triangle; selfCollide: false on one is an error', () => {
+    const idx = new Map([['a', 0], ['b', 1], ['c', 2]]);
+    const t = compileTriangleDefs([{ a: 'a', b: 'b', c: 'c', bulkhead: true, twoSided: true }], idx);
+    expect(t.flags[0]).toBe(RIG_TRI_FLAG_BULKHEAD | RIG_TRI_FLAG_SELF | RIG_TRI_FLAG_TWO_SIDED);
+    expect(() => compileTriangleDefs([{ a: 'a', b: 'b', c: 'c', bulkhead: true, selfCollide: false }], idx)).toThrow();
+  });
+  it('sedan firewall: 12 two-sided bulkheads over s5; the bay rails and the engine that run into it are not excluded', () => {
+    const cv = compileVehicle(SEDAN);
+    const rig = cv.rig;
+    const b = bulkheadsOf(rig.triangles)!;
+    expect(b.count).toBe(12);
+    const set = triangleSetOf(rig, b);
+    const ids = rig.nodeIds;
+    for (let t = 0; t < b.count; t++) {
+      for (const v of [b.a[t]!, b.b[t]!, b.c[t]!]) expect(ids[v]!.startsWith('s5_')).toBe(true);
+      const ex = Array.from(set.excl.subarray(set.exclStart[t]!, set.exclStart[t + 1]!)).map((i) => ids[i]!);
+      expect(ex.filter((id) => /^(s4_|eng_)/.test(id))).toEqual([]);
+    }
+    // the full surface keeps them (merged after the derived lattice surface, flags intact)
+    const derived = deriveCollisionTriangles(rig, { nodeCount: cv.bodyNodeCount });
+    const m = mergeTriangles(derived, rig.triangles!, rig.nodePos);
+    let n = 0;
+    for (let t = 0; t < m.count; t++) if ((m.flags[t]! & RIG_TRI_FLAG_BULKHEAD) !== 0) n++;
+    expect(n).toBe(12);
   });
 });

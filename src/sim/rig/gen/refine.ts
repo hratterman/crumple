@@ -615,12 +615,12 @@ export function refineVehicle(base: VehicleDef, opts: RefineOptions): RefinedVeh
   const def: VehicleDef = {
     ...base,
     name: opts.name,
-    // R-CORE collision triangles (CONTRACTS "R-CORE"): the sheets' own outward triangles; declared, so they
-    // replace the derived lattice surface (the sheets ARE the outer surface)
-    body: { ...base.body, name: `${opts.name}.body`, nodes: [...nodes, ...genNodes], beams: [...beams, ...genBeams], triangles: collisionOf(parts) },
+    // R-CORE collision triangles (CONTRACTS "R-CORE"): the base car's declared ones (bulkheads) plus the sheets'
+    // own outward triangles, merged into the derived lattice surface
+    body: { ...base.body, name: `${opts.name}.body`, nodes: [...nodes, ...genNodes], beams: [...beams, ...genBeams], triangles: [...(base.body.triangles ?? []), ...collisionOf(parts)] },
     ...(shell !== undefined ? { shell } : {}),
   };
-  const collision: CollisionTriangle[] = def.body.triangles!.map(({ a, b, c }) => ({ a, b, c }));
+  const collision: CollisionTriangle[] = collisionOf(parts).map(({ a, b, c }) => ({ a, b, c }));
   const report = reportOf(def, baseCv.totalMass, cg as [number, number, number], parts, genBeams.length, seamCount, collision.length);
   return { def, report, collision, skinNodes, memberNodes, seams };
 }

@@ -28,6 +28,7 @@
 import {
   RIG_NODE_FLAG_COLLIDABLE,
   RIG_NODE_FLAG_OBJ_CONTACT,
+  RIG_TRI_FLAG_BULKHEAD,
   RIG_TRI_FLAG_SELF,
   RIG_TRI_FLAG_TWO_SIDED,
   type CompiledRig,
@@ -116,9 +117,11 @@ export function mergeTriangles(derived: CompiledTriangles, declared: CompiledTri
     let match = have.get(key(a, b, c)) ?? -1;
     if (match < 0) match = overlaps(a, b, c);
     if (match < 0) extra.push(t);
+    else if ((declared.flags[t]! & RIG_TRI_FLAG_BULKHEAD) !== 0) dFlags[match] = dFlags[match]! | declared.flags[t]!;
     else if ((declared.flags[t]! & RIG_TRI_FLAG_SELF) === 0) dFlags[match] = dFlags[match]! & ~RIG_TRI_FLAG_SELF;
   }
   for (let t = 0; t < derived.count; t++) {
+    if ((dFlags[t]! & RIG_TRI_FLAG_BULKHEAD) !== 0) continue;
     if (sheet[derived.a[t]!] || sheet[derived.b[t]!] || sheet[derived.c[t]!]) dFlags[t] = dFlags[t]! & ~RIG_TRI_FLAG_SELF;
   }
   const n = derived.count + extra.length;
@@ -191,6 +194,25 @@ export function selfParticipants(rig: CompiledRig, declared: CompiledTriangles |
   return out;
 }
 
+/** The declared BULKHEAD triangles of a set (RIG_TRI_FLAG_BULKHEAD), or null when it has none. */
+export function bulkheadsOf(tris: CompiledTriangles | undefined): CompiledTriangles | null {
+  if (!tris) return null;
+  const idx: number[] = [];
+  for (let t = 0; t < tris.count; t++) if ((tris.flags[t]! & RIG_TRI_FLAG_BULKHEAD) !== 0) idx.push(t);
+  if (idx.length === 0) return null;
+  const n = idx.length;
+  const out: CompiledTriangles = { count: n, a: new Int32Array(n), b: new Int32Array(n), c: new Int32Array(n), flags: new Uint8Array(n), material: new Uint8Array(n), thickness: new Float64Array(n) };
+  idx.forEach((t, k) => {
+    out.a[k] = tris.a[t]!;
+    out.b[k] = tris.b[t]!;
+    out.c[k] = tris.c[t]!;
+    out.flags[k] = tris.flags[t]!;
+    out.material[k] = tris.material[t]!;
+    out.thickness[k] = tris.thickness[t]!;
+  });
+  return out;
+}
+
 /** Compiles declared triangles (node ids → indices); throws on unknown / repeated vertices or bad values. */
 export function compileTriangleDefs(defs: readonly RigTriangleDef[], index: ReadonlyMap<string, number>): CompiledTriangles {
   const n = defs.length;
@@ -217,7 +239,8 @@ export function compileTriangleDefs(defs: readonly RigTriangleDef[], index: Read
     out.a[t] = ia;
     out.b[t] = ib;
     out.c[t] = ic;
-    out.flags[t] = (d.twoSided ? RIG_TRI_FLAG_TWO_SIDED : 0) | (d.selfCollide === false ? 0 : RIG_TRI_FLAG_SELF);
+    if (d.bulkhead && d.selfCollide === false) throw new Error(`triangle ${t}: a bulkhead always self-collides`);
+    out.flags[t] = (d.twoSided ? RIG_TRI_FLAG_TWO_SIDED : 0) | (d.selfCollide === false ? 0 : RIG_TRI_FLAG_SELF) | (d.bulkhead ? RIG_TRI_FLAG_BULKHEAD : 0);
     out.material[t] = mat;
     out.thickness[t] = h;
   }
@@ -825,7 +848,9 @@ export function triangleSetOf(rig: CompiledRig, tris: CompiledTriangles): Triang
     const h = tris.thickness[t]!;
     if (h > maxH) maxH = h;
     const ex = new Set<number>(v);
-    for (const x of v) for (const y of nbrs[x]!) ex.add(y);
+    // Beam neighbours of its vertices touch a surface by design, except a BULKHEAD's: stopping the members that
+    // run into it (the bay rails into the firewall) is its job, so only rest-pose proximity excludes them there.
+    if ((tris.flags[t]! & RIG_TRI_FLAG_BULKHEAD) === 0) for (const x of v) for (const y of nbrs[x]!) ex.add(y);
     if ((tris.flags[t]! & RIG_TRI_FLAG_SELF) !== 0) {
       for (let i = 0; i < n; i++) {
         if (ex.has(i) || !selfNode(rig, i)) continue;
